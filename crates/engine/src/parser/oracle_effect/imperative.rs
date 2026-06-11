@@ -4947,6 +4947,13 @@ pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
         return TargetFilter::TriggeringPlayer;
     }
+    // CR 603.7c: DamageDone triggers use TriggeringPlayer for "that player"
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::TriggeringPlayer)
+    ) {
+        return TargetFilter::TriggeringPlayer;
+    }
 
     match &ctx.subject {
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
@@ -6018,12 +6025,12 @@ pub(super) fn parse_imperative_family_ast(
                 ))
                 .parse(rest)
                 {
-                    let (target, _) = parse_target(mass_rest);
+                    let (target, _) = parse_target_with_ctx(mass_rest, ctx);
                     return Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
                         target,
                     }));
                 }
-                let (target, _) = parse_target(rest);
+                let (target, _) = parse_target_with_ctx(rest, ctx);
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Goad { target }))
             } else {
                 Some(ImperativeFamilyAst::Goad)

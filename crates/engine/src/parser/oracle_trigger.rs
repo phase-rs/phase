@@ -13,6 +13,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
+use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
@@ -822,17 +823,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
-    if condition_introduces_damage_source_controller_player(&cond_lower) {
-        // CR 603.7c: For DamageDone triggers ("...deals damage to a player"),
-        // "that player" refers to the damaged player (TriggeringPlayer), not the
-        // damage source's controller. This handles Grenzo, Havoc Raiser and similar
-        // cards where the damage source is "a creature you control" but the effect
-        // needs to reference the damaged player.
-        if is_damage_done_trigger_pattern(&cond_lower) {
-            effect_ctx.relative_player_scope = Some(ControllerRef::TriggeringPlayer);
-        } else {
-            effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
-        }
+    // CR 603.7c: DamageDone triggers ("...deals damage to a player") use
+    // TriggeringPlayer for "that player" in the effect body. This must be
+    // checked BEFORE `condition_introduces_target_player` because both match
+    // "deals [combat] damage to a player", but DamageDone needs TriggeringPlayer
+    // while generic target-player triggers need TargetPlayer.
+    if is_damage_done_trigger_pattern(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::TriggeringPlayer);
+    } else if condition_introduces_damage_source_controller_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
     } else if condition_introduces_defending_player(&cond_lower) {
         // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
         // in combat), not TargetPlayer (which requires a player target to be
@@ -900,6 +899,19 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             )
             .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             .or_else(|| {
+                // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
+                // mode1; or mode2" on a single line (no bullet-line modes). Grenzo,
+                // Havoc Raiser is the canonical case. Route through the modal parser
+                // so each mode body is independently parsed with the trigger's
+                // established relative_player_scope (e.g. TriggeringPlayer for
+                // DamageDone triggers) so "that player" in mode bodies resolves to
+                // the damaged player (CR 603.7c).
+                if let Some(modal_ability) = try_parse_inline_modal(
+                    &effect_for_parse,
+                    effect_ctx.relative_player_scope.clone(),
+                ) {
+                    return Some(TriggerBody::PreLowered(Box::new(modal_ability)));
+                }
                 let ir =
                     parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
                 Some(TriggerBody::EffectChain(ir))
@@ -28116,17 +28128,17 @@ mod slicer_control_handoff_tests {
     }
 
     /// Regression test for issue #2346: Grenzo, Havoc Raiser - DamageDone triggers
-    /// should use TriggeringPlayer (the damaged player) for "that player" references,
-    /// not ParentTargetController.
+    /// with inline modal choices must scope "that player" in each mode body to the
+    /// damaged player (TriggeringPlayer), not ParentTargetController.
     ///
-    /// Tests a simpler DamageDone trigger without modal effects (modal parsing is not
-    /// integrated into trigger effect chains). The key behavior is that "that player"
-    /// in the effect body must resolve to the damaged player (TriggeringPlayer).
+    /// Asserts the lowered Goad and ExileTop effects directly so the test is
+    /// discriminating: it fails if mode bodies produce TargetOnly/Unimplemented or
+    /// if "that player" resolves to the wrong player.
     #[test]
     fn damage_done_trigger_uses_triggering_player_for_that_player() {
         let parsed = parse_oracle_text(
-            "Whenever a creature you control deals combat damage to a player, that player discards a card.",
-            "Test Card",
+            "Whenever a creature you control deals combat damage to a player, choose one \u{2014} goad target creature that player controls; or exile the top card of that player's library.",
+            "Grenzo, Havoc Raiser",
             &[],
             &["Artifact".into(), "Creature".into()],
             &["Equipment".into()],
@@ -28137,26 +28149,56 @@ mod slicer_control_handoff_tests {
             .find(|t| matches!(t.mode, TriggerMode::DamageDone))
             .expect("DamageDone trigger must parse");
 
-        // Verify the trigger mode is DamageDone
         assert_eq!(trigger.mode, TriggerMode::DamageDone);
 
         let execute = trigger.execute.as_ref().expect("execute must be Some");
-        let effects = flatten_effects(execute);
 
-        // Find the Discard effect and verify it targets TriggeringPlayer
-        let discard_effect = effects
+        // The execute must have a modal with two mode abilities
+        let modal = execute.modal.as_ref().expect("execute must carry a modal");
+        assert_eq!(modal.mode_count, 2, "must have two modes, got {:?}", modal);
+
+        let mode_abilities = &execute.mode_abilities;
+        assert_eq!(
+            mode_abilities.len(),
+            2,
+            "must have two mode ability entries, got {:?}",
+            mode_abilities
+        );
+
+        // Mode 0: Goad — target creature that player (TriggeringPlayer) controls
+        let mode0_effects = flatten_effects(&mode_abilities[0]);
+        let goad_controller = mode0_effects
             .iter()
             .find_map(|e| match e {
-                Effect::Discard { target, .. } => Some(target),
+                Effect::Goad {
+                    target: TargetFilter::Typed(tf),
+                } => Some(tf.controller.clone()),
                 _ => None,
             })
-            .expect("Discard effect must be present");
-
+            .unwrap_or_else(|| {
+                panic!("mode 0 must contain Goad with Typed filter, got {mode0_effects:?}")
+            });
         assert_eq!(
-            discard_effect,
-            &TargetFilter::TriggeringPlayer,
-            "Discard target must be TriggeringPlayer (the damaged player), got {:?}",
-            discard_effect
+            goad_controller,
+            Some(ControllerRef::TriggeringPlayer),
+            "Goad target controller must be TriggeringPlayer (the damaged player), got {:?}",
+            goad_controller
+        );
+
+        // Mode 1: ExileTop — exile the top card of that player's (TriggeringPlayer) library
+        let mode1_effects = flatten_effects(&mode_abilities[1]);
+        let exile_player = mode1_effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ExileTop { player, .. } => Some(player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("mode 1 must contain ExileTop, got {mode1_effects:?}"));
+        assert_eq!(
+            exile_player,
+            TargetFilter::TriggeringPlayer,
+            "ExileTop player must be TriggeringPlayer (the damaged player), got {:?}",
+            exile_player
         );
     }
 }
