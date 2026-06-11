@@ -468,10 +468,125 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
         .collect()
 }
 
+/// CR 611.3 + CR 613.1: Split a static line into its sentence segments, then
+/// parse each as an independent continuous static. Returns `Some(defs)` only
+/// when the line splits into 2+ segments and EVERY segment yields at least one
+/// `StaticDefinition` — i.e. the line is genuinely a sequence of sibling
+/// statics (dual-subject anthems and their relatives). When any segment is
+/// non-static prose (or there is only one sentence) this returns `None`, so the
+/// single-sentence pipeline keeps ownership of the line.
+///
+/// Each segment is re-entered through `parse_static_line_multi_inner` so that a
+/// sentence which itself decomposes (e.g. "<grant> and can't block") still
+/// emits all of its own statics. Recursion terminates because a single-sentence
+/// segment produces only one `split_static_sentences` segment, which fails the
+/// 2+ guard.
+fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
+    let segments = split_static_sentences(text);
+    if segments.len() < 2 {
+        return None;
+    }
+    // CR 611.3a: A sentence that opens with a back-referential connector
+    // ("Otherwise", "Then", "Instead") is a continuation whose meaning depends
+    // on the prior clause's condition (Hunter's Blowgun's ". Otherwise, it has
+    // reach." gates on `Not(<head condition>)`; the same holds for "as long
+    // as"-gated alternatives). Splitting these into independent statics would
+    // drop the complement condition, so defer the whole line to the dedicated
+    // attached-subject / otherwise handlers downstream.
+    if segments
+        .iter()
+        .skip(1)
+        .any(|segment| segment_is_back_referential_continuation(segment))
+    {
+        return None;
+    }
+    let mut defs = Vec::new();
+    for segment in &segments {
+        let segment_defs = parse_static_line_multi_inner(segment);
+        if segment_defs.is_empty() {
+            // A non-static sentence (or one the static pipeline can't classify)
+            // means this isn't a pure sibling-static line — defer the whole
+            // line to the single-sentence fallback rather than emitting a
+            // partial result that silently drops the unparsed sentence.
+            return None;
+        }
+        defs.extend(segment_defs);
+    }
+    Some(defs)
+}
+
+/// CR 611.3a: Recognize a sentence whose leading connector binds it to the
+/// preceding clause's condition rather than standing on its own. Such a sentence
+/// must not be split off as an independent static.
+fn segment_is_back_referential_continuation(segment: &str) -> bool {
+    let lower = segment.to_lowercase();
+    let result: OracleResult<'_, &str> =
+        alt((tag("otherwise"), tag("instead"), tag("then "))).parse(lower.as_str());
+    result.is_ok()
+}
+
+/// Split a static line on sentence boundaries (`.` followed by whitespace or
+/// end-of-input), tracking `{…}` mana-symbol and quote nesting so a period
+/// inside a quoted granted ability or a mana symbol never ends a sentence. Each
+/// returned segment keeps its terminating period and is trimmed; empty segments
+/// are dropped.
+fn split_static_sentences(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut brace_depth = 0usize;
+    let mut in_double_quote = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        match ch {
+            '{' if !in_double_quote => brace_depth += 1,
+            '}' if !in_double_quote => brace_depth = brace_depth.saturating_sub(1),
+            '"' => in_double_quote = !in_double_quote,
+            // A sentence ends at a period that is followed by whitespace or
+            // end-of-input. A period directly followed by a non-space (e.g. an
+            // ellipsis or a decimal that MTG static text never uses) is kept
+            // inside the current segment.
+            '.' if brace_depth == 0
+                && !in_double_quote
+                && chars.peek().is_none_or(|next| next.is_whitespace()) =>
+            {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => {}
+        }
+    }
+    let trailing = current.trim();
+    if !trailing.is_empty() {
+        segments.push(trailing.to_string());
+    }
+    segments
+}
+
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 611.3 + CR 613.1: A static ability whose Oracle text is several
+    // independent sentences (each a self-contained continuous effect) defines
+    // each sentence as its own continuous effect with its own affected set.
+    // Dual-subject anthems are the canonical class — e.g. Flowering of the
+    // White Tree ("Legendary creatures you control get +2/+1 and have ward {1}.
+    // Nonlegendary creatures you control get +1/+1."), Intangible Virtue
+    // siblings, Glorious Anthem variants, the *-Tribute supertype pairs. Without
+    // this split the single-sentence pipeline parses the first sentence,
+    // swallows the period, and drops every following sentence. Split into
+    // sentence segments and parse each independently; only adopt the split when
+    // there are 2+ segments and EVERY segment yields at least one static, which
+    // restricts the path to genuine sibling-static lines and leaves trailing
+    // non-static prose to the single-sentence fallback below.
+    if let Some(defs) = parse_multi_sentence_statics(&stripped) {
+        return defs;
+    }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
     // activate abilities only during {your | their own} turn(s)". Emits both

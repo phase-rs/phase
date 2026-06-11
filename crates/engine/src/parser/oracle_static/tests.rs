@@ -15053,3 +15053,124 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
         defs[0].modifications
     );
 }
+
+/// CR 611.3 + CR 613.1 + CR 205.4a: A multi-sentence static ability whose
+/// sentences are independent continuous effects (the dual-subject anthem class)
+/// must emit one `StaticDefinition` per sentence, each carrying its own affected
+/// filter and modifications. Regression for Flowering of the White Tree, whose
+/// first-sentence parse previously swallowed the period, mangled the ward cost,
+/// and dropped the entire second sentence.
+///
+/// Discriminating: the legendary half gets +2/+1 AND `ward {1}` (generic 1, NOT
+/// the empty `ward {0}` the swallowed-period bug produced); the nonlegendary
+/// half gets +1/+1 with NO keyword; both halves are restricted to `You`-
+/// controlled creatures so an opponent's legendary creature is unaffected.
+#[test]
+fn multi_sentence_dual_subject_anthem_emits_both_statics() {
+    use crate::types::keywords::WardCost;
+    use crate::types::mana::ManaCost;
+
+    let defs = parse_static_line_multi(
+        "Legendary creatures you control get +2/+1 and have ward {1}. \
+         Nonlegendary creatures you control get +1/+1.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "dual-subject anthem must emit both sentences as separate statics, got {defs:?}"
+    );
+
+    // Legendary half: +2/+1, ward {1}, controller=You, supertype=Legendary.
+    let legendary = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &d.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    })
+            )
+        })
+        .expect("must emit a Legendary-supertype static");
+    assert_eq!(legendary.mode, StaticMode::Continuous);
+    assert!(matches!(
+        &legendary.affected,
+        Some(TargetFilter::Typed(tf))
+            if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters.contains(&TypeFilter::Creature)
+    ));
+    assert!(legendary
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(legendary
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    // Ward cost must be {1} — the swallowed-period bug produced an empty {0}.
+    let ward = legendary
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(WardCost::Mana(cost)),
+            } => Some(cost),
+            _ => None,
+        })
+        .expect("legendary half must grant a mana ward keyword");
+    assert_eq!(
+        ward.mana_value(),
+        1,
+        "ward cost must be {{1}}, got {ward:?}"
+    );
+    assert_ne!(*ward, ManaCost::zero(), "ward cost must not be empty {{0}}");
+
+    // Nonlegendary half: +1/+1, controller=You, NotSupertype(Legendary), no keyword.
+    let nonlegendary = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &d.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::NotSupertype {
+                        value: Supertype::Legendary,
+                    })
+            )
+        })
+        .expect("must emit a NotSupertype(Legendary) static");
+    assert_eq!(nonlegendary.mode, StaticMode::Continuous);
+    assert!(matches!(
+        &nonlegendary.affected,
+        Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::You)
+    ));
+    assert!(nonlegendary
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(nonlegendary
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(
+        !nonlegendary
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })),
+        "nonlegendary half must NOT grant a keyword, got {:?}",
+        nonlegendary.modifications
+    );
+}
+
+/// Regression guard for the multi-sentence splitter: a single-sentence anthem
+/// must still emit exactly ONE static (the splitter only fires for 2+ sentences
+/// that each parse as statics), and trailing non-static prose must not cause a
+/// partial emit.
+#[test]
+fn single_sentence_anthem_unaffected_by_multi_sentence_split() {
+    let defs = parse_static_line_multi("Creatures you control get +1/+1.");
+    assert_eq!(
+        defs.len(),
+        1,
+        "single-sentence anthem must remain one static, got {defs:?}"
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+}
