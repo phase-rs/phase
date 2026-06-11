@@ -614,6 +614,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_layer_effect_id: Option<u64>,
 
+    /// CR 730.2d: A merged permanent is a token only if its TOPMOST component is a
+    /// token. The survivor keeps its own `ObjectId` (CR 730.2c) but adopts the
+    /// topmost component's token-ness while merged; this captures the survivor's
+    /// intrinsic `is_token` (once, on the first merge that overrides it) so
+    /// `merge::split_merged_permanent_on_leave` can restore it when the pile
+    /// leaves the battlefield. `None` when no override is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge_is_token: Option<bool>,
+
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
     /// the surviving object's id here, so that an effect which finds the object
@@ -1101,6 +1110,7 @@ impl GameObject {
             prototype_form: None,
             mutate_form: None,
             merged_components: Vec::new(),
+            pre_merge_is_token: None,
             merge_layer_effect_id: None,
             split_from_merge_survivor: None,
             cleave_form: None,
@@ -1355,6 +1365,11 @@ impl GameObject {
         // re-entering object is not stuck carrying stale component ids. `mutate_form`
         // (stack-only, paralleling `bestow_form`) is intentionally NOT cleared here.
         self.merged_components.clear();
+        // CR 730.2d + CR 400.7: the topmost-derived token-ness override is
+        // battlefield-scoped. `split_merged_permanent_on_leave` restores it before
+        // this reset runs; clear it defensively so a re-entering object never
+        // carries a stale override value.
+        self.pre_merge_is_token = None;
         // CR 730.3 + CR 400.7: merge copy effects are battlefield-scoped and are
         // pruned at the battlefield-exit seam before this reset. Clear the stored
         // id so a re-entering object cannot point at a stale transient effect.

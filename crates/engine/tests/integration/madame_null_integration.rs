@@ -7,7 +7,7 @@
 //!
 //! These tests pin the
 //! `PayCost { Life(Ref(Power { scope: CostPaidObject })) }`
-//! resolution enabled by the PaymentCost::Life → QuantityExpr widening. The
+//! resolution enabled by the PayCost life-cost → QuantityExpr widening. The
 //! `CostPaidObject` scope resolves (CR 608.2k) via cost-paid object →
 //! trigger-event source → effect-context object; with no cost-paid object
 //! these tests exercise the trigger-event-source (slot 2) fallback:
@@ -27,7 +27,7 @@
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityKind, Effect, ObjectScope, PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility,
+    AbilityCost, AbilityKind, Effect, ObjectScope, QuantityExpr, QuantityRef, ResolvedAbility,
     TargetFilter,
 };
 use engine::types::card_type::CoreType;
@@ -57,13 +57,14 @@ use engine::types::zones::Zone;
 fn build_madame_null_pay_chain(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
     let mut outer = ResolvedAbility::new(
         Effect::PayCost {
-            cost: PaymentCost::Life {
+            cost: AbilityCost::PayLife {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: ObjectScope::CostPaidObject,
                     },
                 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         },
         vec![],

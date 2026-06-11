@@ -144,6 +144,20 @@ pub fn merge_object_onto(
         survivor.merged_components = ordered;
     }
 
+    // CR 730.2d: a merged permanent is a token only if its TOPMOST component is a
+    // token. The survivor keeps its `ObjectId` (CR 730.2c) but adopts the topmost
+    // component's token-ness while merged. Capture the survivor's intrinsic value
+    // once (on the first merge that actually overrides it) so the on-leave split
+    // can restore it (CR 111.7 cease-to-exist must fire for a token host that had
+    // a card mutated on top of it). The all-card case is a no-op (topmost matches).
+    let topmost_is_token = state.objects.get(&topmost_id).is_some_and(|o| o.is_token);
+    if let Some(survivor) = state.objects.get_mut(&target_id) {
+        if survivor.pre_merge_is_token.is_none() && survivor.is_token != topmost_is_token {
+            survivor.pre_merge_is_token = Some(survivor.is_token);
+        }
+        survivor.is_token = topmost_is_token;
+    }
+
     install_merge_layer_effect(
         state,
         target_id,
@@ -327,6 +341,19 @@ pub fn split_merged_permanent_on_leave(
 
     // The surviving object's merge identity is cleared by its own
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
+}
+
+/// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness
+/// after the leave-event snapshot captures the merged permanent's topmost-derived
+/// token-ness, but before the object lands outside the battlefield. This lets
+/// "creature token dies" filters see the object as it existed immediately before
+/// leaving while still letting the restored token host cease to exist.
+pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merged_id: ObjectId) {
+    if let Some(survivor) = state.objects.get_mut(&merged_id) {
+        if let Some(intrinsic) = survivor.pre_merge_is_token.take() {
+            survivor.is_token = intrinsic;
+        }
+    }
 }
 
 /// CR 730.3c: "If an effect can find the new object that a merged permanent

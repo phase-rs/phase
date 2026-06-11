@@ -2596,13 +2596,19 @@ fn distribute_shared_properties(filter: TargetFilter, shared_props: &[FilterProp
 }
 
 /// Returns true when the given property is leg-local (produced by an adjective
-/// prefix during `parse_type_phrase` scanning) and must NOT distribute back
-/// across earlier legs of a comma-OR list. Every other property is assumed to
+/// prefix during `parse_type_phrase` scanning, or by a type-scoped keyword
+/// suffix on only the final disjunct) and must NOT distribute back across
+/// earlier legs of a comma-OR list. Every other property is assumed to
 /// originate from a trailing-suffix parser and is eligible for distribution —
 /// e.g., "artifacts and creatures with mana value 2 or less" distributes
 /// `CmcLE` back onto the artifact leg, while "Auras, Equipment, and modified
 /// creatures you control" must NOT propagate `FilterProp::Modified` to the
 /// Aura/Equipment legs.
+///
+/// CR 115.1: "artifact, enchantment, or creature with flying" binds flying
+/// only to the creature disjunct. Spreading `WithKeyword(Flying)` onto the
+/// artifact/enchantment legs would require those permanents to have flying and
+/// would block activation when only a legal enchantment is present (#2941).
 fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
@@ -2636,6 +2642,12 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // Token qualifier ("creature tokens").
             | FilterProp::Token
             | FilterProp::NonToken
+            // CR 702: "<type> with [keyword]" suffixes bind to the type
+            // phrase that parsed them — never retroactively onto earlier Or
+            // disjuncts ("artifact, enchantment, or creature with flying").
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
     )
 }
 
@@ -8962,6 +8974,95 @@ mod tests {
         let (f, rest) = parse_type_phrase("creature and draw a card");
         assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
         assert!(rest.contains("and draw"), "rest = {:?}", rest);
+    }
+
+    #[test]
+    fn comma_or_keyword_suffix_stays_on_final_disjunct_only() {
+        // Issue #2941 (Vivien Reid): "artifact, enchantment, or creature with
+        // flying" — flying applies only to the creature leg.
+        let (f, rest) = parse_target("target artifact, enchantment, or creature with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected three disjuncts, got {filters:?}"
+        );
+
+        let artifact = &filters[0];
+        let enchantment = &filters[1];
+        let creature = &filters[2];
+
+        let TargetFilter::Typed(artifact_typed) = artifact else {
+            panic!("artifact leg should be Typed, got {artifact:?}");
+        };
+        assert!(has_type(artifact_typed, TypeFilter::Artifact));
+        assert!(
+            !artifact_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+            "flying must not distribute onto artifact leg: {artifact_typed:?}"
+        );
+
+        let TargetFilter::Typed(enchantment_typed) = enchantment else {
+            panic!("enchantment leg should be Typed, got {enchantment:?}");
+        };
+        assert!(has_type(enchantment_typed, TypeFilter::Enchantment));
+        assert!(
+            !enchantment_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+            "flying must not distribute onto enchantment leg: {enchantment_typed:?}"
+        );
+
+        let TargetFilter::Typed(creature_typed) = creature else {
+            panic!("creature leg should be Typed, got {creature:?}");
+        };
+        assert!(has_type(creature_typed, TypeFilter::Creature));
+        assert!(
+            creature_typed
+                .properties
+                .contains(&FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }),
+            "creature leg must retain flying: {creature_typed:?}"
+        );
+    }
+
+    #[test]
+    fn comma_or_without_keyword_suffix_stays_on_final_disjunct_only() {
+        let (f, rest) = parse_target("target artifact or creature without flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(artifact_typed) = &filters[0] else {
+            panic!("expected artifact Typed");
+        };
+        assert!(
+            !artifact_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithoutKeyword { .. })),
+            "without-flying must not distribute onto artifact leg: {artifact_typed:?}"
+        );
+
+        let TargetFilter::Typed(creature_typed) = &filters[1] else {
+            panic!("expected creature Typed");
+        };
+        assert!(
+            creature_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithoutKeyword { .. })),
+            "creature leg must retain without-flying: {creature_typed:?}"
+        );
     }
 
     #[test]
