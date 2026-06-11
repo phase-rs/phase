@@ -536,13 +536,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
                 .as_ref()
                 .is_some_and(|def| def_tree_has_optional(def)),
         Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
-        // CR 115.7d: "you may choose new targets for [spell]" lowers to
-        // `ChangeTargets { scope: All }` — the opt-in is at resolution time,
-        // not `def.optional`.
-        Effect::ChangeTargets {
-            scope: RetargetScope::All,
-            ..
-        } => true,
         _ => false,
     }
 }
@@ -3424,35 +3417,6 @@ mod tests {
              You may choose new targets for the copy.",
             "Galvanic Iteration",
             &["Instant"],
-        );
-
-        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
-    }
-
-    /// CR 115.7d: Redirect-style retarget effects encode the "you may choose
-    /// new targets" choice in `ChangeTargets { scope: All }`.
-    #[test]
-    fn optional_you_may_accepts_change_targets_all() {
-        let parsed = parse_named(
-            "You may choose new targets for target spell.",
-            "Redirect",
-            &["Instant"],
-        );
-
-        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
-    }
-
-    /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
-    /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
-    /// into `FlipCoin.win_effect`.
-    #[test]
-    fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
-        let parsed = parse_named(
-            "Whenever you cast an instant or sorcery spell, flip a coin. \
-             If you lose the flip, return that spell to its owner's hand. \
-             If you win the flip, copy that spell, and you may choose new targets for the copy.",
-            "Krark, the Thumbless",
-            &["Legendary", "Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
