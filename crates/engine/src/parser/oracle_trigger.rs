@@ -685,6 +685,35 @@ fn condition_introduces_damage_source_controller_player(cond_lower: &str) -> boo
     )
 }
 
+/// Check if the trigger condition is a DamageDone trigger pattern
+/// ("deals damage to a player" or "deals combat damage to a player").
+fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
+    let input = cond_lower.trim_start();
+    let input = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| rest)
+    .unwrap_or(input);
+
+    // Check for "deals damage to a player" or "deals combat damage to a player"
+    let Ok((rest, _)) = parse_damage_source_subject(input) else {
+        return false;
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("deals ").parse(rest) else {
+        return false;
+    };
+    let Ok((after_damage, _)) = parse_damage_predicate_tail(rest) else {
+        return false;
+    };
+
+    matches!(
+        parse_damage_to_qualifier(after_damage),
+        Some(TargetFilter::Player)
+    )
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -794,7 +823,16 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
     if condition_introduces_damage_source_controller_player(&cond_lower) {
-        effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+        // CR 603.7c: For DamageDone triggers ("...deals damage to a player"),
+        // "that player" refers to the damaged player (TriggeringPlayer), not the
+        // damage source's controller. This handles Grenzo, Havoc Raiser and similar
+        // cards where the damage source is "a creature you control" but the effect
+        // needs to reference the damaged player.
+        if is_damage_done_trigger_pattern(&cond_lower) {
+            effect_ctx.relative_player_scope = Some(ControllerRef::TriggeringPlayer);
+        } else {
+            effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+        }
     } else if condition_introduces_defending_player(&cond_lower) {
         // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
         // in combat), not TargetPlayer (which requires a player target to be
@@ -28074,6 +28112,51 @@ mod slicer_control_handoff_tests {
                 .iter()
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "control-handoff clause must not be dropped as Unimplemented, got {effects:#?}",
+        );
+    }
+
+    /// Regression test for issue #2346: Grenzo, Havoc Raiser - DamageDone triggers
+    /// should use TriggeringPlayer (the damaged player) for "that player" references,
+    /// not ParentTargetController.
+    ///
+    /// Tests a simpler DamageDone trigger without modal effects (modal parsing is not
+    /// integrated into trigger effect chains). The key behavior is that "that player"
+    /// in the effect body must resolve to the damaged player (TriggeringPlayer).
+    #[test]
+    fn damage_done_trigger_uses_triggering_player_for_that_player() {
+        let parsed = parse_oracle_text(
+            "Whenever a creature you control deals combat damage to a player, that player discards a card.",
+            "Test Card",
+            &[],
+            &["Artifact".into(), "Creature".into()],
+            &["Equipment".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+
+        // Verify the trigger mode is DamageDone
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+
+        // Find the Discard effect and verify it targets TriggeringPlayer
+        let discard_effect = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Discard { target, .. } => Some(target),
+                _ => None,
+            })
+            .expect("Discard effect must be present");
+
+        assert_eq!(
+            discard_effect,
+            &TargetFilter::TriggeringPlayer,
+            "Discard target must be TriggeringPlayer (the damaged player), got {:?}",
+            discard_effect
         );
     }
 }
