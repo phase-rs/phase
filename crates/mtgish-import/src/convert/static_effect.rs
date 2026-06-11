@@ -9,7 +9,7 @@ use engine::types::ability::{
     AbilityKind, ContinuousModification, Duration, PlayerScope, QuantityExpr, StaticCondition,
     StaticDefinition,
 };
-use engine::types::statics::StaticMode;
+use engine::types::statics::{CombatAloneAction, CombatAloneRequirement, StaticMode};
 use engine::types::Phase;
 
 use crate::convert::keyword::try_convert as keyword_try_convert;
@@ -293,8 +293,19 @@ pub fn convert_permanent_rule(
         P::CantAttack => StaticMode::CantAttack,
         P::CantBlock => StaticMode::CantBlock,
         P::CantCrew => StaticMode::CantCrew,
-        P::CantAttackAlone => StaticMode::CantAttackAlone,
-        P::CantBlockAlone => StaticMode::CantBlockAlone,
+        // CR 506.5 + CR 508.1c + CR 509.1b: parameterized "alone" combat restriction.
+        P::CantAttackAlone => StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        P::CantBlockAlone => StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        P::CanOnlyAttackAlone => StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        },
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
         P::MustBeBlocked => StaticMode::MustBeBlocked,

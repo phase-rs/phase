@@ -1742,17 +1742,29 @@ fn static_cant_block() {
 
 #[test]
 fn static_cant_attack_alone() {
-    // CR 506.5 + CR 508.1a: "can't attack alone" must NOT be swallowed by the
+    // CR 506.5 + CR 508.1c: "can't attack alone" must NOT be swallowed by the
     // generic "can't attack" arm (which would blanket-prohibit attacking).
     let def = parse_static_line("Bonded Construct can't attack alone.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantAttackAlone);
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
 #[test]
 fn static_cant_block_alone() {
     let def = parse_static_line("~ can't block alone.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantBlockAlone);
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
@@ -1761,8 +1773,59 @@ fn static_cant_attack_or_block_alone_emits_both() {
     // CR 506.5: Mogg Flunkies — both restrictions from one clause.
     let defs = parse_static_line_multi("Mogg Flunkies can't attack or block alone.");
     assert_eq!(defs.len(), 2);
-    assert!(defs.iter().any(|d| d.mode == StaticMode::CantAttackAlone));
-    assert!(defs.iter().any(|d| d.mode == StaticMode::CantBlockAlone));
+    assert!(defs.iter().any(|d| {
+        d.mode
+            == (StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            })
+    }));
+    assert!(defs.iter().any(|d| {
+        d.mode
+            == (StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            })
+    }));
+}
+
+#[test]
+fn static_can_only_attack_alone_parses() {
+    // CR 508.1c: Master of Cruelties — "can only attack alone" means the
+    // creature may not be declared alongside other attackers.
+    let def =
+        parse_static_line("~ can only attack alone.").expect("can only attack alone should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_can_only_attack_alone_not_swallowed_by_cant_attack_alone() {
+    // Guard: the positive ("can only attack alone") must not be confused
+    // with the negative ("can't attack alone") which means the opposite.
+    let def_only = parse_static_line("~ can only attack alone.").unwrap();
+    let def_cant = parse_static_line("~ can't attack alone.").unwrap();
+    assert_eq!(
+        def_only.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        }
+    );
+    assert_eq!(
+        def_cant.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
+    assert_ne!(def_only.mode, def_cant.mode);
 }
 
 /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
