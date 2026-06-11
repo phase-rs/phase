@@ -507,6 +507,13 @@ pub fn move_to_zone(
     }
     zone_change_record.combat_status = capture_combat_status(state, object_id);
 
+    // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
+    // temporarily changed the survivor's token-ness, the ZoneChanged record above
+    // must retain the merged permanent's event-time token-ness. Restore the
+    // survivor only after that snapshot so the moved token component can cease to
+    // exist without corrupting leave-trigger filters.
+    super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
+
     apply_zone_exit_cleanup(state, object_id, from, to);
 
     remove_from_zone(state, object_id, from, owner);
