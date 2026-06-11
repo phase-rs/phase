@@ -8002,6 +8002,11 @@ mod tests {
         assert!(json.contains("\"EffectZoneChoice\""));
     }
 
+    // ---------------------------------------------------------------------
+    // CR 110.2a: serde coverage for the resolved-once runtime carriers
+    // (`PendingChangeZoneIteration` and `WaitingFor::EffectZoneChoice`).
+    // ---------------------------------------------------------------------
+
     #[test]
     fn pending_change_zone_iteration_modern_shape_roundtrips() {
         let original = PendingChangeZoneIteration {

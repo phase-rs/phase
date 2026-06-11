@@ -15370,9 +15370,8 @@ mod tests {
     }
 
     #[test]
-    fn enters_under_chosen_player_index_zero_distinguishable_from_legacy_false() {
-        // The modern shape can express `Some(ControllerRef::ChosenPlayer { index: 0 })`,
-        // which must NOT collapse to the legacy `false` semantics (`None`).
+    fn enters_under_chosen_player_index_zero_roundtrips() {
+        // The modern shape can express `Some(ControllerRef::ChosenPlayer { index: 0 })`.
         let json = r#"{
             "type": "ChangeZone",
             "destination": "Battlefield",
@@ -15405,7 +15404,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_under_your_control_field_not_emitted_in_serialization() {
+    fn enters_under_field_not_emitted_when_none() {
         // `enters_under: None` must skip-serialize; `Some(You)` must emit the
         // modern key. Neither case may emit the legacy boolean field.
         for variant in [None, Some(ControllerRef::You)] {
