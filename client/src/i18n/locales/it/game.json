@@ -1484,7 +1484,9 @@
     "scopeMulti": "Scegli nuovi bersagli per la magia",
     "subtitle": "{{scope}}. Attuale: {{current}}",
     "confirm": "Conferma",
-    "badgeNewTarget": "Nuovo bersaglio"
+    "badgeNewTarget": "Nuovo bersaglio",
+    "slotLabel": "Bersaglio {{index}}: {{current}} → {{chosen}}",
+    "unselected": "invariato"
   },
   "separatePiles": {
     "chooserName": "Giocatore {{number}}",

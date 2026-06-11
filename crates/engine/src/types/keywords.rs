@@ -99,6 +99,23 @@ pub enum EchoCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
+/// card as an Aura. Classic Theros bestow uses a pure mana cost (e.g. Boon Satyr
+/// "Bestow {3}{G}{G}"). Murders at Karlov Manor reprints introduced compound
+/// bestow costs with a non-mana rider ("Bestow—{R}, Collect evidence 6." on
+/// Detective's Phoenix), where the residual non-mana sub-cost is paid alongside
+/// the mana sub-cost. Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the
+/// non-mana portion composes through the existing `AbilityCost` /
+/// `pay_additional_cost` pipeline. `split_bestow_cost_components` (casting.rs)
+/// separates the mana sub-cost (paid via the normal mana flow, CR 601.2g) from
+/// the residual non-mana sub-cost (paid via `pay_additional_cost`, CR 601.2h).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum BestowCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -537,7 +554,7 @@ pub enum Keyword {
     /// colorless Hero creature token, then attach this Equipment to it."
     JobSelect,
     TotemArmor,
-    Bestow(ManaCost),
+    Bestow(BestowCost),
 
     // Graveyard
     Embalm(EmbalmCost),
@@ -1785,7 +1802,11 @@ impl FromStr for Keyword {
                 "tribute" => return Ok(Keyword::Tribute(p.parse().unwrap_or(1))),
                 "afterlife" => return Ok(Keyword::Afterlife(p.parse().unwrap_or(1))),
                 "reconfigure" => return Ok(Keyword::Reconfigure(parse_keyword_mana_cost(p))),
-                "bestow" => return Ok(Keyword::Bestow(parse_keyword_mana_cost(p))),
+                "bestow" => {
+                    return Ok(Keyword::Bestow(BestowCost::Mana(parse_keyword_mana_cost(
+                        p,
+                    ))))
+                }
                 "embalm" => {
                     return Ok(Keyword::Embalm(EmbalmCost::Mana(parse_keyword_mana_cost(
                         p,
@@ -2572,7 +2593,15 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Ninjutsu" => Ok(Keyword::Ninjutsu(mana(data)?)),
         "CommanderNinjutsu" => Ok(Keyword::CommanderNinjutsu(mana(data)?)),
         "Reconfigure" => Ok(Keyword::Reconfigure(mana(data)?)),
-        "Bestow" => Ok(Keyword::Bestow(mana(data)?)),
+        "Bestow" => {
+            // Accept both the legacy bare ManaCost format and the new tagged
+            // BestowCost format (Mana / NonMana) — mirrors Flashback/Embalm.
+            if let Ok(bestow_cost) = serde_json::from_value::<BestowCost>(data.clone()) {
+                Ok(Keyword::Bestow(bestow_cost))
+            } else {
+                Ok(Keyword::Bestow(BestowCost::Mana(mana(data)?)))
+            }
+        }
         "Embalm" => {
             // Accept both legacy ManaCost format and new EmbalmCost tagged format.
             if let Ok(embalm_cost) = serde_json::from_value::<EmbalmCost>(data.clone()) {

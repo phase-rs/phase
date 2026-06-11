@@ -30,7 +30,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    EffectScope, FilterProp, ManaModification, ManaReplacementScope, PlayerFilter,
+    EffectScope, FilterProp, LibraryPosition, ManaModification, ManaReplacementScope, PlayerFilter,
     PreventionAmount, QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
     TapStateChange, TargetFilter, TypeFilter, TypedFilter,
@@ -195,6 +195,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
 
     // --- "If a card/token would be put into a graveyard, exile it instead" ---
     if let Some(def) = parse_graveyard_exile_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- Library of Leng: "If an effect causes you to discard a card, discard it,
+    // but you may put it on top of your library instead of into your graveyard." ---
+    if let Some(def) = parse_discard_to_library_top_replacement(&norm_lower, &normalized, &text) {
         return Some(def);
     }
 
@@ -535,6 +541,57 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     None
 }
 
+/// CR 614.1a + CR 614.6: Library of Leng — when an effect causes the controller
+/// to discard, they may put the discarded card on top of their library instead
+/// of into their graveyard.
+fn parse_discard_to_library_top_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            tag("if an effect causes you to discard a card, discard it, but you may "),
+        )
+        .parse(i)
+    })?;
+    let after_lower = after_prefix.to_lowercase();
+    if all_consuming(terminated(
+        pair(
+            tag::<_, _, OracleError<'_>>("put it on top of your "),
+            tag::<_, _, OracleError<'_>>("library"),
+        ),
+        pair(
+            tag::<_, _, OracleError<'_>>(" instead of into your graveyard"),
+            opt(tag::<_, _, OracleError<'_>>(".")),
+        ),
+    ))
+    .parse(after_lower.as_str())
+    .is_err()
+    {
+        return None;
+    }
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+        },
+    );
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Discard)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(execute)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .condition(ReplacementCondition::EffectCausedDiscard)
+            .description(original_text.to_string()),
+    )
+}
+
 fn parse_discard_self_to_battlefield_replacement(
     norm_lower: &str,
     normalized: &str,
@@ -617,7 +674,7 @@ fn parse_self_enters_pay_cost_replacement(
     // Guard: only Sacrifice / Discard are valid Karoo accept-costs.
     if !matches!(
         cost,
-        AbilityCost::Sacrifice { .. } | AbilityCost::Discard { .. }
+        AbilityCost::Sacrifice(_) | AbilityCost::Discard { .. }
     ) {
         return None;
     }
@@ -6099,7 +6156,7 @@ mod tests {
         match &def.mode {
             ReplacementMode::MayCost { cost, decline } => {
                 assert!(
-                    matches!(cost, AbilityCost::Sacrifice { count: 2, .. }),
+                    matches!(cost, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(2)),
                     "expected Sacrifice count 2, got {cost:?}"
                 );
                 let decline = decline.as_ref().expect("Karoo decline branch");
@@ -6128,7 +6185,7 @@ mod tests {
         match &def.mode {
             ReplacementMode::MayCost { cost, .. } => {
                 assert!(
-                    matches!(cost, AbilityCost::Sacrifice { count: 1, .. }),
+                    matches!(cost, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1)),
                     "expected Sacrifice count 1, got {cost:?}"
                 );
             }
@@ -6279,6 +6336,38 @@ mod tests {
             )
             .as_deref(),
             Some("You gain life equal to the damage prevented this way.")
+        );
+    }
+
+    #[test]
+    fn library_of_leng_discard_to_library_top_replacement() {
+        let def = parse_replacement_line(
+            "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
+            "Library of Leng",
+        )
+        .expect("Library of Leng discard replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Discard);
+        assert!(
+            matches!(def.mode, ReplacementMode::Optional { decline: None }),
+            "optional top-of-library redirect must be Optional {{ decline: None }}; got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::EffectCausedDiscard),
+            "Library of Leng must gate on effect-caused discards only"
+        );
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(
+            matches!(*execute.effect, Effect::PutAtLibraryPosition { .. }),
+            "expected PutAtLibraryPosition, got {:?}",
+            execute.effect
         );
     }
 

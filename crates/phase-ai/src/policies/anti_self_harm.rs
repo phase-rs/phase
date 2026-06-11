@@ -778,10 +778,8 @@ fn ability_cost_requires_sacrifice(ability: &engine::types::ability::AbilityDefi
         Some(AbilityCost::Composite { costs }) => costs.iter().any(|c| {
             matches!(
                 c,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    ..
-                }
+                AbilityCost::Sacrifice(cost)
+                    if matches!(cost.target, TargetFilter::SelfRef)
             )
         }),
         _ => false,
@@ -813,10 +811,11 @@ fn target_is_sacrificed_source(ctx: &PolicyContext<'_>, object_id: ObjectId) -> 
 
 fn cost_includes_sacrifice_self(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            ..
-        } => true,
+        AbilityCost::Sacrifice(cost)
+            if matches!(cost.target, engine::types::ability::TargetFilter::SelfRef) =>
+        {
+            true
+        }
         AbilityCost::Composite { costs } => costs.iter().any(cost_includes_sacrifice_self),
         _ => false,
     }
@@ -841,9 +840,9 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification, ControllerRef,
-        FilterProp, PtValue, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification,
+        ControllerRef, FilterProp, PtValue, QuantityRef, ResolvedAbility, SacrificeCost,
+        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -3126,10 +3125,10 @@ mod tests {
         let ability = ResolvedAbility::new(effect, Vec::new(), fanatic_id, PlayerId(0));
         let mut pending_cast = PendingCast::new(fanatic_id, CardId(100), ability, ManaCost::zero());
         pending_cast.activation_cost = Some(AbilityCost::Composite {
-            costs: vec![AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            }],
+            costs: vec![AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::SelfRef,
+                1,
+            ))],
         });
 
         let legal_targets = vec![

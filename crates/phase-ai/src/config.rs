@@ -280,6 +280,18 @@ pub struct PolicyPenalties {
     /// combo line that is reachable next turn. Consumed by `ComboLinePolicy`.
     #[serde(default = "default_combo_progress_next_turn_bonus")]
     pub combo_progress_next_turn_bonus: f64,
+    /// CR 701.6a: Penalty for casting a spell whose mana value matches the
+    /// charge-counter count on a Chalice-of-the-Void-class permanent the AI
+    /// controls — the spell is countered for free, pure tempo and card loss.
+    /// Consumed by `ChaliceAvoidancePolicy`.
+    #[serde(default = "default_own_chalice_counter_penalty")]
+    pub own_chalice_counter_penalty: f64,
+    /// CR 701.6a: Penalty for casting a spell that an opponent's Chalice-class
+    /// permanent would counter. Lighter than the own-Chalice penalty: the AI
+    /// may still want the spell on the stack (e.g. to bait, or when the spell's
+    /// value clears the loss), so this demotes rather than vetoes.
+    #[serde(default = "default_opponent_chalice_counter_penalty")]
+    pub opponent_chalice_counter_penalty: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -320,6 +332,8 @@ impl Default for PolicyPenalties {
             threat_wipe_overextend_penalty: default_threat_wipe_overextend_penalty(),
             combo_progress_this_turn_bonus: default_combo_progress_this_turn_bonus(),
             combo_progress_next_turn_bonus: default_combo_progress_next_turn_bonus(),
+            own_chalice_counter_penalty: default_own_chalice_counter_penalty(),
+            opponent_chalice_counter_penalty: default_opponent_chalice_counter_penalty(),
         }
     }
 }
@@ -377,6 +391,12 @@ fn default_combo_progress_this_turn_bonus() -> f64 {
 }
 fn default_combo_progress_next_turn_bonus() -> f64 {
     5.0
+}
+fn default_own_chalice_counter_penalty() -> f64 {
+    -12.0
+}
+fn default_opponent_chalice_counter_penalty() -> f64 {
+    -4.0
 }
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.

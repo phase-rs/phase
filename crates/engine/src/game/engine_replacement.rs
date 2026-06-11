@@ -317,6 +317,7 @@ pub(super) fn handle_replacement_choice(
                     object_id,
                     source_id,
                     applied,
+                    ..
                 } => {
                     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
                         effects::discard::complete_discard_to_graveyard(

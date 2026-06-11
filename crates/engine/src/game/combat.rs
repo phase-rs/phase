@@ -13,7 +13,9 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::statics::{BlockExceptionKind, StaticMode};
+use crate::types::statics::{
+    BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
+};
 use crate::types::zones::Zone;
 
 /// CR 702.19: Which trample variant applies to combat damage assignment.
@@ -467,16 +469,41 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         }
     }
 
-    // CR 506.5 + CR 508.1a: A creature with "can't attack alone" may be declared
-    // as an attacker only if it isn't the sole attacker. Two such creatures may
-    // attack together (CR 506.5 Example), so this only triggers at exactly one.
+    // CR 506.5 + CR 508.1c: CombatAlone(Attack, NeedsCompanion) — creature must
+    // NOT be the sole attacker ("can't attack alone"). Two such creatures may
+    // attack together (CR 506.5 Example), so only reject when exactly one attacker.
     if attacker_ids.len() == 1 {
         let id = attacker_ids[0];
         if let Some(obj) = state.objects.get(&id) {
-            if super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantAttackAlone)
-            {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                sd.mode
+                    == (StaticMode::CombatAlone {
+                        action: CombatAloneAction::Attack,
+                        requirement: CombatAloneRequirement::NeedsCompanion,
+                    })
+            }) {
                 return Err(format!("{id:?} can't attack alone (CR 506.5)"));
+            }
+        }
+    }
+
+    // CR 506.5 + CR 508.1c: CombatAlone(Attack, MustBeSole) — creature must BE
+    // the sole attacker ("can only attack alone"). Reject any multi-attacker
+    // declaration that includes such a creature.
+    if attacker_ids.len() > 1 {
+        for &id in attacker_ids {
+            if let Some(obj) = state.objects.get(&id) {
+                if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                    sd.mode
+                        == (StaticMode::CombatAlone {
+                            action: CombatAloneAction::Attack,
+                            requirement: CombatAloneRequirement::MustBeSole,
+                        })
+                }) {
+                    return Err(format!(
+                        "{id:?} can only attack alone — may not attack alongside other creatures (CR 506.5 + CR 508.1c)"
+                    ));
+                }
             }
         }
     }
@@ -972,15 +999,18 @@ pub fn validate_blockers_for_player(
         *attackers_per_blocker.entry(blocker_id).or_default() += 1;
     }
 
-    // CR 506.5 + CR 509.1b: A creature with "can't block alone" may be declared
-    // as a blocker only if it isn't the sole creature this player declares as a
-    // blocker this step. Two such creatures may block together.
+    // CR 506.5 + CR 509.1b: CombatAlone(Block, NeedsCompanion) — creature must
+    // NOT be the sole blocker ("can't block alone"). Two such creatures may block together.
     if attackers_per_blocker.len() == 1 {
         let (&blocker_id, _) = attackers_per_blocker.iter().next().expect("len checked");
         if let Some(obj) = state.objects.get(&blocker_id) {
-            if super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantBlockAlone)
-            {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                sd.mode
+                    == (StaticMode::CombatAlone {
+                        action: CombatAloneAction::Block,
+                        requirement: CombatAloneRequirement::NeedsCompanion,
+                    })
+            }) {
                 return Err(format!("{blocker_id:?} can't block alone (CR 506.5)"));
             }
         }
@@ -3178,8 +3208,8 @@ mod tests {
 
     #[test]
     fn cant_attack_alone_rejects_sole_attacker() {
-        // CR 506.5 + CR 508.1a: a "can't attack alone" creature is illegal as the
-        // only attacker, but legal alongside another attacker.
+        // CR 506.5 + CR 508.1c: a CombatAlone(Attack, NeedsCompanion) creature is
+        // illegal as the only attacker, but legal alongside another attacker.
         let mut state = setup();
         let a = create_creature(&mut state, PlayerId(0), "Bonded Construct", 2, 2);
         state
@@ -3187,7 +3217,10 @@ mod tests {
             .get_mut(&a)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::CantAttackAlone));
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }));
         let b = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         assert!(validate_attackers(&state, &[a]).is_err());
@@ -3195,9 +3228,37 @@ mod tests {
     }
 
     #[test]
+    fn can_only_attack_alone_rejects_multi_attacker() {
+        // CR 506.5 + CR 508.1c: CombatAlone(Attack, MustBeSole) — the flagged
+        // creature can attack alone but is rejected when declared alongside another.
+        let mut state = setup();
+        let master = create_creature(&mut state, PlayerId(0), "Master of Cruelties", 1, 4);
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            }));
+        let companion = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let unflagged = create_creature(&mut state, PlayerId(0), "Elk", 2, 2);
+
+        // Sole attacker: legal.
+        assert!(validate_attackers(&state, &[master]).is_ok());
+        // With a companion: illegal.
+        assert!(validate_attackers(&state, &[master, companion]).is_err());
+        // Unflagged creature attacking alone: legal (restriction is not on it).
+        assert!(validate_attackers(&state, &[unflagged]).is_ok());
+        // Two unflagged creatures: legal.
+        assert!(validate_attackers(&state, &[unflagged, companion]).is_ok());
+    }
+
+    #[test]
     fn cant_block_alone_rejects_sole_blocker() {
-        // CR 506.5 + CR 509.1b: a "can't block alone" creature is illegal as the
-        // only blocker, but legal alongside another blocker.
+        // CR 506.5 + CR 509.1b: a CombatAlone(Block, NeedsCompanion) creature is
+        // illegal as the only blocker, but legal alongside another blocker.
         let mut state = setup();
         let atk1 = create_creature(&mut state, PlayerId(0), "Atk1", 2, 2);
         let atk2 = create_creature(&mut state, PlayerId(0), "Atk2", 2, 2);
@@ -3207,7 +3268,10 @@ mod tests {
             .get_mut(&lone)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::CantBlockAlone));
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }));
         let other = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
         state.combat = Some(CombatState {

@@ -168,7 +168,9 @@ pub(crate) fn discard_all_and_count_nonlands(
     for &card_id in cards {
         let is_nonland = is_nonland_card(state, card_id);
         if let super::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-            super::discard::discard_as_cost(state, card_id, player, events)
+            super::discard::discard_caused_by_effect_with_source(
+                state, card_id, player, None, events,
+            )
         {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
