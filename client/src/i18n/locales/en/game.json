@@ -1489,7 +1489,9 @@
     "scopeMulti": "Choose new targets for the spell",
     "subtitle": "{{scope}}. Current: {{current}}",
     "confirm": "Confirm",
-    "badgeNewTarget": "New target"
+    "badgeNewTarget": "New target",
+    "slotLabel": "Target {{index}}: {{current}} → {{chosen}}",
+    "unselected": "unchanged"
   },
   "separatePiles": {
     "chooserName": "Player {{number}}",

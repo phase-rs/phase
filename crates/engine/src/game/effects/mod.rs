@@ -4583,6 +4583,23 @@ fn resolve_chain_body(
         ability
     };
 
+    // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
+    // same resolution (instructions are followed "in the order written"), so it
+    // resolves AFTER the parent's effect and must read the object's CURRENT
+    // characteristics, which the layer system (CR 613) determines. When the
+    // parent effect mutated layer-affecting state (a +1/+1 counter via
+    // `PutCounter`, a P/T-setting continuous effect, …) it only marked
+    // `layers_dirty`; the derived `power`/`toughness` fields are not recomputed
+    // until the next flush. Flush here, before the sub resolves its condition and
+    // effect-quantity reads, so a sub like "add {R} equal to this creature's
+    // power" (Molten-Core Maestro, issue #2384) sees the post-counter power
+    // rather than the stale pre-counter snapshot. `flush_layers` is the single
+    // authority and a no-op when nothing is dirty, so leaf chains and non-P/T
+    // parents pay nothing.
+    if ability.sub_ability.is_some() {
+        crate::game::layers::flush_layers(state);
+    }
+
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
