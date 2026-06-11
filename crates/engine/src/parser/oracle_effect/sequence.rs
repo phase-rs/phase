@@ -711,6 +711,18 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
                             .parse(remainder_trimmed)
                             .is_ok();
+                    // CR 705 + CR 707.10c: Comma splitting already keeps `if …`
+                    // prefix clauses intact (see `starts_prefix_clause` in
+                    // `split_comma_clause_boundary`), but a blocked comma leaves
+                    // `, and ` in the buffer — which then hits this bare-`and`
+                    // path and bisects the body anyway. Krark, the Thumbless:
+                    // "If you win the flip, copy that spell, and you may choose
+                    // new targets for the copy" must reach coin-flip branch
+                    // parsing as one chunk so the CopyMayRetarget continuation
+                    // absorbs the retarget grant.
+                    let inside_prefix_clause_body = starts_prefix_clause(
+                        before_lower.trim_end().trim_end_matches(',').trim_end(),
+                    );
                     let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -724,7 +736,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_otherwise_body
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
-                        || roll_die_modifier_continuation;
+                        || roll_die_modifier_continuation
+                        || inside_prefix_clause_body;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -1817,7 +1830,15 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
 fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    let clause = lower.trim().trim_end_matches('.').trim_end();
+    let clause = lower
+        .trim()
+        .trim_end_matches('.')
+        .trim_end_matches(',')
+        .trim();
+    let clause = clause
+        .strip_prefix("and ")
+        .or_else(|| clause.strip_prefix(", and "))
+        .unwrap_or(clause);
     value(
         (),
         (
@@ -5019,6 +5040,25 @@ mod tests {
 
     // --- CR 707.10c: copy-retarget clause recognition ---
 
+    /// CR 705 + CR 707.10c: Krark, the Thumbless — coin-flip win branch must not
+    /// bare-`and` split off the copy-retarget grant.
+    #[test]
+    fn krark_coin_flip_win_branch_stays_single_chunk() {
+        let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+        let chunks = clause_texts(text);
+        assert_eq!(
+            chunks.len(),
+            3,
+            "expected three sentence chunks, got {chunks:?}"
+        );
+        assert!(
+            chunks[2].contains("choose new targets"),
+            "win chunk must include retarget clause: {:?}",
+            chunks[2]
+        );
+    }
+
     #[test]
     fn recognize_copy_retarget_clause_variants() {
         // Fork / Twincast — "You may choose new targets for the copy/copies."
@@ -5037,6 +5077,9 @@ mod tests {
             "you may choose a new target for that copy."
         ));
         // Negatives.
+        assert!(recognize_copy_retarget_clause(
+            "and you may choose new targets for the copy"
+        ));
         assert!(!recognize_copy_retarget_clause("copy that spell"));
         assert!(!recognize_copy_retarget_clause(
             "may choose a new target for the creature"
