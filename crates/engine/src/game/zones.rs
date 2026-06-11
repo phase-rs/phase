@@ -594,15 +594,7 @@ pub fn move_to_zone(
     // above, guaranteeing a post-layer rebuild on the next
     // `collect_pending_triggers` consult.
     if to == Zone::Battlefield {
-        let registration = state.objects.get(&object_id).map(|obj| {
-            let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
-                obj.trigger_definitions.as_slice().iter().cloned().collect();
-            let synthetic = super::trigger_index::has_synthetic_keyword_trigger_for(obj);
-            (defs, synthetic)
-        });
-        if let Some((defs, synthetic)) = registration {
-            state.trigger_index.add(object_id, &defs, synthetic);
-        }
+        super::trigger_index::reindex_object_triggers(state, object_id);
     }
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());

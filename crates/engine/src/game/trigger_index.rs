@@ -859,6 +859,24 @@ pub fn has_synthetic_keyword_trigger_for(obj: &GameObject) -> bool {
     })
 }
 
+/// CR 603.6a: Re-register one permanent's trigger definitions in the derived
+/// index after they are applied outside the ETB pipeline (scenario seeding,
+/// card-db rehydration, Oracle-text overlays, etc.).
+pub fn reindex_object_triggers(state: &mut GameState, object_id: ObjectId) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    if obj.zone != Zone::Battlefield || obj.is_phased_out() {
+        state.trigger_index.remove(object_id);
+        return;
+    }
+    let defs: SmallVec<[TriggerDefinition; 4]> =
+        obj.trigger_definitions.as_slice().iter().cloned().collect();
+    let synthetic = has_synthetic_keyword_trigger_for(obj);
+    state.trigger_index.remove(object_id);
+    state.trigger_index.add(object_id, &defs, synthetic);
+}
+
 impl TriggerIndex {
     /// CR 603.6a: Register a permanent's trigger definitions in the index when
     /// it enters the battlefield. The caller is responsible for invoking this

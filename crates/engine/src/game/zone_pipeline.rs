@@ -911,6 +911,29 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// the next object surfaces its own prompt. Rebuilds each tail request with the
 /// stashed batch-uniform context (attribution source, tap-state, exile
 /// tracking) so the resumed deliveries match the originals.
+///
+/// RE-PAUSE CONTRACT (the explicit guarantee for "a LATER item in the same batch
+/// parks after the first one already parked and was resumed"): everything a batch
+/// needs to finish identically across an arbitrary number of sequential parks is
+/// held in `state.pending_batch_deliveries` — NOT on the stack and NOT in the
+/// resuming caller — so each park can re-stash it for the next one:
+///   * the **undelivered tail** (`remaining`) — `deliver_batch` re-stashes the
+///     still-undelivered suffix on every re-park, so no object is ever dropped;
+///   * the **batch-uniform request context** (`destination`, `source_id`,
+///     `enter_tapped`, `exile_tracking`) — re-applied to every rebuilt request so
+///     the second-park resume produces requests equivalent to the originals
+///     (e.g. seek's `enter_tapped`, mill's self-anchored attribution);
+///   * the **post-loop `completion`** — taken out here, then re-attached via
+///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
+///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
+///     empties (never early, never twice).
+///
+/// Because all of this lives on the parked record (not in `route_rest_partition`
+/// or any synchronous caller frame), a second, third, … park is just another
+/// `deliver_batch` → re-stash cycle. The contract is pinned by
+/// `mill_double_redirect_choice_continuation` (two sequential parks, no
+/// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
+/// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
         let completion = pending.completion;

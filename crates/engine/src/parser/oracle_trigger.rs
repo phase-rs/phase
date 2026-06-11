@@ -6183,6 +6183,7 @@ fn try_parse_event(
                     )),
                 ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
+                value(AttackTargetFilter::Player, tag(" one of your opponents")),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 value(AttackTargetFilter::Player, tag(" you")),
                 value(AttackTargetFilter::Battle, tag(" a battle")),
@@ -6190,6 +6191,9 @@ fn try_parse_event(
             .parse(input)
         }
         let attack_target_filter = parse_attack_target.parse(after).ok().map(|(_, f)| f);
+        let attacks_one_of_your_opponents = tag::<_, _, OracleError<'_>>(" one of your opponents")
+            .parse(after)
+            .is_ok();
         let mut def = make_base();
         // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
         // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,
@@ -6212,9 +6216,20 @@ fn try_parse_event(
         } else {
             TriggerMode::Attacks
         };
-        def.valid_card = Some(subject.clone());
+        // CR 508.1a + CR 508.5: player-subject attack triggers scope the attacking
+        // player via `valid_source`, not `valid_card` — `TargetFilter::Player` never
+        // matches an object (Breena, the Demagogue).
+        if subject_is_player(subject) {
+            def.valid_source = Some(subject.clone());
+        } else {
+            def.valid_card = Some(subject.clone());
+        }
         def.attack_target_filter = attack_target_filter;
-        if matches!(
+        if attacks_one_of_your_opponents {
+            def.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ));
+        } else if matches!(
             def.attack_target_filter,
             Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
         ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok()
@@ -24032,6 +24047,33 @@ mod tests {
             }),
             "Price of Glory must gate on it NOT being the tapping player's turn"
         );
+    }
+
+    #[test]
+    fn breena_attaches_defending_life_intervening_if() {
+        // Issue #865: attack trigger gated on defending opponent life.
+        let def = parse_trigger_line(
+            "Whenever a player attacks one of your opponents, if that opponent has more life than another of your opponents, that attacking player draws a card and you put two +1/+1 counters on a creature you control.",
+            "Breena, the Demagogue",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_card, None);
+        assert_eq!(def.valid_source, Some(TargetFilter::Player));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        match def.condition {
+            Some(TriggerCondition::QuantityComparison {
+                comparator: Comparator::GT,
+                ..
+            }) => {}
+            other => panic!(
+                "Breena must gate on defending player life exceeding another opponent, got {other:?}"
+            ),
+        }
     }
 
     #[test]

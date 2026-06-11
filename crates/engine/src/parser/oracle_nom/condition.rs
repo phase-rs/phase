@@ -114,6 +114,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
 fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_opponent_poison_conditions,
+        parse_defending_player_more_life_than_another_opponent,
         parse_defending_player_comparison_conditions,
         parse_that_player_controls_more_comparison,
         parse_no_opponent_comparison_conditions,
@@ -4914,6 +4915,34 @@ fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, S
 /// comparing the defending player's permanents to the trigger controller's.
 /// The object-count machinery already handles `ControllerRef::You`; this arm
 /// adds the combat-context controller axis for the LHS.
+/// CR 508.5 + CR 603.4: "that opponent has more life than another of your
+/// opponents" — defending player's life exceeds the lowest life total among
+/// the source controller's opponents (Breena, the Demagogue).
+fn parse_defending_player_more_life_than_another_opponent(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("that opponent "), tag("defending player "))).parse(input)?;
+    let (rest, _) = tag("has more life than another of your opponents").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::DefendingPlayer,
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Min,
+                    },
+                },
+            },
+        },
+    ))
+}
+
 fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("defending player controls more ").parse(input)?;
     let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
@@ -8397,6 +8426,37 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 20 },
             } => {}
             other => panic!("expected opponent LifeTotal GE 20 with Max aggregate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_that_opponent_has_more_life_than_another_opponent() {
+        let (rest, c) =
+            parse_inner_condition("that opponent has more life than another of your opponents")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::DefendingPlayer,
+                            },
+                    },
+                comparator: Comparator::GT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+            } => {}
+            other => panic!("expected defending life GT min opponent life, got {other:?}"),
         }
     }
 

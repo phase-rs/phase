@@ -138,6 +138,7 @@ mod issue_564_wishclaw_talisman_control;
 mod issue_565_birthing_ritual_end_step_trigger;
 mod issue_566_ragavan_dash_cast;
 mod issue_580_solitude_evoke_prompt;
+mod issue_581_mystic_remora_cumulative_upkeep;
 mod issue_583_vivi_ornitier_mana_source;
 mod issue_709_regression;
 mod issue_859_weathered_wayfarer;

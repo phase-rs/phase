@@ -1047,6 +1047,19 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
 }
 
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
+    rehydrate_card_db_metadata(state, db);
+    let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
+    repair_battlefield_trigger_index_after_face_reapply(state, changed_battlefield);
+
+    if changed_any || state.layers_dirty.is_dirty() {
+        bump_state_revision(state);
+        mark_public_state_all_dirty(state);
+        finalize_public_state(state);
+    }
+}
+
+/// Populate Conjure registry and card-name validation lists on first rehydrate.
+fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // Populate the Conjure card-face registry (used by the Conjure effect
     // handler). Scoped to exactly the faces reachable as Conjure targets so we
     // never clone the entire database into per-game state. Decks with no
@@ -1079,7 +1092,11 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
     if state.all_card_names.is_empty() {
         state.all_card_names = db.card_names().into();
     }
+}
 
+/// Re-apply printed faces from `db` to every object that carries a `printed_ref`.
+/// Does not finalize public state or flush layers.
+fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) -> (bool, bool) {
     let object_ids: Vec<_> = state.objects.keys().copied().collect();
     let mut changed_any = false;
     let mut changed_battlefield = false;
@@ -1203,14 +1220,19 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
         }
     }
 
+    (changed_any, changed_battlefield)
+}
+
+/// CR 603.6a: `apply_card_face_to_object` may replace `trigger_definitions`
+/// without touching the derived index. Rebuild so upkeep triggers (e.g. Mystic
+/// Remora cumulative upkeep) stay indexed before the next event consult.
+fn repair_battlefield_trigger_index_after_face_reapply(
+    state: &mut GameState,
+    changed_battlefield: bool,
+) {
     if changed_battlefield {
         crate::game::layers::mark_layers_full(state);
-    }
-
-    if changed_any || state.layers_dirty.is_dirty() {
-        bump_state_revision(state);
-        mark_public_state_all_dirty(state);
-        finalize_public_state(state);
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
     }
 }
 
@@ -2613,5 +2635,78 @@ mod tests {
                 "walker missed conjure name '{name}' in a nested carrier"
             );
         }
+    }
+
+    /// Issue #581: rehydration must repair a partially stale derived index before
+    /// `finalize_public_state` flushes layers (which would mask a missing repair).
+    #[test]
+    fn rehydrate_repairs_stale_trigger_index_before_layer_flush() {
+        use crate::game::trigger_index::{candidates_for_event, reindex_object_triggers};
+        use crate::types::events::GameEvent;
+        use crate::types::triggers::TriggerEventKey;
+
+        let mut face = test_face(
+            "Test Upkeep Enchantment",
+            "test-upkeep-enchantment-oracle-id",
+            vec![CoreType::Enchantment],
+            ManaCost::default(),
+        );
+        face.triggers
+            .push(TriggerDefinition::new(TriggerMode::PayCumulativeUpkeep));
+
+        let export = serde_json::json!({
+            "test upkeep enchantment": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object_from_card_face(&mut state, &face, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.zone = Zone::Battlefield;
+        }
+        state.battlefield.push_back(id);
+        reindex_object_triggers(&mut state, id);
+
+        let upkeep_key = TriggerEventKey::BeginningOfPhase(Phase::Upkeep);
+        if let Some(bucket) = state.trigger_index.by_key.get_mut(&upkeep_key) {
+            bucket.retain(|oid| *oid != id);
+            if bucket.is_empty() {
+                state.trigger_index.by_key.remove(&upkeep_key);
+            }
+        }
+        state.trigger_index.unclassified.retain(|oid| *oid != id);
+        state
+            .trigger_index
+            .by_key
+            .entry(TriggerEventKey::BeginningOfPhase(Phase::Draw))
+            .or_default()
+            .push(id);
+
+        let before = candidates_for_event(
+            &state,
+            &GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            },
+        );
+        assert!(
+            !before.contains(&id),
+            "precondition: stale index must omit the upkeep permanent"
+        );
+
+        let (_, changed_battlefield) = reapply_printed_faces_from_card_db(&mut state, &db);
+        repair_battlefield_trigger_index_after_face_reapply(&mut state, changed_battlefield);
+
+        let after = candidates_for_event(
+            &state,
+            &GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            },
+        );
+        assert!(
+            after.contains(&id),
+            "rehydrate must rebuild the derived index before layer flush (issue #581)"
+        );
     }
 }

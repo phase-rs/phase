@@ -1,9 +1,13 @@
-//! CR 601.2b: Cost-payability pre-gate.
+//! CR 118.3 + CR 601.2h: Cost-payability pre-gate.
 //!
 //! A single predicate over `AbilityCost` that answers "can this cost be paid
-//! right now, given the current game state?" for cost variants where CR 601.2b
-//! applies — specifically, costs that require the player to *choose an object*
-//! and where no legal object exists.
+//! right now, given the current game state?" — CR 118.3 ("A player can't pay a
+//! cost without having the necessary resources to pay it fully") and CR 601.2h
+//! ("Partial payments are not allowed. Unpayable costs can't be paid"). It
+//! covers costs that require the player to *choose an object* where no legal
+//! object exists, and hard resource checks (life, energy, counters). (The prior
+//! attribution to CR 601.2b was wrong: 601.2b is modal/X *announcement*, not
+//! resource payability.)
 //!
 //! This is the authoritative gate consulted before:
 //!   - Offering an `OptionalCostChoice` prompt (if unpayable, the prompt is skipped).
@@ -205,9 +209,12 @@ impl AbilityCost {
         }
     }
 
-    /// CR 601.2b: Returns true if this cost can be paid given the current game
-    /// state. Returns false only when the cost requires a choice of object and
-    /// no legal object exists, or a hard resource check fails (e.g., life total).
+    /// CR 118.3 + CR 601.2h: Returns true if this cost can be paid given the
+    /// current game state. Returns false only when the cost requires a choice of
+    /// object and no legal object exists, or a hard resource check fails (e.g.,
+    /// life total) — CR 118.3 "necessary resources to pay it fully" / CR 601.2h
+    /// "unpayable costs can't be paid". (CR 601.2b is modal/X announcement, not
+    /// resource payability.)
     ///
     /// Mana affordability is NOT checked here; CR 601.2g handles the mana step
     /// separately through the mana-payment flow.

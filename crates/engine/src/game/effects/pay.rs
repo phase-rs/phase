@@ -1,5 +1,4 @@
 use crate::game::costs::{self, PaymentFailure, PaymentOutcome};
-use crate::game::life_costs::can_pay_life_cost;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
@@ -170,12 +169,22 @@ fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
 }
 
 /// CR 118.12: Pay a resolution-time `AbilityCost` via the single payment
-/// authority (`game::costs`). This adapter pre-gates affordability (CR 601.2h:
-/// "partial payments are not allowed") and maps the authority's outcome to the
-/// resolution-scope failure channel (`cost_payment_failed_flag`). The duplicate
+/// authority (`game::costs`). The duplicate
 /// Mana/ManaDynamic/PayLife/PayEnergy/Composite/Discard payment arms that used
 /// to live here were folded into `costs::pay_ability_cost_for_resolution`
-/// (cost-payment unification, Phase 2).
+/// (cost-payment unification, Phase 2); the resolution-time affordability match
+/// that used to live here (`can_pay_resolution_ability_cost`, A3) was folded
+/// into `costs::can_pay` with `PaymentScope::Resolution` (Phase 5).
+///
+/// CR 601.2h: only the multi-cost `Composite` shape is pre-gated through the
+/// affordability authority — it is the one with cross-sub-cost atomicity
+/// ("partial payments are not allowed"), so a `Composite` must never commit one
+/// sub-cost before discovering a later sub-cost is unpayable. A *singleton* cost
+/// needs no pre-gate: the authority's own internal pre-flight + `Failed` mapping
+/// is exactly equivalent, and pre-gating it would re-run the board-scale auto-tap
+/// planner and re-resolve the `QuantityExpr` a second time (Phase 4 deferred
+/// perf fix). The authority's outcome maps to the resolution-scope failure
+/// channel (`cost_payment_failed_flag`).
 fn resolve_ability_cost_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -183,11 +192,15 @@ fn resolve_ability_cost_payment(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EffectError> {
-    // CR 601.2h: pre-gate the whole cost so a `Composite` never commits a
-    // sub-cost before discovering a later sub-cost is unpayable. The
-    // authority's `Failed` is the secondary guard for any drift between
-    // affordability and payment.
-    if !can_pay_resolution_ability_cost(state, ability, payer, cost) {
+    if matches!(cost, AbilityCost::Composite { .. })
+        && !costs::can_pay(
+            state,
+            payer,
+            ability.source_id,
+            cost,
+            &costs::PaymentScope::Resolution { ability },
+        )
+    {
         state.cost_payment_failed_flag = true;
         return Ok(PaymentOutcome::Failed {
             reason: PaymentFailure {
@@ -220,124 +233,6 @@ fn resolve_ability_cost_payment(
         Err(e) => Err(EffectError::InvalidParam(format!(
             "resolution-time cost payment failed: {e:?}"
         ))),
-    }
-}
-
-/// CR 118.3: A player can't pay a cost without having the necessary resources
-/// to pay it fully. Returns whether `payer` could pay `cost` right now, used
-/// as the pre-flight check inside a `Composite` so the resolver can fail fast
-/// before mutating state. Exhaustive over `AbilityCost` (no wildcard arm) so
-/// any future variant forces a deliberate decision here.
-fn can_pay_resolution_ability_cost(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    payer: PlayerId,
-    cost: &AbilityCost,
-) -> bool {
-    match cost {
-        AbilityCost::Mana { cost: mana_cost } => casting::can_pay_effect_mana_cost_after_auto_tap(
-            state,
-            payer,
-            ability.source_id,
-            mana_cost,
-        ),
-        // CR 118.4 + CR 107.3c: Resolve the dynamic generic to a concrete
-        // amount, then check mana payability. Dynamic-generic ability costs
-        // appear primarily in unless-pay contexts; activation paths normally
-        // pre-resolve to `Mana { cost }` upstream.
-        AbilityCost::ManaDynamic { quantity } => {
-            let amount = resolve_quantity_with_targets(state, quantity, ability);
-            let mana = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-            casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, &mana)
-        }
-        // CR 119.4: Pay life requires the player's life total to be at least the
-        // payment amount (and no CantLoseLife lock).
-        AbilityCost::PayLife { amount } => {
-            let amount = resolve_quantity_with_targets(state, amount, ability);
-            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
-            can_pay_life_cost(state, payer, amount)
-        }
-        // CR 107.14: Pay {E} requires that many energy counters.
-        AbilityCost::PayEnergy { amount } => {
-            let amount =
-                u32::try_from(resolve_quantity_with_targets(state, amount, ability).max(0))
-                    .unwrap_or(0);
-            state
-                .players
-                .iter()
-                .find(|p| p.id == payer)
-                .is_some_and(|p| p.energy >= amount)
-        }
-        // CR 702.179f: Pay speed requires that much current speed.
-        AbilityCost::PaySpeed { amount } => {
-            let amount = resolve_quantity_with_targets(state, amount, ability);
-            let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
-            crate::game::speed::effective_speed(state, payer) >= amount
-        }
-        // CR 701.9: Discard requires `count` eligible cards in the payer's hand
-        // (matching `filter` if present). `random` and `self_ref` do not affect
-        // affordability — random discard still needs the card count, and a
-        // self-ref discard requires the source to be in hand. Defer those
-        // shape-specific checks until commitment time.
-        AbilityCost::Discard {
-            count,
-            filter,
-            selection: _,
-            self_scope: _,
-        } => {
-            let count = u32::try_from(resolve_quantity_with_targets(state, count, ability).max(0))
-                .unwrap_or(0) as usize;
-            let eligible = casting::find_eligible_discard_targets(
-                state,
-                payer,
-                ability.source_id,
-                filter.as_ref(),
-            );
-            eligible.len() >= count
-        }
-        // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
-        // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
-        // choice is made interactively via `UnlessPaymentChooseCost`; the
-        // unconditional pre-flight check only needs at least one branch.
-        AbilityCost::OneOf { costs } => costs
-            .iter()
-            .any(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
-        // Variants below are not yet supported as resolution-time costs.
-        // Refusing here is the conservative affordability answer (treat as
-        // "can't pay" → `cost_payment_failed_flag` → the effect's didn't-pay
-        // branch, per CR 118.12). The authority's Resolution-scope guard on
-        // its interactive pass-through arm backs this up: a shape that slips
-        // past this pre-gate returns `Failed`, never a silent `Paid`.
-        //
-        // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
-        // unless-payment entry point (Task 6 wires resolution); the resolved
-        // base is what gets payability-checked. The wrapper itself is not a
-        // direct resolution-time cost, so refusing here keeps the effect
-        // proceeding pre-expansion.
-        AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Unattach
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        | AbilityCost::EffectCost { .. }
-        | AbilityCost::PerCounter { .. }
-        | AbilityCost::Unimplemented { .. } => false,
     }
 }
 

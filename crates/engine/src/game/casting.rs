@@ -10221,7 +10221,7 @@ fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(CostObjectCount, &Ta
     }
 }
 
-fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+pub(super) fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     match cost {
         AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_tap_creatures_cost),
@@ -10606,52 +10606,35 @@ pub(super) fn find_eligible_sacrifice_targets(
         .collect()
 }
 
+/// CR 118.3 + CR 601.2h: Activation-time affordability pre-gate. Delegates to
+/// the single affordability authority [`super::costs::can_pay`], which composes
+/// `AbilityCost::is_payable` (the CR 118.3 resource/choice-eligibility gate,
+/// including the Waterbend auto-tap mana check) with a clone-and-dry-run of the
+/// payment authority. This keeps legal-action generation in sync with
+/// `handle_activate_ability`, so the AI never proposes an activation the submit
+/// path would reject.
+///
+/// The bespoke non-self-Sacrifice / PayLife / TapCreatures pre-checks that used
+/// to live here were deleted in Phase 5 — each duplicated logic already in
+/// `is_payable` (proven by discriminating tests); a bare Waterbend cost is
+/// answered by `is_payable`'s auto-tap check and skips the `can_pay` dry run
+/// (gated on the bare `AbilityCost::Waterbend` shape).
 fn can_pay_ability_cost_now(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
-    // CR 601.2b: Unified choice-of-object + resource payability pre-gate. This
-    // keeps legal-action generation in sync with `handle_activate_ability`, so
-    // the AI never proposes an activation that the submit path would reject.
-    if !cost.is_payable(state, player, source_id) {
-        return false;
-    }
-    // CR 118.3: Pre-check non-self sacrifice eligibility before simulation.
-    // The simulation would give a false positive since pay_ability_cost's
-    // non-self Sacrifice arm is a no-op (it's handled interactively).
-    if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
-        let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-        let (min_count, _) = sacrifice_cost_bounds(count, eligible.len());
-        if eligible.len() < min_count {
-            return false;
-        }
-    }
-    // Waterbend mana cost is paid interactively via ManaPayment, so
-    // pay_ability_cost treats it as a no-op. Pre-check affordability here
-    // to avoid listing unpayable Waterbend abilities as legal actions.
-    if let Some(wb_cost) = find_waterbend_cost(cost) {
-        if !can_pay_cost_after_auto_tap(state, player, source_id, wb_cost) {
-            return false;
-        }
-    }
-    // CR 118.3 + CR 119.4b + CR 119.8: Pre-check both insufficient-life and
-    // CantLoseLife so locked or underfunded activated abilities never appear
-    // as legal actions. The real payment is applied by `pay_ability_cost`.
-    if let Some(amount) = find_pay_life_cost(cost, state, player, source_id) {
-        if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
-            return false;
-        }
-    }
-    if let Some((count, filter)) = find_tap_creatures_cost(cost) {
-        let eligible = find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
-        if eligible.len() < count as usize {
-            return false;
-        }
-    }
-    let mut simulated = state.clone();
-    pay_ability_cost(&mut simulated, player, source_id, cost, &mut Vec::new()).is_ok()
+    let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
+    super::costs::can_pay(
+        state,
+        player,
+        source_id,
+        cost,
+        &super::costs::PaymentScope::Activation {
+            excluded_sources: &excluded_sources,
+        },
+    )
 }
 
 pub fn can_activate_ability_now(

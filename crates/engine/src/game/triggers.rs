@@ -424,13 +424,19 @@ fn collect_matching_triggers(
             }
             if !trig_def.batched {
                 if let Some(ref condition) = trig_def.condition {
-                    if !check_trigger_condition(
-                        state,
-                        condition,
-                        controller,
-                        Some(obj_id),
-                        Some(event),
-                    ) {
+                    // CR 508.5 + CR 603.4: Attacks triggers with intervening-if
+                    // clauses read the defending player from each expanded attack
+                    // event — the batch-level event is the wrong context.
+                    let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks);
+                    if !skip_early_condition
+                        && !check_trigger_condition(
+                            state,
+                            condition,
+                            controller,
+                            Some(obj_id),
+                            Some(event),
+                        )
+                    {
                         continue;
                     }
                 }
@@ -479,8 +485,7 @@ fn collect_matching_triggers(
                     continue;
                 }
                 vec![trigger_events]
-            } else if matches!(trig_def.mode, TriggerMode::Attacks) && trig_def.condition.is_none()
-            {
+            } else if matches!(trig_def.mode, TriggerMode::Attacks) {
                 super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
@@ -515,6 +520,17 @@ fn collect_matching_triggers(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
+                if let Some(ref condition) = trig_def.condition {
+                    if !check_trigger_condition(
+                        state,
+                        condition,
+                        controller,
+                        Some(obj_id),
+                        Some(&trigger_event),
+                    ) {
+                        continue;
+                    }
+                }
                 // CR 603.2c: For batched triggers, stash the filtered subject
                 // count so the resolved ability's `EventContextAmount` reads
                 // "that many" as the number of matching subjects (Dragons that
@@ -20479,6 +20495,124 @@ mod dedup_regression_tests {
             check_trigger_condition(&state, &condition, controller, None, Some(&sac_event)),
             "an artifact controlled by the sacrificing (triggering) player \
              must satisfy 'who controls an artifact' and fire the trigger",
+        );
+    }
+
+    #[test]
+    fn breena_triggers_when_defending_opponent_has_more_life_than_another_opponent() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let breena_controller = PlayerId(0);
+        let attacking_player = PlayerId(1);
+        let defending_player = PlayerId(2);
+
+        state.players[0].life = 40;
+        state.players[1].life = 30;
+        state.players[2].life = 35;
+
+        let breena = create_object(
+            &mut state,
+            CardId(1),
+            breena_controller,
+            "Breena, the Demagogue".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&breena).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            let trig_def = crate::parser::oracle_trigger::parse_trigger_line(
+                "Whenever a player attacks one of your opponents, if that opponent has more life than another of your opponents, that attacking player draws a card and you put two +1/+1 counters on a creature you control.",
+                "Breena, the Demagogue",
+            );
+            obj.trigger_definitions.push(trig_def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+        }
+
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            attacking_player,
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            attacking_player,
+            "Second Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second_attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker, second_attacker],
+                defending_player,
+                attacks: vec![
+                    (attacker, AttackTarget::Player(defending_player)),
+                    (second_attacker, AttackTarget::Player(defending_player)),
+                ],
+            }],
+        );
+
+        let breena_trigger_count = state
+            .stack
+            .iter()
+            .filter(|entry| {
+                entry.source_id == breena
+                    && entry.controller == breena_controller
+                    && matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility { ability, .. }
+                            if matches!(ability.effect, Effect::Draw { .. })
+                    )
+            })
+            .count();
+        assert_eq!(
+            breena_trigger_count, 1,
+            "Breena must trigger when a player attacks an opponent with more life than another opponent"
+        );
+
+        state.stack.clear();
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == defending_player)
+            .unwrap()
+            .life = 25;
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker, second_attacker],
+                defending_player,
+                attacks: vec![
+                    (attacker, AttackTarget::Player(defending_player)),
+                    (second_attacker, AttackTarget::Player(defending_player)),
+                ],
+            }],
+        );
+
+        assert!(
+            state.stack.is_empty(),
+            "Breena must not trigger when the defending opponent fails the intervening-if"
         );
     }
 

@@ -299,6 +299,37 @@ fn install_merge_layer_effect(
 /// Called from the battlefield-exit seam in `zones::move_to_zone` BEFORE the
 /// surviving object is moved. Returns immediately for non-merged objects.
 ///
+/// CR 730.3d (replacement propagation): `dest` is the merged permanent's
+/// *resolved* destination — the merged-permanent leave is a single ZoneChange
+/// event consulted ONCE through `replace_event` (on the survivor) before
+/// `zones::move_to_zone` reaches this seam, so `dest` already reflects any
+/// applied `Moved` redirect (Rest in Peace / Leyline of the Void:
+/// graveyard → exile). Routing every component to that same resolved `dest`
+/// "applies one replacement effect to the object [and thereby] to all components
+/// of the object" — exactly CR 730.3d. Components are explicitly NOT re-consulted
+/// per component here (`put_component_into_zone` routes raw); re-consulting would
+/// double-apply ordering and is rules-wrong per 730.3d.
+///
+/// CR 730.3e (card-vs-token scope): a "card"-scoped redirect (one that applies to
+/// a card being put into a zone without also including tokens) follows the
+/// survivor's resolved destination through `dest`. When the merged permanent is
+/// NOT a token (its survivor is a card, so a card-scoped redirect matches it and
+/// redirects the leave event), ALL components — token components included — take
+/// `dest` (730.3e first clause: "applies to all components of the merged
+/// permanent if it's not a token, including components that are tokens"). The
+/// second clause (the merged permanent's survivor is itself a TOKEN, so a
+/// card-scoped redirect does NOT match the survivor and its CARD components must
+/// still be moved by the redirect while the token survivor + token components
+/// take the default zone) is NOT handled here: it requires the merged-permanent
+/// leave to be consulted as a single component-aware event so the card-scoped
+/// redirect can apply to the card components without matching the token survivor.
+/// That is a replacement-pipeline extension (component-aware single consult), not
+/// a per-component re-consult (which 730.3d forbids), and no current pool `Moved`
+/// definition is card-scoped (the RIP-class parser ignores the "a card" subject
+/// and leaves `valid_card == None`, so today every such redirect is token-
+/// inclusive and matches the survivor regardless of token-ness). Tracked as a
+/// follow-up; the Commander exemption (CR 903.9b–c) is separately out of scope.
+///
 /// CR 730.3a deferred: the owner's arrange-order choice for graveyard/library
 /// destinations is not modeled — components are placed in their stored
 /// (topmost-first) order.
