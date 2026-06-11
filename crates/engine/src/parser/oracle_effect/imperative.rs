@@ -4998,18 +4998,16 @@ fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
 /// CR 701.50e + CR 107.3i: Parse connive count from text after "connive"/"connives".
 /// Handles literal N, bare `X` (spell-cost path), and ", where X is <quantity>"
 /// bindings (Spymaster's Vault class).
-fn parse_connive_count_expr<'a>(text: &'a str, lower_rest: &str) -> (QuantityExpr, &'a str) {
-    let rest_orig = &text[text.len() - lower_rest.len()..];
-
+fn parse_connive_count_expr<'a>(rest_orig: &'a str, lower_rest: &str) -> (QuantityExpr, &'a str) {
     if let Ok((after_num, n)) = nom_primitives::parse_number.parse(lower_rest) {
         let consumed = lower_rest.len() - after_num.len();
-        let after_orig = rest_orig[consumed..].trim_start();
+        let after_orig = rest_orig.get(consumed..).unwrap_or(rest_orig).trim_start();
         return (QuantityExpr::Fixed { value: n as i32 }, after_orig);
     }
 
-    if let Ok((after_x, _)) = alt((tag::<_, _, OracleError<'_>>("x"), tag("X"))).parse(lower_rest) {
+    if let Ok((after_x, _)) = tag::<_, _, OracleError<'_>>("x").parse(lower_rest) {
         let consumed = lower_rest.len() - after_x.len();
-        let after_orig = rest_orig[consumed..].trim_start();
+        let after_orig = rest_orig.get(consumed..).unwrap_or(rest_orig).trim_start();
         let initial = QuantityExpr::Ref {
             qty: QuantityRef::Variable {
                 name: "X".to_string(),
@@ -5693,8 +5691,11 @@ pub(super) fn parse_imperative_family_ast(
         // CR 702.162a + CR 701.50e: "connive" / "connives" — extract optional
         // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
-            let rest_lower = lower[first_word.len()..].trim_start();
-            let (count, rest_orig) = parse_connive_count_expr(text, rest_lower);
+            let after_verb_lower = &lower[first_word.len()..];
+            let rest_lower = after_verb_lower.trim_start();
+            let prefix_len = lower.len() - rest_lower.len();
+            let rest_orig = text.get(prefix_len..).unwrap_or("");
+            let (count, rest_orig) = parse_connive_count_expr(rest_orig, rest_lower);
             if !rest_orig.trim().is_empty() {
                 let (target, _) = parse_target(rest_orig.trim());
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive { target, count }))
