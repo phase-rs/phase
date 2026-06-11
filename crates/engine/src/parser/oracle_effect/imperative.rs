@@ -11884,4 +11884,31 @@ mod tests {
             "recipient prevent must not carry a source filter"
         );
     }
+
+    /// CR 119.3 + CR 608.2c: Kaya's Wrath lifegain (issue #2943) must parse
+    /// through the imperative GainLife path with a FilteredTrackedSetSize
+    /// amount, not fall through to Unimplemented.
+    #[test]
+    fn gain_life_equal_to_destroyed_creatures_you_controlled_this_way() {
+        use crate::types::ability::{ControllerRef, QuantityExpr, QuantityRef};
+
+        let text = "You gain life equal to the number of creatures you controlled that were \
+                    destroyed this way.";
+        let lower = text.to_ascii_lowercase();
+        let ast = parse_numeric_imperative_ast(text, &lower)
+            .expect("Kaya's Wrath lifegain clause must parse");
+        match ast {
+            NumericImperativeAst::GainLife { amount } => match amount {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize { filter },
+                } => {
+                    let tf = typed_leg(&filter).expect("filter must be Typed");
+                    assert!(has_type(tf, TypeFilter::Creature));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+            },
+            other => panic!("expected GainLife imperative, got {other:?}"),
+        }
+    }
 }

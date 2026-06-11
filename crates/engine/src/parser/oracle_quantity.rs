@@ -413,6 +413,22 @@ pub(crate) fn parse_quantity_ref_with_context(
                 });
             }
         }
+        // CR 608.2c + CR 400.7: "the number of [filter] destroyed/sacrificed
+        // this way" — count from the tracked set populated by the preceding
+        // destroy/sacrifice in the sub_ability chain. Must run BEFORE
+        // `parse_type_phrase`, which would consume "creatures you controlled"
+        // and leave an unresolved "that were destroyed this way" tail.
+        // Class: Kaya's Wrath (issue #2943), Ceaseless Conflict, and any
+        // "equal to the number of … destroyed this way" lifegain phrasing.
+        {
+            let lower = rest.to_ascii_lowercase();
+            if lower.contains("destroyed this way") || lower.contains("sacrificed this way") {
+                if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
+                    return Some(qty);
+                }
+                return Some(QuantityRef::TrackedSetSize);
+            }
+        }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
@@ -5347,6 +5363,55 @@ mod tests {
             },
         };
         assert_eq!(qty, expected);
+    }
+
+    /// CR 608.2c + CR 400.7: "the number of creatures you controlled that were
+    /// destroyed this way" (Kaya's Wrath, issue #2943) must lower to
+    /// `FilteredTrackedSetSize`, not `Effect::Unimplemented`. The for-each
+    /// path already handled this shape; the `parse_quantity_ref` "the number
+    /// of …" path must mirror it before `parse_type_phrase` strips the tail.
+    #[test]
+    fn parse_quantity_ref_creatures_you_controlled_destroyed_this_way() {
+        let qty = parse_quantity_ref(
+            "the number of creatures you controlled that were destroyed this way",
+        )
+        .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+                TargetFilter::Typed(ref tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "filter must require Creature"
+                    );
+                    assert!(
+                        tf.controller
+                            .as_ref()
+                            .is_some_and(|c| matches!(c, ControllerRef::You)),
+                        "filter must require controller=You"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Type-qualified "the number of … destroyed this way" via
+    /// `parse_quantity_ref` emits `FilteredTrackedSetSize` when the type
+    /// phrase restricts the tracked set.
+    #[test]
+    fn parse_quantity_ref_permanents_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty =
+            parse_quantity_ref("the number of permanents destroyed this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => {
+                assert!(
+                    matches!(filter.as_ref(), TargetFilter::Typed(_)),
+                    "expected typed permanent filter, got {filter:?}"
+                );
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
     }
 
     /// Same composite shape with "you controlled" — verifies the controller
