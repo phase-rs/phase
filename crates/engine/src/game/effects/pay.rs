@@ -1,4 +1,4 @@
-use crate::game::costs::{self, PaymentOutcome};
+use crate::game::costs::{self, PaymentFailure, PaymentOutcome};
 use crate::game::life_costs::can_pay_life_cost;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolve_effect_player_ref;
@@ -127,15 +127,20 @@ pub fn resolve(
                 resolve_quantity_with_targets(state, amount, &payment_ability).max(0),
             )
             .unwrap_or(0);
-            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
-            if !state.cost_payment_failed_flag {
+            let outcome =
+                resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+            // Gate the stamp on THIS payment's outcome, not the global
+            // `cost_payment_failed_flag` — a stale flag from an earlier effect
+            // must not suppress the stamp for a payment that succeeded.
+            if outcome == PaymentOutcome::Paid {
                 state.last_effect_count = Some(resolved as i32);
             }
         }
         // All other resolution-time cost shapes (Mana without X, PayLife,
         // PaySpeed, Composite, Discard, …) route through the single payment
-        // authority. CR 119.4: paying life IS losing life (the replacement
-        // pipeline + CantLoseLife lock apply inside the authority's
+        // authority. CR 119.4: paying life IS losing life; CR 119.8: a
+        // CantLoseLife lock therefore blocks the payment (the replacement
+        // pipeline + lock both apply inside the authority's
         // `pay_life_as_cost`).
         _ => {
             resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
@@ -177,33 +182,35 @@ fn resolve_ability_cost_payment(
     payer: PlayerId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<PaymentOutcome, EffectError> {
     // CR 601.2h: pre-gate the whole cost so a `Composite` never commits a
     // sub-cost before discovering a later sub-cost is unpayable. The
     // authority's `Failed` is the secondary guard for any drift between
     // affordability and payment.
     if !can_pay_resolution_ability_cost(state, ability, payer, cost) {
         state.cost_payment_failed_flag = true;
-        return Ok(());
+        return Ok(PaymentOutcome::Failed {
+            reason: PaymentFailure {
+                reason: "resolution-time cost not affordable (pre-gate)".to_string(),
+            },
+        });
     }
     match costs::pay_ability_cost_for_resolution(state, payer, cost, ability, events) {
-        Ok(PaymentOutcome::Paid) => {}
+        Ok(outcome @ PaymentOutcome::Paid) => Ok(outcome),
         // CR 616.1: a replacement-effect choice — or an interactive
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
         // set by the authority; the resolution chain resumes from there.
-        Ok(PaymentOutcome::Paused { .. }) => {}
-        Ok(PaymentOutcome::Failed { .. }) => {
+        Ok(outcome @ PaymentOutcome::Paused { .. }) => Ok(outcome),
+        Ok(outcome @ PaymentOutcome::Failed { .. }) => {
             state.cost_payment_failed_flag = true;
+            Ok(outcome)
         }
         // An engine invariant violation (e.g. missing source object) surfaces
         // as an effect error rather than a silent payment failure.
-        Err(e) => {
-            return Err(EffectError::InvalidParam(format!(
-                "resolution-time cost payment failed: {e:?}"
-            )));
-        }
+        Err(e) => Err(EffectError::InvalidParam(format!(
+            "resolution-time cost payment failed: {e:?}"
+        ))),
     }
-    Ok(())
 }
 
 /// CR 118.3: A player can't pay a cost without having the necessary resources
@@ -852,6 +859,28 @@ mod tests {
         assert_eq!(state.players[0].energy, 0);
     }
 
+    /// A stale `cost_payment_failed_flag` left by an EARLIER effect must not
+    /// suppress the `last_effect_count` stamp for an energy payment that
+    /// succeeds — the stamp is gated on this payment's own `PaymentOutcome`,
+    /// not the global flag.
+    #[test]
+    fn resolution_pay_energy_stamps_count_despite_stale_failed_flag() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 5;
+        state.cost_payment_failed_flag = true;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 5 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[0].energy, 0);
+        assert_eq!(state.last_effect_count, Some(5));
+    }
+
     #[test]
     fn resolution_pay_energy_fixed_amount_fails_when_insufficient() {
         let mut state = GameState::new_two_player(42);
@@ -868,6 +897,8 @@ mod tests {
         assert!(state.cost_payment_failed_flag);
         // No partial payment — energy unchanged.
         assert_eq!(state.players[0].energy, 4);
+        // CR 118.12: an unpaid cost must not feed "that much" downstream.
+        assert_eq!(state.last_effect_count, None);
     }
 
     #[test]

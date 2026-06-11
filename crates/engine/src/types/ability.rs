@@ -5747,14 +5747,19 @@ impl LegacyUnlessCost {
 /// - `Speed { amount }` → `PaySpeed { amount }`
 /// - `Energy { amount }` → `PayEnergy { amount }`
 /// - `AbilityCost { cost }` → `cost` (unwrap)
-/// - `ScaledMana { base, .. }` → `Mana { cost: base }` — the per-object `times`
-///   multiplier moved to the sibling `Effect::PayCost::scale` field, which a
-///   field-level deserializer cannot populate. `ScaledMana` is emitted only as
-///   a `Spell`-kind sub-ability that resolves in a single pass (it never pauses
-///   on a `PayAmountChoice`), so it is never persisted mid-resolution; the only
-///   legacy surface is `card-data.json`, which is regenerated in this phase and
-///   carries the modern `(Mana, scale)` shape. Mapping the base alone here is a
-///   safe best-effort for any stale artifact.
+/// - `ScaledMana { base, times }` → `Unimplemented` (deny, don't undercharge).
+///   The per-object `times` multiplier moved to the sibling
+///   `Effect::PayCost::scale` field, which a field-level deserializer cannot
+///   populate, so the multiplier is unrecoverable here. Mapping the base alone
+///   would silently undercharge (CR 118.1): a pre-Phase-4 save captured at a
+///   `ChooseObjectsSelection` prompt persists the stashed
+///   `PayCost { ScaledMana }` sub-ability inside
+///   `GameState::pending_continuation` (Magnetic Mountain–class, ~2 cards).
+///   Mapping to `Unimplemented` makes the authority fail the payment, so the
+///   CR 118.12 didn't-pay branch applies — rules-safer than charging `base`
+///   for an N-object effect. `card-data.json` is regenerated with the modern
+///   `(Mana, scale)` shape, so this fires only for saves crossing the
+///   pre→post-Phase-4 upgrade boundary.
 pub fn deserialize_pay_cost_compat<'de, D>(d: D) -> Result<AbilityCost, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -5786,7 +5791,8 @@ enum LegacyPaymentCost {
     // The legacy `times` field is intentionally omitted: serde ignores the
     // extra JSON key, and the per-object multiplier moved to the sibling
     // `Effect::PayCost::scale` field which a field-level deserializer cannot
-    // reach (see `deserialize_pay_cost_compat`). Only the mana `base` survives.
+    // reach (see `deserialize_pay_cost_compat`). The unrecoverable multiplier
+    // means this maps to `Unimplemented` (deny, don't undercharge).
     ScaledMana { base: ManaCost },
 }
 
@@ -5798,9 +5804,17 @@ impl LegacyPaymentCost {
             LegacyPaymentCost::Speed { amount } => AbilityCost::PaySpeed { amount },
             LegacyPaymentCost::Energy { amount } => AbilityCost::PayEnergy { amount },
             LegacyPaymentCost::AbilityCost { cost } => cost,
-            // The per-object `times` lives on the sibling `scale` field, which a
-            // field-level deserializer cannot reach; map the base alone.
-            LegacyPaymentCost::ScaledMana { base } => AbilityCost::Mana { cost: base },
+            // CR 118.1 + CR 118.12: the per-object `times` lives on the sibling
+            // `scale` field, which a field-level deserializer cannot reach.
+            // Deny rather than undercharge: `Unimplemented` fails the payment
+            // in the authority, taking the didn't-pay branch instead of
+            // charging `base` once for an N-object effect.
+            LegacyPaymentCost::ScaledMana { base } => AbilityCost::Unimplemented {
+                description: format!(
+                    "legacy ScaledMana PayCost from a pre-Phase-4 save (base {base:?}; \
+                     per-object multiplier unrecoverable)"
+                ),
+            },
         }
     }
 }
@@ -15942,6 +15956,45 @@ mod modal_ability_tests {
                 amount: QuantityExpr::Fixed { value: 1 }
             }
         );
+
+        // Legacy PaymentCost::Speed → AbilityCost::PaySpeed.
+        let legacy_speed = r#"{
+            "type": "PayCost",
+            "cost": { "type": "Speed", "amount": { "type": "Fixed", "value": 1 } }
+        }"#;
+        let effect: Effect = serde_json::from_str(legacy_speed).expect("legacy Speed must load");
+        let Effect::PayCost { cost, .. } = effect else {
+            panic!("expected PayCost");
+        };
+        assert_eq!(
+            cost,
+            AbilityCost::PaySpeed {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        );
+
+        // Legacy PaymentCost::ScaledMana (with the legacy `times` key present) →
+        // AbilityCost::Unimplemented: the per-object multiplier is unrecoverable
+        // by a field-level deserializer, so the mapping denies the payment
+        // (CR 118.12 didn't-pay branch) rather than undercharging `base` alone.
+        let legacy_scaled = r#"{
+            "type": "PayCost",
+            "cost": {
+                "type": "ScaledMana",
+                "base": { "type": "Cost", "shards": [], "generic": 4 },
+                "times": { "type": "Ref", "qty": { "type": "TrackedSetSize" } }
+            }
+        }"#;
+        let effect: Effect =
+            serde_json::from_str(legacy_scaled).expect("legacy ScaledMana must load");
+        let Effect::PayCost { cost, scale, .. } = effect else {
+            panic!("expected PayCost");
+        };
+        assert!(
+            matches!(cost, AbilityCost::Unimplemented { .. }),
+            "legacy ScaledMana must map to Unimplemented (deny, don't undercharge), got {cost:?}"
+        );
+        assert_eq!(scale, None);
 
         // Modern shape (unwrapped AbilityCost + explicit scale) still round-trips.
         let modern = Effect::PayCost {
