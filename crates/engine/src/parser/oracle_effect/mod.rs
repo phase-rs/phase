@@ -1725,6 +1725,16 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         }
     };
 
+    let tail = remaining
+        .trim_start()
+        .trim_start_matches([',', ' '])
+        .trim_start();
+    let sub_ability = if tail.is_empty() {
+        None
+    } else {
+        Some(Box::new(parse_effect_chain(tail, AbilityKind::Spell)))
+    };
+
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
@@ -1735,7 +1745,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             },
         },
         duration,
-        sub_ability: None,
+        sub_ability,
         distribute: None,
         multi_target: None,
         condition: None,
