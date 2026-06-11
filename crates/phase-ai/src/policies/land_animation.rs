@@ -296,7 +296,9 @@ mod tests {
     use crate::context::AiContext;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityKind, QuantityExpr, StaticDefinition, TargetFilter};
+    use engine::types::ability::{
+        AbilityKind, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
+    };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaColor;
@@ -320,8 +322,8 @@ mod tests {
 
     fn animate_effect() -> Effect {
         Effect::Animate {
-            power: Some(2),
-            toughness: Some(2),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
             types: vec!["Creature".to_string()],
             remove_types: Vec::new(),
             target: TargetFilter::SelfRef,
