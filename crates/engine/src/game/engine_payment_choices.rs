@@ -518,13 +518,18 @@ pub(super) fn handle_unless_payment(
                 unreachable!("ManaDynamic should be resolved before payment");
             }
             // CR 118.12 + CR 118.3 + CR 119.4: Unless-pay life routes through
-            // the single payment authority (cost-payment unification, Phase 3).
-            // The authority resolves the `QuantityExpr` against the payer-
-            // adjusted ability (dynamic life amounts read the chosen X /
-            // event-context object at payment time, CR 608.2k) and routes
-            // through `pay_life_as_cost`; an unpayable cost (insufficient life,
-            // or a CantLoseLife lock) makes the "unless" branch fall through to
-            // the effect still happening.
+            // the single payment authority (cost-payment unification, Phase 3),
+            // which routes it through `pay_life_as_cost`; an unpayable cost
+            // (insufficient life, or a CantLoseLife lock) makes the "unless"
+            // branch fall through to the effect still happening.
+            // Deviation from the authority's stated Resolution precondition:
+            // `pending_effect` is passed RAW — controller NOT swapped to the
+            // payer (unlike the `effects/pay.rs` payer-adjusted clone) — and
+            // the unless-payer goes in separately as `player`. This preserves
+            // the pre-Phase-3 inline behavior: unless-cost dynamic quantities
+            // can be controller-relative by card text, so a blanket controller
+            // swap is not obviously correct here. The PAYER's life is still
+            // what gets deducted (the authority pays `player`).
             AbilityCost::PayLife { .. } => {
                 match costs::pay_ability_cost_for_resolution(
                     state,
@@ -534,6 +539,13 @@ pub(super) fn handle_unless_payment(
                     events,
                 )? {
                     PaymentOutcome::Paid => {}
+                    // CR 616.1: the authority's Resolution PayLife arm has no
+                    // `Paused` return path today (`pay_life_as_cost` returns
+                    // only Paid/InsufficientLife/Prohibited); lumped with
+                    // `Failed` defensively. If a future authority change makes
+                    // a pause reachable here, this arm must hold the unless-
+                    // prompt instead of resolving the punishment effect over a
+                    // live replacement choice.
                     PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
                         payment_failed = true;
                     }
@@ -542,10 +554,12 @@ pub(super) fn handle_unless_payment(
             // CR 118.12 + CR 118.12a + CR 107.14: "[Effect] unless [player]
             // pays [cost]" — paying {E} removes one energy counter per `{E}`
             // symbol. Routed through the single payment authority (cost-payment
-            // unification, Phase 3); the authority resolves the dynamic
-            // `QuantityExpr` against the payer-adjusted ability (CR 107.3c) and
-            // performs the energy deduction. Insufficient energy makes the
-            // "unless" branch fall through to the effect happening.
+            // unification, Phase 3), which resolves the dynamic `QuantityExpr`
+            // (CR 107.3c) and performs the energy deduction. Insufficient
+            // energy makes the "unless" branch fall through to the effect
+            // happening. Same precondition deviation as the PayLife arm above:
+            // `pending_effect` is passed RAW (no payer-adjusted clone); the
+            // PAYER's energy is what gets deducted.
             AbilityCost::PayEnergy { .. } => {
                 match costs::pay_ability_cost_for_resolution(
                     state,
@@ -555,6 +569,8 @@ pub(super) fn handle_unless_payment(
                     events,
                 )? {
                     PaymentOutcome::Paid => {}
+                    // CR 616.1: no `Paused` path exists for PayEnergy today;
+                    // lumped with `Failed` defensively (see PayLife arm note).
                     PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
                         payment_failed = true;
                     }

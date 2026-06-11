@@ -1,27 +1,30 @@
-//! Discriminating coverage for **unless-pay-life routing through the single
-//! payment authority** (cost-payment unification, Phase 3).
+//! Coverage for **unless-pay routing through the single payment authority**
+//! (cost-payment unification, Phase 3).
 //!
 //! Phase 3 routes the deterministic `handle_unless_payment` arms (Mana,
 //! PayLife, PayEnergy) through `game::costs::pay_ability_cost_for_resolution`
-//! at `PaymentScope::Resolution`, replacing the bespoke inline life deduction
+//! at `PaymentScope::Resolution`, replacing the bespoke inline payment code
 //! that used to live in `engine_payment_choices.rs`. The interactive arms
 //! (Discard/Sacrifice/ReturnToHand/library-exile) stay adapter-side because
 //! their resources are acquired via WaitingFor round-trips before payment.
 //!
-//! These tests drive the REAL pipeline: a Sangrophage built from its
-//! authoritative Oracle text through `GameScenario::add_creature_from_oracle`
-//! (which runs `synthesize_all`), advanced through the upkeep step so the
-//! "tap this creature unless you pay 2 life" trigger fires and surfaces the
-//! `WaitingFor::UnlessPayment { cost: PayLife { 2 } }` prompt, then
+//! These tests drive the REAL pipeline: a creature built from authoritative
+//! Oracle text through `GameScenario::add_creature_from_oracle` (which runs
+//! `synthesize_all`), advanced through the upkeep step so the "tap this
+//! creature unless you pay [cost]" trigger fires and surfaces the
+//! `WaitingFor::UnlessPayment` prompt, then
 //! `GameAction::PayUnlessCost { pay: true }`.
 //!
-//! The DISCRIMINATION POINT is the authority's life-insufficiency failure
-//! path: with only 1 life and a 2-life cost, the authority returns
-//! `PaymentOutcome::Failed`, the adapter maps it to the "unless" branch
-//! (CR 118.12a: an unpayable cost ≡ the effect happens), and the creature is
-//! tapped without any life being deducted (CR 118.3 / CR 601.2h: partial
-//! payments are not allowed). With sufficient life, the authority pays
-//! (life deducted, creature untapped).
+//! Test character (honest labeling): the two PayLife tests are real-pipeline
+//! BEHAVIOR-PRESERVATION tests — the pre-Phase-3 inline arm used the same
+//! `pay_life_as_cost` with identical insufficiency handling, so they pin the
+//! routed path's equivalence rather than discriminating routing. The Mana
+//! test IS discriminating: Phase 3 changed the Mana arm's failure semantics
+//! (old: auto-tap mutated live state then returned `ActionNotAllowed`,
+//! rejecting the action and retaining the prompt; new: the authority
+//! pre-flights affordability on a clone and maps unaffordable to `Failed` →
+//! the "unless" branch — CR 118.12 can't-pay ≡ didn't-pay), so the old code
+//! fails that test.
 //!
 //! CR ANCHORS (verified against docs/MagicCompRules.txt):
 //!   * CR 118.3   — "A player can't pay a cost without having the necessary resources to pay it fully."
@@ -88,9 +91,9 @@ fn setup_at_unless_prompt(life: i32) -> (engine::game::scenario::GameRunner, Obj
 
 /// CR 118.3 + CR 118.12a + CR 601.2h: with only 1 life, the 2-life unless-cost
 /// is unpayable — the authority returns `Failed`, so the effect (tap) happens
-/// and NO life is deducted (no partial payment). This is the discrimination
-/// point: a bespoke inline deduction that ignored insufficiency would either
-/// panic or drive life negative; routing through the authority fails cleanly.
+/// and NO life is deducted (no partial payment). Behavior-preservation pin:
+/// the pre-Phase-3 inline arm handled insufficiency identically via
+/// `pay_life_as_cost`; this pins the routed path's equivalence.
 #[test]
 fn unless_pay_life_insufficient_routes_through_authority_failure_path() {
     let (mut runner, sangrophage) = setup_at_unless_prompt(1);
@@ -109,6 +112,61 @@ fn unless_pay_life_insufficient_routes_through_authority_failure_path() {
         runner.life(P0),
         1,
         "no life may be deducted when the cost is unpayable"
+    );
+}
+
+/// CR 118.3 + CR 118.12: DISCRIMINATING test for the Phase 3 Mana-arm change.
+/// With no mana available, `PayUnlessCost { pay: true }` on a "{2}" unless-cost
+/// must be ACCEPTED and fall through to the "unless" branch (can't-pay ≡
+/// didn't-pay): the effect (tap) happens, the prompt clears, and no live state
+/// was mutated by a failed payment attempt. The pre-Phase-3 inline arm instead
+/// auto-tapped live state and returned `EngineError::ActionNotAllowed`,
+/// rejecting the action and leaving the prompt stuck — the old code fails
+/// every assertion below.
+#[test]
+fn unless_pay_mana_unaffordable_falls_through_to_effect() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+
+    let creature = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Test Tithe Beast",
+            2,
+            2,
+            "At the beginning of your upkeep, tap this creature unless you pay {2}.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_upkeep();
+    runner.resolve_top();
+
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessPayment { player, cost, .. } => {
+            assert_eq!(*player, P0, "controller is the unless-payer");
+            assert!(
+                matches!(cost, AbilityCost::Mana { .. }),
+                "expected a Mana unless-cost, got {cost:?}"
+            );
+        }
+        other => panic!("expected UnlessPayment prompt, got {other:?}"),
+    }
+
+    // No lands, no pool: the {2} cost is unaffordable. The pay attempt must
+    // be accepted (not rejected with ActionNotAllowed) and resolve the
+    // punishment effect.
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("attempting to pay an unaffordable mana unless-cost must be accepted");
+
+    assert!(
+        runner.state().objects[&creature].tapped,
+        "an unaffordable mana cost must let the tap effect happen (CR 118.12 can't-pay)"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "the unless-prompt must clear instead of sticking on a rejected action"
     );
 }
 
