@@ -24,7 +24,11 @@ Each entry MUST include:
 
 ## Active shims
 
-### `LEGACY_DESER_ETB_CONTROLLER_2026Q2`
+*(none)*
+
+## Removed shims
+
+### `LEGACY_DESER_ETB_CONTROLLER_2026Q2` — **REMOVED in v0.1.54**
 
 - **Covers:** the pre-2026-Q2 `under_your_control: bool` shape, lifted to
   typed shapes at three layers per CR 110.2a:
