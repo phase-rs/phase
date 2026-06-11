@@ -186,10 +186,11 @@ pub fn resolve(
                 }
             }
             Zone::Library => {
-                // CR 701.20a + CR 701.24a: a kept card sent back to the library
-                // keeps the historical bottom placement; this is a placement, not
-                // a shuffle. Route through the placement-aware pipeline arm so a
-                // future Library-destination `Moved` replacement can still fire.
+                // CR 614.6 + CR 701.24a: a kept card sent back to the library
+                // keeps the effect's historical bottom placement; this is a
+                // placement, not a shuffle. Route through the placement-aware
+                // pipeline arm so a future Library-destination `Moved` replacement
+                // can still fire.
                 match zone_pipeline::move_object(
                     state,
                     ZoneMoveRequest::effect(hit, Zone::Library, ability.source_id)
@@ -347,7 +348,7 @@ fn resolve_revealing_player(
 ///
 /// A `Zone::Library` rest pile randomizes the request order first, then delivers
 /// every card through the placement-aware pipeline arm with
-/// `LibraryPosition::Bottom`. This preserves CR 701.20a's "in a random order"
+/// `LibraryPosition::Bottom`. This preserves the effect instruction's random
 /// bottom placement while keeping `Moved(destination = Library)` replacement
 /// consultation centralized in `zone_pipeline::move_object`.
 pub(crate) fn move_rest_then(
@@ -359,7 +360,8 @@ pub(crate) fn move_rest_then(
 ) -> zone_pipeline::BatchMoveResult {
     match rest_destination {
         Zone::Library => {
-            // CR 701.20a: "on the bottom of your library in a random order."
+            // Random-order bottom placement is the effect instruction; CR 701.20a
+            // keeps the cards revealed until this rest-pile work completes.
             let reqs = library_bottom_requests_in_random_order(state, cards);
             zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
         }
@@ -1118,8 +1120,8 @@ mod tests {
         }
     }
 
-    /// C5 review fix (CR 701.20a + CR 701.24a): an optional kept card accepted
-    /// to `Zone::Library` must be explicit bottom placement, not a placement-less
+    /// C5 review fix (CR 701.24a): an optional kept card accepted to
+    /// `Zone::Library` must be explicit bottom placement, not a placement-less
     /// library move. Without `.at_library_position(Bottom)` the delivery tail
     /// auto-shuffles and emits `ShuffledLibrary`.
     #[test]
