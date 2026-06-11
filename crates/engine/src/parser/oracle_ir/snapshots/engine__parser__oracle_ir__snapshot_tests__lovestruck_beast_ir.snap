@@ -17,9 +17,31 @@ expression: "&ir"
             "type": "IsPresent",
             "filter": {
               "type": "Typed",
-              "type_filters": [],
+              "type_filters": [
+                "Creature"
+              ],
               "controller": "You",
               "properties": [
+                {
+                  "type": "PtComparison",
+                  "stat": "Power",
+                  "scope": "Current",
+                  "comparator": "EQ",
+                  "value": {
+                    "type": "Fixed",
+                    "value": 1
+                  }
+                },
+                {
+                  "type": "PtComparison",
+                  "stat": "Toughness",
+                  "scope": "Current",
+                  "comparator": "EQ",
+                  "value": {
+                    "type": "Fixed",
+                    "value": 1
+                  }
+                },
                 {
                   "type": "InZone",
                   "zone": "Battlefield"

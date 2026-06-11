@@ -524,6 +524,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Unconditional life-floor: "damage that would reduce your life total to
+    // less than N reduces it to N instead" (Ali from Cairo, Fortune Thief,
+    // Sustaining Spirit). CR 614.1a. Tried after the conditional Worship arm,
+    // which claims the "if you control …" prefix. ---
+    if let Some(def) = parse_unconditional_life_floor_damage_replacement(&norm_lower) {
+        return Some(def);
+    }
+
     None
 }
 
@@ -5879,6 +5887,50 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
     )
 }
 
+/// CR 614.1a: Parse the UNCONDITIONAL life-floor replacement — "damage that
+/// would reduce your life total to less than N reduces it to N instead."
+/// (Ali from Cairo, Fortune Thief, Sustaining Spirit). Identical to
+/// [`parse_life_floor_damage_replacement`] but without the Worship-class
+/// "if you control a [filter]," guard, so it carries no `IfControlsMatching`
+/// condition. Dispatched after the conditional arm, which claims the
+/// "if you control …" prefix first.
+fn parse_unconditional_life_floor_damage_replacement(
+    norm_lower: &str,
+) -> Option<ReplacementDefinition> {
+    let (after_threshold, _) =
+        tag::<_, _, OracleError<'_>>("damage that would reduce your life total to less than ")
+            .parse(norm_lower)
+            .ok()?;
+
+    let (tail, minimum) = nom_primitives::parse_number.parse(after_threshold).ok()?;
+    let (tail, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(" reduces it to "),
+        nom_primitives::parse_number,
+    )
+    .parse(tail)
+    .ok()?;
+    if floor_val != minimum {
+        return None;
+    }
+    // Full-consumption guard: the line is exactly the life-floor clause.
+    all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::LifeFloor {
+                minimum: minimum as i32,
+            })
+            .damage_target_filter(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11063,6 +11115,59 @@ mod tests {
                 player: crate::types::ability::DamageTargetPlayerScope::Controller
             }),
             "damage target should be Controller"
+        );
+    }
+
+    /// CR 614.1a: the UNCONDITIONAL life-floor (Ali from Cairo, Fortune Thief,
+    /// Sustaining Spirit) parses to the same `DamageDone` + `LifeFloor` +
+    /// Controller-target replacement as Worship, but with NO condition — the
+    /// previously-dropped `Effect:replacement_structure` gap.
+    #[test]
+    fn parses_unconditional_life_floor_replacement() {
+        for card in ["Ali from Cairo", "Fortune Thief", "Sustaining Spirit"] {
+            let def = parse_replacement_line(
+                "Damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+                card,
+            )
+            .unwrap_or_else(|| panic!("{card}: unconditional life-floor should parse"));
+
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{card}");
+            assert_eq!(
+                def.condition, None,
+                "{card}: unconditional form must carry NO condition (cf. Worship's IfControlsMatching)"
+            );
+            assert_eq!(
+                def.damage_modification,
+                Some(crate::types::ability::DamageModification::LifeFloor { minimum: 1 }),
+                "{card}: damage modification should be LifeFloor(1)"
+            );
+            assert_eq!(
+                def.damage_target_filter,
+                Some(crate::types::ability::DamageTargetFilter::Player {
+                    player: crate::types::ability::DamageTargetPlayerScope::Controller
+                }),
+                "{card}: damage target should be Controller"
+            );
+        }
+    }
+
+    /// Guard: the conditional Worship form still routes to the conditional arm
+    /// (keeps its `IfControlsMatching` condition) — the unconditional arm must
+    /// not swallow it.
+    #[test]
+    fn conditional_worship_life_floor_still_carries_condition() {
+        let def = parse_replacement_line(
+            "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+            "Worship",
+        )
+        .expect("Worship should still parse");
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::IfControlsMatching { .. })
+            ),
+            "Worship must keep its IfControlsMatching condition, got {:?}",
+            def.condition
         );
     }
 }

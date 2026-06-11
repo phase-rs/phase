@@ -1597,6 +1597,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 208.1 (#2912): a leading "N/M" power/toughness designation ("a 1/1
+    // creature", "two 2/2 creatures") constrains the object's current power and
+    // toughness — it is NOT a subtype. Emit a `PtComparison` for each side and
+    // let the trailing type word ("creature") parse normally; previously the
+    // whole "1/1 creature" fused into `Subtype("1/1 Creature")`, so e.g. Sword
+    // of the Meek never matched 1/1 tokens.
+    if let Some((power, toughness, consumed)) = parse_leading_pt_designation(&lower[pos..]) {
+        properties.push(FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: power },
+        });
+        properties.push(FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: toughness },
+        });
+        pos += consumed;
+    }
+
     // CR 105.1 + CR 105.2: Handle color adjective prefixes:
     // "white creature", "red spell", "colorless creature", "multicolored card", etc.
     let color_prop =
@@ -2477,6 +2499,9 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
         || parse_color_prefix(text).is_some()
         || parse_color_quality_prefix(text).is_some()
         || parse_combat_status_prefix(text).is_some()
+        // CR 208.1 (#2912): "1/1 creature" leads a type phrase (the P/T
+        // designation is followed by a type word).
+        || parse_leading_pt_designation(text).is_some()
 }
 
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
@@ -2951,6 +2976,28 @@ fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     .parse(text)
     .ok()?;
     Some((prop, text.len() - rest.len()))
+}
+
+/// CR 208.1 (#2912): Parse a leading "N/M " power/toughness designation
+/// ("1/1 creature", "2/2 creatures") into fixed `(power, toughness)` plus the
+/// bytes consumed (including the trailing space). Only matches when a type word
+/// follows, so a bare "1/1" elsewhere is not hijacked. Fixed integers only;
+/// dynamic "*/*" / "X/X" designations are left to the existing P/T paths.
+fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usize)> {
+    let (after_power, power) = nom_primitives::parse_number(input).ok()?;
+    let (after_slash, _) = tag::<_, _, OracleError<'_>>("/").parse(after_power).ok()?;
+    let (after_toughness, toughness) = nom_primitives::parse_number(after_slash).ok()?;
+    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ")
+        .parse(after_toughness)
+        .ok()?;
+    if !starts_with_type_phrase_lead(after_space) {
+        return None;
+    }
+    Some((
+        power as i32,
+        toughness as i32,
+        input.len() - after_space.len(),
+    ))
 }
 
 /// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
@@ -9091,6 +9138,88 @@ mod tests {
         } else {
             panic!("expected Or filter, got {f:?}");
         }
+    }
+
+    /// #2912 (CR 208.1): a leading "N/M" P/T designation must be parsed as
+    /// power/toughness constraints, not fused into a `Subtype("1/1 Creature")`.
+    #[test]
+    fn parse_type_phrase_pt_designation_is_not_a_subtype() {
+        use crate::types::ability::{
+            Comparator, FilterProp, PtStat, PtValueScope, QuantityExpr, TypeFilter,
+        };
+        let (filter, _rest) = parse_type_phrase("a 1/1 creature you control");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "must be a Creature type, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains('/'))),
+            "the P/T designation must NOT be a subtype: {:?}",
+            tf.type_filters
+        );
+        let pt = |stat| FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 1 },
+        };
+        assert!(
+            tf.properties.contains(&pt(PtStat::Power)),
+            "expected power == 1, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&pt(PtStat::Toughness)),
+            "expected toughness == 1, got {:?}",
+            tf.properties
+        );
+
+        let (colored_filter, _rest) = parse_type_phrase("a 1/1 white creature you control");
+        let TargetFilter::Typed(colored_tf) = colored_filter else {
+            panic!("expected Typed filter, got {colored_filter:?}");
+        };
+        assert!(
+            colored_tf.properties.contains(&FilterProp::HasColor {
+                color: ManaColor::White
+            }),
+            "P/T designation must compose with color prefixes, got {:?}",
+            colored_tf.properties
+        );
+        assert!(colored_tf.properties.contains(&pt(PtStat::Power)));
+        assert!(colored_tf.properties.contains(&pt(PtStat::Toughness)));
+
+        // End-to-end: Sword of the Meek's trigger filter must no longer be a
+        // bogus `Subtype("1/1 Creature")`.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever a 1/1 creature you control enters, draw a card.",
+            "Sword of the Meek",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        let valid = parsed.triggers[0]
+            .valid_card
+            .as_ref()
+            .expect("trigger has a valid_card filter");
+        let TargetFilter::Typed(vtf) = valid else {
+            panic!("expected Typed valid_card, got {valid:?}");
+        };
+        assert!(
+            vtf.type_filters.contains(&TypeFilter::Creature)
+                && !vtf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains('/'))),
+            "trigger filter must be Creature + P/T, not a '1/1 Creature' subtype: {:?}",
+            vtf.type_filters
+        );
+        assert!(vtf.properties.contains(&pt(PtStat::Power)));
     }
 
     #[test]
