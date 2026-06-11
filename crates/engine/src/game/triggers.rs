@@ -295,16 +295,17 @@ fn synthesize_granted_keyword_triggers<'a>(
     keywords: impl IntoIterator<Item = &'a Keyword>,
 ) -> Vec<(KeywordKind, TriggerDefinition)> {
     let mut base_keywords = source_obj.base_keywords.clone();
-    keywords
+    let mut granted_keywords = Vec::new();
+    for kw in keywords {
+        if let Some(pos) = base_keywords.iter().position(|base| base == kw) {
+            base_keywords.remove(pos);
+        } else {
+            granted_keywords.push(kw);
+        }
+    }
+
+    granted_keywords
         .into_iter()
-        .filter_map(|kw| {
-            if let Some(pos) = base_keywords.iter().position(|base| base == kw) {
-                base_keywords.remove(pos);
-                None
-            } else {
-                Some(kw)
-            }
-        })
         .flat_map(|kw| {
             KeywordTriggerInstaller::triggers_for(kw)
                 .into_iter()
