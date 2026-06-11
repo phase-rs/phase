@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
@@ -289,6 +290,23 @@ fn contextual_batched_trigger_event(
     })
 }
 
+fn synthesize_granted_keyword_triggers<'a>(
+    source_obj: &GameObject,
+    keywords: impl IntoIterator<Item = &'a Keyword>,
+) -> Vec<(KeywordKind, TriggerDefinition)> {
+    let base_keyword_kinds: Vec<_> = source_obj.base_keywords.iter().map(|k| k.kind()).collect();
+    keywords
+        .into_iter()
+        .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
+        .flat_map(|kw| {
+            let kind = kw.kind();
+            KeywordTriggerInstaller::triggers_for(kw)
+                .into_iter()
+                .map(move |trig| (kind, trig))
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -313,26 +331,34 @@ fn collect_matching_triggers(
     // the off-zone trigger scan sees them, mirroring how `off_zone_characteristics`
     // synthesizes the keyword itself. The printed-keyword path is unaffected:
     // printed Suspend already carries these triggers in `base_trigger_definitions`.
-    let granted_off_zone_triggers: Vec<(crate::types::keywords::KeywordKind, TriggerDefinition)> =
-        if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
-            let base_keyword_kinds: Vec<_> =
-                source_obj.base_keywords.iter().map(|k| k.kind()).collect();
-            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id)
-                .iter()
-                // Only synthesize for keywords that were *granted* (absent from
-                // the printed/base set) — printed keywords already carry their
-                // companion triggers via synthesis at database-build time.
-                .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
-                .flat_map(|kw| {
-                    let kind = kw.kind();
-                    crate::database::synthesis::KeywordTriggerInstaller::triggers_for(kw)
-                        .into_iter()
-                        .map(move |trig| (kind, trig))
-                })
-                .collect()
+    //
+    // CR 603.10a: The same keyword-origin treatment applies when a battlefield
+    // object just left the battlefield. Runtime-granted keyword triggers such
+    // as Undying/Persist may be cleaned from the live object before the LTB
+    // trigger scan, but the ZoneChangeRecord preserves the LKI keyword set.
+    let granted_keyword_triggers = if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
+        let off_zone_keywords =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id);
+        synthesize_granted_keyword_triggers(source_obj, off_zone_keywords.iter())
+    } else if matches!(zone_filter, Some(Zone::Battlefield)) {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if *object_id == obj_id {
+                synthesize_granted_keyword_triggers(source_obj, record.keywords.iter())
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
-        };
+        }
+    } else {
+        Vec::new()
+    };
 
     let source_phase_out_event = matches!(
         event,
@@ -348,9 +374,9 @@ fn collect_matching_triggers(
     // after the status flip, so this one event must read only PhaseOut definitions
     // directly from the source while leaving all other phased-out abilities inert.
     //
-    // Synthesized off-zone granted-keyword triggers are appended after the
-    // printed set with indices offset past `obj.trigger_definitions.len()` so
-    // the `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
+    // Synthesized granted-keyword triggers are appended after the printed set
+    // with indices offset past `obj.trigger_definitions.len()` so the
+    // `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
     let printed_trigger_count = source_obj.trigger_definitions.len();
     let printed_triggers: Vec<(
         usize,
@@ -372,16 +398,16 @@ fn collect_matching_triggers(
             .collect()
     };
     let all_triggers = printed_triggers.into_iter().chain(
-        granted_off_zone_triggers
+        granted_keyword_triggers
             .iter()
             .enumerate()
             .map(|(i, (kind, def))| (printed_trigger_count + i, def, Some(*kind))),
     );
     for (trig_idx, trig_def, granted_keyword_kind) in all_triggers {
-        // Synthesized granted-keyword companion triggers (off-zone Suspend
-        // grant) carry a keyword-keyed `MayTriggerOrigin` — the synthetic
-        // `trig_idx` points past `trigger_definitions` and must not be used as
-        // a `Printed` index. Printed triggers keep their stable index.
+        // Synthesized granted-keyword companion triggers carry a keyword-keyed
+        // `MayTriggerOrigin` — the synthetic `trig_idx` points past
+        // `trigger_definitions` and must not be used as a `Printed` index.
+        // Printed triggers keep their stable index.
         // Zone guard: only fire a trigger if its declared zones include the zone being scanned.
         // Empty trigger_zones defaults to battlefield-only (engine-internal triggers like
         // prowess/ward). Parser-created non-battlefield triggers set trigger_zones explicitly.
@@ -1342,71 +1368,11 @@ fn collect_pending_triggers(
             {
                 let matched_triggers = {
                     let obj = &state.objects[moved_id];
-
-                    // CR 603.10a + runtime-granted keyword triggers: Synthesize triggers
-                    // for keywords that were granted via continuous effects on the battlefield
-                    // but are no longer present in `obj.trigger_definitions` after the zone
-                    // change. The LKI snapshot in the ZoneChangeRecord preserves the keywords
-                    // the object had when it left the battlefield.
-                    let lki_keywords = if let GameEvent::ZoneChanged { record, .. } = event {
-                        record.keywords.clone()
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Synthesize triggers for LKI keywords that aren't in the current
-                    // trigger_definitions (runtime-granted triggers that were cleared
-                    // during the zone change). This fixes Undying/Persist granted by
-                    // static abilities like Mikaeus (issue #2944).
-                    let base_keyword_kinds: Vec<_> =
-                        obj.base_keywords.iter().map(|k| k.kind()).collect();
-                    let granted_lki_triggers: Vec<(
-                        crate::types::keywords::KeywordKind,
-                        TriggerDefinition,
-                    )> = lki_keywords
-                        .iter()
-                        .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
-                        .filter(|kw| {
-                            !obj.trigger_definitions.iter_all().any(|t| {
-                                // Check if this keyword's trigger is already present
-                                crate::database::synthesis::KeywordTriggerInstaller::triggers_for(
-                                    kw,
-                                )
-                                .iter()
-                                .any(|synth| {
-                                    // Simple structural check - same mode, origin, destination
-                                    synth.mode == t.mode
-                                        && synth.origin == t.origin
-                                        && synth.destination == t.destination
-                                })
-                            })
-                        })
-                        .flat_map(|kw| {
-                            let kind = kw.kind();
-                            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(kw)
-                                .into_iter()
-                                .map(move |trig| (kind, trig))
-                        })
-                        .collect();
-
-                    // Temporarily add the synthesized triggers to the object for the scan
-                    // This is a bit of a hack but avoids duplicating the entire matching logic
-                    let _original_trigger_count = obj.trigger_definitions.len();
-                    let mut temp_triggers = obj.trigger_definitions.clone();
-                    for (_, trig) in granted_lki_triggers.iter() {
-                        temp_triggers.push(trig.clone());
-                    }
-
-                    // Create a temporary object with the synthesized triggers
-                    let mut temp_obj = obj.clone();
-                    temp_obj.trigger_definitions = temp_triggers;
-
-                    // Use the standard matching logic with the temporary object
                     collect_matching_triggers(
                         state,
                         event,
                         events,
-                        &temp_obj,
+                        obj,
                         obj.entered_battlefield_turn.unwrap_or(0),
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
