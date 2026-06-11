@@ -233,3 +233,36 @@ fn detectives_phoenix_bestow_cast_from_graveyard_resolves_as_aura() {
         "the {{R}} bestow mana sub-cost must have been spent from the pool"
     );
 }
+
+#[test]
+fn detectives_phoenix_graveyard_permission_does_not_allow_normal_creature_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mut builder = scenario.add_creature_to_graveyard(P0, "Detective's Phoenix", 2, 2);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+        generic: 3,
+    });
+    builder.with_subtypes(vec!["Phoenix"]);
+    builder.from_oracle_text_with_keywords(&["Flying", "Haste"], PHOENIX_ORACLE);
+    let phoenix = builder.id();
+
+    let mut runner = scenario.build();
+    for _ in 0..5 {
+        add_mana(&mut runner, ManaType::Red, 1);
+    }
+
+    let card_id = runner.state().objects[&phoenix].card_id;
+    let result = runner.act(GameAction::CastSpell {
+        object_id: phoenix,
+        card_id,
+        targets: vec![],
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+    });
+
+    assert!(
+        result.is_err(),
+        "graveyard permission says using bestow; without a legal Aura target it must not fall back to a normal creature cast"
+    );
+}

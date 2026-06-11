@@ -2,9 +2,9 @@ use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, CardPlayMode, CastTimingPermission, CastingPermission, ChoiceType,
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
-    Duration, Effect, GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
-    StaticDefinition, TargetFilter, TargetRef,
+    Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
+    PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -2016,6 +2016,42 @@ fn graveyard_permission_source(
                     player,
                 ),
             )
+        })
+}
+
+fn filter_has_keyword_kind_constraint(filter: &TargetFilter, kind: KeywordKind) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::HasKeywordKind { value } if *value == kind)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|inner| filter_has_keyword_kind_constraint(inner, kind)),
+        _ => false,
+    }
+}
+
+fn has_graveyard_cast_permission_without_keyword_constraint(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> bool {
+    graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
+        .into_iter()
+        .any(|source| {
+            !filter_has_keyword_kind_constraint(source.filter, kind)
+                && frequency_slot_available(state, source.source_id, object_id, source.frequency)
+                && super::filter::matches_target_filter(
+                    state,
+                    object_id,
+                    source.filter,
+                    &super::filter::FilterContext::from_source_with_controller(
+                        source.source_id,
+                        player,
+                    ),
+                )
         })
 }
 
@@ -7591,8 +7627,22 @@ pub fn handle_cast_spell_with_payment_mode(
                         events,
                     );
                 }
+                if !from_hand
+                    && !has_graveyard_cast_permission_without_keyword_constraint(
+                        state,
+                        player,
+                        object_id,
+                        KeywordKind::Bestow,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(
+                        "No legal bestow cast from graveyard".to_string(),
+                    ));
+                }
                 // Otherwise (no legal target / unaffordable bestow): fall through
-                // to the normal / graveyard-permission cast path.
+                // to the normal / graveyard-permission cast path. The graveyard
+                // case is only legal when a separate permission grants a normal
+                // cast, not merely a "using bestow" rider.
             }
         }
     }
