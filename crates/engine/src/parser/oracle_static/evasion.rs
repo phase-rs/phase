@@ -854,7 +854,7 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
 pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticDefinition>> {
     use crate::types::triggers::AttackTargetFilter;
     type VE<'a> = OracleError<'a>;
-    let lower = text.to_lowercase();
+    let lower = text.to_ascii_lowercase();
 
     let (before, defended, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
         let (i, _) = alt((

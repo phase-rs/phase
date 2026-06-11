@@ -390,7 +390,7 @@ fn cant_attack_scoped_splits_from_pt_and_keyword_grant() {
     let lockout = defs
         .iter()
         .find(|d| d.mode == StaticMode::CantAttack)
-        .expect("expected a CantAttack companion, got {:?}");
+        .unwrap_or_else(|| panic!("expected a CantAttack companion, got {:?}", defs));
     assert_eq!(
         lockout.attack_defended,
         Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
