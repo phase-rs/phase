@@ -41557,10 +41557,10 @@ mod tests {
     /// CR 608.2k + CR 701.15b: "the tokens are goaded" anaphor after token creation.
     #[test]
     fn rewrite_recognizer_accepts_the_tokens_goaded_prefix() {
-        let effect = Effect::Unimplemented {
-            name: "the".to_string(),
-            description: Some("The tokens are goaded for the rest of the game".to_string()),
-        };
+        let effect = Effect::unimplemented(
+            "the_tokens_goaded_anaphor",
+            "The tokens are goaded for the rest of the game",
+        );
         let rewritten = rewrite_token_created_this_way_unimplemented(&effect, None)
             .expect("recognizer must accept 'the tokens' goad prefix");
         match rewritten {
