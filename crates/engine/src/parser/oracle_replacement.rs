@@ -3260,11 +3260,27 @@ fn parse_graveyard_exile_replacement(
         // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
         // phrasing ("a card or token") names tokens explicitly and stays
         // unscoped. The token-rider check wins over the bare-card check, so
-        // "a card or token" is never misread as token-excluding. These are
-        // terminal noun-phrase tail checks on the slice the combinator already
-        // tokenized off `take_until` — not parsing dispatch.
-        let names_token = subject.ends_with(" or token") || subject.ends_with(" or tokens"); // allow-noncombinator: noun-phrase tail check on pre-tokenized slice
-        let names_card = subject.ends_with(" card") || subject.ends_with(" cards"); // allow-noncombinator: noun-phrase tail check on pre-tokenized slice
+        // "a card or token" is never misread as token-excluding.
+        //
+        // The token axis is a terminal-noun classification of the noun phrase
+        // `take_until` already tokenized off. "Ends with <noun>" is expressed as
+        // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
+        // classification stays combinator-pure (no raw tail string-ops) and is
+        // correct for arbitrarily long subjects ("a nontoken creature card",
+        // "a creature an opponent controls") where a first-word split would not
+        // be.
+        fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
+            terminated(
+                (take_until(noun), tag(noun)),
+                eof::<&'a str, OracleError<'a>>,
+            )
+            .parse(subject)
+            .is_ok()
+        }
+        let names_token =
+            subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
+        let names_card =
+            subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
         let token_scope = if names_card && !names_token {
             TokenScope::NonToken
         } else {

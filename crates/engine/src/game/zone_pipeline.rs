@@ -1283,6 +1283,23 @@ pub(crate) fn apply_face_down_entry_profile(
 /// survivor); otherwise `None` (no override — the existing single-`to` routing
 /// is already correct).
 ///
+/// LIMITATION (homogeneous card partition): the representative-component consult
+/// applies one card component's resolved destination to the ENTIRE card
+/// partition. This is exact when every card component matches the card-scoped
+/// redirect identically — true for the common case (RIP/Leyline "a card …"
+/// matches every non-token) and for Mutate piles versus type-level filters (all
+/// components are creatures). It can misroute only a heterogeneous partition
+/// under a subtype/color-scoped card redirect (e.g. a green creature card merged
+/// with a red creature card under a TOKEN survivor, versus "if a green creature
+/// card would be put into a graveyard"): the off-filter card component would
+/// follow the representative's redirect instead of its own default. Fully
+/// correct per-component routing would evaluate each card component's filter
+/// individually while resolving CR 616.1 ordering only once — deferred, because
+/// per-component re-consults re-burn that ordering choice (the OQ#5
+/// single-consult mandate) and the misroute requires a token-survivor Mutate
+/// pile with mixed card characteristics under a scoped graveyard-redirect, which
+/// no current card produces.
+///
 /// `// strict-failure: a one-shot ("the next time ... instead") leave redirect
 /// would be consumed by this extra read-only consult; no such depletion-style
 /// def is in the merged-leave class (the graveyard-redirect hosers are
@@ -2434,8 +2451,8 @@ mod parsed_leyline_card_scoping_tests {
     use crate::parser::oracle_replacement::parse_replacement_line;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
-        TriggerMode,
     };
+    use crate::types::triggers::TriggerMode;
 
     /// End-to-end pin of the live Leyline of the Void bug (zone pipeline
     /// tranche 3, parser card-scoping): the def installed here is the REAL
