@@ -282,9 +282,9 @@ fn cant_attack_static_splits_self_reference() {
 }
 
 /// CR 508.1c: The terminal-phrase guard must NOT mis-split scoped attack
-/// restrictions. "can't attack alone" (Sightless Brawler) and the Vow cycle's
-/// "can't attack you or planeswalkers you control" are different restrictions
-/// owned by other branches — the plain-`CantAttack` splitter must decline.
+/// restrictions. "can't attack alone" (Sightless Brawler) is owned by a
+/// different branch; the Vow cycle's "can't attack you or planeswalkers you
+/// control" must be parsed as a defended-scope `CantAttack`, not a blanket one.
 #[test]
 fn cant_attack_split_declines_scoped_restrictions() {
     let alone = parse_static_line_multi("Enchanted creature gets +3/+2 and can't attack alone.");
@@ -297,10 +297,14 @@ fn cant_attack_split_declines_scoped_restrictions() {
     let scoped = parse_static_line_multi(
         "Enchanted creature gets +2/+2, has vigilance, and can't attack you or planeswalkers you control.",
     );
-    assert!(
-        !scoped.iter().any(|d| d.mode == StaticMode::CantAttack),
-        "scoped \"can't attack you …\" must not become a plain CantAttack, got {:?}",
-        scoped.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    let scoped_lockout = scoped
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .unwrap_or_else(|| panic!("expected scoped CantAttack, got {:?}", scoped));
+    assert_eq!(
+        scoped_lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "scoped \"can't attack you ...\" must not become a blanket CantAttack"
     );
 }
 
@@ -377,7 +381,7 @@ fn cant_attack_or_block_split_does_not_suppress_siblings() {
     );
 }
 
-/// CR 508.1d: Vow of Lightning — "Enchanted creature gets +2/+2, has first
+/// CR 508.1b + CR 508.1c: Vow of Lightning — "Enchanted creature gets +2/+2, has first
 /// strike, and can't attack you or planeswalkers you control." must produce the
 /// +2/+2 and first-strike grant AND a companion `CantAttack` scoped to
 /// `PlayerOrPlaneswalker`. Previously the attack restriction was silently
@@ -408,8 +412,8 @@ fn cant_attack_scoped_splits_from_pt_and_keyword_grant() {
     );
 }
 
-/// CR 508.1d: "and can't attack you" (Player scope only, without planeswalkers)
-/// also splits into a `CantAttack` with `defended = Player`.
+/// CR 508.1b + CR 508.1c: "and can't attack you" (Player scope only, without
+/// planeswalkers) also splits into a `CantAttack` with `defended = Player`.
 #[test]
 fn cant_attack_scoped_player_only_variant() {
     let defs = parse_static_line_multi("Enchanted creature gets +0/+3 and can't attack you.");
@@ -425,8 +429,8 @@ fn cant_attack_scoped_player_only_variant() {
     );
 }
 
-/// CR 508.1d: The scoped-attack splitter must not suppress the existing
-/// bare-attack and cant-attack-or-block splitters.
+/// CR 508.1b + CR 508.1c: The scoped-attack splitter must not suppress the
+/// existing bare-attack and cant-attack-or-block splitters.
 #[test]
 fn cant_attack_scoped_split_does_not_suppress_siblings() {
     // Bare "can't attack" must still route to plain CantAttack with no defended scope.
