@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
@@ -21,8 +22,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 701.50e + CR 107.3i: Dynamic connive counts (e.g. creatures that died
+    // this turn) resolve at ability resolution via the shared quantity pipeline.
     let count = match &ability.effect {
-        Effect::Connive { count, .. } => *count,
+        Effect::Connive { count, .. } => {
+            resolve_quantity_with_targets(state, count, ability).max(0) as u32
+        }
         _ => 1,
     };
 
@@ -249,7 +254,7 @@ pub(crate) fn add_connive_counters(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -258,7 +263,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Connive {
                 target: TargetFilter::Any,
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
             },
             vec![TargetRef::Object(target)],
             source,

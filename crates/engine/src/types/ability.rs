@@ -7168,11 +7168,14 @@ pub enum Effect {
     /// CR 701.50a: Target creature connives (draw a card, then discard a card;
     /// if a nonland card is discarded, put a +1/+1 counter on it).
     /// CR 701.50e: "Connive N" draws N, discards N, counters per nonland.
+    /// `count` is a `QuantityExpr` so dynamic bindings (e.g. Spymaster's Vault's
+    /// "connives X, where X is the number of creatures that died this turn") resolve
+    /// at activation time via `resolve_quantity_with_targets`.
     Connive {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        #[serde(default = "default_one")]
-        count: u32,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// CR 702.26a: Target permanent phases out (treated as though it doesn't exist
     /// until its controller's next untap step).

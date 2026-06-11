@@ -4995,6 +4995,33 @@ fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
 /// dynamic count. When the suffix is missing or the inner phrase fails to
 /// parse to a known quantity, the original count (typically `Variable { "X" }`
 /// or `Fixed { value: N }`) is returned unchanged.
+/// CR 701.50e + CR 107.3i: Parse connive count from text after "connive"/"connives".
+/// Handles literal N, bare `X` (spell-cost path), and ", where X is <quantity>"
+/// bindings (Spymaster's Vault class).
+fn parse_connive_count_expr<'a>(text: &'a str, lower_rest: &str) -> (QuantityExpr, &'a str) {
+    let rest_orig = &text[text.len() - lower_rest.len()..];
+
+    if let Ok((after_num, n)) = nom_primitives::parse_number.parse(lower_rest) {
+        let consumed = lower_rest.len() - after_num.len();
+        let after_orig = rest_orig[consumed..].trim_start();
+        return (QuantityExpr::Fixed { value: n as i32 }, after_orig);
+    }
+
+    if let Ok((after_x, _)) = alt((tag::<_, _, OracleError<'_>>("x"), tag("X"))).parse(lower_rest) {
+        let consumed = lower_rest.len() - after_x.len();
+        let after_orig = rest_orig[consumed..].trim_start();
+        let initial = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let count = resolve_exile_top_where_x_binding(after_orig, initial);
+        return (count, after_orig);
+    }
+
+    (QuantityExpr::Fixed { value: 1 }, rest_orig)
+}
+
 fn resolve_exile_top_where_x_binding(after_lib: &str, initial_count: QuantityExpr) -> QuantityExpr {
     let trimmed = after_lib
         .trim_start()
@@ -5663,14 +5690,18 @@ pub(super) fn parse_imperative_family_ast(
         "explore" if lower == "explore" || lower == "explore again" => {
             Some(ImperativeFamilyAst::Explore)
         }
-        // CR 702.162a: "connive" / "connives" — extract target from remainder
+        // CR 702.162a + CR 701.50e: "connive" / "connives" — extract optional
+        // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
-            let rest = lower[first_word.len()..].trim();
-            if !rest.is_empty() {
-                let (target, _) = parse_target(rest);
+            let rest_lower = lower[first_word.len()..].trim_start();
+            let (count, rest_orig) = parse_connive_count_expr(text, rest_lower);
+            if !rest_orig.trim().is_empty() {
+                let (target, _) = parse_target(rest_orig.trim());
+                Some(ImperativeFamilyAst::GainKeyword(Effect::Connive { target, count }))
+            } else if count != (QuantityExpr::Fixed { value: 1 }) {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive {
-                    target,
-                    count: 1,
+                    target: TargetFilter::Any,
+                    count,
                 }))
             } else {
                 Some(ImperativeFamilyAst::Connive)
@@ -6986,7 +7017,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Explore => Effect::Explore,
         ImperativeFamilyAst::Connive => Effect::Connive {
             target: TargetFilter::Any,
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
         },
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,

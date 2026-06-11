@@ -29013,6 +29013,38 @@ mod tests {
         );
     }
 
+    /// CR 701.50e + CR 700.4 + CR 107.3i: Spymaster's Vault connive count must
+    /// bind X to creatures that died this turn, not hardcode 1.
+    #[test]
+    fn connive_where_x_is_creatures_died_this_turn() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::zones::Zone;
+
+        let e = parse_effect(
+            "Target creature you control connives X, where X is the number of creatures that died this turn.",
+        );
+        let Effect::Connive { target, count } = e else {
+            panic!("expected Connive, got {e:?}");
+        };
+        assert!(
+            matches!(target, TargetFilter::Typed(_)),
+            "expected typed creature target, got {target:?}"
+        );
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        ..
+                    },
+                }
+            ),
+            "connive count should be creatures-died-this-turn, got {count:?}"
+        );
+    }
+
     #[test]
     fn phase_out_targeted() {
         let e = parse_effect("Target creature phases out");
