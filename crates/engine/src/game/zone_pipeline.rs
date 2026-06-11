@@ -927,6 +927,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 ///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
 ///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
 ///     empties (never early, never twice).
+///
 /// Because all of this lives on the parked record (not in `route_rest_partition`
 /// or any synchronous caller frame), a second, third, … park is just another
 /// `deliver_batch` → re-stash cycle. The contract is pinned by
