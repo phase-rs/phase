@@ -5887,48 +5887,77 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
     )
 }
 
-/// CR 614.1a: Parse the UNCONDITIONAL life-floor replacement — "damage that
-/// would reduce your life total to less than N reduces it to N instead."
-/// (Ali from Cairo, Fortune Thief, Sustaining Spirit). Identical to
-/// [`parse_life_floor_damage_replacement`] but without the Worship-class
-/// "if you control a [filter]," guard, so it carries no `IfControlsMatching`
-/// condition. Dispatched after the conditional arm, which claims the
-/// "if you control …" prefix first.
+/// CR 614.1a: Parse the UNCONDITIONAL life-floor replacement:
+/// - "damage that would reduce your life total to less than N reduces it to N instead"
+///   (Fortune Thief, Sustaining Spirit)
+/// - "damage that would reduce your life total to 0 reduces it to 1 instead"
+///   (Ali from Cairo printed wording — lethal threshold "to 0", floor M)
+///
+/// Identical to [`parse_life_floor_damage_replacement`] but without the Worship-class
+/// "if you control a [filter]," guard. Dispatched after the conditional arm.
 fn parse_unconditional_life_floor_damage_replacement(
     norm_lower: &str,
 ) -> Option<ReplacementDefinition> {
-    let (after_threshold, _) =
-        tag::<_, _, OracleError<'_>>("damage that would reduce your life total to less than ")
-            .parse(norm_lower)
-            .ok()?;
-
-    let (tail, minimum) = nom_primitives::parse_number.parse(after_threshold).ok()?;
-    let (tail, floor_val) = preceded(
-        tag::<_, _, OracleError<'_>>(" reduces it to "),
-        nom_primitives::parse_number,
-    )
-    .parse(tail)
-    .ok()?;
-    if floor_val != minimum {
-        return None;
-    }
-    // Full-consumption guard: the line is exactly the life-floor clause.
-    all_consuming((
-        tag::<_, _, OracleError<'_>>(" instead"),
-        opt(tag::<_, _, OracleError<'_>>(".")),
+    let floor_minimum = alt((
+        parse_unconditional_life_floor_less_than_form,
+        parse_unconditional_life_floor_to_zero_form,
     ))
-    .parse(tail)
-    .ok()?;
+    .parse(norm_lower)
+    .ok()
+    .map(|(_, minimum)| minimum)?;
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .damage_modification(DamageModification::LifeFloor {
-                minimum: minimum as i32,
+                minimum: floor_minimum,
             })
             .damage_target_filter(DamageTargetFilter::Player {
                 player: DamageTargetPlayerScope::Controller,
             }),
     )
+}
+
+/// "damage that would reduce your life total to less than N reduces it to N instead."
+fn parse_unconditional_life_floor_less_than_form(input: &str) -> OracleResult<'_, i32> {
+    let (rest, minimum) = preceded(
+        tag::<_, _, OracleError<'_>>("damage that would reduce your life total to less than "),
+        nom_primitives::parse_number,
+    )
+    .parse(input)?;
+    let (rest, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(" reduces it to "),
+        nom_primitives::parse_number,
+    )
+    .parse(rest)?;
+    if floor_val != minimum {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let (rest, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(rest)?;
+    Ok((rest, minimum as i32))
+}
+
+/// Ali from Cairo printed wording: "…to 0 reduces it to M instead."
+fn parse_unconditional_life_floor_to_zero_form(input: &str) -> OracleResult<'_, i32> {
+    let (rest, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(
+            "damage that would reduce your life total to 0 reduces it to ",
+        ),
+        nom_primitives::parse_number,
+    )
+    .parse(input)?;
+    let (rest, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(rest)?;
+    Ok((rest, floor_val as i32))
 }
 
 #[cfg(test)]
@@ -11124,6 +11153,18 @@ mod tests {
     /// previously-dropped `Effect:replacement_structure` gap.
     #[test]
     fn parses_unconditional_life_floor_replacement() {
+        let def = parse_replacement_line(
+            "Damage that would reduce your life total to 0 reduces it to 1 instead.",
+            "Ali from Cairo",
+        )
+        .expect("Ali from Cairo printed 'to 0' wording should parse");
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.condition, None);
+        assert_eq!(
+            def.damage_modification,
+            Some(crate::types::ability::DamageModification::LifeFloor { minimum: 1 })
+        );
+
         for card in ["Ali from Cairo", "Fortune Thief", "Sustaining Spirit"] {
             let def = parse_replacement_line(
                 "Damage that would reduce your life total to less than 1 reduces it to 1 instead.",

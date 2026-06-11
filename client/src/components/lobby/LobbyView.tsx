@@ -11,7 +11,7 @@ import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
 import { ServerFlag } from "./ServerFlag";
 import { ServerPicker } from "./ServerPicker";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 
 interface LobbyViewProps {
   onHostGame: () => void;
@@ -264,27 +264,42 @@ export function LobbyView({
     });
   }, [games, formatFilter, roomTypeFilter]);
 
+  const formatMenuGroups = useMemo(
+    () =>
+      FORMAT_FILTER_GROUPS.map(({ group, items }) => ({
+        label: group,
+        items: items.map((m) => ({ value: m.format, label: m.label })),
+      })),
+    [],
+  );
+
+  const formatMenuLabel = formatFilter
+    ? (FORMAT_REGISTRY.find((m) => m.format === formatFilter)?.label ?? formatFilter)
+    : t("lobbyView.allFormats");
+
+  const serverHost = serverAddress.replace(/^wss?:\/\//, "").split("/")[0];
+
   return (
     <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-5 py-6">
-      <div className="flex w-full items-center justify-between gap-3">
+      <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {isP2P ? t("lobbyView.directConnection") : t("lobbyView.onlineLobby")}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
           {isServer && (
             <button
               type="button"
               onClick={() => setServerPickerOpen(true)}
               title={serverAddress}
-              className="flex items-center gap-1.5 rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
+              className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
             >
               {serverFlag && (
                 <ServerFlag
                   flag={serverFlag}
-                  className="h-2.5 w-auto rounded-[1px] ring-1 ring-black/20"
+                  className="h-2.5 w-auto shrink-0 rounded-[1px] ring-1 ring-black/20"
                 />
               )}
-              {serverAddress.replace(/^wss?:\/\//, "").split("/")[0]}
+              <span className="truncate whitespace-nowrap">{serverHost}</span>
             </button>
           )}
           {/* In P2P mode the user has no other path back to ServerPicker —
@@ -309,43 +324,30 @@ export function LobbyView({
         </div>
       </div>
 
-      {/* Format filter -- grouped native <select>. Native is the
-          mobile/tablet UX win: a 14-chip segmented control overflows
-          horizontally on phone/tablet, while native <select> opens an
-          OS-level full-screen picker that's already touch-optimized.
-          Trigger is sized to the 44px touch-target rule. */}
+      {/* Format filter — MenuSelect opens a bottom sheet below 820px (shell tab
+          bar width) so the long format roster never covers the lobby form.
+          Desktop keeps the anchored dropdown. min-h-44px + text-base meet the
+          44/48px touch-target rule and prevent iOS focus-zoom. */}
       {isServer && (
-        <label
-          htmlFor="lobby-format-filter"
-          className="flex min-h-[44px] items-center gap-2 self-start rounded-[16px] bg-black/18 px-3 py-1 ring-1 ring-white/10"
-        >
-          <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
+        <div className="flex min-h-[44px] w-full items-center gap-2 self-stretch rounded-[16px] bg-black/18 px-3 py-1 ring-1 ring-white/10 sm:w-auto sm:self-start">
+          <span className="shrink-0 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
             {t("lobbyView.format")}
           </span>
-          <SelectField
-            id="lobby-format-filter"
-            value={formatFilter ?? FILTER_ALL_SENTINEL}
-            onChange={(e) =>
+          <MenuSelect
+            ariaLabel={t("lobbyView.format")}
+            label={formatMenuLabel}
+            selectedValue={formatFilter ?? FILTER_ALL_SENTINEL}
+            items={[{ value: FILTER_ALL_SENTINEL, label: t("lobbyView.allFormats") }]}
+            groups={formatMenuGroups}
+            onSelect={(value) =>
               setFormatFilter(
-                e.target.value === FILTER_ALL_SENTINEL ? null : (e.target.value as GameFormat),
+                value === FILTER_ALL_SENTINEL ? null : (value as GameFormat),
               )
             }
-            className="bg-transparent py-1.5 text-base font-medium text-white outline-none"
-          >
-            <option value={FILTER_ALL_SENTINEL} className="bg-[#0a0f1b] text-slate-100">
-              {t("lobbyView.allFormats")}
-            </option>
-            {FORMAT_FILTER_GROUPS.map(({ group, items }) => (
-              <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
-                {items.map((m) => (
-                  <option key={m.format} value={m.format} className="bg-[#0a0f1b] text-slate-100">
-                    {m.label}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </SelectField>
-        </label>
+            wrapperClassName="min-w-0 flex-1 sm:min-w-[10rem]"
+            className="min-h-[44px] rounded-none border-0 bg-transparent px-0 py-1.5 text-base font-medium text-white shadow-none hover:bg-transparent focus-visible:ring-white/20"
+          />
+        </div>
       )}
 
       {isServer && showRoomTypeFilter && (

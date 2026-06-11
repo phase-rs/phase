@@ -2224,6 +2224,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cost_reduction_conditional_opponent_nonbasic_lands() {
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {4} less to activate if an opponent controls four or more nonbasic lands",
+        )
+        .expect("opponent nonbasic land gate should parse");
+        assert_eq!(reduction.amount_per, 4);
+        assert_eq!(reduction.count, QuantityExpr::Fixed { value: 1 });
+        assert!(reduction.condition.is_some());
+    }
+
     /// Regression: the "for each" scaling form is unchanged and carries no
     /// condition.
     #[test]
