@@ -29,6 +29,7 @@ use crate::types::ability::{
     PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
     TargetFilter, TriggerDefinition,
 };
+use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -459,6 +460,13 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             ..
         }
+        // CR 115.7d: "you may choose new targets for [spell/ability]" lowers to
+        // `ChangeTargets { scope: All }` with the full surface form preserved
+        // (not `def.optional`). The player may leave targets unchanged.
+        | Effect::ChangeTargets {
+            scope: RetargetScope::All,
+            ..
+        }
         // CR 701.20a + CR 608.2c: RevealUntil with kept_optional_to encodes
         // "you may put that card onto the battlefield" — the kept-card
         // destination choice IS the "may" decision (mirrors RevealFromHand
@@ -504,6 +512,30 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
         }
+        // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
+        // "you may choose new targets for the copy" on the win branch (Krark)
+        // lives in `win_effect`, not at `def.optional`.
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
         _ => false,
     }
 }
@@ -3423,6 +3455,50 @@ mod tests {
         }
     }
 
+    /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
+    /// to `ChangeTargets { scope: All }` with the full `you may choose new
+    /// targets` surface preserved — not `def.optional`.
+    #[test]
+    fn optional_you_may_accepts_change_targets_retarget_spells() {
+        for (oracle, name, types) in [
+            (
+                "The next time a spell or ability an opponent controls targets you \
+                 this turn, change the target to another spell or ability. \
+                 Overload {2}{U}{U} (You may cast this spell for its overload cost. \
+                 If you do, change its target.)\n\
+                 You may choose new targets for target spell or ability.",
+                "Deflecting Swat",
+                &["Instant"][..],
+            ),
+            (
+                "You may choose new targets for target spell.",
+                "Redirect",
+                &["Instant"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} should not swallow retarget optional"
+            );
+        }
+    }
+
+    /// CR 707.10c + CR 115.7d: Increasing Vengeance — copy with optional
+    /// retarget for copies (absorbed onto CopySpell when adjacent).
+    #[test]
+    fn optional_you_may_accepts_increasing_vengeance_copy_retarget() {
+        let parsed = parse_named(
+            "Copy target instant or sorcery spell you control. If this spell was cast from a \
+             graveyard, copy that spell twice instead. You may choose new targets for the copies.\n\
+             Flashback {3}{R}{R}",
+            "Increasing Vengeance",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
     /// CR 707.10c: Thousand-Year Storm exercises the triggered-ability context
     /// — the plural "for the copies" clause is absorbed onto the trigger's
     /// inner CopySpell.
@@ -3434,6 +3510,38 @@ mod tests {
              You may choose new targets for the copies.",
             "Thousand-Year Storm",
             &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
+    /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
+    /// into `FlipCoin.win_effect`.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
+        let parsed = parse_named(
+            "Whenever you cast an instant or sorcery spell, flip a coin. \
+             If you lose the flip, return that spell to its owner's hand. \
+             If you win the flip, copy that spell, and you may choose new targets for the copy.",
+            "Krark, the Thumbless",
+            &["Legendary", "Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 603.2b + CR 611.2 + CR 609.4b: Xanathar's upkeep trigger bundles
+    /// look/play/spend-as-any-color permissions inside the execute tree.
+    #[test]
+    fn optional_you_may_accepts_xanathar_upkeep_permissions() {
+        let parsed = parse_named(
+            "At the beginning of your upkeep, choose target opponent. Until end of turn, \
+             that player can't cast spells, you may look at the top card of their library \
+             any time, you may play the top card of their library, and you may spend mana \
+             as though it were mana of any color to cast spells this way.",
+            "Xanathar, Guild Kingpin",
+            &["Legendary", "Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));

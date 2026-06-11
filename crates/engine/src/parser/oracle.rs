@@ -5874,6 +5874,45 @@ mod tests {
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
     }
 
+    /// Issue #2938 — Deflecting Swat's resolution effect must lower to
+    /// `ChangeTargets`, not a no-op `TargetOnly` wrapper.
+    #[test]
+    fn deflecting_swat_choose_new_targets_for_spell_or_ability() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::game_state::RetargetScope;
+
+        let r = parse(
+            "If you control a commander, you may cast this spell without paying its mana cost.\n\
+             You may choose new targets for target spell or ability.",
+            "Deflecting Swat",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "abilities={:?}", r.abilities);
+        assert!(
+            matches!(
+                r.abilities[0].effect.as_ref(),
+                Effect::ChangeTargets {
+                    scope: RetargetScope::All,
+                    forced_to: None,
+                    ..
+                }
+            ),
+            "effect={:?} optional={} description={:?}",
+            r.abilities[0].effect,
+            r.abilities[0].optional,
+            r.abilities[0].description
+        );
+        let Effect::ChangeTargets { target, .. } = r.abilities[0].effect.as_ref() else {
+            unreachable!();
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or(StackSpell, StackAbility), got {target:?}");
+        };
+        assert!(filters.contains(&TargetFilter::StackSpell));
+    }
+
     /// Issue #1990 — Spellskite must parse to forced-self `ChangeTargets` so the
     /// AI `SpellskitePriorityPolicy` effect-shape gate fires at runtime.
     #[test]

@@ -3,10 +3,10 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CounterSourceRider, Duration, Effect, FaceDownProfile,
-    LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect,
+    FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -882,6 +882,8 @@ pub(crate) enum UtilityImperativeAst {
     },
     Copy {
         target: TargetFilter,
+        /// CR 707.10c: set when the imperative remainder is a copy-retarget grant.
+        retarget: CopyRetargetPermission,
     },
     Transform {
         target: TargetFilter,

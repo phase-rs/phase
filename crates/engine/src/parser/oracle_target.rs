@@ -463,9 +463,21 @@ pub fn parse_target_with_syntax<'a>(
             return parse_target_with_syntax(original_rest, ctx);
         }
     }
-    // "that [type phrase]" → anaphoric reference to a typed subject
+    // CR 608.2k: Bare "that spell" refers to the triggering spell object
+    // (Krark, the Thumbless; Spellchain Scatter). "that card" is NOT included —
+    // it stays on the ParentTarget arm below and is rewritten to TrackedSet when
+    // a prior sibling publishes an affected set (Sin, Spira's Punishment). Predicate
+    // continuations ("that spell is countered this way") keep ParentTarget because
+    // text remains after the noun; comma continuations ("copy that spell, and …")
+    // still name the triggering spell.
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
+        if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
+            if after.is_empty() || after.starts_with([',', ';']) {
+                let orig_after = original_rest.get("spell".len()..).unwrap_or(original_rest);
+                return (TargetFilter::TriggeringSource, orig_after, syntax);
+            }
+        }
         let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
             return (TargetFilter::ParentTarget, rem, syntax);
@@ -7870,6 +7882,21 @@ mod tests {
     #[test]
     fn parse_target_them_inherits_parent_target() {
         let (filter, rest) = parse_target("them");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_standalone_that_spell_is_triggering_source() {
+        let (filter, rest, _) =
+            parse_target_with_syntax("that spell", &mut ParseContext::default());
+        assert_eq!(filter, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_standalone_that_card_is_parent_target() {
+        let (filter, rest, _) = parse_target_with_syntax("that card", &mut ParseContext::default());
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
     }
