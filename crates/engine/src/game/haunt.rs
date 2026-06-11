@@ -25,6 +25,7 @@
 //! when the haunted creature leaves the battlefield (so the payoff can read it
 //! at that moment) and pruned when the haunting card leaves exile.
 
+use super::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -88,8 +89,31 @@ pub fn resolve(
         return Ok(());
     }
 
-    super::zones::move_to_zone(state, card, Zone::Exile, events);
-    add_haunt_link(state, card, creature);
+    // CR 702.55a + CR 614.6: the haunting card is exiled from its graveyard.
+    // Route through the zone-change pipeline so a board-wide `Moved` exile
+    // redirect is consulted (none target Exile today — behavior-preserving,
+    // future-proof). Attributed to the card itself.
+    let result = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::effect(card, Zone::Exile, card),
+        events,
+    );
+    // CR 616.1: a future Exile-targeting `Moved` redirect could surface an
+    // ordering choice. Park the prompt (mirrors `exile_from_top_until`'s
+    // NeedsChoice arm) and return without recording the link — the card is not
+    // yet in exile, so it is not haunting. The resume re-runs SBAs once the
+    // choice is made; the haunt link is recorded only when the card lands in
+    // exile (the zone check below is the single redirect-safe guard).
+    if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = result {
+        state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(player, state);
+        return Ok(());
+    }
+    // CR 702.55b: record the haunt relationship only once the card has actually
+    // landed in exile. A `Moved` redirect could have sent it elsewhere, in which
+    // case it is not haunting and the link must NOT be recorded.
+    if state.objects.get(&card).map(|o| o.zone) == Some(Zone::Exile) {
+        add_haunt_link(state, card, creature);
+    }
     Ok(())
 }
 

@@ -6284,6 +6284,14 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
+    /// CR 701.24a: the library placement requested by the original `move_object`
+    /// call whose replacement consult parked here (W3 library-placement arm only).
+    /// `Some` solely for a parked Library-targeting `ZoneChange`; the resume path
+    /// (`handle_replacement_choice`) threads it back into the delivery so the
+    /// object lands at the requested index instead of the tail auto-shuffling it
+    /// away. `None` for every other parked event (the common case).
+    #[serde(default)]
+    pub library_placement: Option<crate::types::ability::LibraryPosition>,
 }
 
 /// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending

@@ -23,9 +23,9 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AttackScope, AttackSubject, Comparator,
-    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PtValue, QuantityExpr,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
+    Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -4757,17 +4757,22 @@ pub(super) fn apply_where_x_effect_expression(
         // the sub-ability's "draw X cards"; without this arm the cost amount
         // stayed as the bare `Variable("X")` and decoupled from the resolved
         // expression.
-        Effect::PayCost { cost, .. } => match cost {
-            PaymentCost::Life { amount }
-            | PaymentCost::Speed { amount }
-            | PaymentCost::Energy { amount } => {
-                *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
-            }
-            PaymentCost::ScaledMana { times, .. } => {
+        Effect::PayCost { cost, scale, .. } => {
+            // CR 118.1 + CR 118.5: per-object scaled mana (`scale`) tracks the
+            // surrounding where-X binding before the cost amount itself.
+            if let Some(times) = scale {
                 *times = apply_where_x_quantity_expression(times.clone(), where_x_expression);
             }
-            PaymentCost::Mana { .. } | PaymentCost::AbilityCost { .. } => {}
-        },
+            match cost {
+                AbilityCost::PayLife { amount }
+                | AbilityCost::PaySpeed { amount }
+                | AbilityCost::PayEnergy { amount }
+                | AbilityCost::ManaDynamic { quantity: amount } => {
+                    *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+                }
+                _ => {}
+            }
+        }
         Effect::GenericEffect {
             static_abilities, ..
         } => {

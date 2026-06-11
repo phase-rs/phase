@@ -377,21 +377,20 @@ pub(crate) fn move_rest_then(
 
 /// Put cards on the bottom of the player's library in random order.
 //
-// Zone-pipeline bucketing: `move_to_library_position` is a library-placement
-// SIBLING raw mover (PLAN §0 / §5 "library-placement sibling treatment").
-// Migrating it onto `move_object`'s placement arm is gated on completing that
-// arm's consult (it is a Phase-A stub that delegates straight to
-// `move_to_library_at_index`, skipping the replacement consult). That completion
-// is DEFERRED: no `Moved` replacement in the card pool targets
-// `destination_zone(Library)` (verified: 25 Battlefield / 17 Graveyard / 2 Exile
-// destinations, zero Library; reproduce with
+// Phase E tranche 2: `move_to_library_position` is a library-placement SIBLING
+// raw mover that still bypasses `move_object`'s placement arm. W3 already
+// completed that arm's replacement consult and the placement-aware auto-shuffle
+// gate (CR 701.24a: a placement is not a shuffle), so migrating this caller is
+// now a mechanical lift, not the cross-cutting change the pre-W3 note feared.
+// It remains DEFERRED only because no `Moved` replacement in the card pool
+// targets `destination_zone(Library)` (verified: 31 Battlefield / 19 Graveyard /
+// 2 Exile destinations, plus the one synthetic Library def in the W3 test;
+// reproduce with
 //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
-// — re-run before lifting this deferral), so the consult is a guaranteed no-op today, and
-// completing it correctly requires gating the CR 701.24a delivery-tail
-// auto-shuffle on placement-absence across the shared delivery signatures — a
-// cross-cutting change with a silent-randomization landmine for zero current
-// correctness gain. A library→bottom reposition is not "put into a
-// graveyard/exile/hand", so nothing is skipped by staying on the raw sibling.
+// — re-run before lifting), so routing through the consult is a guaranteed no-op
+// today. A library→bottom reposition is not "put into a graveyard/exile/hand",
+// so nothing is skipped by staying on the raw sibling. See the tranche-2 caller
+// list at `zone_pipeline::move_object`'s placement arm.
 fn shuffle_to_bottom(state: &mut GameState, cards: &[ObjectId], events: &mut Vec<GameEvent>) {
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);

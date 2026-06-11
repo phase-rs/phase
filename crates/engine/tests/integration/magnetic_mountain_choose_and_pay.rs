@@ -11,7 +11,7 @@
 //!
 //! This test drives the full pipeline through `apply`: the upkeep trigger
 //! fires, the engine raises `WaitingFor::ChooseObjectsSelection`, the player
-//! selects 2 tapped blue creatures, `PaymentCost::ScaledMana` charges
+//! selects 2 tapped blue creatures, the `PayCost` scaled mana charges
 //! {4}×2 = {8}, and the reused `IfYouDo`/`Untap{TrackedSet}` tail untaps
 //! exactly those 2 creatures. Every assertion fails against pre-07d behavior.
 
@@ -142,7 +142,7 @@ fn magnetic_mountain_choose_and_pay_per_creature_untaps_selection() {
     // Resolve the rest of the chain: PayCost { ScaledMana } then IfYouDo/Untap.
     runner.advance_until_stack_empty();
 
-    // DISCRIMINATING ASSERTION 2 — PaymentCost::ScaledMana charged {4} × 2 =
+    // DISCRIMINATING ASSERTION 2 — PayCost scaled mana charged {4} × 2 =
     // {8}, draining the whole pool. Pre-07d the fixed {4} would leave 4 behind.
     let mana_left = runner
         .state()

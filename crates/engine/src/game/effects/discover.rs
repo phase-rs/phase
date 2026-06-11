@@ -1,3 +1,4 @@
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::game::{quantity, zones};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
@@ -35,8 +36,22 @@ pub fn resolve(
 
     // CR 701.57a: Exile one at a time until hit or library exhausted
     for &card_id in &library {
-        // Move to exile
-        zones::move_to_zone(state, card_id, Zone::Exile, events);
+        // CR 701.57a + CR 614.6: exile the card via the zone-change pipeline so a
+        // board-wide `Moved` exile redirect is consulted (none target Exile today
+        // — behavior-preserving, future-proof). CR 616.1: a future Exile-targeting
+        // redirect could surface an ordering choice mid-loop; park the prompt
+        // (mirrors `exile_from_top_until`'s NeedsChoice arm) and return rather than
+        // continuing to exile/classify the remaining cards past a parked prompt.
+        let result = zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::effect(card_id, Zone::Exile, ability.source_id),
+            events,
+        );
+        if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = result {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
 
         // Check if this is a nonland card with MV ≤ limit
         let is_hit = state.objects.get(&card_id).is_some_and(|obj| {

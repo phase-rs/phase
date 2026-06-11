@@ -26,8 +26,8 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost,
-    PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
     SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TypeFilter,
     TypedFilter, ZoneOwner,
 };
@@ -5176,7 +5176,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     None
 }
 
-fn parse_mana_and_life_payment(rest_orig: &str) -> Option<PaymentCost> {
+fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
     let (mana_cost, after_mana) = parse_mana_symbols(rest_orig.trim())?;
     let after_mana_lower = after_mana.to_lowercase();
     let (_, after_and) = nom_on_lower(after_mana, &after_mana_lower, |input| {
@@ -5187,13 +5187,11 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<PaymentCost> {
         .parse(input)
     })?;
     let amount = parse_pay_life_amount(after_and.trim_start())?;
-    Some(PaymentCost::AbilityCost {
-        cost: AbilityCost::Composite {
-            costs: vec![
-                AbilityCost::Mana { cost: mana_cost },
-                AbilityCost::PayLife { amount },
-            ],
-        },
+    Some(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana { cost: mana_cost },
+            AbilityCost::PayLife { amount },
+        ],
     })
 }
 
@@ -5227,13 +5225,13 @@ pub(super) fn parse_cost_resource_ast(
         // nom combinators over the post-"pay " remainder.
         if let Some(amount) = parse_pay_life_amount(rest) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Life { amount },
+                cost: AbilityCost::PayLife { amount },
             });
         }
         // CR 107.14: "pay any amount of {E}" → variable energy payment
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable {
                             name: "X".to_string(),
@@ -5247,7 +5245,7 @@ pub(super) fn parse_cost_resource_ast(
         // following effect chain.
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: crate::types::mana::ManaCost::Cost {
                         shards: vec![crate::types::mana::ManaCostShard::X],
                         generic: 0,
@@ -5265,12 +5263,12 @@ pub(super) fn parse_cost_resource_ast(
         {
             if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
                 return Some(CostResourceImperativeAst::Pay {
-                    cost: PaymentCost::Energy { amount },
+                    cost: AbilityCost::PayEnergy { amount },
                 });
             }
             // Fallback: variable energy payment
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable {
                             name: "X".to_string(),
@@ -5279,14 +5277,14 @@ pub(super) fn parse_cost_resource_ast(
                 },
             });
         }
-        // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → PaymentCost::Energy
+        // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy
         if rest.contains("{e}") {
             let energy_count = rest.matches("{e}").count() as u32;
             let cleaned = rest.replace("{e}", "").replace(' ', "");
             if cleaned.is_empty() {
                 // Pure {E} symbols: "pay {e}{e}"
                 return Some(CostResourceImperativeAst::Pay {
-                    cost: PaymentCost::Energy {
+                    cost: AbilityCost::PayEnergy {
                         amount: QuantityExpr::Fixed {
                             value: energy_count as i32,
                         },
@@ -5298,17 +5296,17 @@ pub(super) fn parse_cost_resource_ast(
                 let prefix = rest.trim_end_matches("{e}").trim();
                 if let Ok((_, n)) = nom_primitives::parse_number.parse(prefix) {
                     return Some(CostResourceImperativeAst::Pay {
-                        cost: PaymentCost::Energy {
+                        cost: AbilityCost::PayEnergy {
                             amount: QuantityExpr::Fixed { value: n as i32 },
                         },
                     });
                 }
             }
         }
-        // "pay {2}{B}" → PaymentCost::Mana (CR 117.1)
+        // "pay {2}{B}" → AbilityCost::Mana (CR 117.1)
         if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Mana { cost: mana_cost },
+                cost: AbilityCost::Mana { cost: mana_cost },
             });
         }
     }
@@ -5414,6 +5412,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
         }
         CostResourceImperativeAst::Pay { cost } => Effect::PayCost {
             cost,
+            scale: None,
             payer: TargetFilter::Controller,
         },
         CostResourceImperativeAst::DamageEffect(effect) => *effect,
@@ -9672,7 +9671,7 @@ mod tests {
         let text = "pay any amount of mana";
         let lower = text.to_lowercase();
         let Some(CostResourceImperativeAst::Pay {
-            cost: PaymentCost::Mana { cost },
+            cost: AbilityCost::Mana { cost },
         }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
         else {
             panic!("expected variable mana PayCost");

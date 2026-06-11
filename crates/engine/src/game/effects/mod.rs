@@ -804,6 +804,38 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
     }
 }
 
+pub(crate) fn prepend_remaining_pay_cost_continuation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    remaining_cost: AbilityCost,
+) {
+    let mut remaining_payment = ability.clone();
+    remaining_payment.controller = payer;
+    remaining_payment.optional = false;
+    remaining_payment.optional_for = None;
+    remaining_payment.effect = Effect::PayCost {
+        cost: remaining_cost,
+        scale: None,
+        payer: TargetFilter::Controller,
+    };
+    remaining_payment.sub_ability = None;
+
+    if let Some(sub) = ability.sub_ability.as_ref() {
+        let mut sub_clone = sub.as_ref().clone();
+        if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+            sub_clone.targets = ability.targets.clone();
+        }
+        apply_parent_chain_context(&mut sub_clone, ability, None);
+        super::ability_utils::append_to_sub_chain(&mut remaining_payment, sub_clone);
+    }
+
+    // CR 118.12 + CR 608.2c: when payment pauses before later sub-costs are
+    // paid, resume by paying those costs before following the original
+    // sub-ability chain.
+    prepend_to_pending_continuation(state, remaining_payment);
+}
+
 pub(crate) fn parent_referent_context_from_events(
     state: &GameState,
     events: &[GameEvent],
@@ -4891,6 +4923,13 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
+        // CR 118.12 + CR 608.2c: a paused PayCost resolver installs the full
+        // remaining-cost continuation itself so later sub-costs stay before
+        // the original rider after the choice resolves.
+        if continuation_installed_by_this_effect && matches!(ability.effect, Effect::PayCost { .. })
+        {
+            return Ok(());
+        }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
         // save the sub-ability as a continuation to execute after the player responds,
         // rather than immediately processing it (which would bypass the UI).
@@ -8433,9 +8472,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Life {
+                cost: AbilityCost::PayLife {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -8503,9 +8543,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -8562,9 +8603,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -8637,9 +8679,10 @@ mod tests {
         // Sanity check: the same flag DOES gate a PayCost parent.
         let pay_cost_parent = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -14928,18 +14971,17 @@ mod tests {
         .condition(AbilityCondition::effect_performed());
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::AbilityCost {
-                    cost: crate::types::ability::AbilityCost::Composite {
-                        costs: vec![
-                            crate::types::ability::AbilityCost::Mana {
-                                cost: ManaCost::generic(1),
-                            },
-                            crate::types::ability::AbilityCost::PayLife {
-                                amount: QuantityExpr::Fixed { value: 1 },
-                            },
-                        ],
-                    },
+                cost: crate::types::ability::AbilityCost::Composite {
+                    costs: vec![
+                        crate::types::ability::AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        crate::types::ability::AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -15017,9 +15059,10 @@ mod tests {
         .condition(AbilityCondition::effect_performed());
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
