@@ -10,9 +10,9 @@ use super::ability::{
     BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    TriggerCondition,
+    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -1046,10 +1046,11 @@ pub struct PendingCounterMoveQueue {
 ///
 /// Shared by every batch flow that delivers many objects to one destination
 /// through the pipeline (mill: library→graveyard/exile/hand; mass bounce:
-/// battlefield→hand/library). Serializes as a plain `{ remaining, destination }`
-/// struct (the type name never appears on the wire), so the rename from the
-/// original mill-only `PendingMillDeliveries` is wire-transparent; the field-name
-/// alias on the holding `GameState` field carries the only readable name change.
+/// battlefield→hand/library; reveal-until library-bottom placement). Serializes
+/// as a plain struct (the type name never appears on the wire), so the rename
+/// from the original mill-only `PendingMillDeliveries` is wire-transparent; the
+/// field-name alias on the holding `GameState` field carries the only readable
+/// name change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
     /// Objects whose per-object zone move has not yet been delivered.
@@ -1074,6 +1075,12 @@ pub struct PendingBatchDeliveries {
     /// Exile-link tracking re-seeded on each rebuilt tail request.
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
+    /// Library placement re-seeded on each rebuilt tail request. `None` means a
+    /// plain library move, which uses the delivery tail's normal library shuffle;
+    /// `Some(Bottom/Top/NthFromTop)` preserves explicit placement batches such as
+    /// reveal-until rest piles across CR 616.1 pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_placement: Option<LibraryPosition>,
     /// Post-batch cleanup that MUST run exactly once after every object in the
     /// batch has been delivered (including across a CR 616.1 pause/resume). The
     /// batch caller stashes it when the batch pauses mid-pile; the drain path

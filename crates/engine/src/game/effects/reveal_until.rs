@@ -2,9 +2,8 @@ use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
-use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -135,9 +134,6 @@ pub fn resolve(
     // Move the matching card to its destination.
     if let Some(hit) = hit_card {
         match kept_destination {
-            Zone::Hand => {
-                zones::move_to_zone(state, hit, Zone::Hand, events);
-            }
             Zone::Battlefield => {
                 // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
                 // through the zone-change pipeline so the full delivery tail runs
@@ -190,18 +186,40 @@ pub fn resolve(
                 }
             }
             Zone::Library => {
-                // CR 701.20a: a kept card sent to the library (2 cards) is a
-                // placement, not a redirect-eligible move — keep the raw mover
-                // (no `Moved` class targets the library; routing through the
-                // pipeline's placement arm would gain nothing).
-                zones::move_to_zone(state, hit, Zone::Library, events);
+                // CR 701.20a + CR 701.24a: a kept card sent back to the library
+                // keeps the historical bottom placement; this is a placement, not
+                // a shuffle. Route through the placement-aware pipeline arm so a
+                // future Library-destination `Moved` replacement can still fire.
+                match zone_pipeline::move_object(
+                    state,
+                    ZoneMoveRequest::effect(hit, Zone::Library, ability.source_id)
+                        .at_library_position(LibraryPosition::Bottom),
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        let mut clear_markers = revealed_misses.clone();
+                        clear_markers.push(hit);
+                        zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::RevealRestPile {
+                                player: revealing_player,
+                                rest_cards: revealed_misses,
+                                rest_destination,
+                                clear_markers,
+                                publish_tracked_set: None,
+                                emit_reveal_until_resolved: Some(ability.source_id),
+                            },
+                        );
+                        return Ok(());
+                    }
+                }
             }
             other => {
-                // CR 614.6: a kept card sent to the graveyard (4 cards) or exile
-                // routes through the pipeline so a `Moved` graveyard→exile
-                // redirect (Rest in Peace / Leyline of the Void) fires on it. On a
-                // CR 616.1 ordering pause, defer the rest-pile move + marker clear
-                // + `EffectResolved` onto a `RevealRestPile` completion (the same
+                // CR 614.6: a kept card sent to another zone routes through the
+                // pipeline so a matching `Moved` redirect can fire. On a CR 616.1
+                // ordering pause, defer the rest-pile move + marker clear +
+                // `EffectResolved` onto a `RevealRestPile` completion (the same
                 // deferral the battlefield branch uses) so the misses don't strand
                 // and `EffectResolved` doesn't land over the parked prompt.
                 match zone_pipeline::move_object(
@@ -311,19 +329,6 @@ fn resolve_revealing_player(
     }
 }
 
-/// CR 701.20a: Move the non-matching ("rest") pile to `rest_destination`. Single
-/// authority for rest-pile placement — used by both the synchronous resolver path
-/// and the `RevealUntilKeptChoice` handler (which, on decline, may add the hit
-/// card to `cards` so it joins the random-order shuffle).
-pub(crate) fn move_rest(
-    state: &mut GameState,
-    cards: &[ObjectId],
-    rest_destination: Zone,
-    events: &mut Vec<GameEvent>,
-) {
-    move_rest_then(state, cards, rest_destination, None, events);
-}
-
 /// CR 701.20a + CR 614.6 + CR 603.10a: Move the rest pile to `rest_destination`,
 /// running `completion` (the reveal-marker clear / tracked-set publish /
 /// `RevealUntil`-resolved cleanup) exactly once after the pile lands — whether
@@ -340,11 +345,11 @@ pub(crate) fn move_rest(
 /// completion is carried with an empty `rest_cards` so it does NOT re-move the
 /// pile (the pile IS this batch — the completion is cleanup-only here).
 ///
-/// A `Zone::Library` rest pile keeps the random-order shuffle-to-bottom
-/// (`shuffle_to_bottom`, CR 701.20a "in a random order") and runs the completion
-/// inline: a library reposition has no `Moved`-redirect class to consult (zero
-/// `destination_zone(Library)` defs in the pool) and cannot pause, so routing it
-/// through the pipeline's placement arm would gain nothing and lose the shuffle.
+/// A `Zone::Library` rest pile randomizes the request order first, then delivers
+/// every card through the placement-aware pipeline arm with
+/// `LibraryPosition::Bottom`. This preserves CR 701.20a's "in a random order"
+/// bottom placement while keeping `Moved(destination = Library)` replacement
+/// consultation centralized in `zone_pipeline::move_object`.
 pub(crate) fn move_rest_then(
     state: &mut GameState,
     cards: &[ObjectId],
@@ -354,14 +359,9 @@ pub(crate) fn move_rest_then(
 ) -> zone_pipeline::BatchMoveResult {
     match rest_destination {
         Zone::Library => {
-            // "on the bottom of your library in a random order"
-            shuffle_to_bottom(state, cards, events);
-            if let Some(completion) = completion {
-                crate::game::engine_resolution_choices::run_batch_completion(
-                    state, completion, events,
-                );
-            }
-            zone_pipeline::BatchMoveResult::Done
+            // CR 701.20a: "on the bottom of your library in a random order."
+            let reqs = library_bottom_requests_in_random_order(state, cards);
+            zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
         }
         dest => {
             // CR 400.7: the rest cards move themselves to `dest`; each anchors
@@ -375,39 +375,85 @@ pub(crate) fn move_rest_then(
     }
 }
 
-/// Put cards on the bottom of the player's library in random order.
-//
-// Phase E tranche 2: `move_to_library_position` is a library-placement SIBLING
-// raw mover that still bypasses `move_object`'s placement arm. W3 already
-// completed that arm's replacement consult and the placement-aware auto-shuffle
-// gate (CR 701.24a: a placement is not a shuffle), so migrating this caller is
-// now a mechanical lift, not the cross-cutting change the pre-W3 note feared.
-// It remains DEFERRED only because no `Moved` replacement in the card pool
-// targets `destination_zone(Library)` (verified: 31 Battlefield / 19 Graveyard /
-// 2 Exile destinations, plus the one synthetic Library def in the W3 test;
-// reproduce with
-//   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
-// — re-run before lifting), so routing through the consult is a guaranteed no-op
-// today. A library→bottom reposition is not "put into a graveyard/exile/hand",
-// so nothing is skipped by staying on the raw sibling. See the tranche-2 caller
-// list at `zone_pipeline::move_object`'s placement arm.
-fn shuffle_to_bottom(state: &mut GameState, cards: &[ObjectId], events: &mut Vec<GameEvent>) {
+/// Build bottom-placement requests in random order.
+fn library_bottom_requests_in_random_order(
+    state: &mut GameState,
+    cards: &[ObjectId],
+) -> Vec<ZoneMoveRequest> {
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);
 
-    for &card_id in &shuffled {
-        zones::move_to_library_position(state, card_id, false, events);
-    }
+    shuffled
+        .into_iter()
+        .map(|card_id| {
+            ZoneMoveRequest::effect(card_id, Zone::Library, card_id)
+                .at_library_position(LibraryPosition::Bottom)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+
+    /// Synthetic board-wide replacement: "If an object would be put into
+    /// `destination`, exile it instead." No pool card currently defines the
+    /// Library variant, but it discriminates raw delivery from the pipeline arm.
+    fn install_destination_to_exile_redirect(
+        state: &mut GameState,
+        destination: Zone,
+        name: &str,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(90001),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            face_down_profile: None,
+                        },
+                    ))
+                    .destination_zone(destination),
+            );
+        source
+    }
+
+    fn install_library_to_exile_redirect(state: &mut GameState) -> ObjectId {
+        install_destination_to_exile_redirect(state, Zone::Library, "Library Exile Redirect")
+    }
+
+    fn install_hand_to_exile_redirect(state: &mut GameState) -> ObjectId {
+        install_destination_to_exile_redirect(state, Zone::Hand, "Hand Exile Redirect")
+    }
 
     fn make_reveal_until_ability(
         controller: PlayerId,
@@ -525,6 +571,132 @@ mod tests {
             _ => None,
         });
         assert_eq!(revealed.unwrap().len(), 3);
+    }
+
+    /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card placed back
+    /// into a library must run the `Moved` replacement consult. The old raw
+    /// `move_to_zone(..., Library)` skipped this synthetic Library→Exile
+    /// redirect and left the card in the library.
+    #[test]
+    fn reveal_until_kept_library_redirected_to_exile() {
+        let mut state = GameState::new_two_player(42);
+        install_library_to_exile_redirect(&mut state);
+
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            Zone::Library,
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        assert!(!state.players[0].library.contains(&creature));
+    }
+
+    /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card put into a
+    /// hand must run the `Moved` replacement consult. The old raw
+    /// `move_to_zone(..., Hand)` skipped this synthetic Hand→Exile redirect.
+    #[test]
+    fn reveal_until_kept_hand_redirected_to_exile() {
+        let mut state = GameState::new_two_player(42);
+        install_hand_to_exile_redirect(&mut state);
+
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            Zone::Hand,
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        assert!(!state.players[0].hand.contains(&creature));
+    }
+
+    /// C5 discriminating test (CR 614.6 + CR 701.20a): a reveal-until rest pile
+    /// returned to the bottom of a library must still run through the placement
+    /// pipeline. The old raw `move_to_library_position(..., bottom)` skipped
+    /// this synthetic Library→Exile redirect.
+    #[test]
+    fn reveal_until_library_rest_redirected_to_exile() {
+        let mut state = GameState::new_two_player(42);
+        install_library_to_exile_redirect(&mut state);
+
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            Zone::Hand,
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[0].hand.contains(&creature));
+        assert_eq!(state.objects[&land].zone, Zone::Exile);
+        assert!(!state.players[0].library.contains(&land));
     }
 
     #[test]
@@ -944,6 +1116,88 @@ mod tests {
                 "declined hit card must not be on the battlefield"
             );
         }
+    }
+
+    /// C5 review fix (CR 701.20a + CR 701.24a): an optional kept card accepted
+    /// to `Zone::Library` must be explicit bottom placement, not a placement-less
+    /// library move. Without `.at_library_position(Bottom)` the delivery tail
+    /// auto-shuffles and emits `ShuffledLibrary`.
+    #[test]
+    fn reveal_until_kept_choice_library_accept_does_not_shuffle() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: Some(Zone::Library),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let wf = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            wf,
+            GameAction::DecideOptionalEffect { accept: true },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "accepted library placement must not degrade into an auto-shuffled library move"
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![creature, land],
+            "accepted hit is placed on bottom, then the one-card rest pile is placed below it"
+        );
     }
 
     /// C6 discriminating test (CR 614.1c + CR 306.5b): accepting a planeswalker

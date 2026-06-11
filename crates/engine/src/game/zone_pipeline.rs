@@ -911,6 +911,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             source_id: None,
             enter_tapped: EtbTapState::Unspecified,
             exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
             completion: None,
         })
 }
@@ -978,11 +979,12 @@ fn deliver_batch(
 
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
 /// can finish it. Captures the batch-uniform request context (CR 400.7
-/// attribution source, CR 614.1c tap-state, exile tracking) from the first tail
-/// request so the rebuilt requests are equivalent to the originals — without
-/// this the re-stash collapsed every tail request to
-/// `ZoneMoveRequest::effect(obj, dest, obj)`, dropping seek's `enter_tapped`
-/// mod and ability-source attribution across the pause boundary.
+/// attribution source, CR 614.1c tap-state, exile tracking, explicit library
+/// placement) from the first tail request so the rebuilt requests are
+/// equivalent to the originals — without this the re-stash collapsed every tail
+/// request to `ZoneMoveRequest::effect(obj, dest, obj)`, dropping seek's
+/// `enter_tapped` mod, ability-source attribution, and reveal-until bottom
+/// placement across the pause boundary.
 ///
 /// Batch-uniform contract (mirrors the single-`destination` design): every
 /// batch caller builds requests with one shared mod/attribution set, so the
@@ -996,12 +998,14 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
     let source_id = first.source().filter(|&s| s != first.object_id);
     let enter_tapped = first.mods.enter_tapped;
     let exile_tracking = first.exile_links.tracking;
+    let library_placement = first.placement.clone();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
         remaining: tail.into_iter().map(|r| r.object_id).collect(),
         destination,
         source_id,
         enter_tapped,
         exile_tracking,
+        library_placement,
         // The post-loop cleanup (if any) is attached by the batch caller after
         // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
         // has no completion to stash.
@@ -1014,7 +1018,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
 /// the next object surfaces its own prompt. Rebuilds each tail request with the
 /// stashed batch-uniform context (attribution source, tap-state, exile
-/// tracking) so the resumed deliveries match the originals.
+/// tracking, library placement) so the resumed deliveries match the originals.
 ///
 /// RE-PAUSE CONTRACT (the explicit guarantee for "a LATER item in the same batch
 /// parks after the first one already parked and was resumed"): everything a batch
@@ -1024,9 +1028,10 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 ///   * the **undelivered tail** (`remaining`) — `deliver_batch` re-stashes the
 ///     still-undelivered suffix on every re-park, so no object is ever dropped;
 ///   * the **batch-uniform request context** (`destination`, `source_id`,
-///     `enter_tapped`, `exile_tracking`) — re-applied to every rebuilt request so
-///     the second-park resume produces requests equivalent to the originals
-///     (e.g. seek's `enter_tapped`, mill's self-anchored attribution);
+///     `enter_tapped`, `exile_tracking`, `library_placement`) — re-applied to
+///     every rebuilt request so the second-park resume produces requests
+///     equivalent to the originals (e.g. seek's `enter_tapped`, mill's
+///     self-anchored attribution, reveal-until's bottom placement);
 ///   * the **post-loop `completion`** — taken out here, then re-attached via
 ///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
 ///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
@@ -1053,6 +1058,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 );
                 req.mods.enter_tapped = pending.enter_tapped;
                 req.exile_links.tracking = pending.exile_tracking;
+                if let Some(position) = pending.library_placement.clone() {
+                    req = req.at_library_position(position);
+                }
                 req
             })
             .collect();
@@ -2354,6 +2362,144 @@ mod w3_library_placement_tests {
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             vec![placed, a, b],
             "the resumed delivery must honor LibraryPosition::Top, not shuffle the position away"
+        );
+    }
+
+    /// F-B (CR 616.1 + CR 701.24a): a batch tail must preserve explicit library
+    /// placement across a pause. The first card parks on an optional
+    /// Library→Exile redirect; the undelivered tail is stashed in
+    /// `PendingBatchDeliveries`. Declining the first redirect drains the tail,
+    /// which parks again on the second card. Both the stashed tail and the second
+    /// parked replacement must carry `LibraryPosition::Bottom`; otherwise the
+    /// second final delivery becomes a plain Library move and auto-shuffles.
+    #[test]
+    fn batch_library_placement_tail_survives_pause() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::ReplacementMode;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![a, b];
+
+        let redirect_source = create_object(
+            &mut state,
+            CardId(90006),
+            PlayerId(0),
+            "Optional Library Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&redirect_source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            face_down_profile: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Library),
+            );
+
+        let first = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Graveyard,
+        );
+        let reqs = vec![
+            ZoneMoveRequest::effect(first, Zone::Library, first)
+                .at_library_position(LibraryPosition::Bottom),
+            ZoneMoveRequest::effect(second, Zone::Library, second)
+                .at_library_position(LibraryPosition::Bottom),
+        ];
+
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(&mut state, reqs, &mut events),
+            BatchMoveResult::NeedsChoice
+        ));
+        assert_eq!(
+            state
+                .pending_batch_deliveries
+                .as_ref()
+                .map(|pending| pending.remaining.clone()),
+            Some(vec![second]),
+            "the first park must stash the undelivered tail"
+        );
+        assert_eq!(
+            state
+                .pending_batch_deliveries
+                .as_ref()
+                .and_then(|pending| pending.library_placement.clone()),
+            Some(LibraryPosition::Bottom),
+            "the stashed tail must preserve bottom placement"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline first optional redirect");
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.library_placement.clone()),
+            Some(LibraryPosition::Bottom),
+            "the second card's re-parked replacement must preserve bottom placement"
+        );
+
+        let second_resume =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline second optional redirect");
+        assert!(
+            !second_resume.events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "explicit bottom placement must not become an auto-shuffled library move"
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![a, b, first, second],
+            "both declined batch moves must land on the bottom in request order"
         );
     }
 
