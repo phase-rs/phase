@@ -413,58 +413,6 @@ pub(crate) fn parse_compound_turn_counter_animation(
     )
 }
 
-/// Parse simple counter condition + animation pattern (no turn restriction):
-/// "As long as ~ has [N or more] [type] counters on [pronoun],
-///  [pronoun]'s a [P/T] [types] and has [keyword]"
-///
-/// Produces `StaticCondition::HasCounters { .. }` with
-/// `ContinuousModification` list for type/subtype/P-T/keyword changes.
-/// Used by Grand Master of Flowers and similar planeswalkers.
-pub(crate) fn parse_simple_counter_animation(lower: &str, text: &str) -> Option<StaticDefinition> {
-    // Strip "as long as " prefix via nom tag
-    let (rest, _) = tag::<_, _, OracleError<'_>>("as long as ")(lower).ok()?;
-
-    // Parse "~ has [N or more] [type] counters on [pronoun], "
-    let (rest, _) = tag::<_, _, OracleError<'_>>("~ has ")(rest).ok()?;
-
-    // Parse the counter count requirement: "one or more" / "N or more" / "a"
-    let (minimum, rest) = parse_counter_minimum(rest)?;
-
-    // Parse "[type] counters on [pronoun], "
-    let rest = rest.trim_start();
-    let counters_pos = rest.find(" counter")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-    let counter_type_text = rest[..counters_pos].trim();
-    // CR 122.1: bare "a counter on it" with no type word → Any; typed "a [type]
-    // counter on it" → OfType(ct). Routes through the shared mapping in
-    // `types::counter::parse_counter_type` to keep the canonical set in one place.
-    let counters = if counter_type_text.is_empty() {
-        CounterMatch::Any
-    } else {
-        CounterMatch::OfType(parse_counter_type(counter_type_text))
-    };
-
-    // Skip past "counters on [pronoun], " to get the modification text
-    let rest = &rest[counters_pos..];
-    let modification_text = strip_after(rest, ", ")?.trim();
-
-    let modifications = parse_animation_modifications(modification_text.trim_end_matches('.'));
-    if modifications.is_empty() {
-        return None;
-    }
-
-    Some(
-        StaticDefinition::continuous()
-            .affected(TargetFilter::SelfRef)
-            .condition(StaticCondition::HasCounters {
-                counters,
-                minimum,
-                maximum: None,
-            })
-            .modifications(modifications)
-            .description(text.to_string()),
-    )
-}
-
 /// Parse "one or more" / "N or more" / "a" into a counter minimum count.
 /// Returns (minimum, remaining text).
 pub(crate) fn parse_counter_minimum(text: &str) -> Option<(u32, &str)> {

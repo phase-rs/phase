@@ -856,12 +856,6 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "As long as ~ has [counters], [pronoun]'s a [P/T] [types] and has [keyword]" ---
-    // Simple counter condition (no turn restriction): HasCounters → animation pattern (Grand Master of Flowers, etc.)
-    if let Some(def) = parse_simple_counter_animation(tp.lower, tp.original) {
-        return Some(def);
-    }
-
     // --- "During your turn, [subject] has/gets ..." ---
     // --- "During turns other than yours, [subject] has/gets ..." ---
     let (turn_rest_tp, turn_condition) =

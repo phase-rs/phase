@@ -5729,8 +5729,8 @@ fn handle_crew_activation(
     } else {
         // Select the lowest power value (granted crew cost should override printed)
         let min_power = crew_keywords.iter().map(|(p, _)| *p).min().unwrap();
-        // Use most permissive cadence: if any keyword is Unlimited (not once_per_turn),
-        // the activation is not restricted.
+        // CR 702.122a: Each Crew N is a separate activated ability. Use most permissive
+        // cadence: Unlimited if any keyword is Unlimited, otherwise OncePerTurn.
         let has_unlimited = crew_keywords.iter().any(|(_, limited)| !*limited);
         let once_per_turn = !has_unlimited;
         (min_power, once_per_turn)
@@ -20752,6 +20752,160 @@ mod crew_tests {
         }
 
         (state, vehicle_id, creature_a, creature_b)
+    }
+
+    #[test]
+    fn test_crew_cost_uses_minimum_of_multiple_keywords() {
+        // Issue #2342: When a vehicle has multiple Crew keywords (printed + granted),
+        // the crew cost should use the minimum power value.
+        let (mut state, vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
+
+        // Add a second Crew { power: 2 } keyword to simulate Kotori's grant
+        {
+            let obj = state.objects.get_mut(&vehicle_id).unwrap();
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 2,
+                once_per_turn: None,
+            });
+        }
+
+        // Verify the vehicle has both Crew keywords
+        let vehicle = state.objects.get(&vehicle_id).unwrap();
+        let crew_keywords: Vec<u32> = vehicle
+            .keywords
+            .iter()
+            .filter_map(|kw| {
+                if let crate::types::keywords::Keyword::Crew { power, .. } = kw {
+                    Some(*power)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            crew_keywords.len(),
+            2,
+            "Vehicle should have 2 Crew keywords"
+        );
+        assert!(crew_keywords.contains(&2), "Vehicle should have Crew 2");
+        assert!(crew_keywords.contains(&3), "Vehicle should have Crew 3");
+
+        // Verify crew activation succeeds with power 2 creature (min cost is 2)
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_b], // 2/2 creature
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "Vehicle should be crewable by power 2 creature when min cost is 2"
+        );
+    }
+
+    #[test]
+    fn test_crew_cadence_uses_most_permissive() {
+        // CR 702.122a: When a vehicle has Crew keywords with different cadences,
+        // the most permissive cadence should be used (Unlimited if any is Unlimited).
+        let (mut state, vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
+
+        // Add a second Crew { power: 2, OncePerTurn } keyword
+        {
+            let obj = state.objects.get_mut(&vehicle_id).unwrap();
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 2,
+                once_per_turn: Some(Box::new(
+                    crate::types::ability::ActivationRestriction::OnlyOnceEachTurn,
+                )),
+            });
+        }
+
+        // Verify crew activation succeeds (Unlimited from printed Crew 3 should be available)
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_b], // 2/2 creature
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "Vehicle should be crewable when one Crew keyword has Unlimited cadence"
+        );
+    }
+
+    #[test]
+    fn test_crew_equal_power_keywords() {
+        // Test edge case: multiple Crew keywords with equal power values
+        let (mut state, vehicle_id, creature_a, creature_b) = setup_crew_scenario();
+
+        // Add a second Crew { power: 3 } keyword (same as printed)
+        {
+            let obj = state.objects.get_mut(&vehicle_id).unwrap();
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 3,
+                once_per_turn: None,
+            });
+        }
+
+        // Enter CrewVehicle state to check the crew_power value
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        match result.waiting_for {
+            WaitingFor::CrewVehicle {
+                crew_power,
+                eligible_creatures,
+                ..
+            } => {
+                assert_eq!(
+                    crew_power, 3,
+                    "Min cost should be 3 when both keywords are Crew 3"
+                );
+                assert!(
+                    eligible_creatures.contains(&creature_a),
+                    "3/3 creature should be eligible"
+                );
+                assert!(
+                    eligible_creatures.contains(&creature_b),
+                    "2/2 creature should be in eligible list"
+                );
+            }
+            other => panic!("Expected CrewVehicle, got {:?}", other),
+        }
+
+        // Attempt to crew with 2/2 creature - should fail due to insufficient power
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_b],
+            },
+        );
+        assert!(
+            result.is_err(),
+            "Crewing with power 2 should fail when cost is 3"
+        );
+
+        // Crew with 3/3 creature - should succeed
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "Crewing with power 3 should succeed when cost is 3"
+        );
     }
 
     #[test]
