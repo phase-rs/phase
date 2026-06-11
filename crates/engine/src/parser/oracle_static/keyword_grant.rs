@@ -892,10 +892,7 @@ pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     // `strip_quoted_segments` removes `and "Whenever..."` from the end of a list
     // like "has first strike, trample, haste, and \"Whenever...\""— the connector
     // `, and` is dropped but the comma after the last bare keyword remains.
-    let text = text
-        .trim()
-        .trim_end_matches(|c: char| c == '.' || c == ',')
-        .trim();
+    let text = text.trim().trim_end_matches(['.', ',']).trim();
     // Split on ", and/or ", ", and ", " and ", or ", " — longest-match-first
     // ordering prevents ", and " from consuming the prefix of ", and/or ".
     let mut parts: Vec<&str> = Vec::new();

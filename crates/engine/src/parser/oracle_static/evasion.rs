@@ -2371,10 +2371,10 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
                 split.effect_text.clone(),
                 Some(split.condition_text.clone()),
             )
-        } else if let Some((before, after)) = text.split_once(" as long as ") {
+        } else if let Some((before, after)) = tp.split_around(" as long as ") {
             (
-                before.trim().to_string(),
-                Some(after.trim().trim_end_matches('.').to_string()),
+                before.original.trim().to_string(),
+                Some(after.original.trim().trim_end_matches('.').to_string()),
             )
         } else {
             (text.to_string(), None)
@@ -2385,25 +2385,22 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
     // Scan for "and FOREIGN_SUBJECT verb KEYWORD" in the effect text.
     // We try each grant verb and check every " and " position.
     for verb in [" have ", " has ", " gains ", " gain "] {
-        let mut search_pos = 0;
-        while search_pos < effect_lower.len() {
-            let and_pos = match effect_lower[search_pos..].find(" and ") {
-                Some(offset) => search_pos + offset,
-                None => break,
-            };
-            let after_and = &effect_lower[and_pos + 5..];
+        let mut search_lower = effect_lower.as_str();
+        let mut search_offset = 0;
+        while let Some((before_and, subject_lower, keyword_lower)) =
+            nom_primitives::scan_preceded(search_lower, |input| {
+                let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(input)?;
+                let (after_subject, subject) = take_until(verb).parse(after_and)?;
+                let (after_verb, _) = tag::<_, _, OracleError<'_>>(verb).parse(after_subject)?;
+                Ok((after_verb, subject))
+            })
+        {
+            let and_pos = search_offset + before_and.len();
 
-            let verb_offset = match after_and.find(verb) {
-                Some(o) => o,
-                None => {
-                    search_pos = and_pos + 5;
-                    continue;
-                }
-            };
-
-            let subject_lower = after_and[..verb_offset].trim();
+            let subject_lower = subject_lower.trim();
             if subject_lower.is_empty() {
-                search_pos = and_pos + 5;
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
                 continue;
             }
 
@@ -2411,20 +2408,23 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
             let companion_filter = match parse_continuous_subject_filter(subject_lower) {
                 Some(f) if !matches!(f, TargetFilter::SelfRef) => f,
                 _ => {
-                    search_pos = and_pos + 5;
+                    search_offset = and_pos + "and ".len();
+                    search_lower = &effect_lower[search_offset..];
                     continue;
                 }
             };
 
             // Keyword text is everything after the verb.
-            let kw_start = and_pos + 5 + verb_offset + verb.len();
+            let kw_start = effect_lower.len() - keyword_lower.len();
             if kw_start >= effect_original.len() {
-                search_pos = and_pos + 5;
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
                 continue;
             }
             let keyword_text = effect_original[kw_start..].trim().trim_end_matches('.');
             if keyword_text.is_empty() {
-                search_pos = and_pos + 5;
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
                 continue;
             }
 
@@ -2434,14 +2434,16 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
                 push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
             }
             if companion_mods.is_empty() {
-                search_pos = and_pos + 5;
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
                 continue;
             }
 
             // Primary text is everything before " and FOREIGN_SUBJECT".
             let primary_text = effect_original[..and_pos].trim_end_matches(',').trim();
             if primary_text.is_empty() {
-                search_pos = and_pos + 5;
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
                 continue;
             }
 
@@ -2454,7 +2456,8 @@ pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<Stat
             };
             let mut primary_defs = parse_static_line_multi(&primary_full);
             if primary_defs.is_empty() {
-                search_pos = and_pos + 5;
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
                 continue;
             }
 
