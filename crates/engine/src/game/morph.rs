@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, FaceDownBody, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -48,8 +48,6 @@ pub fn apply_face_down_creature_characteristics(
     obj: &mut crate::game::game_object::GameObject,
     profile: &crate::types::ability::FaceDownProfile,
 ) {
-    use crate::types::ability::FaceDownBody;
-
     obj.face_down = true;
     obj.name = String::new();
     obj.base_name = String::new();
@@ -58,26 +56,15 @@ pub fn apply_face_down_creature_characteristics(
     // Creature core type with the effect's extra types layered on top. A
     // non-creature body (CR 708.2a sentence 2 — "It's a Forest land.") takes its
     // core types entirely from the effect, with no implicit Creature.
-    let core_types = match profile.body {
-        FaceDownBody::Creature => {
-            let mut core_types = vec![CoreType::Creature];
-            for ct in &profile.extra_core_types {
-                if !core_types.contains(ct) {
-                    core_types.push(*ct);
-                }
-            }
-            core_types
-        }
-        FaceDownBody::Noncreature => {
-            let mut core_types: Vec<CoreType> = Vec::new();
-            for ct in &profile.extra_core_types {
-                if !core_types.contains(ct) {
-                    core_types.push(*ct);
-                }
-            }
-            core_types
-        }
+    let mut core_types = match profile.body {
+        FaceDownBody::Creature => vec![CoreType::Creature],
+        FaceDownBody::Noncreature => Vec::new(),
     };
+    for ct in &profile.extra_core_types {
+        if !core_types.contains(ct) {
+            core_types.push(*ct);
+        }
+    }
     // CR 208.1 + CR 708.2a: only a creature body has power/toughness — it
     // defaults to 2/2 unless the effect specifies otherwise. A non-creature
     // body (a Forest land) has no power/toughness.

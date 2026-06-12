@@ -17,9 +17,9 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownProfile, LibraryPosition,
-    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownBody, FaceDownProfile,
+    LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -3323,8 +3323,6 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
 /// type ("land", "artifact", ...) → `FaceDownBody::Noncreature` with that core
 /// type explicit and no power/toughness (CR 208.1).
 pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile> {
-    use crate::types::ability::FaceDownBody;
-
     // CR 205.1a: "It's a / It is a <characteristics> <core-type>."
     let (mut rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
@@ -3676,6 +3674,8 @@ pub(super) fn parse_followup_continuation_ast(
     ctx: &mut ParseContext,
 ) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
+    let face_down_profile_spec =
+        parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
 
     match previous_effect {
         Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
@@ -4177,12 +4177,9 @@ pub(super) fn parse_followup_continuation_ast(
         // Refines the face-down profile with the specified characteristics. Placed
         // BEFORE the broad Mill/Dig from-among arm so it claims the spec sentence.
         Effect::Mill { .. } | Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
-            if parse_theyre_face_down_profile(&lower)
-                .or_else(|| parse_its_face_down_profile(&lower))
-                .is_some() =>
+            if face_down_profile_spec.is_some() =>
         {
-            let profile = parse_theyre_face_down_profile(&lower)
-                .or_else(|| parse_its_face_down_profile(&lower))?;
+            let profile = face_down_profile_spec.clone()?;
             Some(ContinuationAst::FaceDownProfileSpec { profile })
         }
         // "Put/return up to N [filter] from among them/those cards onto the
@@ -6078,8 +6075,6 @@ mod tests {
     /// "It's a Forest land.") and creature bodies — no card-named hardcode.
     #[test]
     fn parse_its_face_down_profile_forest_land_and_siblings() {
-        use crate::types::ability::FaceDownBody;
-
         // Yedora: "It's a Forest land." — a non-creature Land with the Forest
         // land type, no power/toughness.
         let forest = parse_its_face_down_profile("it's a forest land.").unwrap();
