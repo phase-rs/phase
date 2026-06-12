@@ -38,13 +38,8 @@ fn resolve_library_owner(
     // object in the parent ability chain's targets (the Destroyed permanent
     // for Assassin's Trophy, the exiled spell for Praetor's Grasp variants, …).
     if matches!(target_player, TargetFilter::ParentTargetController) {
-        if let Some(parent_obj_id) = ability.targets.iter().find_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            _ => None,
-        }) {
-            if let Some(obj) = state.objects.get(&parent_obj_id) {
-                return obj.controller;
-            }
+        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
+            return player;
         }
     }
     ability.controller
@@ -1902,6 +1897,62 @@ mod tests {
                 .contains(&PlayerId(0)),
             "caster did NOT search — turn-tracking flag must not record them"
         );
+    }
+
+    /// CR 608.2h + CR 701.23a: if the parent target has already left the object
+    /// map, "its controller may search" must use the target's LKI controller,
+    /// not fall back to the caster.
+    #[test]
+    fn parent_target_controller_search_uses_lki_for_missing_target() {
+        let mut state = GameState::new_two_player(42);
+        let destroyed = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(1),
+            "Destroyed Token".to_string(),
+            Zone::Graveyard,
+        );
+        let lki = state.objects[&destroyed].snapshot_for_mana_spent();
+        state.lki_cache.insert(destroyed, lki);
+        state.objects.remove(&destroyed);
+        let _opp_basic = add_library_land(&mut state, 1, PlayerId(1), "Forest", true);
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    crate::types::ability::FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![TargetRef::Object(destroyed)],
+            ObjectId(9997),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(1),
+                "LKI must identify the missing parent target's controller"
+            ),
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(1)));
+        assert!(!state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
     }
 
     /// CR 701.23a: Praetor's Grasp-shape regression — "search target opponent's

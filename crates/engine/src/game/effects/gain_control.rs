@@ -356,6 +356,91 @@ mod tests {
         )
     }
 
+    /// CR 611.2b + CR 122.1c: Shield Broker — "put a shield counter on target
+    /// noncommander creature you don't control. You gain control of that
+    /// creature for as long as it has a shield counter on it." The control TCE's
+    /// `ForAsLongAs { RecipientHasCounters(shield) }` duration must be evaluated
+    /// against the CONTROLLED creature (the recipient), not the source (Shield
+    /// Broker has no shield counter). Issue #2855: pre-fix the source-scoped
+    /// `HasCounters` check failed immediately, so control never transferred.
+    #[test]
+    fn shield_broker_etb_places_counter_and_transfers_control() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let broker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shield Broker".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&target).unwrap();
+            o.card_types.core_types = vec![CoreType::Creature];
+            o.base_card_types = o.card_types.clone();
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.base_power = Some(2);
+            o.base_toughness = Some(2);
+        }
+
+        let def = parse_trigger_line(
+            "When this creature enters, put a shield counter on target noncommander creature you don't control. You gain control of that creature for as long as it has a shield counter on it.",
+            "Shield Broker",
+        );
+        let ability = def.execute.as_ref().expect("execute ability");
+        let resolved = build_resolved_from_def_with_targets(
+            ability,
+            broker,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).expect("ETB resolves");
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = &state.objects[&target];
+        assert_eq!(
+            obj.counters.get(&CounterType::Shield).copied().unwrap_or(0),
+            1,
+            "a shield counter must be placed on the target"
+        );
+        assert_eq!(
+            obj.controller,
+            PlayerId(0),
+            "control of the target must transfer to Shield Broker's controller while it has a shield counter"
+        );
+
+        state
+            .objects
+            .get_mut(&target)
+            .expect("target remains on battlefield")
+            .counters
+            .remove(&CounterType::Shield);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&target].controller,
+            PlayerId(1),
+            "control must revert when the recipient no longer has a shield counter"
+        );
+    }
+
     /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
     /// controls". The mass `GainControlAll` enumerates the battlefield, binds
     /// `controller: TargetPlayer` to the effect's player target (the player

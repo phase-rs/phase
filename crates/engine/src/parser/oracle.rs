@@ -7763,7 +7763,7 @@ mod tests {
         };
         assert_eq!(filters.len(), 2);
         for (filter, property) in [
-            (&filters[0], FilterProp::Attacking),
+            (&filters[0], FilterProp::Attacking { defender: None }),
             (&filters[1], FilterProp::Blocking),
         ] {
             let TargetFilter::Typed(typed) = filter else {
@@ -11125,6 +11125,43 @@ mod tests {
     }
 
     #[test]
+    fn tainted_pact_parses_until_stop_repeat_and_unless_same_name_gate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityCondition, RepeatContinuation, TargetFilter};
+        let def = parse_effect_chain(
+            "Exile the top card of your library. You may put that card into your hand \
+             unless it has the same name as another card exiled this way. Repeat this process \
+             until you put a card into your hand or you exile two cards with the same name, \
+             whichever comes first.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::UntilStopConditions {
+                stop_on_put_to_hand: true,
+                stop_on_duplicate_exiled_names: true,
+            }),
+            "expected UntilStopConditions repeat_until, got {:?}",
+            def.repeat_until,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected optional put-to-hand sub_ability");
+        assert!(sub.optional, "put-to-hand rider must be optional");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetSharesNameWithOtherExiledThisWay {
+                    target: TargetFilter::ParentTarget,
+                }),
+            }),
+            "unless same-name gate must bind to ParentTarget, got {:?}",
+            sub.condition,
+        );
+    }
+
+    #[test]
     fn proliferate_twice_uses_repeat_for() {
         use crate::parser::oracle_effect::parse_effect_chain;
         let def = parse_effect_chain("proliferate twice", AbilityKind::Spell);
@@ -13259,9 +13296,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Colorless Eldrazi".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Colorless Eldrazi".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -13272,9 +13310,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Artifact".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -13285,18 +13324,74 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Assassin".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Assassin".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
+        );
+    }
+
+    /// CR 106.6: a bare "… or (to) activate an ability" suffix (no type qualifier)
+    /// permits casting the named spell type OR activating *any* ability — the
+    /// generic `AbilityActivationScope::Any` form (Sage of the Unknowable, Purple
+    /// Dragon Punks, Guidelight Optimizer).
+    #[test]
+    fn mana_spend_restriction_bare_activation_or_is_any_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an artifact spell or activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    /// CR 106.6: Sage of the Unknowable — "Spend this mana only to cast a
+    /// colorless spell or to activate an ability." The "or **to** activate an
+    /// ability" suffix is the generic any-ability form.
+    #[test]
+    fn mana_spend_restriction_colorless_or_to_activate_any_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast a colorless spell or to activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Colorless".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
         );
     }
 
     #[test]
-    fn mana_spend_restriction_bare_activation_or_is_unsupported() {
+    fn mana_spend_restriction_any_activation_tail_preserves_inner_or_spell_type() {
         let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
-            "spend this mana only to cast an artifact spell or activate an ability",
+            "spend this mana only to cast an instant or sorcery spell or activate an ability",
         );
-        assert_eq!(result, None);
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Instant or Sorcery".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_any_activation_tail_accepts_to_activate_plural() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast artifact spells or to activate abilities",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
     }
 
     #[test]
@@ -13306,9 +13401,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Ally".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Ally".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 

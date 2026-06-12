@@ -1038,6 +1038,10 @@ fn static_has_target_gated_cost_modification(def: &StaticDefinition) -> bool {
             spell_filter: Some(filter),
             ..
         } => target_filter_has_targets_property(filter),
+        StaticMode::ImposeAdditionalCost {
+            spell_filter: Some(filter),
+            ..
+        } => target_filter_has_targets_property(filter),
         _ => false,
     }
 }

@@ -2939,9 +2939,11 @@ mod tests {
         assert_eq!(
             qty,
             QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::AttackingController])
-                ),
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                ])),
             },
         );
     }

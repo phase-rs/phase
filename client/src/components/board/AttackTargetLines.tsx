@@ -5,6 +5,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import {
   arcPath,
@@ -232,7 +233,7 @@ function useHudAttackIndicators(
     function targetSelector(target: AttackerArrowTarget): string {
       return target.kind === "player"
         ? `[data-player-hud="${target.playerId}"]`
-        : `[data-object-id="${target.objectId}"]`;
+        : objectAnchorSelector(target.objectId);
     }
 
     function poll() {

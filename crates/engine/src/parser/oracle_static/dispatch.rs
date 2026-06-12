@@ -80,6 +80,18 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 601.2f + CR 118.8: Static-imposed additional non-mana costs must dispatch
+    // before generic cost-mod and restriction arms that share "cost"/"spells" tokens.
+    // Use word-boundary scans only on phrases that start a token; numeric life amounts
+    // sit immediately before "life" without a leading space ("3 life to cast").
+    if nom_primitives::scan_contains(tp.lower, "cost an additional")
+        && nom_primitives::scan_contains(tp.lower, "life to cast")
+    {
+        if let Some(def) = try_parse_impose_additional_cost(&text, &lower) {
+            return Some(def);
+        }
+    }
+
     if let Some(mode) = parse_max_combat_creatures_static(&lower) {
         return Some(StaticDefinition::new(mode).description(text.to_string()));
     }
@@ -516,9 +528,27 @@ pub(crate) fn parse_static_line_inner(
     // and leave "attacking you <predicate>" as input to `parse_continuous_gets_has`,
     // which expects a verb ("gets"/"has"/"is"), not a subject continuation.
     if let Some(rest) = nom_tag_tp(&tp, "all creatures attacking you ") {
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-        );
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                }]),
+            );
+        if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
+            return Some(def);
+        }
+    }
+
+    // CR 508.1b: "Creatures attacking your opponents have double strike." —
+    // attackers whose defending player is an opponent of the source's controller
+    // (Blast-Furnace Hellkite).
+    if let Some(rest) = nom_tag_tp(&tp, "creatures attacking your opponents ") {
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                }]),
+            );
         if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
             return Some(def);
         }

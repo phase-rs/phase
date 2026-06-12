@@ -15402,7 +15402,9 @@ mod tests {
                     panic!("filter should be typed, got {filter:?}");
                 };
                 assert!(tf.properties.contains(&FilterProp::Another));
-                assert!(tf.properties.contains(&FilterProp::Attacking));
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::Attacking { defender: None }));
                 let shares = tf.properties.iter().find(|p| {
                     matches!(
                         p,
@@ -21307,6 +21309,39 @@ mod tests {
             Some(TargetFilter::LastCreated),
             "the 'It gains haste' grant must apply to the created token, not SelfRef"
         );
+    }
+
+    /// CR 603.2 + CR 608.2c + CR 115.10a: Kederekt Parasite — "Whenever an opponent draws a
+    /// card, ... you may have this creature deal 1 damage to that player." The
+    /// optional "you may have ~ deal N damage to that player" causative frame
+    /// must bind "that player" to the triggering (drawing) player, not to a
+    /// chooseable `Player` target. The damaged player is fixed by the trigger
+    /// event (CR 603.2), so no target selection is offered (issue #2893).
+    #[test]
+    fn opponent_draws_may_have_deal_damage_to_that_player_binds_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent draws a card, if you control a red permanent, you may have this creature deal 1 damage to that player.",
+            "Kederekt Parasite",
+        );
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        // The "you may" wording makes the resolution optional (yes/no), not a
+        // forced effect.
+        assert!(
+            execute.optional,
+            "execute.optional must be true ('you may')"
+        );
+        match execute.effect.as_ref() {
+            Effect::DealDamage { target, amount, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "'that player' must bind to the drawing opponent (TriggeringPlayer), \
+                     not a chooseable Player target",
+                );
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected DealDamage to TriggeringPlayer, got {other:?}"),
+        }
     }
 
     /// CR 613.1 + CR 503.1a: The Rack — "the chosen player's upkeep" must

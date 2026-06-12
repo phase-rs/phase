@@ -65,9 +65,9 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
     }
     // CR 506.4 + CR 613.1f: a creature removed from combat stops being attacking,
     // so a granted "while attacking" keyword (deathtouch/lifelink via
-    // FilterProp::Attacking, Layer 6) must be revoked immediately. Mark dirty only
+    // FilterProp::Attacking { defender: None }, Layer 6) must be revoked immediately. Mark dirty only
     // when an attacker was actually removed — removing a pure blocker doesn't
-    // affect FilterProp::Attacking statics.
+    // affect FilterProp::Attacking { defender: None } statics.
     if attacker_removed {
         state.layers_dirty.mark_full();
     }
@@ -226,12 +226,12 @@ mod tests {
         );
         assert!(
             state.layers_dirty.is_dirty(),
-            "removing an attacker must mark layers dirty to revoke FilterProp::Attacking grants"
+            "removing an attacker must mark layers dirty to revoke FilterProp::Attacking {{ defender: None }} grants"
         );
     }
 
     /// CR 506.4: removing a creature that is NOT an attacker (e.g. a pure blocker)
-    /// does not change which creatures are attacking, so FilterProp::Attacking
+    /// does not change which creatures are attacking, so FilterProp::Attacking { defender: None }
     /// statics are unaffected and layers must NOT be spuriously dirtied. Locks the
     /// `attacker_removed` gate.
     #[test]
@@ -281,7 +281,7 @@ mod tests {
         );
         assert!(
             !state.layers_dirty.is_dirty(),
-            "removing a pure blocker must not dirty layers — no FilterProp::Attacking change"
+            "removing a pure blocker must not dirty layers - no FilterProp::Attacking {{ defender: None }} change"
         );
     }
 

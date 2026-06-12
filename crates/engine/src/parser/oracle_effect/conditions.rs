@@ -611,6 +611,30 @@ pub(super) fn strip_unless_entered_suffix(
     (None, text.to_string())
 }
 
+/// CR 607.2a + CR 608.2c: "unless it has the same name as another card exiled
+/// this way" on an optional put-to-hand rider (Tainted Pact).
+pub(super) fn strip_unless_shares_name_with_other_exiled_this_way(
+    text: &str,
+) -> Option<(String, AbilityCondition)> {
+    const SUFFIX: &str = " unless it has the same name as another card exiled this way";
+    let lower = text.to_lowercase();
+    let (_, before) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(SUFFIX),
+        tag::<_, _, OracleError<'_>>(SUFFIX),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let trimmed = text[..before.len()].trim_end().to_string();
+    Some((
+        trimmed,
+        AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::TargetSharesNameWithOtherExiledThisWay {
+                target: TargetFilter::ParentTarget,
+            }),
+        },
+    ))
+}
+
 fn try_nom_condition_as_unless(
     condition_text: &str,
     ctx: &mut ParseContext,
@@ -2570,6 +2594,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
@@ -3010,7 +3035,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
                 value(false, tag("it was ")),
             )),
             alt((
-                value(FilterProp::Attacking, tag("attacking")),
+                value(FilterProp::Attacking { defender: None }, tag("attacking")),
                 value(FilterProp::Blocking, tag("blocking")),
             )),
         );

@@ -1778,9 +1778,10 @@ fn powerstone_ability() -> AbilityDefinition {
             produced: ManaProduction::Colorless {
                 count: QuantityExpr::Fixed { value: 1 },
             },
-            restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Artifact".to_string(),
-            )],
+            restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            }],
             grants: vec![],
             expiry: None,
             target: None,

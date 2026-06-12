@@ -14,7 +14,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
-use crate::types::mana::{ManaColor, ManaRestriction, ManaSpellGrant};
+use crate::types::mana::{AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant};
 use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -1237,27 +1237,50 @@ fn parse_activation_source_quality(input: &str) -> OracleResult<'_, String> {
     Ok((rest, normalize_restricted_source_phrase(phrase.trim())))
 }
 
-fn split_restricted_spell_and_activation(rest: &str) -> (&str, Option<String>) {
-    all_consuming(alt((
+fn parse_activation_tail_after_or(input: &str) -> OracleResult<'_, Option<String>> {
+    let (input, _) = opt(tag("to ")).parse(input)?;
+    let (input, _) = tag("activate ").parse(input)?;
+    let (input, _) = alt((tag("an ability"), tag("abilities"))).parse(input)?;
+    let (input, source_quality) =
+        opt(preceded(tag(" of "), parse_activation_source_quality)).parse(input)?;
+    Ok((input, source_quality))
+}
+
+/// The ability-activation tail of a "cast [X] spell …" spend restriction.
+enum ActivationTail {
+    /// No "or activate …" tail — a plain spell-type restriction.
+    None,
+    /// "… or (to) activate an ability" with no type qualifier — any ability.
+    Any,
+    /// "… or activate abilities of [source quality]" — abilities of that type.
+    OfType(String),
+}
+
+fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
+    // Anchor on the activation suffix prefix instead of the first " or " so
+    // spell type unions ("instant or sorcery") stay inside the spell half.
+    let activation_tail = all_consuming(alt((
         separated_pair(
-            take_until::<_, _, OracleError<'_>>(" or activate abilities of "),
-            tag(" or activate abilities of "),
-            parse_activation_source_quality,
+            take_until::<_, _, OracleError<'_>>(" or to activate "),
+            tag(" or "),
+            parse_activation_tail_after_or,
         ),
         separated_pair(
-            take_until::<_, _, OracleError<'_>>(" or activate an ability of "),
-            tag(" or activate an ability of "),
-            parse_activation_source_quality,
-        ),
-        separated_pair(
-            take_until::<_, _, OracleError<'_>>(" or to activate an ability of "),
-            tag(" or to activate an ability of "),
-            parse_activation_source_quality,
+            take_until::<_, _, OracleError<'_>>(" or activate "),
+            tag(" or "),
+            parse_activation_tail_after_or,
         ),
     )))
     .parse(rest)
-    .map(|(_, (spell_part, source_quality))| (spell_part.trim(), Some(source_quality)))
-    .unwrap_or((rest.trim(), None))
+    .map(|(_, (spell_part, source_quality))| (spell_part.trim(), source_quality));
+    if let Ok((spell_part, source_quality)) = activation_tail {
+        return (
+            spell_part,
+            source_quality.map_or(ActivationTail::Any, ActivationTail::OfType),
+        );
+    }
+
+    (rest.trim(), ActivationTail::None)
 }
 
 /// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
@@ -1379,9 +1402,10 @@ pub(crate) fn parse_mana_spend_restriction(
         return Some((ManaSpendRestriction::SpellFromZone(zone), grants));
     }
 
-    // CR 106.6: Check for "or activate abilities of [type]" suffix.
-    // If present, emit a combined SpellTypeOrAbilityActivation restriction.
-    let (spell_part, activation_source_quality) = split_restricted_spell_and_activation(rest);
+    // CR 106.6: Check for an "or activate …" ability-activation suffix. If
+    // present, emit a combined SpellTypeOrAbilityActivation restriction whose
+    // `ability` scope is `OfSpellType` (typed suffix) or `Any` (generic suffix).
+    let (spell_part, activation_tail) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
         return Some((ManaSpendRestriction::ChosenCreatureType, grants));
@@ -1395,13 +1419,29 @@ pub(crate) fn parse_mana_spend_restriction(
 
     let type_phrase = parse_restricted_spell_type_phrase(spell_part)?;
 
-    match activation_source_quality {
-        Some(source_quality) if source_quality.eq_ignore_ascii_case(&type_phrase) => Some((
-            ManaSpendRestriction::SpellTypeOrAbilityActivation(type_phrase),
+    match activation_tail {
+        ActivationTail::OfType(source_quality)
+            if source_quality.eq_ignore_ascii_case(&type_phrase) =>
+        {
+            Some((
+                ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: type_phrase,
+                    ability: AbilityActivationScope::OfSpellType,
+                },
+                grants,
+            ))
+        }
+        // A typed activation suffix whose source quality differs from the spell
+        // type is an unsupported compound — gap it rather than guess.
+        ActivationTail::OfType(_) => None,
+        ActivationTail::Any => Some((
+            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: type_phrase,
+                ability: AbilityActivationScope::Any,
+            },
             grants,
         )),
-        Some(_) => None,
-        None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
+        ActivationTail::None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
     }
 }
 

@@ -272,9 +272,13 @@ pub(crate) fn resolve_restrictions(
                 .and_then(|obj| obj.chosen_creature_type())
                 .map(|ct| ManaRestriction::OnlyForCreatureType(ct.to_string())),
             // CR 106.6: Combined spell type + ability activation restriction.
-            ManaSpendRestriction::SpellTypeOrAbilityActivation(t) => {
-                Some(ManaRestriction::OnlyForTypeSpellsOrAbilities(t.clone()))
-            }
+            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type,
+                ability,
+            } => Some(ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: spell_type.clone(),
+                ability: *ability,
+            }),
             ManaSpendRestriction::ActivateOnly => Some(ManaRestriction::OnlyForActivation),
             ManaSpendRestriction::XCostOnly => Some(ManaRestriction::OnlyForXCosts),
             ManaSpendRestriction::SpellWithKeywordKind(kind) => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { ObjectId } from "../adapter/types.ts";
+import { objectAnchorSelector } from "../utils/objectAnchorSelector.ts";
 
 export interface LinePosition {
   from: { x: number; y: number };
@@ -33,7 +34,7 @@ export function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, L
         for (const id of [fromId, toId]) {
           const key = String(id);
           if (currentRects.has(key)) continue;
-          const el = document.querySelector(`[data-object-id="${id}"]`);
+          const el = document.querySelector(objectAnchorSelector(id));
           if (!el) continue;
           const rect = el.getBoundingClientRect();
           currentRects.set(key, rect);

@@ -39,6 +39,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 701.43d: linked "when you do" trigger fires when the source creature
         // is exerted as it attacks.
         TriggerMode::Exerted => match_exerted,
+        // CR 607.2h + CR 702.154b: linked Enlist trigger fires when the
+        // source creature enlisted another creature as it attacked.
+        TriggerMode::Enlisted => match_enlisted,
         TriggerMode::Discover => match_discover,
         TriggerMode::Adapt => match_adapt,
         TriggerMode::Foretell => match_foretell,
@@ -158,7 +161,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
-        | TriggerMode::Enlisted
         | TriggerMode::PlanarDice
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
@@ -406,6 +408,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::Discover, match_discover);
     r.insert(TriggerMode::Adapt, match_adapt);
     r.insert(TriggerMode::Foretell, match_foretell);
+    r.insert(TriggerMode::Enlisted, match_enlisted);
     // CR 702.26b: Phasing triggers fire when a permanent phases out.
     r.insert(TriggerMode::PhaseOut, match_phase_out);
 
@@ -436,7 +439,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         // TriggerMode::Saddled — moved to real matcher below
         // TriggerMode::Evolve — moved to real matcher below
         // TriggerMode::Evolved — moved to real matcher below
-        TriggerMode::Enlisted,
+        // TriggerMode::Enlisted — moved to real matcher below
         // TriggerMode::DungeonCompleted — moved to real matcher above
         // TriggerMode::RoomEntered — moved to real matcher above
         TriggerMode::PlanarDice,
@@ -769,6 +772,7 @@ fn count_matching_trigger_event_subjects(
     match event {
         GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
         GameEvent::CreatureExerted { object_id } => count_one(*object_id),
+        GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
         GameEvent::ZoneChanged { object_id, .. }
         | GameEvent::Discarded { object_id, .. }
         | GameEvent::SpellCast { object_id, .. }
@@ -1330,6 +1334,17 @@ pub(super) fn match_exerted(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::CreatureExerted { object_id } if *object_id == source_id)
+}
+
+/// CR 607.2h + CR 702.154b: Enlist's linked "when you do" trigger fires only
+/// for the enlist cost paid for that same attacking source.
+pub(super) fn match_enlisted(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::CreatureEnlisted { attacker, .. } if *attacker == source_id)
 }
 
 pub(super) fn matching_attack_events(

@@ -641,13 +641,24 @@ fn collect_matching_triggers(
                 } else {
                     None
                 };
+                let mut pending_ability = ability.clone();
+                if let GameEvent::CreatureEnlisted {
+                    tapped_snapshot, ..
+                } = &trigger_event
+                {
+                    // CR 608.2h + CR 113.7a: Enlist's linked trigger resolves
+                    // after the tapped creature may have left the battlefield, so
+                    // seed the cost-time LKI snapshot for "that creature's power."
+                    pending_ability
+                        .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
+                }
                 pending.push(MatchedTrigger {
                     trig_idx,
                     pending: PendingTrigger {
                         source_id: obj_id,
                         controller,
                         condition: trig_def.condition.clone(),
-                        ability: ability.clone(),
+                        ability: pending_ability,
                         timestamp,
                         target_constraints: trig_def
                             .execute
@@ -5228,6 +5239,20 @@ fn build_triggered_ability(
 /// Note: TriggeringSpellController, TriggeringSpellOwner, TriggeringPlayer,
 /// and TriggeringSource auto-resolve from event context at resolution time
 /// (via `state.current_trigger_event`), so they do not require player selection.
+/// CR 115.1 + CR 702.26a: True when a `PhaseOut`/`PhaseIn` filter denotes a
+/// population to expand at resolution rather than a single declared target.
+fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ScopedPlayer => true,
+        TargetFilter::Typed(tf) => {
+            tf.type_filters == [TypeFilter::Permanent]
+                && tf.controller.is_some()
+                && tf.properties.is_empty()
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
     // CR 701.21a: Sacrifice does not target — the controller chooses permanents
     // at resolution time via EffectZoneChoice. Returning a filter here would
@@ -5332,6 +5357,17 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // class).
     if effect.target_filter() == Some(&TargetFilter::Any)
         && !matches!(effect, Effect::DealDamage { .. })
+    {
+        return None;
+    }
+    // CR 115.1 + CR 702.26a: Mass phase-out / phase-in ("all permanents you
+    // control phase out" — Teferi's Protection; "you phase out") expands its
+    // population filter at resolution. Only "target [type] phase(s) out/in"
+    // requires a stack-time target slot.
+    if matches!(effect, Effect::PhaseOut { .. } | Effect::PhaseIn { .. })
+        && effect
+            .target_filter()
+            .is_some_and(phase_out_or_in_filter_is_mass)
     {
         return None;
     }
@@ -11103,6 +11139,48 @@ pub mod tests {
         );
     }
 
+    /// CR 115.1 + CR 702.26a: Teferi's Protection mass phase-out must not
+    /// surface a target slot — permanents are expanded at resolution.
+    #[test]
+    fn extract_target_skips_mass_phase_out_permanents_you_control() {
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "mass PhaseOut{{Permanent, You}} must not generate a target slot (issue #2907)"
+        );
+    }
+
+    /// CR 115.1: "Target creature phases out" still requires a target slot.
+    #[test]
+    fn extract_target_keeps_targeted_phase_out_creature() {
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "targeted PhaseOut{{Creature}} must generate a target slot"
+        );
+    }
+
+    /// CR 115.1: "Any number of target nonland permanents you control phase
+    /// out" uses declared targets even though the filter is controller-scoped.
+    #[test]
+    fn extract_target_keeps_targeted_phase_out_nonland_permanents_you_control() {
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                    .controller(ControllerRef::You),
+            ),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "targeted PhaseOut{{Nonland Permanent, You}} must generate a target slot"
+        );
+    }
+
     /// CR 115.1 / CR 115.1d: `GenericEffect { target: Some(Typed(Creature)) }` is a
     /// targeted continuous modification ("target creature gains haste") — must
     /// still generate a slot.
@@ -15182,7 +15260,7 @@ pub mod tests {
                     target: TargetFilter::Typed(
                         TypedFilter::new(TypeFilter::Subtype("Goblin".to_string()))
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::Attacking]),
+                            .properties(vec![FilterProp::Attacking { defender: None }]),
                     ),
                 },
             ))

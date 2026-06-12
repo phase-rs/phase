@@ -114,6 +114,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
         | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
 
         GameEvent::DamageDealt { is_combat, .. } => {
@@ -329,6 +330,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::CreatureExerted { object_id } => {
             vec![card_seg(state, *object_id), text(" is exerted")]
         }
+
+        GameEvent::CreatureEnlisted {
+            attacker, tapped, ..
+        } => vec![
+            card_seg(state, *attacker),
+            text(" enlists "),
+            card_seg(state, *tapped),
+        ],
 
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]

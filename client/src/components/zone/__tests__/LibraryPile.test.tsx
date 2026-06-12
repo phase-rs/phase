@@ -335,11 +335,23 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     render(<LibraryPile playerId={0} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
 
-    fireEvent.touchStart(button, {
-      touches: [{ clientX: 10, clientY: 10 }],
+    fireEvent.pointerDown(button, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
     });
     vi.advanceTimersByTime(500);
-    fireEvent.touchEnd(button);
+    fireEvent.pointerUp(button, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
     fireEvent.click(button);
 
     expect(dispatchMock).not.toHaveBeenCalled();

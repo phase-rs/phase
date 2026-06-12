@@ -12,6 +12,7 @@ import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -110,6 +111,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
 export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride, coveredIds }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
+  const canHover = useCanHover();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -234,20 +236,20 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
-  // On mobile, skip mouse events — synthesized mouseenter from touch fires
+  // On touch-only devices, skip mouse events — synthesized mouseenter from touch fires
   // inspectObject every touch, opening the full-screen MobilePreviewOverlay
   // and blocking combat interactions (blocker/attacker selection).
   const handleMouseEnter = useCallback(() => {
-    if (isMobile) return;
+    if (isMobile || !canHover) return;
     hoverObject(objectId); inspectObject(objectId);
-  }, [isMobile, hoverObject, inspectObject, objectId]);
+  }, [canHover, hoverObject, inspectObject, isMobile, objectId]);
 
   const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (isMobile) return;
+    if (isMobile || !canHover) return;
     const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
     hoverObject(nextObjectId);
     inspectObject(nextObjectId);
-  }, [isMobile, hoverObject, inspectObject]);
+  }, [canHover, hoverObject, inspectObject, isMobile]);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
@@ -468,6 +470,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   };
 
   const useArtCrop = battlefieldCardDisplay === "art_crop";
+  const highlightRadiusClass = useArtCrop ? "rounded-[6px]" : "rounded-lg";
 
   return (
     <motion.div
@@ -664,7 +667,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         <div
           aria-hidden
           data-card-affordance-highlight="true"
-          className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${glowClass}`}
+          className={`pointer-events-none absolute inset-0 z-30 ${highlightRadiusClass} ${glowClass}`}
         />
       )}
 

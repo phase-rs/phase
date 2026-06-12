@@ -2587,7 +2587,7 @@ fn parse_for_each_combat_creature_controlled(
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     let (rest, combat_property) = alt((
-        value(FilterProp::Attacking, tag("attacking ")),
+        value(FilterProp::Attacking { defender: None }, tag("attacking ")),
         value(FilterProp::Blocking, tag("blocking ")),
     ))
     .parse(input)?;
@@ -2614,7 +2614,7 @@ fn parse_for_each_combat_creature_controlled(
 /// "for each attacking/blocking creature other than ~".
 fn parse_for_each_combat_creature_other_than_source(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, combat_property) = alt((
-        value(FilterProp::Attacking, tag("attacking ")),
+        value(FilterProp::Attacking { defender: None }, tag("attacking ")),
         value(FilterProp::Blocking, tag("blocking ")),
     ))
     .parse(input)?;
@@ -2904,7 +2904,9 @@ fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, Qua
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![tf],
                 controller: None,
-                properties: vec![FilterProp::AttackingController],
+                properties: vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                }],
             }),
         },
     ))
@@ -3495,7 +3497,7 @@ mod tests {
         };
         assert_eq!(type_filters, vec![TypeFilter::Creature]);
         assert!(properties.contains(&FilterProp::Another));
-        assert!(properties.contains(&FilterProp::Attacking));
+        assert!(properties.contains(&FilterProp::Attacking { defender: None }));
         assert!(properties.iter().any(|p| matches!(
             p,
             FilterProp::SharesQuality {
@@ -5188,7 +5190,7 @@ mod tests {
                     ..
                 })
             } if type_filters == vec![TypeFilter::Creature]
-                && properties == vec![FilterProp::Attacking, FilterProp::Another]
+                && properties == vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
         ));
     }
 
@@ -5205,7 +5207,7 @@ mod tests {
                     ..
                 })
             } if type_filters == vec![TypeFilter::Creature]
-                && properties == vec![FilterProp::Attacking]
+                && properties == vec![FilterProp::Attacking { defender: None }]
         ));
     }
 

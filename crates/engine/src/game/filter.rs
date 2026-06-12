@@ -142,7 +142,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ColorCount { .. }
         | FilterProp::Token
         | FilterProp::NonToken
-        | FilterProp::Attacking
+        | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
@@ -196,7 +196,6 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
-        | FilterProp::AttackingController
         | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
@@ -335,7 +334,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ColorCount { .. }
         | FilterProp::Token
         | FilterProp::NonToken
-        | FilterProp::Attacking
+        | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
@@ -389,7 +388,6 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
-        | FilterProp::AttackingController
         | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
@@ -2444,8 +2442,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // {LITERAL} this game" relies on this against the game-scope history.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
-        FilterProp::Attacking
-        | FilterProp::AttackingController
+        FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
@@ -2704,6 +2701,28 @@ fn matches_last_chosen_land_or_nonland_kind(
     }
 }
 
+fn attacking_defender_matches(
+    state: &GameState,
+    source: &SourceContext<'_>,
+    defending_player: PlayerId,
+    defender: Option<&ControllerRef>,
+) -> bool {
+    match defender {
+        None => true,
+        Some(ControllerRef::Opponent) => source.controller.is_some_and(|controller| {
+            super::players::is_opponent(state, controller, defending_player)
+        }),
+        Some(controller) => controller_ref_player(
+            state,
+            source.id,
+            source.controller,
+            source.ability,
+            controller,
+        )
+        .is_some_and(|player| player == defending_player),
+    }
+}
+
 /// Check if an object satisfies a single FilterProp.
 fn matches_filter_prop(
     prop: &FilterProp,
@@ -2717,18 +2736,17 @@ fn matches_filter_prop(
         FilterProp::Token => obj.is_token,
         // CR 111.1: Nontoken identity of the matched object or event-time snapshot.
         FilterProp::NonToken => !obj.is_token,
-        FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
-            combat
-                .attackers
-                .iter()
-                .any(|attacker| attacker.object_id == object_id)
-        }),
-        // CR 508.1b: Matches attacking creatures whose defending player equals the
-        // filter's source controller ("creatures attacking you").
-        FilterProp::AttackingController => state.combat.as_ref().is_some_and(|combat| {
+        // CR 508.1b: Attacking creatures may be scoped by defending player
+        // relation ("attacking", "attacking you", "attacking your opponents").
+        FilterProp::Attacking { defender } => state.combat.as_ref().is_some_and(|combat| {
             combat.attackers.iter().any(|a| {
                 a.object_id == object_id
-                    && source.controller.is_some_and(|sc| a.defending_player == sc)
+                    && attacking_defender_matches(
+                        state,
+                        source,
+                        a.defending_player,
+                        defender.as_ref(),
+                    )
             })
         }),
         // CR 509.1a: A creature is blocking if it was declared as a blocker.
@@ -3527,10 +3545,16 @@ fn zone_change_record_matches_property(
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.
         // Live combat maps are cleared when an object leaves combat (CR 506.4),
         // so look-back filters must read the zone-change snapshot.
-        FilterProp::Attacking => record.combat_status.attacking,
-        FilterProp::AttackingController => {
+        FilterProp::Attacking { defender } => {
             record.combat_status.attacking
-                && source.controller == record.combat_status.defending_player
+                && match defender {
+                    None => true,
+                    Some(defender) => record.combat_status.defending_player.is_some_and(
+                        |defending_player| {
+                            attacking_defender_matches(state, source, defending_player, Some(defender))
+                        },
+                    ),
+                }
         }
         FilterProp::Blocking => record.combat_status.blocking,
         // `ZoneChangeCombatStatus` snapshots role, not the blocker-to-attacker
@@ -5485,8 +5509,9 @@ mod tests {
             ..CombatState::default()
         });
 
-        let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Attacking]));
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+        );
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, bystander, &filter, attacker));
@@ -8252,7 +8277,7 @@ mod tests {
         };
 
         assert!(zone_change_record_matches_property(
-            &FilterProp::Attacking,
+            &FilterProp::Attacking { defender: None },
             &state,
             &attacking_record,
             &source_ctx,
@@ -8264,7 +8289,9 @@ mod tests {
             &source_ctx,
         ));
         assert!(zone_change_record_matches_property(
-            &FilterProp::AttackingController,
+            &FilterProp::Attacking {
+                defender: Some(ControllerRef::You)
+            },
             &state,
             &attacking_record,
             &source_ctx,

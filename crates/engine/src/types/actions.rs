@@ -156,6 +156,12 @@ pub enum GameAction {
     ChooseExert {
         exert: bool,
     },
+    /// CR 508.1g + CR 702.154a: The active player's decision whether to pay
+    /// the pending Enlist optional attack cost by tapping one eligible
+    /// creature. `None` declines because Enlist allows tapping "up to one."
+    ChooseEnlist {
+        target: Option<ObjectId>,
+    },
     /// CR 701.30b: The clashing player's choice of which opponent to clash with,
     /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
     /// one of that prompt's `candidates`.
@@ -1236,6 +1242,7 @@ impl GameAction {
             GameAction::ChoosePair { partner } => *partner,
             GameAction::ChooseDamageSource { source } => Some(*source),
             GameAction::ChooseUntap { object_id, .. } => Some(*object_id),
+            GameAction::ChooseEnlist { target } => *target,
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),
             GameAction::ChooseLegend { keep } => Some(*keep),
             GameAction::CastPreparedCopy { source } => Some(*source),

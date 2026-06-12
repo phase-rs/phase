@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { ObjectId, PlayerId } from "../adapter/types.ts";
+import { objectAnchorSelector } from "../utils/objectAnchorSelector.ts";
 
 export interface Pos {
   x: number;
@@ -47,7 +48,7 @@ export function arcPath(from: Pos, to: Pos): string {
 function targetSelector(target: AttackerArrowTarget): string {
   return target.kind === "player"
     ? `[data-player-hud="${target.playerId}"]`
-    : `[data-object-id="${target.objectId}"]`;
+    : objectAnchorSelector(target.objectId);
 }
 
 function targetKey(target: AttackerArrowTarget): string {
@@ -90,7 +91,7 @@ export function useAttackerArrowPositions(
         const fromKey = `o:${a.attackerId}`;
         const toKey = targetKey(a.target);
         if (!current.has(fromKey)) {
-          const el = document.querySelector(`[data-object-id="${a.attackerId}"]`);
+          const el = document.querySelector(objectAnchorSelector(a.attackerId));
           if (el) current.set(fromKey, el.getBoundingClientRect());
         }
         if (!current.has(toKey)) {

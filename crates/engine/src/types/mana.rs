@@ -280,6 +280,21 @@ pub enum PaymentContext<'a> {
     Effect,
 }
 
+/// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
+/// activate …" restriction. Parameterizes *which* ability activations the mana
+/// may also be spent on, so the spell-type + ability-activation OR restriction
+/// needs a single variant rather than a sibling per ability scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbilityActivationScope {
+    /// "… or activate abilities of [the spell's type]" — only abilities on a
+    /// permanent whose type matches the restriction's `spell_type`
+    /// (e.g. "cast creature spells or activate abilities of creatures").
+    OfSpellType,
+    /// "… or to activate an ability" — any ability activation is permitted
+    /// (e.g. Sage of the Unknowable, "a colorless spell or to activate an ability").
+    Any,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaRestriction {
     /// "Spend this mana only to cast spells."
@@ -290,9 +305,14 @@ pub enum ManaRestriction {
     /// The `String` is the chosen creature type (e.g., "Elf").
     OnlyForCreatureType(String),
     /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
-    /// Allows spending for spells of the type (checked via `allows_spell`) OR for ability
-    /// activations on permanents of the type (checked via `allows_activation`).
-    OnlyForTypeSpellsOrAbilities(String),
+    /// Allows spending for spells of `spell_type` (checked via `allows_spell`) OR for ability
+    /// activations whose scope is described by `ability` (checked via `allows_activation`):
+    /// `OfSpellType` restricts to abilities of permanents of `spell_type`; `Any` permits any
+    /// ability activation ("… or to activate an ability").
+    OnlyForTypeSpellsOrAbilities {
+        spell_type: String,
+        ability: AbilityActivationScope,
+    },
     /// "Spend this mana only to activate abilities."
     /// Cannot be used for casting spells — activation-only.
     OnlyForActivation,
@@ -373,9 +393,9 @@ impl ManaRestriction {
             // and subtypes (Elemental, Goblin, ...). Flamebraider's "Elemental" names
             // a creature subtype; "Artifact" would name a core type. The check treats
             // both buckets uniformly because Oracle text doesn't distinguish the two.
-            ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => {
+            ManaRestriction::OnlyForTypeSpellsOrAbilities { spell_type, .. } => {
                 Self::matches_required_quality(
-                    required_type,
+                    spell_type,
                     meta.types.iter().chain(meta.subtypes.iter()),
                 )
             }
@@ -428,14 +448,20 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellWithManaValue { .. }
             | ManaRestriction::OnlyForSpellWithColorCount { .. }
             | ManaRestriction::OnlyForSpellFromZone(_) => false,
-            // CR 106.6: The ability-activation half of the OR. "Elemental sources"
-            // includes objects with creature type Elemental — consult subtypes too.
-            ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => {
-                Self::matches_required_quality(
-                    required_type,
+            // CR 106.6: The ability-activation half of the OR. `OfSpellType`
+            // restricts to abilities of permanents whose type matches the
+            // restriction ("Elemental sources" includes creature type Elemental —
+            // consult subtypes too); `Any` permits any ability activation.
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type,
+                ability,
+            } => match ability {
+                AbilityActivationScope::OfSpellType => Self::matches_required_quality(
+                    spell_type,
                     source_types.iter().chain(source_subtypes.iter()),
-                )
-            }
+                ),
+                AbilityActivationScope::Any => true,
+            },
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
             // X-cost mana can be used for abilities with {X} in their cost.
@@ -1602,7 +1628,10 @@ mod tests {
     // must match against both core types and subtypes on `SpellMeta`.
     #[test]
     fn restriction_type_or_ability_allows_subtype_creature_spell() {
-        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities("Elemental".to_string());
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Elemental".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let elemental_creature = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elemental".to_string()],
@@ -1645,8 +1674,10 @@ mod tests {
     // Both the colorless quality and Eldrazi subtype must be true.
     #[test]
     fn restriction_type_or_ability_requires_all_compound_spell_qualities() {
-        let restriction =
-            ManaRestriction::OnlyForTypeSpellsOrAbilities("Colorless Eldrazi".to_string());
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Colorless Eldrazi".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let colorless_eldrazi = SpellMeta {
             types: vec!["Creature".to_string(), "Colorless".to_string()],
             subtypes: vec!["Eldrazi".to_string()],
@@ -1680,7 +1711,10 @@ mod tests {
     // source whose subtypes include "Elemental"; activation must be permitted.
     #[test]
     fn restriction_type_or_ability_allows_subtype_activation() {
-        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities("Elemental".to_string());
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Elemental".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let elemental_creature_types = vec!["Creature".to_string()];
         let elemental_subtypes = vec!["Elemental".to_string(), "Shaman".to_string()];
         assert!(restriction.allows_activation(&elemental_creature_types, &elemental_subtypes));
@@ -1689,16 +1723,55 @@ mod tests {
         assert!(!restriction.allows_activation(&elemental_creature_types, &goblin_subtypes));
 
         // Core-type match also satisfies the check (e.g., "Artifact sources").
-        let artifact_restriction =
-            ManaRestriction::OnlyForTypeSpellsOrAbilities("Artifact".to_string());
+        let artifact_restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Artifact".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let artifact_types = vec!["Artifact".to_string()];
         let no_subtypes: Vec<String> = vec![];
         assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes));
     }
 
+    // CR 106.6: `AbilityActivationScope::Any` — "cast a colorless spell or to
+    // activate an ability" (Sage of the Unknowable). The spell half stays
+    // type-gated, while the ability half permits *any* activation regardless of
+    // the source's types.
+    #[test]
+    fn restriction_type_or_any_ability_gates_spell_but_allows_any_activation() {
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Colorless".to_string(),
+            ability: AbilityActivationScope::Any,
+        };
+        let colorless_spell = SpellMeta {
+            types: vec!["Artifact".to_string(), "Colorless".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let colored_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        // Spell half: still gated to the named type.
+        assert!(restriction.allows_spell(&colorless_spell));
+        assert!(!restriction.allows_spell(&colored_spell));
+        // Ability half: any activation is permitted, regardless of source type.
+        assert!(restriction.allows_activation(&["Goblin".to_string()], &[]));
+        assert!(restriction.allows_activation(&["Land".to_string()], &["Forest".to_string()]));
+    }
+
     #[test]
     fn restriction_artifact_spell_or_activation_uses_both_payment_contexts() {
-        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities("Artifact".to_string());
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Artifact".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let artifact_spell = SpellMeta {
             types: vec!["Artifact".to_string()],
             subtypes: vec![],
@@ -1741,8 +1814,10 @@ mod tests {
     // same way " or " does, rather than requiring one spell to carry both types.
     #[test]
     fn restriction_instant_and_sorcery_allows_either_type() {
-        let restriction =
-            ManaRestriction::OnlyForTypeSpellsOrAbilities("Instant and Sorcery".to_string());
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Instant and Sorcery".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let instant = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
@@ -1777,8 +1852,10 @@ mod tests {
     // predicate as spell casting.
     #[test]
     fn restriction_type_or_ability_requires_all_compound_activation_qualities() {
-        let restriction =
-            ManaRestriction::OnlyForTypeSpellsOrAbilities("Colorless Eldrazi".to_string());
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: "Colorless Eldrazi".to_string(),
+            ability: AbilityActivationScope::OfSpellType,
+        };
         let colorless_creature_types = vec!["Creature".to_string(), "Colorless".to_string()];
         let eldrazi_subtypes = vec!["Eldrazi".to_string()];
         assert!(restriction.allows_activation(&colorless_creature_types, &eldrazi_subtypes));
