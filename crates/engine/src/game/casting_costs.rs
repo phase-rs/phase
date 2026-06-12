@@ -4660,16 +4660,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     } else {
         None
     };
-    // CR 601.2a + CR 611.2a: Capture the source of a single-use `PlayFromExile`
-    // grant authorizing this cast BEFORE the object leaves exile for the stack.
+    // CR 601.2a + CR 603.7 + CR 611.2a: Capture the tracked-set group of a
+    // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
+    // leaves exile for the stack.
     // Consumed after the move (see below) so the grant's one allowed cast is
     // spent and every sibling exiled card becomes uncastable (Chandra, Hope's
     // Beacon +1).
-    let single_use_exile_play_source = if source_zone == Zone::Exile {
+    let single_use_exile_play_group = if source_zone == Zone::Exile {
         state
             .objects
             .get(&object_id)
-            .and_then(|obj| super::casting::single_use_play_from_exile_source(state, obj, player))
+            .and_then(|obj| super::casting::single_use_play_from_exile_group(state, obj, player))
     } else {
         None
     };
@@ -4863,13 +4864,13 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     {
         state.exile_play_permissions_used.insert(source);
     }
-    // CR 601.2a + CR 611.2a: A single-use exile-cast grant is spent on this
-    // cast. Record the source and strip the now-void `PlayFromExile` grant from
+    // CR 601.2a + CR 603.7 + CR 611.2a: A single-use exile-cast grant is spent
+    // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
     // every other card still in the tracked set so the remaining exiled cards
     // can no longer be cast (Chandra, Hope's Beacon +1: "an instant or sorcery
     // spell" — one total).
-    if let Some(source) = single_use_exile_play_source {
-        super::casting::consume_single_use_play_from_exile(state, source);
+    if let Some(group) = single_use_exile_play_group {
+        super::casting::consume_single_use_play_from_exile(state, group);
     }
 
     let obj = state

@@ -208,29 +208,28 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             | CastingPermission::Foretold { .. } => true,
         });
     }
-    // CR 601.2a + CR 611.2a: Garbage-collect single-use consumed markers whose
-    // grant has expired. After the prune above, drop any consumed-source entry
-    // that no longer has a live single-use `PlayFromExile` grant in exile, so a
-    // later re-grant from a same-id source is not pre-consumed and the set does
-    // not grow without bound.
-    let live_single_use_sources: std::collections::HashSet<crate::types::identifiers::ObjectId> =
+    // CR 601.2a + CR 603.7 + CR 611.2a: Garbage-collect single-use consumed
+    // markers whose grant has expired. After the prune above, drop any consumed
+    // tracked-set entry that no longer has a live single-use `PlayFromExile`
+    // grant in exile, so the set does not grow without bound.
+    let live_single_use_groups: std::collections::HashSet<crate::types::identifiers::TrackedSetId> =
         state
             .objects
-            .iter()
-            .flat_map(|(obj_id, obj)| {
-                obj.casting_permissions.iter().filter_map(move |p| match p {
+            .values()
+            .flat_map(|obj| {
+                obj.casting_permissions.iter().filter_map(|p| match p {
                     CastingPermission::PlayFromExile {
-                        source_id,
+                        single_use_group,
                         single_use: true,
                         ..
-                    } => Some(source_id.unwrap_or(*obj_id)),
+                    } => *single_use_group,
                     _ => None,
                 })
             })
             .collect();
     state
         .exile_play_single_use_consumed
-        .retain(|source| live_single_use_sources.contains(source));
+        .retain(|group| live_single_use_groups.contains(group));
 }
 
 /// CR 514.2: Remove durational casting permissions granted to
@@ -9174,6 +9173,7 @@ mod tests {
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             });
 
@@ -9200,6 +9200,7 @@ mod tests {
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
+            single_use_group: None,
             single_use: false,
         });
         perms.push(CastingPermission::PlayFromExile {
@@ -9210,6 +9211,7 @@ mod tests {
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
+            single_use_group: None,
             single_use: false,
         });
         perms.push(CastingPermission::AdventureCreature);
@@ -9248,6 +9250,7 @@ mod tests {
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             });
 
@@ -9335,6 +9338,7 @@ mod tests {
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             });
         state
@@ -9352,6 +9356,7 @@ mod tests {
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             });
 
@@ -9386,6 +9391,7 @@ mod tests {
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             });
 

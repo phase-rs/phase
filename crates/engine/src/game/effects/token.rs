@@ -1927,6 +1927,7 @@ fn junk_ability() -> AbilityDefinition {
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             },
             target: TargetFilter::TrackedSet {

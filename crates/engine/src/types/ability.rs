@@ -14,7 +14,7 @@ use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint,
 };
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
@@ -1640,15 +1640,21 @@ pub enum CastingPermission {
         /// object qualities, not source/controller-relative.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card_filter: Option<TargetFilter>,
+        /// CR 603.7 + CR 611.2a: Identity of the resolving tracked set for a
+        /// `single_use` grant. This is deliberately separate from `source_id`:
+        /// the same permanent can create overlapping "one spell from among
+        /// those cards" effects, and each tracked set gets its own cast slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        single_use_group: Option<TrackedSetId>,
         /// CR 601.2a + CR 611.2a: When `true`, this grant authorizes at most ONE
         /// cast across its entire duration window — the "you may cast *a/one*
         /// [type] spell from among those exiled cards" class (Chandra, Hope's
         /// Beacon +1). Distinct from `frequency: OncePerTurn`, which resets each
         /// turn (CR 514.2): a single-use grant spanning two turns still permits
         /// only one cast total. On the finalizing cast, the shared grant is
-        /// stripped from every exiled object carrying the same `source_id`
-        /// (`casting_costs::consume_single_use_play_from_exile`), making the
-        /// remaining cards uncastable. `false` (default) preserves the unlimited
+        /// stripped from every exiled object carrying the same `single_use_group`
+        /// (`casting::consume_single_use_play_from_exile`), making the remaining
+        /// cards uncastable. `false` (default) preserves the unlimited
         /// within-window impulse-draw behavior.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         single_use: bool,

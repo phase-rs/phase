@@ -14,7 +14,7 @@ use crate::types::game_state::{
     CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast, SneakPlacement,
     SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaSpellGrant, PaymentContext, SpellMeta,
@@ -1438,6 +1438,7 @@ pub(crate) fn play_from_exile_permission_source(
             source_id,
             exiled_by_ability_controller,
             card_filter,
+            single_use_group,
             single_use,
             ..
         } if *granted_to == player => {
@@ -1453,11 +1454,14 @@ pub(crate) fn play_from_exile_permission_source(
                 }
             }
             // CR 601.2a + CR 611.2a: A single-use grant authorizes at most one
-            // cast across its whole duration window. Once that cast finalizes,
-            // the source is recorded in `exile_play_single_use_consumed` and the
-            // grant no longer applies to any card in the tracked set.
-            if *single_use && state.exile_play_single_use_consumed.contains(&source) {
-                return None;
+            // cast across its whole duration window. The tracked set, not the
+            // source permanent, is the grant identity because one source may
+            // create overlapping "those exiled cards" effects.
+            if *single_use {
+                let group = single_use_group.as_ref()?;
+                if state.exile_play_single_use_consumed.contains(group) {
+                    return None;
+                }
             }
             if *frequency == CastFrequency::OncePerTurn {
                 if *exiled_by_ability_controller == Some(player) {
@@ -1476,27 +1480,27 @@ pub(crate) fn play_from_exile_permission_source(
     })
 }
 
-/// CR 601.2a + CR 611.2a: Returns the granting source of a `single_use`
+/// CR 601.2a + CR 603.7 + CR 611.2a: Returns the tracked-set identity of a `single_use`
 /// [`CastingPermission::PlayFromExile`] on `obj` that authorizes `player` and
 /// has not yet been consumed, if any. Used at cast finalization to record that
 /// the grant's one allowed cast has been spent. Mirrors the grantee/filter
 /// gating of [`play_from_exile_permission_source`] so a card that fails the
 /// type filter never spends the slot.
-pub(crate) fn single_use_play_from_exile_source(
+pub(crate) fn single_use_play_from_exile_group(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
-) -> Option<ObjectId> {
+) -> Option<TrackedSetId> {
     obj.casting_permissions.iter().find_map(|p| match p {
         crate::types::ability::CastingPermission::PlayFromExile {
             granted_to,
-            source_id,
             card_filter,
+            single_use_group,
             single_use: true,
             ..
         } if *granted_to == player => {
-            let source = source_id.unwrap_or(obj.id);
-            if state.exile_play_single_use_consumed.contains(&source) {
+            let group = single_use_group.as_ref()?;
+            if state.exile_play_single_use_consumed.contains(group) {
                 return None;
             }
             if let Some(filter) = card_filter {
@@ -1505,30 +1509,30 @@ pub(crate) fn single_use_play_from_exile_source(
                     return None;
                 }
             }
-            Some(source)
+            Some(*group)
         }
         _ => None,
     })
 }
 
 /// CR 601.2a + CR 611.2a: Spend a single-use `PlayFromExile` grant. Records the
-/// `source` in `exile_play_single_use_consumed` and strips the now-void
-/// `PlayFromExile { source_id == source, single_use: true }` permission from
-/// every object still in exile, so the remaining cards in the tracked set are
-/// no longer castable (Chandra, Hope's Beacon +1 grants one cast total across
-/// its until-end-of-next-turn window).
-pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, source: ObjectId) {
-    state.exile_play_single_use_consumed.insert(source);
+/// `group` in `exile_play_single_use_consumed` and strips the now-void
+/// `PlayFromExile { single_use_group == group, single_use: true }` permission
+/// from every object still in exile, so the remaining cards in that tracked set
+/// are no longer castable (Chandra, Hope's Beacon +1 grants one cast total
+/// across its until-end-of-next-turn window).
+pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, group: TrackedSetId) {
+    state.exile_play_single_use_consumed.insert(group);
     for obj_id in state.exile.clone() {
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             obj.casting_permissions.retain(|p| {
                 !matches!(
                     p,
                     crate::types::ability::CastingPermission::PlayFromExile {
-                        source_id,
+                        single_use_group,
                         single_use: true,
                         ..
-                    } if source_id.unwrap_or(obj_id) == source
+                    } if *single_use_group == Some(group)
                 )
             });
         }
@@ -12671,6 +12675,7 @@ mod tests {
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
+                    single_use_group: None,
                     single_use: false,
                 });
         }
@@ -23398,6 +23403,7 @@ mod tests {
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                     card_filter: None,
+                    single_use_group: None,
                     single_use: false,
                 });
         }
@@ -23496,6 +23502,7 @@ mod tests {
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                     card_filter: None,
+                    single_use_group: None,
                     single_use: false,
                 });
         }
@@ -23664,6 +23671,7 @@ mod tests {
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
+                    single_use_group: None,
                     single_use: false,
                 });
         }
@@ -23990,6 +23998,7 @@ mod tests {
                     exiled_by_ability_controller: Some(PlayerId(0)),
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
+                    single_use_group: None,
                     single_use: false,
                 });
         }
@@ -24059,6 +24068,7 @@ mod tests {
                     exiled_by_ability_controller: Some(PlayerId(0)),
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
+                    single_use_group: None,
                     single_use: false,
                 });
         }
@@ -41216,6 +41226,7 @@ mod tests {
         name: &str,
         core_type: CoreType,
         source_id: ObjectId,
+        single_use_group: TrackedSetId,
     ) -> ObjectId {
         let exiled = add_exiled_card(state, player, name);
         let obj = state.objects.get_mut(&exiled).unwrap();
@@ -41238,6 +41249,7 @@ mod tests {
                     controller: None,
                     properties: vec![],
                 })),
+                single_use_group: Some(single_use_group),
                 single_use: true,
             });
         exiled
@@ -41252,10 +41264,22 @@ mod tests {
         let mut state = setup_game_at_main_phase();
         let player = PlayerId(0);
         let source = ObjectId(9999);
-        let instant =
-            add_impulse_exiled_card(&mut state, player, "Bolt", CoreType::Instant, source);
-        let creature =
-            add_impulse_exiled_card(&mut state, player, "Bear", CoreType::Creature, source);
+        let instant = add_impulse_exiled_card(
+            &mut state,
+            player,
+            "Bolt",
+            CoreType::Instant,
+            source,
+            TrackedSetId(1),
+        );
+        let creature = add_impulse_exiled_card(
+            &mut state,
+            player,
+            "Bear",
+            CoreType::Creature,
+            source,
+            TrackedSetId(1),
+        );
 
         let available = spell_objects_available_to_cast(&state, player);
         assert!(
@@ -41271,15 +41295,23 @@ mod tests {
     /// CR 601.2a + CR 611.2a: A single-use grant authorizes one cast total
     /// across its window. After the slot is consumed, NO card in the tracked
     /// set (including other matching-type cards) remains castable, and the
-    /// grant is stripped from every exiled object sharing the source.
+    /// grant is stripped from every exiled object sharing the tracked-set group.
     #[test]
     fn play_from_exile_single_use_blocks_second_cast() {
         let mut state = setup_game_at_main_phase();
         let player = PlayerId(0);
         let source = ObjectId(9999);
-        let first = add_impulse_exiled_card(&mut state, player, "Bolt", CoreType::Instant, source);
-        let second =
-            add_impulse_exiled_card(&mut state, player, "Shock", CoreType::Instant, source);
+        let group = TrackedSetId(1);
+        let first =
+            add_impulse_exiled_card(&mut state, player, "Bolt", CoreType::Instant, source, group);
+        let second = add_impulse_exiled_card(
+            &mut state,
+            player,
+            "Shock",
+            CoreType::Instant,
+            source,
+            group,
+        );
 
         let before = spell_objects_available_to_cast(&state, player);
         assert!(
@@ -41287,17 +41319,17 @@ mod tests {
             "both instants castable before consumption"
         );
 
-        // The single-use source for the first card is discovered, then spent.
-        let resolved_source = {
+        // The single-use group for the first card is discovered, then spent.
+        let resolved_group = {
             let obj = state.objects.get(&first).unwrap();
-            single_use_play_from_exile_source(&state, obj, player)
+            single_use_play_from_exile_group(&state, obj, player)
         };
         assert_eq!(
-            resolved_source,
-            Some(source),
-            "single-use source must resolve for a matching exiled card"
+            resolved_group,
+            Some(group),
+            "single-use group must resolve for a matching exiled card"
         );
-        consume_single_use_play_from_exile(&mut state, source);
+        consume_single_use_play_from_exile(&mut state, group);
 
         let after = spell_objects_available_to_cast(&state, player);
         assert!(
@@ -41307,6 +41339,61 @@ mod tests {
         assert!(
             state.objects[&second].casting_permissions.is_empty(),
             "the void single-use grant must be stripped from sibling exiled cards"
+        );
+    }
+
+    /// CR 601.2a + CR 603.7 + CR 611.2a: Single-use grants are scoped to the
+    /// tracked set created by one resolving effect, not just the source object.
+    /// A source can create overlapping "from among those exiled cards" effects
+    /// before the first one expires, and spending one set must not spend the
+    /// other.
+    #[test]
+    fn play_from_exile_single_use_tracks_overlapping_sets_from_same_source() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source = ObjectId(9999);
+        let first_set = TrackedSetId(1);
+        let second_set = TrackedSetId(2);
+        let first = add_impulse_exiled_card(
+            &mut state,
+            player,
+            "First Bolt",
+            CoreType::Instant,
+            source,
+            first_set,
+        );
+        let first_sibling = add_impulse_exiled_card(
+            &mut state,
+            player,
+            "First Shock",
+            CoreType::Instant,
+            source,
+            first_set,
+        );
+        let second = add_impulse_exiled_card(
+            &mut state,
+            player,
+            "Second Bolt",
+            CoreType::Instant,
+            source,
+            second_set,
+        );
+
+        let resolved_group = {
+            let obj = state.objects.get(&first).unwrap();
+            single_use_play_from_exile_group(&state, obj, player)
+        };
+        assert_eq!(resolved_group, Some(first_set));
+        consume_single_use_play_from_exile(&mut state, first_set);
+
+        let after = spell_objects_available_to_cast(&state, player);
+        assert!(
+            !after.contains(&first) && !after.contains(&first_sibling),
+            "the consumed tracked set must no longer be castable"
+        );
+        assert!(
+            after.contains(&second),
+            "an overlapping grant from the same source but a different tracked set must remain castable"
         );
     }
 
@@ -41527,6 +41614,7 @@ mod tests {
                 exiled_by_ability_controller: Some(player),
                 mana_spend_permission: None,
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             });
 

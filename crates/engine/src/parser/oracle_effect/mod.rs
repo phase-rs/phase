@@ -6021,6 +6021,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
+            single_use_group: None,
             single_use: false,
         },
         target: TargetFilter::TrackedSet {
@@ -6137,6 +6138,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             exiled_by_ability_controller: None,
             mana_spend_permission,
             card_filter,
+            single_use_group: None,
             single_use,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
@@ -6198,6 +6200,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             exiled_by_ability_controller: None,
             mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
             card_filter: None,
+            single_use_group: None,
             single_use: false,
         },
         target: TargetFilter::Any,
@@ -6327,6 +6330,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
+            single_use_group: None,
             single_use: false,
         },
         // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
@@ -6365,6 +6369,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
+            single_use_group: None,
             single_use: false,
         },
         target: tracked_set_filter(),
@@ -6396,6 +6401,7 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
                 exiled_by_ability_controller: None,
                 mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                 card_filter: None,
+                single_use_group: None,
                 single_use: false,
             },
             target: TargetFilter::TrackedSet {

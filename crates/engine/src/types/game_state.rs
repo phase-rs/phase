@@ -5612,17 +5612,17 @@ pub struct GameState {
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
     pub exile_play_permissions_used: HashSet<ObjectId>,
-    /// CR 601.2a + CR 611.2a: Tracks `single_use` `PlayFromExile` grants whose
-    /// one allowed cast has already been spent. Keyed by the granting source's
-    /// ObjectId (Chandra, Hope's Beacon +1: "you may cast *a/an* [type] spell
-    /// from among those exiled cards"). Distinct from
+    /// CR 601.2a + CR 603.7 + CR 611.2a: Tracks `single_use` `PlayFromExile`
+    /// grants whose one allowed cast has already been spent. Keyed by the
+    /// tracked set published by the effect (Chandra, Hope's Beacon +1: "you may
+    /// cast *a/an* [type] spell from among those exiled cards"). Distinct from
     /// `exile_play_permissions_used`: that set is per-turn and cleared at every
     /// turn boundary, whereas a single-use grant authorizes ONE cast across its
     /// entire (possibly multi-turn) duration window, so this set is NOT cleared
     /// per turn — it is pruned only when the grant itself expires
-    /// (`layers::prune_*_casting_permissions` clears stale source entries).
+    /// (`layers::prune_*_casting_permissions` clears stale tracked-set entries).
     #[serde(default)]
-    pub exile_play_single_use_consumed: HashSet<ObjectId>,
+    pub exile_play_single_use_consumed: HashSet<TrackedSetId>,
     /// CR 601.2a + CR 113.6b: Tracks `OncePerTurn` `StaticMode::ExileCastPermission`
     /// sources that have already had a spell cast through them this turn
     /// (Maralen, Fae Ascendant — "Once each turn, you may cast …"). Keyed by
