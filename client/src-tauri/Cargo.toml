@@ -17,7 +17,3 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"
-# time 0.3.47+ adds a blanket `From<T> for ModifierValue::Type` impl that
-# conflicts with tauri-utils' `From<T> for Value` / `From<P> for AssetKey`.
-# Keep this pin and client/src-tauri/Cargo.lock in sync — do not strip.
-time = "=0.3.46"
