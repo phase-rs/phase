@@ -3194,7 +3194,7 @@ fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
     ));
 }
 
-/// CR 601.2f + CR 702.33e: "The first kicked spell you cast each turn costs {1}
+/// CR 601.2f + CR 702.33d: "The first kicked spell you cast each turn costs {1}
 /// less to cast." (Vine Gecko). The "kicked" qualifier — whether the spell's
 /// kicker additional cost was paid — is not a representable spell-cost filter,
 /// so the parser must DECLINE the cost static rather than emit a filterless,
@@ -3206,21 +3206,10 @@ fn static_first_kicked_spell_does_not_emit_broad_reducer() {
     let parsed =
         parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.");
 
-    if let Some(def) = parsed {
-        if let StaticMode::ModifyCost {
-            mode: CostModifyMode::Reduce,
-            ref spell_filter,
-            ..
-        } = def.mode
-        {
-            assert!(
-                spell_filter.is_some() || def.condition.is_some(),
-                "kicked-spell cost reducer must not be a filterless, conditionless broad \
-                 reducer; got spell_filter={spell_filter:?}, condition={:?}",
-                def.condition
-            );
-        }
-    }
+    assert!(
+        parsed.is_none(),
+        "kicked-spell cost reducer must be declined until paid-kicker state is representable; got {parsed:?}"
+    );
 }
 
 #[test]
