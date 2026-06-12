@@ -14,7 +14,7 @@ use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint,
 };
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
@@ -1627,6 +1627,37 @@ pub enum CastingPermission {
         /// card rather than creating a global player permission.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mana_spend_permission: Option<ManaSpendPermission>,
+        /// CR 601.2a: Optional card-type/quality filter restricting WHICH of the
+        /// granted-permission objects may actually be cast. `None` (the common
+        /// case — Light Up the Stage, Reckless Impulse) authorizes any exiled
+        /// card. `Some(filter)` scopes the grant to cards matching `filter`
+        /// (Chandra, Hope's Beacon +1: "you may cast an instant or sorcery spell
+        /// from among those exiled cards"). Enforced in
+        /// `casting::play_from_exile_permission_source`, so the same gate covers
+        /// both the cast path and the land-play path; a card that fails the
+        /// filter is invisible to `has_exile_cast_permission`. Evaluated with a
+        /// `FilterContext::neutral()` because card-type filters are printed
+        /// object qualities, not source/controller-relative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card_filter: Option<TargetFilter>,
+        /// CR 603.7 + CR 611.2a: Identity of the resolving tracked set for a
+        /// `single_use` grant. This is deliberately separate from `source_id`:
+        /// the same permanent can create overlapping "one spell from among
+        /// those cards" effects, and each tracked set gets its own cast slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        single_use_group: Option<TrackedSetId>,
+        /// CR 601.2a + CR 611.2a: When `true`, this grant authorizes at most ONE
+        /// cast across its entire duration window — the "you may cast *a/one*
+        /// [type] spell from among those exiled cards" class (Chandra, Hope's
+        /// Beacon +1). Distinct from `frequency: OncePerTurn`, which resets each
+        /// turn (CR 514.2): a single-use grant spanning two turns still permits
+        /// only one cast total. On the finalizing cast, the shared grant is
+        /// stripped from every exiled object carrying the same `single_use_group`
+        /// (`casting::consume_single_use_play_from_exile`), making the remaining
+        /// cards uncastable. `false` (default) preserves the unlimited
+        /// within-window impulse-draw behavior.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single_use: bool,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -3626,13 +3657,18 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 508.1a: Number of creatures the controller attacked with this turn,
-    /// optionally narrowed by `filter` (e.g. "attacked with a token / a
-    /// commander / a Wolf"). `None` counts all attacking creatures (the bare
-    /// "if you attacked this turn" / "for each creature you attacked with this
-    /// turn" patterns); `Some(filter)` counts only this-turn attackers matching
-    /// `filter`, resolved against `state.creatures_attacked_this_turn`.
+    /// CR 508.1a: Number of creatures that attacked this turn, scoped by
+    /// `scope` and optionally narrowed by `filter` (e.g. "attacked with a
+    /// token / a commander / a Wolf"). `Controller` + `filter: None` counts all
+    /// attacking creatures the controller declared (the bare "if you attacked
+    /// this turn" / "for each creature you attacked with this turn" patterns);
+    /// `All` + `filter: Some(creature)` counts every creature that attacked this
+    /// turn by any player ("if no creatures attacked this turn"). Filtered forms
+    /// resolve against `state.attacker_declarations_this_turn` declaration-time
+    /// snapshots so attackers that left the battlefield still count.
     AttackedThisTurn {
+        #[serde(default = "default_count_scope_controller")]
+        scope: CountScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },

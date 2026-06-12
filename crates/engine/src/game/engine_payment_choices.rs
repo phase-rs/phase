@@ -2,7 +2,7 @@ use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, TapStateChange, TargetFilter, TargetRef,
+    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -901,6 +901,57 @@ pub(super) fn handle_unless_payment(
                     events,
                     &trigger_event,
                 )?);
+            } else if let Some(sub) = pending_effect
+                .sub_ability
+                .as_ref()
+                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+            {
+                // CR 700.2d + CR 608.2c: A `SequentialSibling` sub is the NEXT
+                // INDEPENDENT instruction "in the order written" — not a
+                // continuation of the unless-modified instruction, so it must
+                // resolve regardless of whether the unless cost was paid. The
+                // canonical case is choosing the same modal mode more than once
+                // (Mystic Confluence's "Counter target spell unless its
+                // controller pays {3}" picked twice → two independent counter
+                // instructions, each demanding its own {3}; issue #2925). The
+                // primary instruction's effect was suppressed above (its unless
+                // cost was paid), but the sibling chain is a separate instruction
+                // and is resumed here. The decline path resolves the whole
+                // `pending_effect` chain (which already follows the sibling); the
+                // pay path suppresses the head, so it must hand off only the
+                // sibling sub-chain — `resolve_ability_chain` then surfaces the
+                // sibling's OWN `unless_pay` prompt and follows its own chain.
+                let mut sub_resolved = sub.as_ref().clone();
+                if sub_resolved.targets.is_empty() {
+                    sub_resolved.targets = pending_effect.targets.clone();
+                }
+                sub_resolved.context = pending_effect.context.clone();
+                let event_start = resolve_ability_chain_for_unless_payment(
+                    state,
+                    &sub_resolved,
+                    events,
+                    &trigger_event,
+                )?;
+                // CR 608.2c: If the sibling instruction itself paused for input
+                // (e.g. its OWN unless-pay prompt — the second {3} of a
+                // double-counter), that fresh `WaitingFor` is the next state and
+                // MUST be preserved. The shared post-payment tail below would
+                // overwrite an open `UnlessPayment` with active-player priority
+                // (`set_active_priority`), collapsing the second prompt; run the
+                // trigger/SBA pipeline now and return so it survives.
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    let default_wf = state.waiting_for.clone();
+                    let wf = engine_priority::run_post_action_pipeline_from(
+                        state,
+                        events,
+                        event_start,
+                        &default_wf,
+                        false,
+                    )?;
+                    state.waiting_for = wf;
+                    return Ok(action_result(events, state.waiting_for.clone()));
+                }
+                post_action_event_start = Some(event_start);
             }
         }
     }
