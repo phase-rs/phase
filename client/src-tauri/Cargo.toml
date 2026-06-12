@@ -8,6 +8,12 @@ license = "MIT OR Apache-2.0"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Transitive pins: time 0.3.47+ triggers rustc E0119 with cookie 0.18.1 /
+# tauri-utils 2.9.2 blanket `From` impls (tauri-apps/tauri#15525). Locked in
+# client/src-tauri/Cargo.lock; keep these constraints until upstream fixes land.
+serde_with = "=3.14.0"
+time = "=0.3.46"
+plist = "=1.8.0"
 engine = { path = "../../crates/engine" }
 phase-ai = { path = "../../crates/phase-ai" }
 tauri = { version = "2", features = [] }
