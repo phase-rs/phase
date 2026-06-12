@@ -1081,6 +1081,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
             target,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
+            prevention_duration: None,
         },
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: counter_followup.map(Box::new),
@@ -8260,6 +8261,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_tapped: d.enter_tapped,
                             enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
+                            face_down: d.face_down,
                         },
                         rem,
                     ))
@@ -16980,15 +16982,15 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set flag.
         // This needs to check whether the previous clause publishes an affected
         // object set (zone changes, token creation, counter placement, etc.).
-        let needs_tracked_set = clauses
-            .iter()
-            .rev()
-            .find(|c| !c.absorbed_by_followup)
-            .is_some_and(|previous| {
-                publishes_tracked_set_from_resolution(&previous.parsed.effect)
-                    && (contains_explicit_tracked_set_pronoun(&lower_check)
-                        || contains_implicit_tracked_set_pronoun(&lower_check))
-            });
+        // CR 603.7: Scan ALL prior non-absorbed clauses for a tracked-set
+        // publisher, not just the nearest. An intermediate non-publishing
+        // clause (e.g. Investigate) must not shadow an earlier exile.
+        let any_prior_publishes = clauses.iter().any(|c| {
+            !c.absorbed_by_followup && publishes_tracked_set_from_resolution(&c.parsed.effect)
+        });
+        let needs_tracked_set = any_prior_publishes
+            && (contains_explicit_tracked_set_pronoun(&lower_check)
+                || contains_implicit_tracked_set_pronoun(&lower_check));
 
         // Continuation recognition — store on ClauseIr, application moves to lowering.
         //
@@ -31093,6 +31095,32 @@ mod tests {
         assert!(*tapped);
     }
 
+    /// CR 603.7: Exile → non-publishing clause → delayed return: uses_tracked_set
+    /// must be true even when the non-publishing clause (Investigate) is nearest.
+    /// Covers Disorder in the Court.
+    #[test]
+    fn exile_then_investigate_then_return_exiled_cards_uses_tracked_set() {
+        let e = parse_effect_chain(
+            "Exile X target creatures, then investigate X times. Return the exiled cards to the battlefield tapped under their owners' control at the beginning of the next end step.",
+            AbilityKind::Spell,
+        );
+        fn find_delayed(def: &AbilityDefinition) -> bool {
+            if let Effect::CreateDelayedTrigger {
+                uses_tracked_set, ..
+            } = &*def.effect
+            {
+                if *uses_tracked_set {
+                    return true;
+                }
+            }
+            def.sub_ability.as_deref().is_some_and(find_delayed)
+        }
+        assert!(
+            find_delayed(&e),
+            "expected CreateDelayedTrigger {{ uses_tracked_set: true }} for 'the exiled cards', got {e:?}"
+        );
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones full chain: an exile that publishes a
     /// tracked set, followed by "create a token that's a copy of that card,
     /// except it's an enchantment and loses all other card types." The copy
@@ -38278,6 +38306,7 @@ mod tests {
                 target,
                 scope,
                 damage_source_filter,
+                ..
             } => {
                 assert_eq!(*amount, PreventionAmount::All);
                 assert!(amount_dynamic.is_none());

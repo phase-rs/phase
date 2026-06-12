@@ -2936,6 +2936,7 @@ pub(crate) fn parse_oracle_ir(
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: Some(TargetFilter::Typed(source_filter)),
+                    prevention_duration: None,
                 },
             ))
             .description(line.to_string());

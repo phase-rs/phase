@@ -3636,6 +3636,7 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
                 .map(|_| crate::types::ability::PreventionScope::CombatDamage)
                 .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
             damage_source_filter: source_filter,
+            prevention_duration: None,
         });
     }
 

@@ -2663,6 +2663,9 @@ pub fn convert_create_replace_would_deal_damage_until(
         target,
         scope,
         damage_source_filter: source_filter,
+        // CR 514.2: EOT expiration is the only shape this converter accepts
+        // (guarded above), so no explicit "this combat" window applies.
+        prevention_duration: None,
     })
 }
 
@@ -2699,6 +2702,8 @@ pub fn convert_create_future_replace_would_deal_damage(
         target: engine::types::ability::TargetFilter::Any,
         scope,
         damage_source_filter: source_filter,
+        // CR 514.2: future-damage shields are EOT-scoped; no "this combat" window.
+        prevention_duration: None,
     })
 }
 

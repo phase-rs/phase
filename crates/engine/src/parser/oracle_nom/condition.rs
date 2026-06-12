@@ -118,6 +118,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_defending_player_comparison_conditions,
         parse_that_player_controls_more_comparison,
         parse_no_opponent_comparison_conditions,
+        parse_triggering_player_has_unattacked_opponent,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
         parse_quantity_quantity_comparison,
@@ -5207,6 +5208,36 @@ fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, Stat
     ))
 }
 
+/// CR 506.2 + CR 508.6 + CR 603.4: Parse "that/that opponent player has another
+/// opponent who isn't being attacked" (Suppressor Skyguard's attack-trigger
+/// intervening-if). "That player" is the triggering/attacking player; the clause
+/// is true when at least one of that player's opponents is NOT in their
+/// attacked-this-combat set. Modeled as `PlayerCount(filter) >= 1` over the
+/// `OpponentOfTriggeringPlayerNotAttacked` filter (resolved in `game/quantity.rs`).
+///
+/// The apostrophe in "isn't" is normalized over BOTH U+0027 (straight) and
+/// U+2019 (curly) since `to_lowercase()` preserves the source printing's
+/// apostrophe — Scryfall English oracle text uses the curly form.
+fn parse_triggering_player_has_unattacked_opponent(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("that player "), tag("that opponent "))).parse(input)?;
+    let (rest, _) = tag("has another opponent who isn").parse(rest)?;
+    let (rest, _) = alt((tag("'t being attacked"), tag("\u{2019}t being attacked"))).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentOfTriggeringPlayerNotAttacked,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
 /// Parse "an opponent controls more [type] than you" → QuantityComparison.
 /// Also handles "an opponent has more life/cards in hand than you".
 ///
@@ -5691,6 +5722,34 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    /// CR 506.2 + CR 508.6 + CR 603.4: Suppressor Skyguard's intervening-if
+    /// "that player has another opponent who isn't being attacked" parses to a
+    /// `PlayerCount(OpponentOfTriggeringPlayerNotAttacked) >= 1` comparison.
+    /// Covers the straight (U+0027) apostrophe, the curly (U+2019) printing form,
+    /// and the "that opponent" subject alias.
+    #[test]
+    fn parse_triggering_player_unattacked_opponent_variants() {
+        let expected = StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentOfTriggeringPlayerNotAttacked,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        for text in [
+            "that player has another opponent who isn't being attacked",
+            "that player has another opponent who isn\u{2019}t being attacked",
+            "that opponent has another opponent who isn't being attacked",
+        ] {
+            let (rest, cond) = parse_inner_condition(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            assert_eq!(cond, expected, "wrong condition for {text:?}");
+        }
+    }
 
     #[test]
     fn parse_quantity_quantity_comparison_x_ge_library() {

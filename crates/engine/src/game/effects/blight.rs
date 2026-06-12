@@ -73,6 +73,8 @@ pub fn resolve(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        // CR 708.2a: Blight places -1/-1 counters; no face-down entry.
+        face_down_profile: None,
         count_param: count,
     };
 

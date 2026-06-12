@@ -2374,6 +2374,7 @@ pub(super) fn handle_resolution_choice(
                 enters_attacking,
                 owner_library: _,
                 track_exiled_by_source,
+                face_down_profile,
                 count_param,
             },
             GameAction::SelectCards { cards: chosen },
@@ -2514,6 +2515,13 @@ pub(super) fn handle_resolution_choice(
                         enter_with_counters: vec![],
                         duration: None,
                         track_exiled_by_source,
+                        // CR 708.2a + CR 708.3: thread the face-down profile that
+                        // was carried across the `EffectZoneChoice` round-trip into
+                        // the move ctx, so a selected face-down `ChangeZone` card
+                        // (Yedora-style return paused for selection) enters FACE
+                        // DOWN with the specified characteristics instead of
+                        // resuming face up and exposing the real object.
+                        face_down_profile: face_down_profile.clone(),
                     };
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
@@ -2537,6 +2545,9 @@ pub(super) fn handle_resolution_choice(
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         moved_count: None,
+                                        // CR 708.2a + CR 708.3: preserve the
+                                        // face-down profile across a further pause.
+                                        face_down_profile: ctx.face_down_profile.clone(),
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -2565,6 +2576,9 @@ pub(super) fn handle_resolution_choice(
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
                                         moved_count: None,
+                                        // CR 708.2a + CR 708.3: preserve the
+                                        // face-down profile across a further pause.
+                                        face_down_profile: ctx.face_down_profile.clone(),
                                         effect_kind,
                                     });
                                 state.waiting_for =

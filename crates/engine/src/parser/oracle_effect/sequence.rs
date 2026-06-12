@@ -17,9 +17,9 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownProfile, LibraryPosition,
-    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownBody, FaceDownProfile,
+    LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -3308,6 +3308,9 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
             return Some(FaceDownProfile {
                 power,
                 toughness,
+                // CR 708.2a: "They're ... creatures." is always a creature body —
+                // Creature is implicit and `extra_core_types` layer on top.
+                body: crate::types::ability::FaceDownBody::Creature,
                 extra_core_types,
                 subtypes,
                 ward: None,
@@ -3339,6 +3342,131 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
             continue;
         }
         // Unrecognized token before "creature(s)" → not a parseable profile.
+        return None;
+    }
+}
+
+/// CR 708.2a + CR 205.1a: Parse the singular "It's a/an <characteristics>
+/// <core-type-noun>." face-down characteristic clause for a permanent put onto
+/// the battlefield face down (Yedora, Grave Gardener: "It's a Forest land.").
+/// Returns `None` when the sentence is not an it's-characteristics clause.
+///
+/// Built entirely from typed combinators (no card-named hardcode), mirroring
+/// `parse_theyre_face_down_profile` for the plural creature form: optional N/M
+/// P/T, then accumulated extra core types and subtypes, terminating on a
+/// core-type noun. The terminating noun chooses the body — "creature(s)" →
+/// `FaceDownBody::Creature` (Creature implicit, 2/2 default), any other core
+/// type ("land", "artifact", ...) → `FaceDownBody::Noncreature` with that core
+/// type explicit and no power/toughness (CR 208.1).
+pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile> {
+    // CR 205.1a: "It's a / It is a <characteristics> <core-type>."
+    let (mut rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it's an "),
+        tag("it's a "),
+        tag("it is an "),
+        tag("it is a "),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // CR 208.1: optional leading N/M power/toughness ("It's a 0/0 ... creature.").
+    let (power, toughness) = match nom_primitives::parse_pt_value(rest) {
+        Ok((after_pt, (PtValue::Fixed(p), PtValue::Fixed(t)))) => {
+            rest = after_pt.trim_start();
+            (Some(p), Some(t))
+        }
+        // A non-literal (`*`/`X`) face-down P/T is not a "specified" characteristic.
+        Ok(_) => return None,
+        Err(_) => (None, None),
+    };
+
+    // Accumulate extra core types and subtypes until a terminating core-type
+    // noun. Creature is the only core type that maps to a creature body; every
+    // other core-type noun ("land", "artifact", ...) terminates a non-creature
+    // body whose core types come entirely from the effect.
+    let mut extra_core_types: Vec<CoreType> = Vec::new();
+    let mut subtypes: Vec<String> = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        // Terminator: a core-type noun then optional ".". The terminal noun maps
+        // directly to its `CoreType` — Creature is the only one that yields a
+        // creature body; every other core type ("land", "artifact", ...)
+        // terminates a non-creature body whose core types come from the effect.
+        if let Ok((after, terminal)) = alt((
+            value(
+                CoreType::Creature,
+                alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))),
+            ),
+            value(CoreType::Land, tag("land")),
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
+        ))
+        .parse(rest)
+        {
+            let after = after.trim_start();
+            let after = opt(tag::<_, _, OracleError<'_>>("."))
+                .parse(after)
+                .map_or(after, |(r, _)| r);
+            if !after.trim().is_empty() {
+                return None;
+            }
+            return match terminal {
+                // "... creature(s)." — creature body, P/T defaults to 2/2.
+                CoreType::Creature => Some(FaceDownProfile {
+                    power,
+                    toughness,
+                    body: FaceDownBody::Creature,
+                    extra_core_types,
+                    subtypes,
+                    ward: None,
+                }),
+                // "... land/artifact/enchantment/planeswalker." — non-creature
+                // body whose core type is the terminal noun; no implicit
+                // Creature, no power/toughness.
+                ct => {
+                    if power.is_some() || toughness.is_some() {
+                        return None;
+                    }
+                    if !extra_core_types.contains(&ct) {
+                        extra_core_types.push(ct);
+                    }
+                    Some(FaceDownProfile {
+                        power: None,
+                        toughness: None,
+                        body: FaceDownBody::Noncreature,
+                        extra_core_types,
+                        subtypes,
+                        ward: None,
+                    })
+                }
+            };
+        }
+        // Non-terminal extra core type word (e.g. "artifact creature").
+        if let Ok((after, ct)) = alt((
+            value(
+                CoreType::Artifact,
+                tag::<_, _, OracleError<'_>>("artifact "),
+            ),
+            value(CoreType::Enchantment, tag("enchantment ")),
+            value(CoreType::Land, tag("land ")),
+            value(CoreType::Planeswalker, tag("planeswalker ")),
+        ))
+        .parse(rest)
+        {
+            if !extra_core_types.contains(&ct) {
+                extra_core_types.push(ct);
+            }
+            rest = after;
+            continue;
+        }
+        // Subtype (land type "Forest", creature type "Spirit", ...).
+        if let Some((canonical, consumed)) = crate::parser::oracle_util::parse_subtype(rest) {
+            subtypes.push(canonical);
+            rest = &rest[consumed..];
+            continue;
+        }
+        // Unrecognized token before a core-type noun → not a parseable profile.
         return None;
     }
 }
@@ -3582,6 +3710,8 @@ pub(super) fn parse_followup_continuation_ast(
     ctx: &mut ParseContext,
 ) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
+    let face_down_profile_spec =
+        parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
 
     match previous_effect {
         Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
@@ -4076,15 +4206,16 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
-        // CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures."
-        // after a put-face-down clause (the preceding Mill/ChangeZone/
-        // ChangeZoneAll carries `face_down_profile`). Refines the face-down
-        // profile with the specified characteristics. Placed BEFORE the broad
-        // Mill/Dig from-among arm so it claims the "They're ..." sentence.
+        // CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." (plural,
+        // Cyber-Controller) or "It's a/an [types] [subtype] <core-type>." (singular,
+        // Yedora's "It's a Forest land.") after a put-face-down clause (the
+        // preceding Mill/ChangeZone/ChangeZoneAll carries `face_down_profile`).
+        // Refines the face-down profile with the specified characteristics. Placed
+        // BEFORE the broad Mill/Dig from-among arm so it claims the spec sentence.
         Effect::Mill { .. } | Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
-            if parse_theyre_face_down_profile(&lower).is_some() =>
+            if face_down_profile_spec.is_some() =>
         {
-            let profile = parse_theyre_face_down_profile(&lower)?;
+            let profile = face_down_profile_spec.clone()?;
             Some(ContinuationAst::FaceDownProfileSpec { profile })
         }
         // "Put/return up to N [filter] from among them/those cards onto the
@@ -6003,6 +6134,46 @@ mod tests {
 
         // Not a they're clause → None.
         assert!(parse_theyre_face_down_profile("draw a card.").is_none());
+    }
+
+    /// CR 708.2a + CR 205.1a: the singular "It's a/an ... <core-type>." face-down
+    /// characteristic clause parses from parts for both non-creature (Yedora's
+    /// "It's a Forest land.") and creature bodies — no card-named hardcode.
+    #[test]
+    fn parse_its_face_down_profile_forest_land_and_siblings() {
+        // Yedora: "It's a Forest land." — a non-creature Land with the Forest
+        // land type, no power/toughness.
+        let forest = parse_its_face_down_profile("it's a forest land.").unwrap();
+        assert_eq!(forest.body, FaceDownBody::Noncreature);
+        assert_eq!(forest.extra_core_types, vec![CoreType::Land]);
+        assert_eq!(forest.subtypes, vec!["Forest".to_string()]);
+        assert_eq!(forest.power, None);
+        assert_eq!(forest.toughness, None);
+
+        // Sibling land type proves the class coverage (not Forest-specific).
+        let island = parse_its_face_down_profile("it's an island land").unwrap();
+        assert_eq!(island.body, FaceDownBody::Noncreature);
+        assert_eq!(island.extra_core_types, vec![CoreType::Land]);
+        assert_eq!(island.subtypes, vec!["Island".to_string()]);
+
+        // Non-creature artifact body (no land type).
+        let artifact = parse_its_face_down_profile("it's an artifact.").unwrap();
+        assert_eq!(artifact.body, FaceDownBody::Noncreature);
+        assert_eq!(artifact.extra_core_types, vec![CoreType::Artifact]);
+        assert!(artifact.power.is_none() && artifact.toughness.is_none());
+
+        // Singular creature body with P/T → creature body, explicit P/T override.
+        let creature = parse_its_face_down_profile("it's a 3/3 creature.").unwrap();
+        assert_eq!(creature.body, FaceDownBody::Creature);
+        assert_eq!(creature.power, Some(3));
+        assert_eq!(creature.toughness, Some(3));
+
+        // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
+        // a valid characteristic line — lands have no power/toughness).
+        assert!(parse_its_face_down_profile("it's a 2/2 land.").is_none());
+
+        // Not an it's-characteristics clause → None.
+        assert!(parse_its_face_down_profile("draw a card.").is_none());
     }
 
     /// CR 708.2a + CR 708.3 + CR 110.2a: Cyber-Controller's full two-sentence

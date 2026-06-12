@@ -962,6 +962,14 @@ pub struct PendingChangeZoneIteration {
     /// effects with the same count the uninterrupted mass path records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_count: Option<i32>,
+    /// CR 708.2a + CR 708.3: face-down entry profile carried across a
+    /// replacement-ordering / as-enters pause so a paused-then-resumed
+    /// face-down return (Yedora's dying creatures → face-down Forest lands)
+    /// still applies the profile on resume. `None` = normal face-up entry.
+    /// Mirrors the `enter_tapped`/`enter_transformed`/`enters_under_player`
+    /// carry-through pattern on this same struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -2957,6 +2965,15 @@ pub enum WaitingFor {
         owner_library: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         track_exiled_by_source: bool,
+        /// CR 708.2a + CR 708.3: face-down entry profile carried across the
+        /// `EffectZoneChoice` round-trip so a selected `ChangeZone` card that
+        /// must enter face down (Yedora-style "return it face down ... It's a
+        /// Forest land") still applies the profile when the choice resolves,
+        /// instead of resuming face up and exposing its real characteristics.
+        /// `None` = normal face-up entry. Mirrors the `enter_tapped` /
+        /// `enter_transformed` / `enters_under_player` carry-through above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<crate::types::ability::FaceDownProfile>,
         /// CR 701.68a: N for Blight N — number of -1/-1 counters to place.
         /// Zero for all non-blight EffectZoneChoice uses.
         #[serde(default)]
@@ -7855,6 +7872,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
@@ -8100,6 +8118,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
         let json = serde_json::to_string(&wf).unwrap();
@@ -8129,6 +8148,17 @@ mod tests {
             duration: None,
             track_exiled_by_source: false,
             moved_count: None,
+            // CR 708.2a + CR 708.3: the face-down profile must survive the
+            // pause/resume serde round-trip so a paused face-down return
+            // (Yedora) resumes face down with the same characteristics.
+            face_down_profile: Some(crate::types::ability::FaceDownProfile {
+                power: None,
+                toughness: None,
+                body: crate::types::ability::FaceDownBody::Noncreature,
+                extra_core_types: vec![crate::types::card_type::CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+                ward: None,
+            }),
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -8139,6 +8169,10 @@ mod tests {
         );
         let parsed: PendingChangeZoneIteration = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.enters_under_player, Some(PlayerId(1)));
+        assert_eq!(
+            parsed.face_down_profile, original.face_down_profile,
+            "face_down_profile must survive the pause/resume round-trip"
+        );
         assert_eq!(parsed, original);
     }
 
@@ -8160,6 +8194,16 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            // CR 708.2a + CR 708.3: a face-down `ChangeZone` selection must keep
+            // its profile across the `EffectZoneChoice` round-trip.
+            face_down_profile: Some(crate::types::ability::FaceDownProfile {
+                power: None,
+                toughness: None,
+                body: crate::types::ability::FaceDownBody::Noncreature,
+                extra_core_types: vec![crate::types::card_type::CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+                ward: None,
+            }),
             count_param: 0,
         };
         let json = serde_json::to_string(&wf).expect("serialize");

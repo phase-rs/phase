@@ -246,6 +246,8 @@ fn prompt_resolution_tap_untap_choice(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        // CR 708.2a: tap/untap selection is not a face-down entry.
+        face_down_profile: None,
         count_param: 0,
     };
     true

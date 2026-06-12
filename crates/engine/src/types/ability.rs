@@ -4019,6 +4019,12 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
+    /// player (resolved from the active AttackersDeclared trigger event) who is NOT
+    /// in that player's attacked-this-combat set. Models "that player has another
+    /// opponent who isn't being attacked" (Suppressor Skyguard); counted via
+    /// QuantityRef::PlayerCount, gated as count >= 1.
+    OpponentOfTriggeringPlayerNotAttacked,
     /// CR 608.2c + CR 701.38: Each player who cast a vote for `choices[choice_index]`
     /// in the most recent vote within the current top-level ability resolution.
     /// Mirrors `PerformedActionThisWay` — backed by a transient ledger
@@ -6333,13 +6339,37 @@ impl BounceSelection {
     }
 }
 
+/// CR 708.2a: Whether a face-down permanent is a creature or a non-creature.
+///
+/// CR 708.2a sentence 1 gives the manifest/morph default: a face-down permanent
+/// is a 2/2 *creature*. Sentence 2 ("...unless otherwise specified by the effect
+/// that put it onto the battlefield face down") lets an effect specify a
+/// non-creature body instead — e.g. Yedora, Grave Gardener's "It's a Forest
+/// land." (It has no other types or abilities.)". This typed discriminant
+/// replaces an implicit "Creature is always present" assumption so the same
+/// face-down machinery covers both classes without a raw bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FaceDownBody {
+    /// CR 708.2a (sentence 1): the morph/manifest default — the face-down
+    /// permanent has the Creature core type (always present) and defaults to
+    /// 2/2 power/toughness. Any `extra_core_types` are layered on top of
+    /// Creature (e.g. "artifact creatures").
+    #[default]
+    Creature,
+    /// CR 708.2a (sentence 2): the effect fully specifies the core types and the
+    /// permanent is NOT a creature — so it has no power/toughness (CR 208.1) and
+    /// gains no implicit Creature type. Used for "It's a Forest land." The
+    /// profile's `extra_core_types` are the complete core-type set.
+    Noncreature,
+}
+
 /// CR 708.2a: Characteristics an effect specifies for a permanent it puts onto
 /// the battlefield face down ("...unless otherwise specified by the effect that
 /// put it onto the battlefield face down"). When an effect lists no
 /// characteristics, the permanent defaults to a vanilla 2/2 with no name,
 /// subtypes, or mana cost (CR 708.2a). When the effect *does* specify
-/// characteristics ("They're 2/2 Cyberman artifact creatures."), those override
-/// the defaults. Parts-built — no card-named hardcode.
+/// characteristics ("They're 2/2 Cyberman artifact creatures." / "It's a Forest
+/// land."), those override the defaults. Parts-built — no card-named hardcode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaceDownProfile {
     /// CR 708.2a: Power override. `None` defaults to 2.
@@ -6348,11 +6378,21 @@ pub struct FaceDownProfile {
     /// CR 708.2a: Toughness override. `None` defaults to 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toughness: Option<i32>,
-    /// CR 205.1a: Additional core card types beyond Creature (always present per
-    /// CR 708.2a), e.g. Artifact for "artifact creatures".
+    /// CR 708.2a: Whether the face-down permanent is a creature (the
+    /// morph/manifest default — implicit Creature core type + 2/2 P/T) or a
+    /// non-creature whose core types are fully specified by `extra_core_types`
+    /// (e.g. "It's a Forest land", which has no power/toughness).
+    #[serde(default, skip_serializing_if = "is_creature_body")]
+    pub body: FaceDownBody,
+    /// CR 205.1a: For [`FaceDownBody::Creature`], additional core card types
+    /// beyond Creature (always present per CR 708.2a) — e.g. Artifact for
+    /// "artifact creatures". For [`FaceDownBody::Noncreature`], the complete set
+    /// of core card types the effect specifies (e.g. `[Land]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_core_types: Vec<CoreType>,
-    /// CR 205.1a: Creature subtypes the effect grants ("Cyberman").
+    /// CR 205.1a: Subtypes the effect grants — creature subtypes ("Cyberman")
+    /// for a creature body, or land types ("Forest") for a non-creature land
+    /// body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subtypes: Vec<String>,
     /// CR 701.58a: Ward granted to the face-down permanent. `None` for plain
@@ -6363,6 +6403,12 @@ pub struct FaceDownProfile {
     pub ward: Option<crate::types::keywords::WardCost>,
 }
 
+/// `serde` skip helper: the creature body is the CR 708.2a default and need not
+/// be serialized.
+fn is_creature_body(body: &FaceDownBody) -> bool {
+    matches!(body, FaceDownBody::Creature)
+}
+
 impl FaceDownProfile {
     /// CR 708.2a: The default face-down characteristics — a vanilla 2/2 creature
     /// with no extra types or subtypes. Used when an effect puts a card onto the
@@ -6371,6 +6417,7 @@ impl FaceDownProfile {
         Self {
             power: None,
             toughness: None,
+            body: FaceDownBody::Creature,
             extra_core_types: vec![],
             subtypes: vec![],
             ward: None,
@@ -7832,6 +7879,12 @@ pub enum Effect {
         /// and builds a concrete `HasColor` filter on the shield).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source_filter: Option<TargetFilter>,
+        /// CR 511.2 + CR 615: Window the prevention shield persists. None = no stated
+        /// window (legacy: shield pruned at end of turn via is_shield). Some(UntilEndOfCombat)
+        /// from "this combat" -> pruned at end of combat so it doesn't bleed into a later
+        /// combat the same turn. Some(UntilEndOfTurn) from "this turn".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prevention_duration: Option<Duration>,
     },
     /// CR 614.9 + CR 614.1a + CR 615: Create a one-shot "the next time [source]
     /// would deal [combat] damage [to X] this turn, [modify/redirect] instead"

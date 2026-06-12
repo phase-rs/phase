@@ -4697,6 +4697,9 @@ pub(crate) fn check_trigger_condition(
             // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar population
             // predicate is likewise set-valued — no "whose turn" semantic.
             | PlayerFilter::PlayerAttribute { .. }
+            // CR 506.2 + CR 508.6: a count-only attacked-opponents predicate is
+            // set-valued — no single-player "whose turn" semantic. Fail-closed.
+            | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
             | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
@@ -18269,6 +18272,7 @@ pub mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 

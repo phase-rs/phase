@@ -12424,6 +12424,36 @@ mod tests {
         ));
     }
 
+    /// CR 506.2 + CR 508.6 + CR 603.4 (issue #2924): Suppressor Skyguard's
+    /// attack-trigger intervening-if must hoist to `def.condition` as a
+    /// `PlayerCount(OpponentOfTriggeringPlayerNotAttacked) >= 1` comparison.
+    /// Bug A was the condition being dropped (`None`); this test fails if the
+    /// new combinator/bridge regresses.
+    #[test]
+    fn suppressor_skyguard_attack_trigger_hoists_unattacked_opponent_condition() {
+        let def = parse_trigger_line(
+            "Whenever a player attacks you, if that player has another opponent who isn't being attacked, prevent all combat damage that would be dealt to you this combat.",
+            "Suppressor Skyguard",
+        );
+        let expected = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentOfTriggeringPlayerNotAttacked,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        match def.condition {
+            Some(cond) if cond == expected => {}
+            Some(TriggerCondition::And { conditions }) => assert!(
+                conditions.contains(&expected),
+                "And condition missing the unattacked-opponent comparison: {conditions:?}"
+            ),
+            other => panic!("expected hoisted unattacked-opponent condition, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_intervening_if_no_creatures_attacked_this_turn_attaches_condition() {
         let def = parse_trigger_line(

@@ -1348,6 +1348,9 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
+            "opponents of the attacking player who aren't being attacked"
+        }
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
@@ -5602,6 +5605,11 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        // CR 506.2 + CR 508.6: count-only filter resolved by `resolve_player_count`
+        // (Suppressor Skyguard's intervening-if). Handled like the other count filters.
+        PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
+            ("OpponentOfTriggeringPlayerNotAttacked", Handled)
+        }
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
@@ -9608,6 +9616,7 @@ mod tests {
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,
+                    prevention_duration: None,
                 },
             )
             .duration(Duration::UntilEndOfTurn)

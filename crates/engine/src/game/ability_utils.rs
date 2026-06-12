@@ -9197,6 +9197,7 @@ mod tests {
                 target: TargetFilter::Any,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(source_filter),
+                prevention_duration: None,
             },
             vec![],
             dromoka,
