@@ -3402,12 +3402,19 @@ pub fn find_applicable_replacements(
             {
                 continue;
             }
-            // CR 614.12: a stack-resident object reached only via the
-            // stack-self-move exception can apply only its own self-replacement
-            // effects (mirrors the entering-object / discarded-card guards).
+            // CR 614.12 + CR 608.2n: a stack-resident object reached only via the
+            // stack-self-move exception can apply its own self-replacement effects.
+            // Explicit `SelfRef` is the canonical marker (Invoke Calamity rider,
+            // re-parsed Nexus of Fate). `valid_card: None` on a replacement hosted
+            // by the moving stack object is also self-scoped — the host IS the
+            // affected card (legacy card-data predating the SelfRef annotation).
+            // Block only when a non-SelfRef filter is present.
             if is_stack_self_move
                 && !in_scanned_zone
-                && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+                && matches!(
+                    &repl_def.valid_card,
+                    Some(filter) if filter != &crate::types::ability::TargetFilter::SelfRef
+                )
             {
                 continue;
             }
@@ -7280,6 +7287,56 @@ mod tests {
             !candidates.is_empty(),
             "RIP should match countered spell (stack → graveyard)"
         );
+    }
+
+    /// CR 608.2n + CR 614.6 (issue #2897): a stack-resident spell hosting its own
+    /// shuffle-back replacement must be discoverable while resolving, including
+    /// legacy card-data shapes that omitted `valid_card: SelfRef`.
+    #[test]
+    fn stack_self_shuffle_back_matches_without_selfref_annotation() {
+        use crate::parser::oracle_replacement::parse_replacement_line;
+
+        let mut repl = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it into its \
+             owner's library instead.",
+            "Nexus of Fate",
+        )
+        .expect("shuffle-back replacement must parse");
+        repl.valid_card = None;
+
+        let spell_id = ObjectId(99);
+        let mut state = GameState::new_two_player(42);
+        let mut spell = GameObject::new(
+            spell_id,
+            CardId(1),
+            PlayerId(0),
+            "Nexus of Fate".to_string(),
+            Zone::Stack,
+        );
+        spell.replacement_definitions = vec![repl].into();
+        state.objects.insert(spell_id, spell);
+
+        let proposed = ProposedEvent::zone_change(spell_id, Zone::Stack, Zone::Graveyard, None);
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "stack-hosted shuffle-back must match its own stack→graveyard move"
+        );
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange { to, object_id, .. }) => {
+                assert_eq!(object_id, spell_id);
+                assert_eq!(
+                    to,
+                    Zone::Library,
+                    "shuffle-back redirect must replace graveyard with library"
+                );
+            }
+            other => panic!("expected library redirect, got {other:?}"),
+        }
     }
 
     #[test]

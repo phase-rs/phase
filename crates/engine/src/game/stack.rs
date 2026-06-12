@@ -7286,6 +7286,46 @@ mod tests {
         obj_id
     }
 
+    /// CR 608.2n + CR 614.6 (issue #2897): a resolving instant carrying its own
+    /// shuffle-back graveyard replacement must land in its owner's library, not
+    /// the graveyard.
+    #[test]
+    fn nexus_of_fate_class_shuffle_back_on_resolution() {
+        use crate::parser::oracle_replacement::parse_replacement_line;
+
+        let mut state = setup();
+        let spell = push_plain_instant(&mut state);
+        let repl = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it into its \
+             owner's library instead.",
+            "Nexus of Fate",
+        )
+        .expect("shuffle-back replacement must parse");
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .replacement_definitions
+            .push(repl);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Library,
+            "shuffle-back replacement must redirect the resolved spell into its owner's library"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the spell must not also reach the graveyard"
+        );
+        assert!(
+            state.players[0].library.contains(&spell),
+            "the spell must be in its owner's library after resolution"
+        );
+    }
+
     /// CR 608.2n + CR 614.6 (PLAN §8 Risk #2 bug-fix): a plain instant resolving
     /// to its owner's graveyard is redirected to exile by a board-wide Rest in
     /// Peace. FAILS on the pre-C2 raw `move_to_zone(state, id, Graveyard, ..)`
