@@ -110,8 +110,12 @@ fn handle_activated_mode_choice(
     // announcement steps. If an activated modal ability's target legality depends
     // on an {X} activation cost, choose X after modes and before targets, then
     // resume through the same deferred target-selection path modal spells use so
-    // per-mode labels and X-dependent legality stay in sync.
-    if ability_target_legality_needs_chosen_x(&resolved) {
+    // per-mode labels and X-dependent legality stay in sync. CR 601.2d: a chosen
+    // mode that divides an X-dependent pool is likewise X-bounded (issue #2856).
+    let mode_distribute = indices
+        .iter()
+        .find_map(|&i| mode_abilities.get(i).and_then(|m| m.distribute.clone()));
+    if ability_target_legality_needs_chosen_x(&resolved, mode_distribute.as_ref()) {
         if let Some(cost) = ability_cost.as_ref() {
             if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
                 let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);

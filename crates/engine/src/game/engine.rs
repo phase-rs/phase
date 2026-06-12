@@ -20,8 +20,8 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
-    has_legal_target_assignment_for_ability, modal_choice_for_player,
+    begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
+    compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -2794,7 +2794,16 @@ fn apply_action(
                     let mut trial = pending.as_ref().clone();
                     trial.ability.set_chosen_x_recursive(value);
                     trial.cost.concretize_x(value);
-                    let target_slots = build_target_slots(state, &trial.ability)?;
+                    let mut target_slots = build_target_slots(state, &trial.ability)?;
+                    // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
+                    // (now-known) pool so the legal-assignment probe matches what
+                    // the controller will actually be offered (issue #2856).
+                    cap_distribution_target_slots(
+                        state,
+                        &trial.ability,
+                        trial.distribute.as_ref(),
+                        &mut target_slots,
+                    );
                     if !target_slots.is_empty()
                         && !has_legal_target_assignment_for_ability(
                             state,

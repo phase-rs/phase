@@ -107,7 +107,7 @@ pub(crate) fn handle_select_modes(
     if pending.activation_ability_index.is_none()
         && pending.additional_cost_flow.is_none()
         && cost_has_x(&total_cost)
-        && ability_target_legality_needs_chosen_x(&resolved)
+        && ability_target_legality_needs_chosen_x(&resolved, pending.distribute.as_ref())
     {
         let mut pending_x =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
