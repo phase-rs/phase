@@ -3354,16 +3354,19 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
     let mut subtypes: Vec<String> = Vec::new();
     loop {
         rest = rest.trim_start();
-        // Terminator: a core-type noun then optional ".".
+        // Terminator: a core-type noun then optional ".". The terminal noun maps
+        // directly to its `CoreType` — Creature is the only one that yields a
+        // creature body; every other core type ("land", "artifact", ...)
+        // terminates a non-creature body whose core types come from the effect.
         if let Ok((after, terminal)) = alt((
             value(
-                Some(CoreType::Creature),
+                CoreType::Creature,
                 alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))),
             ),
-            value(None, tag("land")),
-            value(Some(CoreType::Artifact), tag("artifact")),
-            value(Some(CoreType::Enchantment), tag("enchantment")),
-            value(Some(CoreType::Planeswalker), tag("planeswalker")),
+            value(CoreType::Land, tag("land")),
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
         ))
         .parse(rest)
         {
@@ -3376,7 +3379,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
             }
             return match terminal {
                 // "... creature(s)." — creature body, P/T defaults to 2/2.
-                Some(CoreType::Creature) => Some(FaceDownProfile {
+                CoreType::Creature => Some(FaceDownProfile {
                     power,
                     toughness,
                     body: FaceDownBody::Creature,
@@ -3384,27 +3387,10 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
                     subtypes,
                     ward: None,
                 }),
-                // "... land." — non-creature Land body; the Land core type is the
-                // terminal noun, no implicit Creature, no power/toughness.
-                None => {
-                    if power.is_some() || toughness.is_some() {
-                        return None;
-                    }
-                    if !extra_core_types.contains(&CoreType::Land) {
-                        extra_core_types.push(CoreType::Land);
-                    }
-                    Some(FaceDownProfile {
-                        power: None,
-                        toughness: None,
-                        body: FaceDownBody::Noncreature,
-                        extra_core_types,
-                        subtypes,
-                        ward: None,
-                    })
-                }
-                // "... artifact/enchantment/planeswalker." — non-creature body
-                // whose core type is the terminal noun.
-                Some(ct) => {
+                // "... land/artifact/enchantment/planeswalker." — non-creature
+                // body whose core type is the terminal noun; no implicit
+                // Creature, no power/toughness.
+                ct => {
                     if power.is_some() || toughness.is_some() {
                         return None;
                     }

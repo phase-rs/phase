@@ -552,6 +552,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             duration,
             track_exiled_by_source,
             mut moved_count,
+            face_down_profile,
             effect_kind,
         } = pending;
         let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
@@ -566,14 +567,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_with_counters,
             duration,
             track_exiled_by_source,
-            // CR 708.2a + CR 708.3: face-down entry is not threaded through the
-            // interactive `EffectZoneChoice` resume carrier
-            // (`PendingChangeZoneIteration`), so a face-down move that ALSO
-            // parked on a per-permanent replacement choice resumes face up. The
-            // synchronous direct/multi-target loop (the Yedora path) DOES apply
-            // it. Latent gap only for a face-down return that simultaneously
-            // surfaces an ETB replacement-ordering prompt — no such card exists.
-            face_down_profile: None,
+            // CR 708.2a + CR 708.3: thread the preserved face-down profile back
+            // into the resume ctx so a face-down move that parked on a
+            // per-permanent replacement-ordering / as-enters choice resumes
+            // FACE DOWN with the same characteristics (Yedora-style return),
+            // instead of exposing the real object face up. Mirrors the
+            // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
+            face_down_profile,
         };
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in THIS resume can be stamped as a co-departed group and
@@ -627,6 +627,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             moved_count,
+                            // CR 708.2a + CR 708.3: preserve the face-down profile
+                            // across a further pause so resumed members stay face down.
+                            face_down_profile: ctx.face_down_profile.clone(),
                             effect_kind,
                         });
                     paused = true;
@@ -648,6 +651,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             moved_count,
+                            // CR 708.2a + CR 708.3: preserve the face-down profile
+                            // across a further pause so resumed members stay face down.
+                            face_down_profile: ctx.face_down_profile.clone(),
                             effect_kind,
                         });
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -6895,6 +6901,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 
@@ -10837,6 +10844,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
         state.pending_continuation =
@@ -10872,6 +10880,7 @@ mod tests {
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_profile: None,
                 count_param: 0,
             },
             GameAction::SelectCards {
