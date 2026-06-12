@@ -5228,6 +5228,23 @@ fn build_triggered_ability(
 /// Note: TriggeringSpellController, TriggeringSpellOwner, TriggeringPlayer,
 /// and TriggeringSource auto-resolve from event context at resolution time
 /// (via `state.current_trigger_event`), so they do not require player selection.
+/// CR 115.1 + CR 702.26a: True when a `PhaseOut`/`PhaseIn` filter denotes a
+/// population to expand at resolution rather than a single declared target.
+fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ScopedPlayer => true,
+        TargetFilter::Typed(tf) => {
+            tf.type_filters.contains(&TypeFilter::Permanent)
+                && !tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature))
+                && tf.controller.is_some()
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
     // CR 701.21a: Sacrifice does not target — the controller chooses permanents
     // at resolution time via EffectZoneChoice. Returning a filter here would
@@ -5332,6 +5349,17 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // class).
     if effect.target_filter() == Some(&TargetFilter::Any)
         && !matches!(effect, Effect::DealDamage { .. })
+    {
+        return None;
+    }
+    // CR 115.1 + CR 702.26a: Mass phase-out / phase-in ("all permanents you
+    // control phase out" — Teferi's Protection; "you phase out") expands its
+    // population filter at resolution. Only "target [type] phase(s) out/in"
+    // requires a stack-time target slot.
+    if matches!(effect, Effect::PhaseOut { .. } | Effect::PhaseIn { .. })
+        && effect
+            .target_filter()
+            .is_some_and(phase_out_or_in_filter_is_mass)
     {
         return None;
     }
@@ -11100,6 +11128,33 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
             "GenericEffect{{target: Some(Any)}} is a mass effect — must not generate a target slot (issue #824)"
+        );
+    }
+
+    /// CR 115.1 + CR 702.26a: Teferi's Protection mass phase-out must not
+    /// surface a target slot — permanents are expanded at resolution.
+    #[test]
+    fn extract_target_skips_mass_phase_out_permanents_you_control() {
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "mass PhaseOut{{Permanent, You}} must not generate a target slot (issue #2907)"
+        );
+    }
+
+    /// CR 115.1: "Target creature phases out" still requires a target slot.
+    #[test]
+    fn extract_target_keeps_targeted_phase_out_creature() {
+        let effect = Effect::PhaseOut {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "targeted PhaseOut{{Creature}} must generate a target slot"
         );
     }
 
