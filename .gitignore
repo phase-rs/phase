@@ -74,6 +74,7 @@ data/mtgjson/sets/
 # Tauri build output
 client/src-tauri/binaries/
 client/src-tauri/target/
+client/src-tauri/Cargo.lock
 
 # Environment
 .env
