@@ -2040,20 +2040,20 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 508.1a: Count creatures the controller attacked with this turn.
-        QuantityRef::AttackedThisTurn { filter } => match filter {
-            // Bare form — total attackers this turn (per-player tally).
-            None => state
+        // CR 508.1a: Count creatures that attacked this turn, scoped by controller
+        // or globally across all players.
+        QuantityRef::AttackedThisTurn { scope, filter } => match (scope, filter.as_ref()) {
+            // Fast per-controller tally for the bare "you attacked this turn" form.
+            (CountScope::Controller, None) => state
                 .attacking_creatures_this_turn
                 .get(&controller)
                 .copied()
                 .map(u32_to_i32_saturating)
                 .unwrap_or(0),
-            // Filtered form — this-turn attackers controlled by the player that
-            // match `filter` (Neyali "a token", Neriv "a commander", Goblin
-            // Researcher "~", etc.), resolved against declaration-time snapshots
-            // so attackers that died or otherwise left the battlefield still count.
-            Some(filter) => usize_to_i32_saturating(
+            // Filtered controller scope — this-turn attackers controlled by the
+            // player that match `filter` (Neyali "a token", Neriv "a commander",
+            // Goblin Researcher "~", etc.).
+            (CountScope::Controller, Some(filter)) => usize_to_i32_saturating(
                 state
                     .attacker_declarations_this_turn
                     .iter()
@@ -2068,6 +2068,28 @@ fn resolve_ref(
                     })
                     .count(),
             ),
+            // Global bare form — every attacker declared this turn by any player.
+            (CountScope::All, None) => {
+                usize_to_i32_saturating(state.attacker_declarations_this_turn.len())
+            }
+            // Global filtered form — "no creatures attacked this turn" and kin.
+            (CountScope::All, Some(filter)) => usize_to_i32_saturating(
+                state
+                    .attacker_declarations_this_turn
+                    .iter()
+                    .filter(|record| {
+                        matches_target_filter_on_attack_declaration_record(
+                            state,
+                            record,
+                            filter,
+                            &filter_ctx,
+                        )
+                    })
+                    .count(),
+            ),
+            // Other scopes are unused by AttackedThisTurn today; default to zero
+            // rather than guessing controller semantics.
+            _ => 0,
         },
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
@@ -3867,7 +3889,10 @@ mod tests {
         state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
 
         let qty = QuantityExpr::Ref {
-            qty: QuantityRef::AttackedThisTurn { filter: None },
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(1)), 3);
@@ -3923,6 +3948,7 @@ mod tests {
 
         let token_attackers = QuantityExpr::Ref {
             qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::creature().properties(vec![FilterProp::Token]),
                 )),
@@ -3930,6 +3956,7 @@ mod tests {
         };
         let goblin_attackers = QuantityExpr::Ref {
             qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Creature, TypeFilter::Subtype("Goblin".into())],
                     controller: None,
@@ -3945,6 +3972,73 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &goblin_attackers, PlayerId(0), ObjectId(1)),
             1
+        );
+    }
+
+    #[test]
+    fn resolve_global_attacked_this_turn_counts_all_players_attackers() {
+        use crate::types::game_state::{AttackDeclarationRecord, LKISnapshot};
+
+        let mut state = GameState::new_two_player(42);
+        let p0_attacker = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_attacker = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let creature_lki = |name: &str, controller: PlayerId| LKISnapshot {
+            name: name.to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
+            mana_value: 2,
+            controller,
+            owner: controller,
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: Vec::new(),
+            counters: HashMap::new(),
+        };
+
+        state.attacker_declarations_this_turn = vec![
+            AttackDeclarationRecord {
+                object_id: p0_attacker,
+                lki: creature_lki("Goblin", PlayerId(0)),
+                is_token: false,
+                is_commander: false,
+            },
+            AttackDeclarationRecord {
+                object_id: p1_attacker,
+                lki: creature_lki("Soldier", PlayerId(1)),
+                is_token: false,
+                is_commander: false,
+            },
+        ];
+
+        let global_creature_attackers = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::All,
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &global_creature_attackers, PlayerId(0), ObjectId(1)),
+            2,
+            "global creature attacker count must include every player's attackers"
         );
     }
 

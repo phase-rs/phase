@@ -4804,6 +4804,7 @@ fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
 mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::CountScope;
 
     /// CR 601.2c (#2344): a single "target opponent" governs the whole verb list
     /// ("sacrifices …, discards …, and loses 3 life") — the player is chosen once
@@ -15466,7 +15467,10 @@ mod tests {
                 inner.as_ref(),
                 AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::AttackedThisTurn { filter: None },
+                        qty: QuantityRef::AttackedThisTurn {
+                            scope: CountScope::Controller,
+                            filter: None,
+                        },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
