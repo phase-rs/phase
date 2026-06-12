@@ -943,6 +943,20 @@ pub struct GameObject {
     pub phase_status: PhaseStatus,
 }
 
+/// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
+/// slice. The generic "choose a card type" persists as a `CardType` attribute; a
+/// restricted card-type choice ("Choose creature or land", Winding Way) parses as
+/// a `Labeled` modal option list and persists as a capitalized `Label`, which is
+/// parsed back to its `CoreType`. Shared by `GameObject::chosen_card_type` and
+/// the `FilterProp::IsChosenCardType` matcher so both forms bind uniformly.
+pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType> {
+    attrs.iter().find_map(|a| match a {
+        ChosenAttribute::CardType(t) => Some(*t),
+        ChosenAttribute::Label(label) => label.parse::<CoreType>().ok(),
+        _ => None,
+    })
+}
+
 impl GameObject {
     /// Oathbreaker RC: true for the command-zone signature spell role.
     pub fn is_signature_spell(&self) -> bool {
@@ -1453,11 +1467,16 @@ impl GameObject {
 
     /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
+    ///
+    /// CR 205.2a: A *restricted* card-type choice ("Choose creature or land",
+    /// Winding Way) parses as a `Labeled` modal option list rather than the
+    /// generic "choose a card type", so it persists as a capitalized `Label`
+    /// rather than a `CardType`. The label still names a card type, so fall back
+    /// to parsing it (e.g. "Creature" → `CoreType::Creature`) — this lets every
+    /// "of the chosen type" reader (cost reduction, protection, the reveal-and-
+    /// partition move) bind a restricted card-type choice uniformly.
     pub fn chosen_card_type(&self) -> Option<CoreType> {
-        self.chosen_attributes.iter().find_map(|a| match a {
-            ChosenAttribute::CardType(t) => Some(*t),
-            _ => None,
-        })
+        chosen_card_type_of(&self.chosen_attributes)
     }
 
     /// Look up a stored basic land type choice.

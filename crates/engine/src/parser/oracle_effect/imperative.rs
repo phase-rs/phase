@@ -3017,12 +3017,23 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
         ChooseImperativeAst::NamedChoice { choice_type } => Effect::Choose {
-            // CR 201.3 / CR 113.6: "With the chosen name" static/trigger filters
-            // (Petrified Hamlet, Cheering Fanatic) resolve against the source
-            // object's `chosen_attributes`. CardName choices must persist so
-            // those later references find the bound name. CreatureType choices
-            // also persist for chained filters such as "that aren't of the chosen type."
-            persist: matches!(choice_type, ChoiceType::CardName | ChoiceType::CreatureType),
+            // CR 201.3 / CR 113.6 / CR 205.2a / CR 614.12c: A chosen attribute
+            // must persist on the source whenever a later clause refers back to
+            // it. CardName choices persist for "with the chosen name" filters
+            // (Petrified Hamlet, Cheering Fanatic); CreatureType for "of the
+            // chosen type" creature filters; CardType and the restricted
+            // card-type Labeled form ("Choose creature or land", Winding Way)
+            // for "all cards of the chosen type ..." partitions, which read the
+            // chosen card type via `FilterProp::IsChosenCardType`. Persisting a
+            // Labeled choice is also what `ChosenLabelIs` companion conditions
+            // rely on (CR 614.12c), so it is uniformly safe.
+            persist: matches!(
+                choice_type,
+                ChoiceType::CardName
+                    | ChoiceType::CreatureType
+                    | ChoiceType::CardType
+                    | ChoiceType::Labeled { .. }
+            ),
             choice_type,
         },
         ChooseImperativeAst::RevealHandFilter {
@@ -3847,13 +3858,29 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                 enters_under,
                 enter_tapped,
                 ..
-            } => Some(PutImperativeAst::ZoneChangeAll {
-                origin,
-                destination,
-                target,
-                enters_under,
-                enter_tapped: enter_tapped.is_tapped(),
-            }),
+            } => {
+                // CR 608.2c: "Put all <filter> revealed this way into <z1> and
+                // the rest into <z2>" partitions the tracked (revealed) set. The
+                // primary move sends the chosen subset to `destination`; capture
+                // the rest zone so the lowering emits the complement move for
+                // the cards the producer left behind (Winding Way). Only the
+                // tracked-set partition form carries a rest clause — a non-
+                // tracked mass move keeps `rest_destination: None`.
+                let rest_destination = matches!(
+                    target,
+                    TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+                )
+                .then(|| super::parse_put_rest_destination(lower))
+                .flatten();
+                Some(PutImperativeAst::ZoneChangeAll {
+                    origin,
+                    destination,
+                    target,
+                    enters_under,
+                    enter_tapped: enter_tapped.is_tapped(),
+                    rest_destination,
+                })
+            }
             Effect::ChangeZone {
                 origin,
                 destination,
@@ -3900,6 +3927,11 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             enters_under,
             enter_tapped,
+            // CR 608.2c: The "and the rest into <zone>" complement is materialized
+            // as a sibling sub-ability by `lower_imperative_family_ast`, which
+            // intercepts the partition form before this bare-effect lowering.
+            // Here it has already been consumed (or was absent).
+            rest_destination: _,
         } => Effect::ChangeZoneAll {
             origin,
             destination,
@@ -6995,6 +7027,66 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             if !all {
                 clause.unless_pay = Some(unless_pay);
             }
+            clause
+        }
+        // CR 608.2c: A tracked-set partition with a rest complement ("Put all
+        // <filter> revealed this way into your hand and the rest into your
+        // graveyard" — Winding Way). The primary mass move sends the chosen
+        // subset (`target`, a `TrackedSetFiltered`) to `destination`; emit a
+        // sibling `ChangeZoneAll` for "the rest" — the revealed cards NOT in the
+        // chosen subset. Expressing the complement as `TrackedSetFiltered { Not
+        // <chosen inner filter> }` (rather than the whole `TrackedSet`) is
+        // zone-independent and order-independent: the chosen cards are excluded
+        // by predicate even after they have already moved to `destination`, so
+        // the complement never re-moves them. Intercepted here because the
+        // partition needs a sub_ability linkage that only `ParsedEffectClause`
+        // can express.
+        ImperativeFamilyAst::Put(PutImperativeAst::ZoneChangeAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            rest_destination: Some(rest_destination),
+        }) => {
+            // "The rest" excludes the chosen subset by predicate. When the
+            // primary names a filtered subset, negate its inner filter;
+            // otherwise (no inner filter) the complement is the full tracked set.
+            let rest_target = match &target {
+                TargetFilter::TrackedSetFiltered { id, filter } => {
+                    TargetFilter::TrackedSetFiltered {
+                        id: *id,
+                        filter: Box::new(TargetFilter::Not {
+                            filter: filter.clone(),
+                        }),
+                    }
+                }
+                TargetFilter::TrackedSet { id } => TargetFilter::TrackedSet { id: *id },
+                _ => TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+            };
+            let primary = Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                face_down_profile: None,
+            };
+            let complement = Effect::ChangeZoneAll {
+                origin: None,
+                destination: rest_destination,
+                target: rest_target,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                face_down_profile: None,
+            };
+            let mut clause = parsed_clause(primary);
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                complement,
+            )));
             clause
         }
         // CR 122.1 + CR 608.2c: Multi-typed counter list → PutCounter chain.

@@ -4905,20 +4905,46 @@ pub(super) fn apply_where_x_effect_expression(
             apply_where_x_to_ability_cost(cost, where_x_expression);
         }
         Effect::GenericEffect {
-            static_abilities, ..
+            static_abilities,
+            target,
+            ..
         } => {
+            // CR 115.1: A `Some(target)` filter on the grant means the recipient
+            // is announced as a target ("another target creature you control" —
+            // Xenagos, God of Revels), so a "that creature" anaphor in the
+            // where-clause is the chosen target, not a cost/trigger referent.
+            let target_based = target.is_some();
+            // CR 608.2c: "that creature's power"/"toughness" in the where-clause
+            // of a *targeted* grant is the target anaphor. The shared quantity
+            // grammar lowers the context-free phrase to `CostPaidObject` (its
+            // triggered-ability sense); on a targeted grant it must instead read
+            // the chosen recipient, so rebind that scope to `Target` here at the
+            // lowering seam. Gating on the demonstrative anaphor keeps a genuine
+            // participle cost referent ("the sacrificed creature's power",
+            // `CostPaidObject`) untouched.
+            let rebind_target_anaphor =
+                target_based && where_x_is_demonstrative_target_creature_stat(where_x_expression);
             for static_def in static_abilities.iter_mut() {
                 if let Some(condition) = static_def.condition.as_mut() {
                     apply_where_x_static_condition(condition, where_x_expression);
                 }
-                // CR 107.3i: A continuous grant's dynamic P/T ("creatures you
-                // control get +X/+X …, where X is the number of creatures you
-                // control" — Craterhoof Behemoth) parses its X in isolation and
-                // defaults to `CostXPaid`; the surrounding where-clause is the
-                // more specific binding and must own every X reference, including
-                // those nested in the grant's continuous modifications.
+                // CR 107.3i + CR 611.2c: A continuous "gets +X/+X … where X is
+                // <expression>" grant lowers to dynamic P/T modifications whose
+                // `value` defaults to `CostXPaid` (X paid as the spell/ability was
+                // cast) when no binding clause has been applied yet. The
+                // surrounding where-clause is the more specific binding and must
+                // own every X reference, including those nested in the grant's
+                // continuous modifications. Substitute it into each dynamic
+                // modification so a triggered/targeted pump (Xenagos, God of
+                // Revels: "where X is that creature's power") or a static grant
+                // (Craterhoof Behemoth: "where X is the number of creatures you
+                // control") tracks the bound quantity instead of the cost-X
+                // fallback. Mirrors the `Pump`/`SearchLibrary` arms above.
                 for modification in static_def.modifications.iter_mut() {
                     apply_where_x_continuous_modification(modification, where_x_expression);
+                    if rebind_target_anaphor {
+                        rebind_target_anaphor_continuous_modification(modification);
+                    }
                 }
             }
         }
@@ -4926,9 +4952,12 @@ pub(super) fn apply_where_x_effect_expression(
     }
 }
 
-/// CR 107.3i: Propagate a "where X is <expression>" binding into the dynamic
-/// `QuantityExpr` carried by a continuous modification (the +X/+X / set-P/T /
-/// dynamic-keyword grants). `apply_where_x_quantity_expression` only rewrites a
+/// CR 107.3i + CR 611.2c: Substitute a "where X is <expression>" binding into a
+/// continuous modification's dynamic `QuantityExpr` value. Only the value-carrying
+/// dynamic P/T and dynamic-keyword grants (the +X/+X / set-P/T / dynamic-keyword
+/// variants) hold an X-bearing `QuantityExpr`; every other `ContinuousModification`
+/// variant is a fixed/typed modification with no X to rebind (enumerated as
+/// explicit no-ops below). `apply_where_x_quantity_expression` only rewrites a
 /// `CostXPaid` / bare `Variable("X")` value, so a modification whose quantity is
 /// already a concrete reference is left unchanged.
 fn apply_where_x_continuous_modification(
@@ -4991,6 +5020,132 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::RemoveManaCost => {}
+    }
+}
+
+/// CR 608.2c: Does the where-clause definition read "that creature's power" /
+/// "that creature's toughness" — the bare demonstrative anaphor to the grant's
+/// chosen target? `parse_event_context_refs` lowers this context-free phrase to
+/// `ObjectScope::CostPaidObject` (its triggered-ability sense); on a *targeted*
+/// continuous grant the antecedent is instead the announced target, so the
+/// caller rebinds that scope to `ObjectScope::Target`.
+///
+/// The participle cost referent ("the sacrificed creature's power", also
+/// `CostPaidObject`) and every non-anaphoric where-X definition fail this gate
+/// and are left untouched — only the bare demonstrative target anaphor matches.
+fn where_x_is_demonstrative_target_creature_stat(where_x_expression: Option<&str>) -> bool {
+    let Some(expression) = where_x_expression else {
+        return false;
+    };
+    let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
+    // The `if` condition scopes the parser temporary so it drops at the end of
+    // condition evaluation (before the owned `expression` string), avoiding the
+    // tail-position borrow that an `is_ok()` return expression would create.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("that creature's "),
+        alt((tag("power"), tag("toughness"))),
+    ))
+    .parse(expression.as_str())
+    .is_ok()
+    {
+        return true;
+    }
+    false
+}
+
+/// CR 608.2c: Rebind a `ObjectScope::CostPaidObject` power/toughness reference
+/// inside a continuous modification's dynamic value to `ObjectScope::Target`.
+/// Applied only on a targeted grant whose where-clause is the demonstrative
+/// target anaphor (`where_x_is_demonstrative_target_creature_stat`), so the
+/// "that creature's power"/"toughness" pump (Xenagos, God of Revels) reads the
+/// announced recipient instead of the trigger/cost referent slot. Mirrors the
+/// modification coverage of `apply_where_x_continuous_modification`.
+fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousModification) {
+    match modification {
+        ContinuousModification::SetDynamicPower { value, .. }
+        | ContinuousModification::SetDynamicToughness { value, .. }
+        | ContinuousModification::SetPowerDynamic { value, .. }
+        | ContinuousModification::SetToughnessDynamic { value, .. }
+        | ContinuousModification::AddDynamicPower { value, .. }
+        | ContinuousModification::AddDynamicToughness { value, .. }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
+            rebind_cost_paid_object_pt_to_target(value);
+        }
+        ContinuousModification::AddCounterOnEnter { .. } => {}
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => {}
+    }
+}
+
+/// Retarget a `ObjectScope::CostPaidObject` power/toughness `QuantityRef` within
+/// a `QuantityExpr` to `ObjectScope::Target`, recursing through every composite
+/// arm. Only the per-object power/toughness refs are rewritten; every other
+/// reference (object counts, mana value, non-`CostPaidObject` scopes) is left
+/// as-is so unrelated where-X bindings are never disturbed.
+fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
+        } if *scope == ObjectScope::CostPaidObject => {
+            *scope = ObjectScope::Target;
+        }
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => {
+            rebind_cost_paid_object_pt_to_target(inner);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rebind_cost_paid_object_pt_to_target(inner);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            rebind_cost_paid_object_pt_to_target(left);
+            rebind_cost_paid_object_pt_to_target(right);
+        }
     }
 }
 

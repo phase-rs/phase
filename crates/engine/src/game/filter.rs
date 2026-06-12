@@ -2284,17 +2284,16 @@ fn spell_object_matches_property(
                 .is_some_and(|color| record.colors.contains(color))
         }),
         FilterProp::IsChosenCardType => context.is_some_and(|context| {
+            // CR 205.2a: `chosen_card_type()` resolves both the `CardType`
+            // attribute and a restricted card-type `Label` ("Choose creature or
+            // land", Winding Way) to a `CoreType`, so this matcher binds both
+            // the generic "choose a card type" and the labeled forms uniformly.
             context
                 .state
                 .objects
                 .get(&context.source_id)
-                .and_then(|source| {
-                    source.chosen_attributes.iter().find_map(|attr| match attr {
-                        ChosenAttribute::CardType(card_type) => Some(card_type),
-                        _ => None,
-                    })
-                })
-                .is_some_and(|card_type| record.core_types.contains(card_type))
+                .and_then(|source| source.chosen_card_type())
+                .is_some_and(|card_type| record.core_types.contains(&card_type))
         }),
         // CR 109.1 (cited as identity foundation — CR has no dedicated
         // "another" entry): "other [X] spells you cast" excludes the case
@@ -3148,16 +3147,18 @@ fn matches_filter_prop(
                 _ => None,
             })
             .is_some_and(|chosen| obj.color.contains(chosen)),
-        // CR 205: Match objects whose core type includes the source's chosen card type.
-        // Used for "spells of the chosen type" (Archon of Valor's Reach).
-        FilterProp::IsChosenCardType => source
-            .chosen_attributes
-            .iter()
-            .find_map(|a| match a {
-                crate::types::ability::ChosenAttribute::CardType(ct) => Some(ct),
-                _ => None,
-            })
-            .is_some_and(|chosen| obj.card_types.core_types.contains(chosen)),
+        // CR 205 + CR 205.2a: Match objects whose core type includes the
+        // source's chosen card type. Used for "spells of the chosen type"
+        // (Archon of Valor's Reach) and "all cards of the chosen type revealed
+        // this way" (Winding Way). The chosen type may be persisted as a
+        // `CardType` attribute (generic "choose a card type") or, for a
+        // restricted card-type choice ("Choose creature or land"), as a
+        // capitalized `Label` that names a card type — `chosen_card_type_of`
+        // resolves both forms to a `CoreType`.
+        FilterProp::IsChosenCardType => {
+            crate::game::game_object::chosen_card_type_of(source.chosen_attributes)
+                .is_some_and(|chosen| obj.card_types.core_types.contains(&chosen))
+        }
         FilterProp::IsChosenLandOrNonlandKind => matches_last_chosen_land_or_nonland_kind(
             &state.last_named_choice,
             &obj.card_types.core_types,

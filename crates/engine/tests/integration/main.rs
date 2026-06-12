@@ -123,6 +123,7 @@ mod issue_2374_fblthp_library_origin;
 mod issue_2376_pyromancers_ascension;
 mod issue_2377_mdfc_commander_zone_revert;
 mod issue_2378_surrak_haste_grant;
+mod issue_2380_xenagos_power_boost;
 mod issue_2414_semblance_anvil;
 mod issue_2415_rottenmouth_viper_sacrifice_cost;
 mod issue_2417_satoru_intervening_if;

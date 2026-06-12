@@ -2977,6 +2977,14 @@ where
         // priority between them; the engine's pinned `cost_paid_object`-first
         // choice stands. Exact parity with the `resolve_object_mana_value`
         // `CostPaidObject` arm.
+        //
+        // This arm is deliberately NOT a "maybe the target" fallback: a
+        // chosen-target anaphor ("that creature's power" on a targeted grant —
+        // Xenagos, God of Revels) is rebound to `ObjectScope::Target` at the
+        // parser/lowering seam (`apply_where_x_continuous_modification`), so it
+        // never reaches this arm. `CostPaidObject` stays the specific
+        // cost/trigger/effect-context object (Greater Good, sacrifice-cost and
+        // trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
