@@ -2394,7 +2394,10 @@ fn parse_for_each_clause_with_they_controller(
     .parse(clause)
     {
         if rest.is_empty() {
-            return Some(QuantityRef::AttackedThisTurn { filter: None });
+            return Some(QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            });
         }
     }
 
@@ -2887,7 +2890,13 @@ mod tests {
     #[test]
     fn creature_you_attacked_with_this_turn_stays_attacked_this_turn() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn { filter: None });
+        assert_eq!(
+            qty,
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }
+        );
     }
 
     #[test]
@@ -2906,7 +2915,13 @@ mod tests {
     #[test]
     fn for_each_creature_you_attacked_with_this_turn_counts_attacking_creatures() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn { filter: None });
+        assert_eq!(
+            qty,
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }
+        );
     }
 
     #[test]

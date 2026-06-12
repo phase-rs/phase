@@ -522,6 +522,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             }
         }
         GameEvent::LifeChanged { .. } => push(TriggerEventKey::LifeChanged),
+        GameEvent::ControllerChanged { .. } => push(TriggerEventKey::ChangesController),
         GameEvent::ManaAdded { .. } => push(TriggerEventKey::ManaProduced),
         GameEvent::TappedForMana { .. } => {
             push(TriggerEventKey::ManaProduced);
@@ -650,7 +651,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
             push(TriggerEventKey::AttachmentChanged);
         }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
-        EffectKind::GainControl => push(TriggerEventKey::ChangesController),
+        EffectKind::GainControl | EffectKind::GainControlAll => {
+            push(TriggerEventKey::ChangesController)
+        }
         EffectKind::Fight => push(TriggerEventKey::Fight),
         EffectKind::Explore => push(TriggerEventKey::Explored),
         EffectKind::Discover => push(TriggerEventKey::DiscoverResolved),
@@ -716,6 +719,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
         | EffectKind::Encore
+        | EffectKind::Meld
         | EffectKind::ExileHaunting
         | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy

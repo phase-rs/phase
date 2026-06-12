@@ -411,6 +411,12 @@ pub enum GameEvent {
         object_id: ObjectId,
         player_id: PlayerId,
     },
+    /// CR 613.1b: A continuous effect changed an object's controller in layer 2.
+    ControllerChanged {
+        object_id: ObjectId,
+        old_controller: PlayerId,
+        new_controller: PlayerId,
+    },
     EffectResolved {
         kind: EffectKind,
         source_id: ObjectId,
