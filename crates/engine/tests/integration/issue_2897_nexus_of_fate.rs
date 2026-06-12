@@ -6,9 +6,9 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{Effect, TargetFilter};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
-use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;

@@ -3387,8 +3387,8 @@ fn parse_graveyard_exile_replacement(
             ))
             .parse(i)?;
 
-        Ok((i, (scope, token_scope, outcome, subject.to_string())))
-    })?;
+            Ok((i, (scope, token_scope, outcome, subject.to_string())))
+        })?;
 
     let subject = subject.trim();
 
