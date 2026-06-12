@@ -511,13 +511,18 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 
 /// CR 725.1 / CR 702.131a: Parse player-state conditions.
 ///
-/// Handles "you're the monarch" and "you have the city's blessing".
+/// Handles "you're the monarch", "you have the initiative", and "you have the city's blessing".
 fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         // CR 725.1: Monarch status
         value(
             StaticCondition::IsMonarch,
             alt((tag("you're the monarch"), tag("you are the monarch"))),
+        ),
+        // CR 726.3: Initiative status
+        value(
+            StaticCondition::IsInitiative,
+            tag("you have the initiative"),
         ),
         // CR 725.1: "there is no monarch" — no player holds the designation.
         value(
@@ -8059,6 +8064,13 @@ mod tests {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_you_have_the_initiative() {
+        let (rest, c) = parse_inner_condition("you have the initiative").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::IsInitiative);
     }
 
     #[test]

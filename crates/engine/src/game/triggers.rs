@@ -28,8 +28,8 @@ use crate::types::zones::Zone;
 use super::ability_utils::build_resolved_from_def;
 use super::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
+    eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped,
 };
 use super::filter::{matches_target_filter, spell_record_matches_filter, FilterContext};
 use super::game_object::GameObject;
@@ -4633,6 +4633,8 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 725.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => eval_is_monarch(state, controller),
+        // CR 726.3: True when the controller has the initiative.
+        TriggerCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
         TriggerCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.

@@ -2621,6 +2621,8 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 
         // CR 725.1: Monarch status bridges directly.
         StaticCondition::IsMonarch => Some(TriggerCondition::IsMonarch),
+        // CR 726.3: Initiative status bridges directly.
+        StaticCondition::IsInitiative => Some(TriggerCondition::IsInitiative),
         // CR 725.1: "there is no monarch" bridges directly.
         StaticCondition::NoMonarch => Some(TriggerCondition::NoMonarch),
         // CR 702.131a: City's Blessing bridges directly.
@@ -8900,6 +8902,30 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::BecomeMonarch, def));
     }
 
+    // CR 726.2: "Whenever you take the initiative" / "Whenever a player takes the
+    // initiative" — initiative-designation trigger.
+    if let Some((valid_target, after)) = parse_takes_initiative_trigger(lower) {
+        if !after.trim().is_empty() {
+            return None;
+        }
+        let mut def = make_base();
+        def.mode = TriggerMode::TakesInitiative;
+        def.valid_target = valid_target;
+        return Some((TriggerMode::TakesInitiative, def));
+    }
+
+    // CR 309.4c + CR 701.49: "Whenever you venture into the dungeon" — fires each
+    // time the controller's venture marker enters a dungeon room.
+    if let Some(after) = parse_venture_into_dungeon_trigger(lower) {
+        if !after.trim().is_empty() {
+            return None;
+        }
+        let mut def = make_base();
+        def.mode = TriggerMode::RoomEntered;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::RoomEntered, def));
+    }
+
     // "whenever you cast your Nth spell each turn" — must precede generic "you cast a"
     if let Some(result) = try_parse_nth_spell_trigger(lower) {
         return Some(result);
@@ -11447,6 +11473,50 @@ fn parse_become_monarch_trigger(lower: &str) -> Option<(Option<TargetFilter>, &s
     Some((valid_target, after_monarch))
 }
 
+/// CR 726.2: Parse "when/whenever [you|a player] take(s) the initiative".
+fn parse_takes_initiative_trigger(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_initiative, valid_target) = alt((
+        value(
+            Some(TargetFilter::Controller),
+            tag::<_, _, OracleError<'_>>("you take the initiative"),
+        ),
+        value(
+            Some(TargetFilter::Player),
+            tag::<_, _, OracleError<'_>>("a player takes the initiative"),
+        ),
+    ))
+    .parse(after_prefix)
+    .ok()?;
+    Some((valid_target, after_initiative))
+}
+
+/// CR 309.4c + CR 701.49: Parse "when/whenever you venture into the dungeon"
+/// (or Undercity — a specific dungeon venture still enters a room).
+fn parse_venture_into_dungeon_trigger(lower: &str) -> Option<&str> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_venture, _) = (
+        tag::<_, _, OracleError<'_>>("you "),
+        alt((
+            tag::<_, _, OracleError<'_>>("venture into the dungeon"),
+            tag::<_, _, OracleError<'_>>("venture into the undercity"),
+        )),
+    )
+        .parse(after_prefix)
+        .ok()?;
+    Some(after_venture)
+}
+
 fn parse_monarch_turn_began_condition(lower: &str) -> Option<&str> {
     let (after_condition, _) =
         tag::<_, _, OracleError<'_>>("if you were the monarch as the turn began,")
@@ -13503,6 +13573,64 @@ mod tests {
     fn trigger_become_the_monarch_rejects_partial_suffix() {
         let def = parse_trigger_line("Whenever you become the monarchy, draw a card.", "Test");
         assert!(matches!(def.mode, TriggerMode::Unknown(_)));
+    }
+
+    // CR 309.4c + CR 701.49: venture-into-dungeon trigger tests.
+    #[test]
+    fn trigger_you_venture_into_the_dungeon_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you venture into the dungeon, create a 5/5 black Zombie Giant creature token.",
+            "Acererak, the Archlich",
+        );
+        assert_eq!(def.mode, TriggerMode::RoomEntered);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.expect("venture trigger must parse an effect");
+        assert!(
+            !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+            "venture trigger body must be implemented, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_you_venture_into_the_undercity_maps_to_room_entered() {
+        let def = parse_trigger_line(
+            "Whenever you venture into the Undercity, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::RoomEntered);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 726.2: take-the-initiative trigger tests.
+    #[test]
+    fn trigger_you_take_the_initiative_scopes_to_controller() {
+        let def = parse_trigger_line("Whenever you take the initiative, draw a card.", "Test");
+        assert_eq!(def.mode, TriggerMode::TakesInitiative);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_a_player_takes_the_initiative() {
+        let def = parse_trigger_line(
+            "Whenever a player takes the initiative, each opponent loses 1 life.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::TakesInitiative);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_attack_with_initiative_intervening_if() {
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, if you have the initiative, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::IsInitiative)
+        ));
     }
 
     #[test]
@@ -24249,6 +24377,14 @@ mod tests {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::IsMonarch),
             Some(TriggerCondition::IsMonarch),
+        );
+    }
+
+    #[test]
+    fn bridge_initiative() {
+        assert_eq!(
+            static_condition_to_trigger_condition(&StaticCondition::IsInitiative),
+            Some(TriggerCondition::IsInitiative),
         );
     }
 

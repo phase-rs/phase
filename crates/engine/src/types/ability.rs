@@ -4570,6 +4570,8 @@ pub enum StaticCondition {
     SourceIsBlocked,
     /// CR 725.1: True when the controller is the monarch.
     IsMonarch,
+    /// CR 726.3: True when the controller has the initiative.
+    IsInitiative,
     /// CR 725.1: True when no player holds the monarch designation. Distinct
     /// from `Not(IsMonarch)`, which is also true when an opponent is monarch.
     NoMonarch,
@@ -11512,6 +11514,9 @@ pub enum AbilityCondition {
     HasMaxSpeed,
     /// CR 725.1: "if you're the monarch" is true when the ability controller has the monarch designation.
     IsMonarch,
+    /// CR 726.3: "if you have the initiative" is true when the ability controller
+    /// has the initiative designation.
+    IsInitiative,
     /// CR 702.131c: "if you have the city's blessing" is true when the ability
     /// controller has the city's blessing designation.
     HasCityBlessing,
@@ -12065,6 +12070,9 @@ pub enum TriggerCondition {
 
     /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
     IsMonarch,
+    /// CR 726.3: "if you have the initiative" is true when the controller has
+    /// the initiative designation.
+    IsInitiative,
     /// CR 725.1: "if there is no monarch" is true when no player holds the
     /// monarch designation. Distinct from `Not(IsMonarch)`.
     NoMonarch,

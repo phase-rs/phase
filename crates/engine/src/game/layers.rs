@@ -5,8 +5,8 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
+    eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -618,6 +618,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
+        | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
         | StaticCondition::CompletedADungeon
@@ -734,6 +735,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
+        | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
         | StaticCondition::CompletedADungeon
@@ -1053,6 +1055,8 @@ fn evaluate_condition_with_context(
         }),
         // CR 725.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => eval_is_monarch(state, controller),
+        // CR 726.3: True when the controller has the initiative.
+        StaticCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
         StaticCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
