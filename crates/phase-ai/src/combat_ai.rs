@@ -24,6 +24,60 @@ enum CombatObjective {
     Race,
 }
 
+fn emit_attack_trace(
+    player: PlayerId,
+    candidate_attackers: &[ObjectId],
+    assignments: &[(ObjectId, AttackTarget)],
+) {
+    if !tracing::event_enabled!(target: "phase_ai::decision_trace", tracing::Level::DEBUG) {
+        return;
+    }
+    let chosen: Vec<String> = assignments
+        .iter()
+        .map(|(attacker, target)| format!("{attacker:?}->{target:?}"))
+        .collect();
+    let rejected: Vec<ObjectId> = candidate_attackers
+        .iter()
+        .copied()
+        .filter(|id| !assignments.iter().any(|(attacker, _)| attacker == id))
+        .collect();
+    tracing::debug!(
+        target: "phase_ai::decision_trace",
+        ai_player = player.0,
+        combat_kind = "attack",
+        chosen = ?chosen,
+        rejected = ?rejected,
+        "combat decision"
+    );
+}
+
+fn emit_block_trace(
+    player: PlayerId,
+    candidate_blockers: &[ObjectId],
+    assignments: &[(ObjectId, ObjectId)],
+) {
+    if !tracing::event_enabled!(target: "phase_ai::decision_trace", tracing::Level::DEBUG) {
+        return;
+    }
+    let chosen: Vec<String> = assignments
+        .iter()
+        .map(|(blocker, attacker)| format!("{blocker:?}->{attacker:?}"))
+        .collect();
+    let rejected: Vec<ObjectId> = candidate_blockers
+        .iter()
+        .copied()
+        .filter(|id| !assignments.iter().any(|(blocker, _)| blocker == id))
+        .collect();
+    tracing::debug!(
+        target: "phase_ai::decision_trace",
+        ai_player = player.0,
+        combat_kind = "block",
+        chosen = ?chosen,
+        rejected = ?rejected,
+        "combat decision"
+    );
+}
+
 /// Choose which creatures to attack with and assign each to an opponent.
 /// Returns `(ObjectId, AttackTarget)` pairs for per-creature targeting.
 /// Strategy: evaluate threat per opponent, check for lethal on weakest,
@@ -296,7 +350,7 @@ pub fn choose_attackers_with_targets_with_profile(
     if opponents.len() == 1 {
         let opp = opponents[0];
         let opponent_life = state.players[opp.0 as usize].life;
-        return redirect_attackers_to_planeswalker(
+        let assignments = redirect_attackers_to_planeswalker(
             state,
             &attacking_ids,
             valid_attack_targets,
@@ -304,10 +358,14 @@ pub fn choose_attackers_with_targets_with_profile(
             opp,
             opponent_life,
         );
+        emit_attack_trace(player, &candidates, &assignments);
+        return assignments;
     }
 
     // Multi-opponent: assign attack targets (planeswalker redirect deferred).
-    assign_attack_targets(state, player, &opponents, attacking_ids)
+    let assignments = assign_attack_targets(state, player, &opponents, attacking_ids);
+    emit_attack_trace(player, &candidates, &assignments);
+    assignments
 }
 
 /// Single-opponent planeswalker redirect (CR 508.1: legality of attacking a
@@ -592,6 +650,7 @@ pub fn choose_blockers_with_profile(
     if matches!(objective, CombatObjective::Stabilize)
         && block_is_futile(state, player, attacker_ids, &available_blockers)
     {
+        emit_block_trace(player, &available_blockers, &[]);
         return Vec::new();
     }
 
@@ -980,6 +1039,7 @@ pub fn choose_blockers_with_profile(
         }
     }
 
+    emit_block_trace(player, &available_blockers, &assignments);
     assignments
 }
 

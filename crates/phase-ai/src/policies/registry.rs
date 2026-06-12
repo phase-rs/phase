@@ -152,6 +152,58 @@ pub enum PolicyVerdict {
     Score { delta: f64, reason: PolicyReason },
 }
 
+/// Score unit contract: `delta = 1.0` is one card of expected value.
+/// Policy helpers expose the declared band at each call site; Phase 3 lints
+/// direct `Score` literals so new policies route through this contract.
+pub const NUDGE_MAX: f64 = 0.3;
+pub const PREFERENCE_MAX: f64 = 1.5;
+pub const STRONG_MAX: f64 = 5.0;
+pub const CRITICAL_MAX: f64 = 15.0;
+
+impl PolicyVerdict {
+    pub fn reject(reason: PolicyReason) -> Self {
+        Self::Reject { reason }
+    }
+
+    pub fn nudge(delta: f64, reason: PolicyReason) -> Self {
+        Self::score_in_band(delta, 0.0, NUDGE_MAX, reason)
+    }
+
+    pub fn preference(delta: f64, reason: PolicyReason) -> Self {
+        Self::score_in_band(delta, NUDGE_MAX, PREFERENCE_MAX, reason)
+    }
+
+    pub fn strong(delta: f64, reason: PolicyReason) -> Self {
+        Self::score_in_band(delta, PREFERENCE_MAX, STRONG_MAX, reason)
+    }
+
+    pub fn critical(delta: f64, reason: PolicyReason) -> Self {
+        Self::score_in_band(delta, STRONG_MAX, CRITICAL_MAX, reason)
+    }
+
+    fn score_in_band(
+        delta: f64,
+        min_exclusive: f64,
+        max_inclusive: f64,
+        reason: PolicyReason,
+    ) -> Self {
+        let magnitude = delta.abs();
+        debug_assert!(
+            magnitude > min_exclusive && magnitude <= max_inclusive,
+            "policy delta {delta} outside declared band ({min_exclusive}, {max_inclusive}]"
+        );
+        let clamped = if magnitude == 0.0 {
+            0.0
+        } else {
+            delta.signum() * magnitude.clamp(min_exclusive.min(f64::EPSILON), max_inclusive)
+        };
+        Self::Score {
+            delta: clamped,
+            reason,
+        }
+    }
+}
+
 /// The clean `TacticalPolicy` trait — four required methods, zero defaults.
 ///
 /// Scaling discipline (CR-equivalent invariant for the AI layer):
@@ -285,6 +337,7 @@ impl PolicyRegistry {
         let mut out = Vec::with_capacity(indices.len());
         for &idx in indices {
             let policy = &self.policies[idx];
+            let policy_id = policy.id();
             let Some(activation) = policy.activation(session_features, ctx.state, ctx.ai_player)
             else {
                 continue;
@@ -292,12 +345,31 @@ impl PolicyRegistry {
             let verdict = policy.verdict(ctx);
             let scaled = match verdict {
                 PolicyVerdict::Reject { reason } => PolicyVerdict::Reject { reason },
-                PolicyVerdict::Score { delta, reason } => PolicyVerdict::Score {
-                    delta: delta * activation as f64,
-                    reason,
-                },
+                PolicyVerdict::Score { delta, reason } => {
+                    let scaled_delta = delta * activation as f64;
+                    debug_assert!(
+                        scaled_delta.abs() <= CRITICAL_MAX,
+                        "policy {:?} scaled delta {} exceeds critical band ceiling {}",
+                        policy_id,
+                        scaled_delta,
+                        CRITICAL_MAX
+                    );
+                    if scaled_delta.abs() > CRITICAL_MAX {
+                        tracing::warn!(
+                            target: "phase_ai::decision_trace",
+                            ?policy_id,
+                            scaled_delta,
+                            activation,
+                            "policy scaled delta exceeds critical band ceiling"
+                        );
+                    }
+                    PolicyVerdict::Score {
+                        delta: scaled_delta,
+                        reason,
+                    }
+                }
             };
-            out.push((policy.id(), scaled));
+            out.push((policy_id, scaled));
         }
         out
     }
@@ -355,19 +427,45 @@ impl PolicyRegistry {
         let min_score = raw_scores
             .iter()
             .copied()
-            .filter(|s| s.is_finite())
+            .filter(|score| score.is_finite())
             .fold(f64::INFINITY, f64::min);
+        if !min_score.is_finite() {
+            tracing::warn!(
+                target: "phase_ai::decision_trace",
+                candidate_count = candidates.len(),
+                "all policy candidates were rejected; using uniform forced-action priors"
+            );
+            let prior = 1.0 / candidates.len() as f64;
+            return candidates
+                .iter()
+                .cloned()
+                .map(|candidate| PolicyPrior { candidate, prior })
+                .collect();
+        }
         let shifted: Vec<f64> = raw_scores
             .iter()
             .map(|score| {
                 if score.is_finite() {
                     ((score - min_score) + 0.01).max(0.01)
                 } else {
-                    0.01
+                    0.0
                 }
             })
             .collect();
-        let total = shifted.iter().sum::<f64>().max(0.01);
+        let total = shifted.iter().sum::<f64>();
+        if total <= 0.0 {
+            tracing::warn!(
+                target: "phase_ai::decision_trace",
+                candidate_count = candidates.len(),
+                "policy priors summed to zero; using uniform forced-action priors"
+            );
+            let prior = 1.0 / candidates.len() as f64;
+            return candidates
+                .iter()
+                .cloned()
+                .map(|candidate| PolicyPrior { candidate, prior })
+                .collect();
+        }
 
         candidates
             .iter()
@@ -384,6 +482,10 @@ impl PolicyRegistry {
 #[cfg(test)]
 mod shared_invariant_tests {
     use super::*;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId};
 
     #[test]
     fn default_registry_contains_combo_line_progress() {
@@ -418,5 +520,116 @@ mod shared_invariant_tests {
             PolicyRegistry::default().policies.len(),
             "shared instance must contain the same policy set as a fresh default()"
         );
+    }
+
+    struct PriorTestPolicy;
+
+    impl TacticalPolicy for PriorTestPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::AntiSelfHarm
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility, DecisionKind::PlayLand]
+        }
+
+        fn activation(
+            &self,
+            _features: &DeckFeatures,
+            _state: &GameState,
+            _player: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            match ctx.candidate.action {
+                GameAction::PassPriority => PolicyVerdict::reject(PolicyReason::new("test_reject")),
+                _ => PolicyVerdict::nudge(0.1, PolicyReason::new("test_score")),
+            }
+        }
+    }
+
+    fn prior_test_registry() -> PolicyRegistry {
+        let policies: Vec<Box<dyn TacticalPolicy>> = vec![Box::new(PriorTestPolicy)];
+        let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
+        by_kind.insert(DecisionKind::ActivateAbility, vec![0]);
+        by_kind.insert(DecisionKind::PlayLand, vec![0]);
+        PolicyRegistry { policies, by_kind }
+    }
+
+    fn candidate(action: GameAction, tactical_class: TacticalClass) -> CandidateAction {
+        CandidateAction {
+            action,
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class,
+            },
+        }
+    }
+
+    fn priority_decision(candidates: Vec<CandidateAction>) -> AiDecisionContext {
+        AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates,
+        }
+    }
+
+    #[test]
+    fn rejected_candidate_gets_zero_prior_when_any_candidate_is_allowed() {
+        let rejected = candidate(GameAction::PassPriority, TacticalClass::Pass);
+        let allowed = candidate(
+            GameAction::PlayLand {
+                object_id: ObjectId(1),
+                card_id: CardId(1),
+            },
+            TacticalClass::Land,
+        );
+        let candidates = vec![rejected.clone(), allowed.clone()];
+        let decision = priority_decision(candidates.clone());
+        let state = GameState::new_two_player(7);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let priors = prior_test_registry().priors(
+            &state,
+            &decision,
+            &candidates,
+            PlayerId(0),
+            &config,
+            &context,
+        );
+
+        assert_eq!(priors.len(), 2);
+        assert_eq!(priors[0].prior, 0.0);
+        assert!(priors[1].prior > 0.99);
+    }
+
+    #[test]
+    fn all_rejected_candidates_fall_back_to_uniform_priors() {
+        let candidates = vec![
+            candidate(GameAction::PassPriority, TacticalClass::Pass),
+            candidate(GameAction::PassPriority, TacticalClass::Pass),
+        ];
+        let decision = priority_decision(candidates.clone());
+        let state = GameState::new_two_player(7);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let priors = prior_test_registry().priors(
+            &state,
+            &decision,
+            &candidates,
+            PlayerId(0),
+            &config,
+            &context,
+        );
+
+        assert_eq!(priors.len(), 2);
+        assert!(priors
+            .iter()
+            .all(|prior| (prior.prior - 0.5).abs() < f64::EPSILON));
     }
 }

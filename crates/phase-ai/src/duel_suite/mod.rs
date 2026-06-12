@@ -90,7 +90,7 @@ impl std::fmt::Debug for DeckRef {
 }
 
 /// Outcome tolerance for a matchup.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Expected {
     /// Mirror match: P0 winrate must fall within `(0.5 - tolerance, 0.5 + tolerance)`.

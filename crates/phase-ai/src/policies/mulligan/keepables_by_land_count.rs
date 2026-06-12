@@ -36,8 +36,8 @@ impl MulliganPolicy for KeepablesByLandCount {
         hand: &[ObjectId],
         state: &GameState,
         _features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
+        _plan: &PlanSnapshot, // input-unused: land-count policy uses mulligan count directly
+        _turn_order: TurnOrder, // input-unused: land-count policy uses mulligan count directly
         mulligans_taken: u8,
     ) -> MulliganScore {
         let hand_size = hand.len();

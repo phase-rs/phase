@@ -37,4 +37,9 @@ name = "ai-bench-state"
 path = "src/bin/ai_bench_state.rs"
 test = false
 
+[[bin]]
+name = "ai-gate"
+path = "src/bin/ai_gate.rs"
+test = false
+
 [dev-dependencies]

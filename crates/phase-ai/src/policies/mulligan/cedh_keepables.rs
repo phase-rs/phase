@@ -9,16 +9,16 @@
 //! from winning by turn 4") lands when the `ComboRegistry` is populated and
 //! the policy can ask `ComboRegistry::reachable_lines(hand_pseudo_state)`.
 //!
-//! **Stub heuristics** — all card classification here is name-based against a
-//! small static staple set. This is explicitly documented as a stub; it is
-//! refined to card-data feature tags once the right tag names are confirmed.
-
 use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter, TypeFilter};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 
+use crate::ability_chain::collect_chain_effects;
 use crate::combo::ComboRegistry;
+use crate::features::control::is_counterspell_parts;
+use crate::features::mana_ramp::{is_mana_dork_parts, is_ritual_parts};
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
@@ -51,8 +51,8 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
+        _plan: &PlanSnapshot, // input-unused: cEDH floor and structure checks do not use curve plan
+        _turn_order: TurnOrder, // input-unused: cEDH floor and structure checks do not use play/draw
         mulligans_taken: u8,
     ) -> MulliganScore {
         // Internal gate: non-cEDH decks see a zero-delta Score (cheap no-op).
@@ -120,9 +120,9 @@ impl MulliganPolicy for CedhKeepablesMulligan {
             };
         }
 
-        let has_fast_mana = hand_has_any(hand, state, is_fast_mana_card);
-        let has_tutor = hand_has_any(hand, state, is_tutor_card);
-        let has_interaction = hand_has_any(hand, state, is_interaction_card);
+        let has_fast_mana = hand_has_any(hand, state, is_fast_mana_object);
+        let has_tutor = hand_has_any(hand, state, is_tutor_object);
+        let has_interaction = hand_has_any(hand, state, is_interaction_object);
 
         // No acceleration, no tutor, no interaction: the hand has neither a
         // fast-mana clock nor a disruption piece — untenable at a cEDH table.
@@ -154,61 +154,64 @@ fn count_lands_in_hand(hand: &[ObjectId], state: &GameState) -> u32 {
 
 fn hand_has_any<F>(hand: &[ObjectId], state: &GameState, pred: F) -> bool
 where
-    F: Fn(&str) -> bool,
+    F: Fn(&engine::game::GameObject) -> bool,
 {
     hand.iter()
-        .any(|&id| state.objects.get(&id).is_some_and(|obj| pred(&obj.name)))
+        .any(|&id| state.objects.get(&id).is_some_and(&pred))
 }
 
-/// Canonical cEDH fast-mana staple set — stub heuristic.
-/// Replace with card-data feature tag lookups once the tag name is confirmed.
-fn is_fast_mana_card(name: &str) -> bool {
-    matches!(
-        name,
-        "Sol Ring"
-            | "Mana Crypt"
-            | "Mox Diamond"
-            | "Chrome Mox"
-            | "Mana Vault"
-            | "Jeweled Lotus"
-            | "Lotus Petal"
-            | "Dark Ritual"
-    )
+fn is_fast_mana_object(obj: &engine::game::GameObject) -> bool {
+    is_mana_dork_parts(&obj.card_types.core_types, &obj.abilities)
+        || is_ritual_parts(&obj.card_types.core_types, &obj.abilities)
 }
 
-/// Canonical cEDH tutor staple set — stub heuristic.
-fn is_tutor_card(name: &str) -> bool {
-    matches!(
-        name,
-        "Demonic Tutor"
-            | "Vampiric Tutor"
-            | "Mystical Tutor"
-            | "Enlightened Tutor"
-            | "Worldly Tutor"
-            | "Imperial Seal"
-            | "Grim Tutor"
-    )
+fn is_tutor_object(obj: &engine::game::GameObject) -> bool {
+    obj.abilities
+        .iter()
+        .any(|ability| ability.kind == AbilityKind::Spell && chain_searches_nonland(ability))
 }
 
-/// Canonical cEDH interaction staple set — stub heuristic.
-fn is_interaction_card(name: &str) -> bool {
-    matches!(
-        name,
-        "Force of Will"
-            | "Force of Negation"
-            | "Mana Drain"
-            | "Counterspell"
-            | "Swan Song"
-            | "Mindbreak Trap"
-            | "Pact of Negation"
-    )
+fn is_interaction_object(obj: &engine::game::GameObject) -> bool {
+    is_counterspell_parts(&obj.abilities)
+}
+
+fn chain_searches_nonland(ability: &AbilityDefinition) -> bool {
+    collect_chain_effects(ability).iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::SearchLibrary { filter, .. } if !target_filter_references_land(filter)
+        )
+    })
+}
+
+fn target_filter_references_land(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.type_filters.iter().any(type_filter_references_land),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_references_land)
+        }
+        _ => false,
+    }
+}
+
+fn type_filter_references_land(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Land => true,
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_references_land),
+        _ => false,
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityCost, ManaContribution, ManaProduction, QuantityExpr, TypedFilter,
+    };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
@@ -258,6 +261,53 @@ mod tests {
         oid
     }
 
+    fn push_ability(state: &mut GameState, oid: ObjectId, ability: AbilityDefinition) {
+        Arc::make_mut(&mut state.objects.get_mut(&oid).unwrap().abilities).push(ability);
+    }
+
+    fn tap_for_mana_ability() -> AbilityDefinition {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: Vec::new(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Tap);
+        ability
+    }
+
+    fn counterspell_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+            },
+        )
+    }
+
+    fn tutor_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SearchLibrary {
+                source_zones: vec![Zone::Library],
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: Default::default(),
+                split: None,
+            },
+        )
+    }
+
     #[test]
     fn not_applicable_when_not_cedh() {
         let policy = CedhKeepablesMulligan::new();
@@ -301,7 +351,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
-        // 3 plain lands, none of which match any fast-mana / tutor / interaction name.
+        // 3 plain lands, none of which carry fast-mana / tutor / interaction structure.
         let mut hand = Vec::new();
         for i in 0..3 {
             hand.push(add_hand_card(
@@ -343,8 +393,8 @@ mod tests {
         }
     }
 
-    /// Baseline-keep path: 2-4 lands AND at least one fast-mana card
-    /// (Sol Ring) passes the gate and yields a positive Score.
+    /// Baseline-keep path: 2-4 lands AND at least one fast-mana object passes
+    /// the structural gate and yields a positive Score.
     #[test]
     fn cedh_hand_with_fast_mana_baseline_keeps() {
         let policy = CedhKeepablesMulligan::new();
@@ -361,13 +411,9 @@ mod tests {
                 vec![CoreType::Land],
             ));
         }
-        // Sol Ring is a canonical fast-mana staple — must trigger the keep path.
-        hand.push(add_hand_card(
-            &mut state,
-            20,
-            "Sol Ring",
-            vec![CoreType::Artifact],
-        ));
+        let rock = add_hand_card(&mut state, 20, "Mana Rock", vec![CoreType::Artifact]);
+        push_ability(&mut state, rock, tap_for_mana_ability());
+        hand.push(rock);
         // Some filler.
         for i in 0..3 {
             hand.push(add_hand_card(
@@ -401,6 +447,74 @@ mod tests {
             }
             _ => panic!("expected baseline-keep Score, got {score:?}"),
         }
+    }
+
+    #[test]
+    fn cedh_hand_with_tutor_baseline_keeps() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        let mut hand = Vec::new();
+        for i in 0..3 {
+            hand.push(add_hand_card(
+                &mut state,
+                i,
+                &format!("Island {i}"),
+                vec![CoreType::Land],
+            ));
+        }
+        let tutor = add_hand_card(&mut state, 20, "Tutor Shape", vec![CoreType::Sorcery]);
+        push_ability(&mut state, tutor, tutor_ability());
+        hand.push(tutor);
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        assert!(
+            matches!(score, MulliganScore::Score { delta, .. } if (delta - 1.0).abs() < f64::EPSILON),
+            "expected structural tutor hand to baseline keep, got {score:?}"
+        );
+    }
+
+    #[test]
+    fn cedh_hand_with_interaction_baseline_keeps() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        let mut hand = Vec::new();
+        for i in 0..3 {
+            hand.push(add_hand_card(
+                &mut state,
+                i,
+                &format!("Island {i}"),
+                vec![CoreType::Land],
+            ));
+        }
+        let counter = add_hand_card(&mut state, 20, "Counter Shape", vec![CoreType::Instant]);
+        push_ability(&mut state, counter, counterspell_ability());
+        hand.push(counter);
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        assert!(
+            matches!(score, MulliganScore::Score { delta, .. } if (delta - 1.0).abs() < f64::EPSILON),
+            "expected structural counterspell hand to baseline keep, got {score:?}"
+        );
     }
 
     /// Second ForceMulligan branch: > 4 lands. Too land-heavy for a cEDH list;

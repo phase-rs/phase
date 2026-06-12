@@ -505,6 +505,7 @@ def main():
 
     # Build output JSON
     output = {
+        "kind": "17lands_phase_weights",
         "source": "17lands_PremierDraft_phase_aware",
         "sets": set_codes,
         "filter": f"win_rate >= {args.min_win_rate}, games >= {args.min_games}",

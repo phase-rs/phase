@@ -1,9 +1,18 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::process::Command;
 
 use phase_ai::auto_play::run_ai_actions;
-use phase_ai::config::{create_config, AiConfig, AiDifficulty, AiProfile, Platform};
-use phase_ai::eval::{EvalWeightSet, EvalWeights};
+use phase_ai::config::{
+    create_config, AiConfig, AiDifficulty, AiProfile, Platform, PolicyPenalties,
+    ACTIVE_POLICY_PENALTY_FIELDS,
+};
+use phase_ai::deck_profile::ArchetypeMultipliers;
+use phase_ai::duel_suite::compare::sign_test_mid_p_upper_tail;
+use phase_ai::duel_suite::{all_matchups, resolve_deck_ref, MatchupSpec};
+use phase_ai::eval::{EvalWeightSet, EvalWeights, KeywordBonuses};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{resolve_deck_list, DeckList, DeckPayload, PlayerDeckList};
@@ -11,30 +20,136 @@ use engine::game::engine::start_game_skip_mulligan;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
-// Parameter vector layout (12 parameters):
-//
-// Indices 0-8: EvalWeights (9 params, optimized as late-game weights)
-//   0=life, 1=aggression, 2=board_presence, 3=board_power,
-//   4=board_toughness, 5=hand_size, 6=zone_quality, 7=card_advantage,
-//   8=synergy
-//
-// Indices 9-11: AiProfile (3 params)
-//   9=risk_tolerance, 10=interaction_patience, 11=stabilize_bias
-//
-// CMA-ES optimizes the late-game weights directly. Early and mid phases
-// are derived by applying the ratios from the 17Lands-trained weight set,
-// since the relative importance shift across phases is well-established
-// from 90M+ training samples and doesn't need evolutionary optimization.
-const PARAM_COUNT: usize = 12;
+const CMA_TUNED_KIND: &str = "cma_tuned_weights";
+const FITNESS_MATCHUP_IDS: &[&str] = &["red-vs-green", "white-vs-red", "red-vs-blue"];
+const HOLDOUT_MATCHUP_IDS: &[&str] = &["black-vs-blue", "azorius-vs-prowess", "delver-vs-green"];
+const EVAL_PARAMETER_NAMES: &[&str] = &[
+    "late.life",
+    "late.aggression",
+    "late.board_presence",
+    "late.board_power",
+    "late.board_toughness",
+    "late.hand_size",
+    "late.zone_quality",
+    "late.card_advantage",
+    "late.synergy",
+    "profile.risk_tolerance",
+    "profile.interaction_patience",
+    "profile.stabilize_bias",
+];
+const KEYWORD_PARAMETER_NAMES: &[&str] = &[
+    "keyword.flying_mult",
+    "keyword.trample_mult",
+    "keyword.deathtouch_flat",
+    "keyword.lifelink_mult",
+    "keyword.hexproof_flat",
+    "keyword.indestructible_flat",
+    "keyword.first_strike_mult",
+    "keyword.vigilance_flat",
+    "keyword.menace_mult",
+    "keyword.tapped_penalty",
+];
+const ARCHETYPE_NAMES: &[&str] = &["aggro", "midrange", "control", "combo", "ramp"];
+const ARCHETYPE_WEIGHT_NAMES: &[&str] = &[
+    "life",
+    "aggression",
+    "board_presence",
+    "board_power",
+    "board_toughness",
+    "hand_size",
+    "zone_quality",
+    "card_advantage",
+    "synergy",
+];
 
 /// Maximum turns before declaring a draw (prevents infinite games).
 const MAX_TURNS: u32 = 100;
 
-/// Convert a parameter vector into an AiConfig.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuneGroup {
+    Eval,
+    Penalties,
+    Keywords,
+    Archetype,
+}
+
+impl TuneGroup {
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "eval" => Some(Self::Eval),
+            "penalties" => Some(Self::Penalties),
+            "keywords" => Some(Self::Keywords),
+            "archetype" => Some(Self::Archetype),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Eval => "eval",
+            Self::Penalties => "penalties",
+            Self::Keywords => "keywords",
+            Self::Archetype => "archetype",
+        }
+    }
+
+    fn parameter_names(self) -> Vec<String> {
+        match self {
+            Self::Eval => EVAL_PARAMETER_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            Self::Penalties => ACTIVE_POLICY_PENALTY_FIELDS
+                .iter()
+                .map(|name| format!("policy_penalties.{name}"))
+                .collect(),
+            Self::Keywords => KEYWORD_PARAMETER_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            Self::Archetype => ARCHETYPE_NAMES
+                .iter()
+                .flat_map(|archetype| {
+                    ARCHETYPE_WEIGHT_NAMES
+                        .iter()
+                        .map(move |weight| format!("archetype.{archetype}.{weight}"))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Convert the legacy eval/profile parameter vector into an AiConfig.
 /// Uses Medium difficulty search settings (depth 2, 24 nodes).
 /// Optimizes late-game weights directly; early/mid derived from 17Lands ratios.
 /// All weight values are clamped to [0.01, 10.0] to prevent degenerate configs.
+#[cfg(test)]
 fn params_to_config(params: &[f64]) -> AiConfig {
+    params_to_config_for(TuneGroup::Eval, params)
+}
+
+fn params_to_config_for(group: TuneGroup, params: &[f64]) -> AiConfig {
+    match group {
+        TuneGroup::Eval => eval_params_to_config(params),
+        TuneGroup::Penalties => {
+            let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+            config.policy_penalties = policy_penalties_from_params(params);
+            config
+        }
+        TuneGroup::Keywords => {
+            let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+            config.keyword_bonuses = keyword_bonuses_from_params(params);
+            config
+        }
+        TuneGroup::Archetype => {
+            let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+            config.archetype_multipliers = archetype_multipliers_from_params(params);
+            config
+        }
+    }
+}
+
+fn eval_params_to_config(params: &[f64]) -> AiConfig {
     let clamp = |v: f64| v.clamp(0.01, 10.0);
 
     let late = EvalWeights {
@@ -65,6 +180,172 @@ fn params_to_config(params: &[f64]) -> AiConfig {
     config.weights = EvalWeightSet { early, mid, late };
     config.profile = profile;
     config
+}
+
+fn numeric_fields_to_params<T: serde::Serialize>(value: &T, fields: &[&str]) -> Vec<f64> {
+    let value = serde_json::to_value(value).expect("tuning config serializes");
+    let object = value
+        .as_object()
+        .expect("tuning config serializes as object");
+    fields
+        .iter()
+        .map(|field| {
+            object
+                .get(*field)
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| panic!("missing numeric tuning field {field}"))
+        })
+        .collect()
+}
+
+fn deserialize_numeric_fields<T>(fields: &[&str], params: &[f64], min: f64, max: f64) -> T
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Default,
+{
+    assert_eq!(fields.len(), params.len());
+    let mut value = serde_json::to_value(T::default()).expect("tuning config serializes");
+    let object = value
+        .as_object_mut()
+        .expect("tuning config serializes as object");
+    for (field, param) in fields.iter().zip(params.iter()) {
+        object.insert(
+            (*field).to_string(),
+            serde_json::Number::from_f64(param.clamp(min, max))
+                .map(serde_json::Value::Number)
+                .expect("finite tuning parameter"),
+        );
+    }
+    serde_json::from_value(value).expect("tuning config deserializes")
+}
+
+fn policy_penalties_from_params(params: &[f64]) -> PolicyPenalties {
+    deserialize_numeric_fields(ACTIVE_POLICY_PENALTY_FIELDS, params, -15.0, 15.0)
+}
+
+fn keyword_bonuses_from_params(params: &[f64]) -> KeywordBonuses {
+    let fields: Vec<&str> = KEYWORD_PARAMETER_NAMES
+        .iter()
+        .map(|name| name.strip_prefix("keyword.").unwrap_or(name))
+        .collect();
+    deserialize_numeric_fields(&fields, params, -10.0, 15.0)
+}
+
+fn archetype_multipliers_from_params(params: &[f64]) -> ArchetypeMultipliers {
+    assert_eq!(
+        params.len(),
+        ARCHETYPE_NAMES.len() * ARCHETYPE_WEIGHT_NAMES.len()
+    );
+    let mut multipliers = ArchetypeMultipliers::default();
+    for (archetype_idx, chunk) in params.chunks(ARCHETYPE_WEIGHT_NAMES.len()).enumerate() {
+        let values: [f64; 9] = chunk
+            .iter()
+            .map(|v| v.clamp(0.01, 5.0))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("archetype group uses 9 weights per archetype");
+        match ARCHETYPE_NAMES[archetype_idx] {
+            "aggro" => multipliers.aggro = values,
+            "midrange" => multipliers.midrange = values,
+            "control" => multipliers.control = values,
+            "combo" => multipliers.combo = values,
+            "ramp" => multipliers.ramp = values,
+            _ => unreachable!("unknown archetype tuning group"),
+        }
+    }
+    multipliers
+}
+
+fn config_from_late_weights_and_profile(late: EvalWeights, profile: AiProfile) -> AiConfig {
+    let learned = EvalWeightSet::learned();
+    let early = scale_from_ratios(&late, &learned.early, &learned.late);
+    let mid = scale_from_ratios(&late, &learned.mid, &learned.late);
+
+    let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+    config.weights = EvalWeightSet { early, mid, late };
+    config.profile = profile;
+    config
+}
+
+fn load_cma_tuned_config(path: &std::path::Path) -> Result<AiConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read tuned artifact {}: {err}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("failed to parse tuned artifact {}: {err}", path.display()))?;
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "tuned artifact missing kind".to_string())?;
+    if kind != CMA_TUNED_KIND {
+        return Err(format!(
+            "expected artifact kind {CMA_TUNED_KIND}, found {kind}"
+        ));
+    }
+    let group = value
+        .get("group")
+        .and_then(|v| v.as_str())
+        .and_then(TuneGroup::from_label)
+        .unwrap_or(TuneGroup::Eval);
+    let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+
+    if group == TuneGroup::Penalties {
+        let penalties = value
+            .get("policy_penalties")
+            .ok_or_else(|| "tuned penalties artifact missing policy_penalties".to_string())?;
+        config.policy_penalties = serde_json::from_value(penalties.clone())
+            .map_err(|err| format!("invalid policy_penalties section: {err}"))?;
+        return Ok(config);
+    }
+
+    if group == TuneGroup::Keywords {
+        let bonuses = value
+            .get("keyword_bonuses")
+            .ok_or_else(|| "tuned keyword artifact missing keyword_bonuses".to_string())?;
+        config.keyword_bonuses = serde_json::from_value(bonuses.clone())
+            .map_err(|err| format!("invalid keyword_bonuses section: {err}"))?;
+        return Ok(config);
+    }
+
+    if group == TuneGroup::Archetype {
+        let multipliers = value
+            .get("archetype_multipliers")
+            .ok_or_else(|| "tuned archetype artifact missing archetype_multipliers".to_string())?;
+        config.archetype_multipliers = serde_json::from_value(multipliers.clone())
+            .map_err(|err| format!("invalid archetype_multipliers section: {err}"))?;
+        return Ok(config);
+    }
+
+    let weights = value
+        .get("weights")
+        .ok_or_else(|| "tuned artifact missing weights".to_string())?;
+    let profile = value
+        .get("profile")
+        .ok_or_else(|| "tuned artifact missing profile".to_string())?;
+
+    let field = |object: &serde_json::Value, name: &str| -> Result<f64, String> {
+        object
+            .get(name)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| format!("tuned artifact missing numeric field {name}"))
+    };
+
+    let late = EvalWeights {
+        life: field(weights, "life")?,
+        aggression: field(weights, "aggression")?,
+        board_presence: field(weights, "board_presence")?,
+        board_power: field(weights, "board_power")?,
+        board_toughness: field(weights, "board_toughness")?,
+        hand_size: field(weights, "hand_size")?,
+        zone_quality: field(weights, "zone_quality")?,
+        card_advantage: field(weights, "card_advantage")?,
+        synergy: field(weights, "synergy")?,
+    };
+    let profile = AiProfile {
+        risk_tolerance: field(profile, "risk_tolerance")?,
+        interaction_patience: field(profile, "interaction_patience")?,
+        stabilize_bias: field(profile, "stabilize_bias")?,
+    };
+
+    Ok(config_from_late_weights_and_profile(late, profile))
 }
 
 /// Scale a base weight set by the ratio between a target phase and a reference phase.
@@ -104,8 +385,42 @@ fn scale_from_ratios(
     }
 }
 
-/// Extract the initial parameter vector from current learned defaults.
+/// Extract the initial parameter vector from current defaults.
+#[cfg(test)]
 fn initial_params() -> Vec<f64> {
+    initial_params_for(TuneGroup::Eval)
+}
+
+fn initial_params_for(group: TuneGroup) -> Vec<f64> {
+    match group {
+        TuneGroup::Eval => eval_initial_params(),
+        TuneGroup::Penalties => {
+            numeric_fields_to_params(&PolicyPenalties::default(), ACTIVE_POLICY_PENALTY_FIELDS)
+        }
+        TuneGroup::Keywords => {
+            let fields: Vec<&str> = KEYWORD_PARAMETER_NAMES
+                .iter()
+                .map(|name| name.strip_prefix("keyword.").unwrap_or(name))
+                .collect();
+            numeric_fields_to_params(&KeywordBonuses::default(), &fields)
+        }
+        TuneGroup::Archetype => {
+            let multipliers = ArchetypeMultipliers::default();
+            [
+                multipliers.aggro,
+                multipliers.midrange,
+                multipliers.control,
+                multipliers.combo,
+                multipliers.ramp,
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+    }
+}
+
+fn eval_initial_params() -> Vec<f64> {
     let w = EvalWeightSet::learned().late;
     let p = AiProfile::default();
     vec![
@@ -377,116 +692,40 @@ fn invsqrt_cov(cov: &[Vec<f64>]) -> Vec<Vec<f64>> {
     l_inv
 }
 
-/// A deck matchup: two named deck lists to pit against each other.
-struct Matchup {
-    name: &'static str,
-    deck_a: PlayerDeckList,
-    deck_b: PlayerDeckList,
-    /// Expected winner based on MTG archetype triangle (aggro < midrange < control < aggro).
-    /// None = mirror/even matchup, Some(0) = deck_a favored, Some(1) = deck_b favored.
-    expected_winner: Option<u8>,
+fn build_tuning_matchups(
+    db: &CardDatabase,
+    ids: &[&str],
+) -> Result<Vec<(DeckPayload, &'static MatchupSpec)>, String> {
+    ids.iter()
+        .map(|id| {
+            let spec = all_matchups()
+                .iter()
+                .find(|spec| spec.id == *id)
+                .ok_or_else(|| format!("unknown tuning matchup {id}"))?;
+            Ok((build_matchup_payload(db, spec)?, spec))
+        })
+        .collect()
 }
 
-/// Build the 3 deck matchups for fitness evaluation.
-fn build_matchups() -> Vec<Matchup> {
-    let red_aggro = PlayerDeckList {
-        main_deck: [
-            vec!["Mountain".to_string(); 24],
-            vec!["Lightning Bolt".to_string(); 4],
-            vec!["Shock".to_string(); 4],
-            vec!["Monastery Swiftspear".to_string(); 4],
-            vec!["Goblin Guide".to_string(); 4],
-            vec!["Zurgo Bellstriker".to_string(); 4],
-            vec!["Bomat Courier".to_string(); 4],
-            vec!["Fanatical Firebrand".to_string(); 4],
-            vec!["Ghitu Lavarunner".to_string(); 4],
-            vec!["Viashino Pyromancer".to_string(); 4],
-        ]
-        .concat(),
-        sideboard: vec![],
-        commander: vec![],
-        ..Default::default()
-    };
-
-    let green_midrange = PlayerDeckList {
-        main_deck: [
-            vec!["Forest".to_string(); 24],
-            vec!["Llanowar Elves".to_string(); 4],
-            vec!["Elvish Mystic".to_string(); 4],
-            vec!["Grizzly Bears".to_string(); 4],
-            vec!["Leatherback Baloth".to_string(); 4],
-            vec!["Gigantosaurus".to_string(); 4],
-            vec!["Garruk's Companion".to_string(); 4],
-            vec!["Kalonian Tusker".to_string(); 4],
-            vec!["Rampant Growth".to_string(); 4],
-            vec!["Giant Growth".to_string(); 4],
-            vec!["Blossoming Defense".to_string(); 4],
-        ]
-        .concat(),
-        sideboard: vec![],
-        commander: vec![],
-        ..Default::default()
-    };
-
-    let white_weenie = PlayerDeckList {
-        main_deck: [
-            vec!["Plains".to_string(); 22],
-            vec!["Savannah Lions".to_string(); 4],
-            vec!["Elite Vanguard".to_string(); 4],
-            vec!["Soldier of the Pantheon".to_string(); 4],
-            vec!["Imposing Sovereign".to_string(); 4],
-            vec!["Precinct Captain".to_string(); 4],
-            vec!["Raise the Alarm".to_string(); 4],
-            vec!["Honor of the Pure".to_string(); 4],
-            vec!["Brave the Elements".to_string(); 4],
-            vec!["Condemn".to_string(); 4],
-            vec!["Banishing Light".to_string(); 2],
-        ]
-        .concat(),
-        sideboard: vec![],
-        commander: vec![],
-        ..Default::default()
-    };
-
-    let blue_control = PlayerDeckList {
-        main_deck: [
-            vec!["Island".to_string(); 26],
-            vec!["Counterspell".to_string(); 4],
-            vec!["Mana Leak".to_string(); 4],
-            vec!["Opt".to_string(); 4],
-            vec!["Preordain".to_string(); 4],
-            vec!["Delver of Secrets".to_string(); 4],
-            vec!["Augur of Bolas".to_string(); 4],
-            vec!["Man-o'-War".to_string(); 4],
-            vec!["Essence Scatter".to_string(); 4],
-            vec!["Unsummon".to_string(); 2],
-        ]
-        .concat(),
-        sideboard: vec![],
-        commander: vec![],
-        ..Default::default()
-    };
-
-    vec![
-        Matchup {
-            name: "Red Aggro vs Green Midrange",
-            deck_a: red_aggro.clone(),
-            deck_b: green_midrange.clone(),
-            expected_winner: Some(1), // midrange > aggro
+fn build_matchup_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, String> {
+    let p0 = resolve_deck_ref(&spec.p0).map_err(|err| format!("{} p0: {err}", spec.id))?;
+    let p1 = resolve_deck_ref(&spec.p1).map_err(|err| format!("{} p1: {err}", spec.id))?;
+    let deck_list = DeckList {
+        player: PlayerDeckList {
+            main_deck: p0,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            ..Default::default()
         },
-        Matchup {
-            name: "White Weenie vs Red Aggro",
-            deck_a: white_weenie,
-            deck_b: red_aggro,
-            expected_winner: None, // aggro mirror, roughly even
+        opponent: PlayerDeckList {
+            main_deck: p1,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            ..Default::default()
         },
-        Matchup {
-            name: "Green Midrange vs Blue Control",
-            deck_a: green_midrange,
-            deck_b: blue_control,
-            expected_winner: Some(1), // control > midrange
-        },
-    ]
+        ..Default::default()
+    };
+    Ok(resolve_deck_list(db, &deck_list))
 }
 
 /// Run a single game with separate AI configs for each player.
@@ -505,29 +744,37 @@ fn run_game(
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
     let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
-    ai_configs.insert(PlayerId(0), config_p0.clone());
-    ai_configs.insert(PlayerId(1), config_p1.clone());
+    ai_configs.insert(PlayerId(0), config_p0.clone().into_measurement(seed));
+    ai_configs.insert(
+        PlayerId(1),
+        config_p1.clone().into_measurement(seed.wrapping_add(1)),
+    );
 
-    let mut turns = 0u32;
+    let mut ai_rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
     loop {
         if let WaitingFor::GameOver { winner } = &state.waiting_for {
-            return (*winner, turns);
+            return (*winner, state.turn_number);
         }
-        if turns >= MAX_TURNS {
-            return (None, turns);
+        if state.turn_number >= MAX_TURNS {
+            return (None, state.turn_number);
         }
 
-        let results = run_ai_actions(&mut state, &ai_players, &ai_configs);
+        let results = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_ai_actions(
+                &mut state,
+                &ai_players,
+                &ai_configs,
+                &mut ai_rng,
+                &ai_session,
+            )
+        })) {
+            Ok(results) => results,
+            Err(_) => return (None, state.turn_number),
+        };
         if results.is_empty() {
             // No actions could be taken — game is stuck
-            return (None, turns);
-        }
-
-        // Track turns by monitoring turn changes
-        if let Some(actor) = state.waiting_for.acting_player() {
-            if actor == PlayerId(0) {
-                turns += 1;
-            }
+            return (None, state.turn_number);
         }
     }
 }
@@ -535,39 +782,40 @@ fn run_game(
 /// Evaluate fitness of a parameter vector by playing games across matchups.
 /// Returns the average win rate of the candidate config vs the baseline.
 fn evaluate_fitness(
+    group: TuneGroup,
     params: &[f64],
     matchups: &[(DeckPayload, &str)],
     games_per_matchup: usize,
     base_seed: u64,
-    baseline: &AiConfig,
 ) -> f64 {
-    let candidate = params_to_config(params);
+    let candidate = params_to_config_for(group, params);
+    let opponent_pool = [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard];
     let mut total_wins = 0usize;
     let mut total_games = 0usize;
 
     for (matchup_idx, (payload, _name)) in matchups.iter().enumerate() {
-        for game_idx in 0..games_per_matchup {
-            let seed = base_seed + (matchup_idx * games_per_matchup + game_idx) as u64;
+        for (opponent_idx, opponent_difficulty) in opponent_pool.iter().enumerate() {
+            let opponent = create_config(*opponent_difficulty, Platform::Native);
+            for game_idx in 0..games_per_matchup {
+                let seed = base_seed
+                    .wrapping_add(matchup_idx as u64 * 100_000)
+                    .wrapping_add(opponent_idx as u64 * 10_000)
+                    .wrapping_add(game_idx as u64);
 
-            // Alternate sides: even games candidate=P0, odd games candidate=P1
-            let (config_p0, config_p1) = if game_idx % 2 == 0 {
-                (&candidate, baseline)
-            } else {
-                (baseline, &candidate)
-            };
-
-            let (winner, _turns) = run_game(payload, seed, config_p0, config_p1);
-
-            let candidate_won = match winner {
-                Some(PlayerId(0)) => game_idx % 2 == 0,
-                Some(PlayerId(1)) => game_idx % 2 == 1,
-                _ => false,
-            };
-
-            if candidate_won {
-                total_wins += 1;
+                let paired = [
+                    (true, run_game(payload, seed, &candidate, &opponent)),
+                    (false, run_game(payload, seed, &opponent, &candidate)),
+                ];
+                for (candidate_is_p0, (winner, _turns)) in paired {
+                    let Some(_) = winner else {
+                        continue;
+                    };
+                    if candidate_won(winner, candidate_is_p0) {
+                        total_wins += 1;
+                    }
+                    total_games += 1;
+                }
             }
-            total_games += 1;
         }
     }
 
@@ -582,8 +830,11 @@ fn print_usage() {
     eprintln!("  --population N    Population size (default: 50)");
     eprintln!("  --games N         Games per matchup per fitness eval (default: 20)");
     eprintln!("  --seed S          RNG seed (default: time-based)");
-    eprintln!("  --output PATH     Output JSON path (default: <data-root>/learned-weights.json)");
-    eprintln!("  --validate        Run baseline vs learned comparison (no CMA-ES)");
+    eprintln!("  --output PATH     Output JSON path (default: <data-root>/cma-tuned-weights.json)");
+    eprintln!(
+        "  --group NAME      Parameter group: eval|penalties|keywords|archetype (default: eval)"
+    );
+    eprintln!("  --validate        Validate the tuned artifact at --output");
 }
 
 fn main() {
@@ -603,6 +854,7 @@ fn main() {
     let mut seed: Option<u64> = None;
     let mut output: Option<PathBuf> = None;
     let mut validate = false;
+    let mut group = TuneGroup::Eval;
 
     let mut i = 2;
     while i < args.len() {
@@ -627,6 +879,14 @@ fn main() {
                 i += 1;
                 output = Some(PathBuf::from(&args[i]));
             }
+            "--group" => {
+                i += 1;
+                group = TuneGroup::from_label(&args[i]).unwrap_or_else(|| {
+                    eprintln!("invalid --group '{}'", args[i]);
+                    print_usage();
+                    std::process::exit(1);
+                });
+            }
             "--validate" => {
                 validate = true;
             }
@@ -639,7 +899,7 @@ fn main() {
         i += 1;
     }
 
-    let output_path = output.unwrap_or_else(|| data_root.join("learned-weights.json"));
+    let output_path = output.unwrap_or_else(|| data_root.join("cma-tuned-weights.json"));
 
     // Load card database
     let card_data_path = data_root.join("card-data.json");
@@ -661,20 +921,6 @@ fn main() {
         std::process::exit(1);
     });
 
-    // Build matchups
-    let matchup_defs = build_matchups();
-    let resolved: Vec<(DeckPayload, &Matchup)> = matchup_defs
-        .iter()
-        .map(|m| {
-            let deck_list = DeckList {
-                player: m.deck_a.clone(),
-                opponent: m.deck_b.clone(),
-                ..Default::default()
-            };
-            (resolve_deck_list(&db, &deck_list), m)
-        })
-        .collect();
-
     let base_seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -683,11 +929,20 @@ fn main() {
     });
 
     if validate {
-        run_validate(&resolved, games, base_seed, &output_path);
+        let holdout = build_holdout_matchups(&db).unwrap_or_else(|err| {
+            eprintln!("Error building holdout matchups: {err}");
+            std::process::exit(1);
+        });
+        run_validate(&holdout, games, base_seed, &output_path);
     } else {
+        let resolved = build_tuning_matchups(&db, FITNESS_MATCHUP_IDS).unwrap_or_else(|err| {
+            eprintln!("Error building fitness matchups: {err}");
+            std::process::exit(1);
+        });
         let fitness_matchups: Vec<(DeckPayload, &str)> =
-            resolved.iter().map(|(p, m)| (p.clone(), m.name)).collect();
+            resolved.iter().map(|(p, m)| (p.clone(), m.id)).collect();
         run_cmaes(
+            group,
             &fitness_matchups,
             generations,
             population,
@@ -696,6 +951,12 @@ fn main() {
             &output_path,
         );
     }
+}
+
+fn build_holdout_matchups(
+    db: &CardDatabase,
+) -> Result<Vec<(DeckPayload, &'static MatchupSpec)>, String> {
+    build_tuning_matchups(db, HOLDOUT_MATCHUP_IDS)
 }
 
 /// Validates learned weights by measuring matchup correctness.
@@ -707,179 +968,211 @@ fn main() {
 /// A weight set that produces correct matchup polarities is better than one that
 /// doesn't — regardless of raw win rate against a baseline.
 fn run_validate(
-    matchups: &[(DeckPayload, &Matchup)],
+    matchups: &[(DeckPayload, &'static MatchupSpec)],
     games: usize,
     base_seed: u64,
-    output_path: &std::path::Path,
+    tuned_path: &std::path::Path,
 ) {
-    let games = if games == 20 { 500 } else { games }; // Default to 500 for validate
+    let games = if games == 20 { 100 } else { games }; // Default to 100 for validate
     let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
 
-    eprintln!("=== Matchup Correctness Validation ===");
+    eprintln!("=== Paired Holdout Validation ===");
     eprintln!("Games per matchup: {games}");
-    eprintln!(
-        "Metric: does the expected-favored deck win more? (aggro < midrange < control < aggro)"
-    );
+    eprintln!("Holdouts: {}", HOLDOUT_MATCHUP_IDS.join(", "));
+    eprintln!("Opponent pool: Easy, Medium, Hard");
 
     let baseline_config = create_config(AiDifficulty::Medium, Platform::Native);
-    // "Learned" uses same defaults — in the future, load from a tuned weights file
-    let learned_config = create_config(AiDifficulty::Medium, Platform::Native);
+    let learned_config = load_cma_tuned_config(tuned_path).unwrap_or_else(|err| {
+        eprintln!("Error loading tuned artifact: {err}");
+        std::process::exit(1);
+    });
 
-    let mut matchup_results = Vec::new();
-    let mut baseline_correct = 0;
-    let mut learned_correct = 0;
-    let mut polarized_count = 0;
+    let opponent_pool = [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard];
+    let mut rows = Vec::new();
+    let mut total_flipped_w_to_l = 0usize;
+    let mut total_flipped_l_to_w = 0usize;
+    let mut total_unchanged = 0usize;
 
-    for (payload, matchup) in matchups {
-        let name = matchup.name;
-        let expected = matchup.expected_winner;
-        eprintln!("\nMatchup: {name}");
-        if let Some(e) = expected {
-            eprintln!(
-                "  Expected winner: deck_{} ({})",
-                if e == 0 { "A" } else { "B" },
-                if e == 0 {
-                    name.split(" vs ").next().unwrap()
+    for (matchup_idx, (payload, matchup)) in matchups.iter().enumerate() {
+        eprintln!("\nHoldout: {}", matchup.id);
+        for (opponent_idx, opponent_difficulty) in opponent_pool.iter().enumerate() {
+            let opponent_config = create_config(*opponent_difficulty, Platform::Native);
+            let mut baseline_wins = 0usize;
+            let mut learned_wins = 0usize;
+            let mut flipped_w_to_l = 0usize;
+            let mut flipped_l_to_w = 0usize;
+            let mut unchanged = 0usize;
+
+            for game_idx in 0..games {
+                let seed = base_seed
+                    .wrapping_add(matchup_idx as u64 * 100_000)
+                    .wrapping_add(opponent_idx as u64 * 10_000)
+                    .wrapping_add(game_idx as u64);
+                let candidate_is_p0 = game_idx % 2 == 0;
+                let (baseline_p0, baseline_p1) = if candidate_is_p0 {
+                    (&baseline_config, &opponent_config)
                 } else {
-                    name.split(" vs ").nth(1).unwrap()
+                    (&opponent_config, &baseline_config)
+                };
+                let (learned_p0, learned_p1) = if candidate_is_p0 {
+                    (&learned_config, &opponent_config)
+                } else {
+                    (&opponent_config, &learned_config)
+                };
+
+                let (baseline_winner, _) = run_game(payload, seed, baseline_p0, baseline_p1);
+                let (learned_winner, _) = run_game(payload, seed, learned_p0, learned_p1);
+                let baseline_won = candidate_won(baseline_winner, candidate_is_p0);
+                let learned_won = candidate_won(learned_winner, candidate_is_p0);
+
+                if baseline_won {
+                    baseline_wins += 1;
                 }
+                if learned_won {
+                    learned_wins += 1;
+                }
+
+                match (baseline_won, learned_won) {
+                    (true, false) => flipped_w_to_l += 1,
+                    (false, true) => flipped_l_to_w += 1,
+                    _ => unchanged += 1,
+                }
+            }
+
+            total_flipped_w_to_l += flipped_w_to_l;
+            total_flipped_l_to_w += flipped_l_to_w;
+            total_unchanged += unchanged;
+            let flips = flipped_w_to_l + flipped_l_to_w;
+            let sign_test_p = (flips > 0)
+                .then(|| sign_test_mid_p_upper_tail(flips, flipped_w_to_l.max(flipped_l_to_w)));
+            let status = validation_status(flipped_w_to_l, flipped_l_to_w, sign_test_p);
+
+            eprintln!(
+                "  {:?}: baseline={:.1}% learned={:.1}% W→L={} L→W={} p={} {status}",
+                opponent_difficulty,
+                baseline_wins as f64 / games as f64 * 100.0,
+                learned_wins as f64 / games as f64 * 100.0,
+                flipped_w_to_l,
+                flipped_l_to_w,
+                sign_test_p
+                    .map(|p| format!("{p:.4}"))
+                    .unwrap_or_else(|| "—".to_string()),
             );
-        } else {
-            eprintln!("  Expected: even matchup");
+
+            rows.push(serde_json::json!({
+                "matchup_id": matchup.id,
+                "p0_label": matchup.p0_label,
+                "p1_label": matchup.p1_label,
+                "opponent_difficulty": format!("{opponent_difficulty:?}"),
+                "games": games,
+                "baseline_candidate_win_rate": r3(baseline_wins as f64 / games as f64),
+                "learned_candidate_win_rate": r3(learned_wins as f64 / games as f64),
+                "flipped_w_to_l": flipped_w_to_l,
+                "flipped_l_to_w": flipped_l_to_w,
+                "unchanged": unchanged,
+                "sign_test_p": sign_test_p.map(r3),
+                "status": status,
+            }));
         }
-
-        // Self-play with baseline weights (both players use default weights)
-        let mut baseline_p0_wins = 0usize;
-        for g in 0..games {
-            let seed = base_seed + g as u64;
-            let (winner, _) = run_game(payload, seed, &baseline_config, &baseline_config);
-            if winner == Some(PlayerId(0)) {
-                baseline_p0_wins += 1;
-            }
-        }
-        let baseline_p0_wr = baseline_p0_wins as f64 / games as f64;
-
-        // Self-play with learned weights (both players use learned weights)
-        let mut learned_p0_wins = 0usize;
-        for g in 0..games {
-            let seed = base_seed + 10000 + g as u64;
-            let (winner, _) = run_game(payload, seed, &learned_config, &learned_config);
-            if winner == Some(PlayerId(0)) {
-                learned_p0_wins += 1;
-            }
-        }
-        let learned_p0_wr = learned_p0_wins as f64 / games as f64;
-
-        // Check matchup polarity correctness
-        let baseline_polarity_correct = match expected {
-            Some(0) => baseline_p0_wr > 0.5, // deck_a should win
-            Some(1) => baseline_p0_wr < 0.5, // deck_b should win
-            _ => true,                       // even matchup, any result is "correct"
-        };
-        let learned_polarity_correct = match expected {
-            Some(0) => learned_p0_wr > 0.5,
-            Some(1) => learned_p0_wr < 0.5,
-            _ => true,
-        };
-
-        // Measure how close to expected polarity (further from 50% in correct direction = better)
-        let polarity_strength = |p0_wr: f64, expected: Option<u8>| -> f64 {
-            match expected {
-                Some(0) => p0_wr - 0.5,    // positive = correct (deck_a wins more)
-                Some(1) => 0.5 - p0_wr,    // positive = correct (deck_b wins more)
-                _ => -(0.5 - p0_wr).abs(), // closer to 50% = better for even matchups
-            }
-        };
-
-        let baseline_strength = polarity_strength(baseline_p0_wr, expected);
-        let learned_strength = polarity_strength(learned_p0_wr, expected);
-
-        if expected.is_some() {
-            polarized_count += 1;
-            if baseline_polarity_correct {
-                baseline_correct += 1;
-            }
-            if learned_polarity_correct {
-                learned_correct += 1;
-            }
-        }
-
-        eprintln!(
-            "  Baseline self-play: deck_A wins {:.1}%{}",
-            baseline_p0_wr * 100.0,
-            if baseline_polarity_correct {
-                " ✓"
-            } else {
-                " ✗ WRONG POLARITY"
-            }
-        );
-        eprintln!(
-            "  Learned self-play:  deck_A wins {:.1}%{}",
-            learned_p0_wr * 100.0,
-            if learned_polarity_correct {
-                " ✓"
-            } else {
-                " ✗ WRONG POLARITY"
-            }
-        );
-        eprintln!(
-            "  Polarity strength:  baseline={:+.3} learned={:+.3}{}",
-            baseline_strength,
-            learned_strength,
-            if learned_strength > baseline_strength {
-                " (improved)"
-            } else {
-                ""
-            }
-        );
-
-        matchup_results.push(serde_json::json!({
-            "name": name,
-            "games": games,
-            "expected_winner": match expected { Some(0) => "deck_a", Some(1) => "deck_b", _ => "even" },
-            "baseline_p0_wr": r3(baseline_p0_wr),
-            "learned_p0_wr": r3(learned_p0_wr),
-            "baseline_polarity_correct": baseline_polarity_correct,
-            "learned_polarity_correct": learned_polarity_correct,
-            "baseline_polarity_strength": r3(baseline_strength),
-            "learned_polarity_strength": r3(learned_strength),
-        }));
     }
 
-    let improvement = learned_correct >= baseline_correct
-        && matchup_results
-            .iter()
-            .filter(|r| {
-                r["learned_polarity_strength"].as_f64().unwrap()
-                    > r["baseline_polarity_strength"].as_f64().unwrap()
-            })
-            .count()
-            >= matchup_results.len() / 2;
+    let total_flips = total_flipped_w_to_l + total_flipped_l_to_w;
+    let aggregate_p = (total_flips > 0).then(|| {
+        sign_test_mid_p_upper_tail(total_flips, total_flipped_w_to_l.max(total_flipped_l_to_w))
+    });
+    let aggregate_status =
+        validation_status(total_flipped_w_to_l, total_flipped_l_to_w, aggregate_p);
 
     eprintln!("\n=== Summary ===");
     eprintln!(
-        "Polarized matchups correct: baseline={}/{} learned={}/{}",
-        baseline_correct, polarized_count, learned_correct, polarized_count
+        "Aggregate flips: W→L={} L→W={} unchanged={} p={} {aggregate_status}",
+        total_flipped_w_to_l,
+        total_flipped_l_to_w,
+        total_unchanged,
+        aggregate_p
+            .map(|p| format!("{p:.4}"))
+            .unwrap_or_else(|| "—".to_string()),
     );
-    eprintln!("Matchup correctness improved: {improvement}");
 
     let result = serde_json::json!({
         "mode": "validate",
-        "metric": "matchup_correctness",
-        "matchups": matchup_results,
-        "baseline_correct": baseline_correct,
-        "learned_correct": learned_correct,
-        "polarized_matchups": polarized_count,
-        "improvement_detected": improvement,
+        "metric": "paired_holdout_vs_opponent_pool",
+        "artifact": tuned_path,
+        "holdout_matchups": HOLDOUT_MATCHUP_IDS,
+        "opponent_pool": opponent_pool.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>(),
+        "games_per_cell": games,
+        "base_seed": base_seed,
+        "rows": rows,
+        "aggregate": {
+            "flipped_w_to_l": total_flipped_w_to_l,
+            "flipped_l_to_w": total_flipped_l_to_w,
+            "unchanged": total_unchanged,
+            "sign_test_p": aggregate_p.map(r3),
+            "status": aggregate_status,
+        },
+        "improvement_detected": aggregate_status == "IMPROVED",
+        "regression_detected": aggregate_status == "REGRESSED",
     });
 
     let json = serde_json::to_string_pretty(&result).unwrap();
-    std::fs::write(output_path, &json).unwrap();
+    let output_path = validation_output_path(tuned_path);
+    std::fs::write(&output_path, &json).unwrap();
     eprintln!("\nResults written to {}", output_path.display());
     println!("{json}");
 }
 
+fn candidate_won(winner: Option<PlayerId>, candidate_is_p0: bool) -> bool {
+    matches!(
+        (winner, candidate_is_p0),
+        (Some(PlayerId(0)), true) | (Some(PlayerId(1)), false)
+    )
+}
+
+fn validation_status(w_to_l: usize, l_to_w: usize, sign_test_p: Option<f64>) -> &'static str {
+    if w_to_l > l_to_w && sign_test_p.is_some_and(|p| p < 0.05) {
+        "REGRESSED"
+    } else if l_to_w > w_to_l && sign_test_p.is_some_and(|p| p < 0.05) {
+        "IMPROVED"
+    } else if w_to_l != l_to_w {
+        "SHIFTED"
+    } else {
+        "UNCHANGED"
+    }
+}
+
+fn validation_output_path(tuned_path: &std::path::Path) -> PathBuf {
+    let stem = tuned_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("cma-tuned-weights");
+    tuned_path.with_file_name(format!("{stem}-validation.json"))
+}
+
+fn manifest_output_path(tuned_path: &std::path::Path) -> PathBuf {
+    let stem = tuned_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("cma-tuned-weights");
+    tuned_path.with_file_name(format!("{stem}-manifest.json"))
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn config_hash(config: &AiConfig) -> String {
+    let mut hasher = DefaultHasher::new();
+    format!("{config:?}").hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn run_cmaes(
+    group: TuneGroup,
     matchups: &[(DeckPayload, &str)],
     generations: usize,
     population: usize,
@@ -888,14 +1181,17 @@ fn run_cmaes(
     output_path: &std::path::Path,
 ) {
     eprintln!("=== CMA-ES AI Weight Tuning ===");
+    let parameter_names = group.parameter_names();
     eprintln!(
-        "Parameters: {PARAM_COUNT}, Generations: {generations}, Population: {population}, Games/eval: {games}"
+        "Group: {}, Parameters: {}, Generations: {generations}, Population: {population}, Games/eval/cell: {games}",
+        group.label(),
+        parameter_names.len()
     );
 
     let baseline = create_config(AiDifficulty::Medium, Platform::Native);
-    let initial = initial_params();
+    let initial = initial_params_for(group);
 
-    let mut cma = CmaEs::new(PARAM_COUNT, initial, 0.3, population);
+    let mut cma = CmaEs::new(parameter_names.len(), initial, 0.3, population);
     let mut rng = if base_seed != 0 {
         <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(base_seed)
     } else {
@@ -918,11 +1214,11 @@ fn run_cmaes(
                 .enumerate()
                 .map(|(i, params)| {
                     evaluate_fitness(
+                        group,
                         params,
                         matchups,
                         games,
                         gen_seed.wrapping_add(i as u64 * 1000),
-                        &baseline,
                     )
                 })
                 .collect()
@@ -934,11 +1230,11 @@ fn run_cmaes(
             .enumerate()
             .map(|(i, params)| {
                 evaluate_fitness(
+                    group,
                     params,
                     matchups,
                     games,
                     gen_seed.wrapping_add(i as u64 * 1000),
-                    &baseline,
                 )
             })
             .collect();
@@ -969,18 +1265,26 @@ fn run_cmaes(
 
     // Use the CMA-ES mean as the final result (more stable than best individual)
     let final_params = cma.best_mean();
-    let final_config = params_to_config(final_params);
+    let final_config = params_to_config_for(group, final_params);
 
     let w = &final_config.weights.late;
     let p = &final_config.profile;
 
     let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
+    let parameters: serde_json::Map<String, serde_json::Value> = parameter_names
+        .iter()
+        .zip(final_params.iter())
+        .map(|(name, value)| (name.clone(), serde_json::json!(r3(*value))))
+        .collect();
     let result = serde_json::json!({
+        "kind": CMA_TUNED_KIND,
         "source": "cma-es-self-play",
+        "group": group.label(),
         "generations": generations,
         "population": population,
         "games_per_eval": games,
         "best_fitness": r3(best_fitness),
+        "parameters": parameters,
         "weights": {
             "life": r3(w.life),
             "aggression": r3(w.aggression),
@@ -997,20 +1301,36 @@ fn run_cmaes(
             "interaction_patience": (p.interaction_patience * 1000.0).round() / 1000.0,
             "stabilize_bias": (p.stabilize_bias * 1000.0).round() / 1000.0,
         },
-        "future_parameters": {
-            "note": "Archetype multipliers and keyword bonuses require adjust_weights()/evaluate_creature() refactoring to accept parameterized values",
-            "keyword_bonuses": {
-                "flying_mult": 1.0, "trample_mult": 0.5, "deathtouch_flat": 3.0,
-                "lifelink_mult": 0.5, "hexproof_flat": 2.0, "indestructible_flat": 4.0,
-                "first_strike_mult": 0.8, "vigilance_flat": 1.0, "menace_mult": 0.5,
-                "tapped_penalty": 1.5,
-            },
-        },
+        "policy_penalties": final_config.policy_penalties,
+        "keyword_bonuses": final_config.keyword_bonuses,
+        "archetype_multipliers": final_config.archetype_multipliers,
     });
 
     let json = serde_json::to_string_pretty(&result).unwrap();
     std::fs::write(output_path, &json).unwrap();
+    let manifest = serde_json::json!({
+        "kind": "cma_tuning_manifest",
+        "artifact_kind": CMA_TUNED_KIND,
+        "group": group.label(),
+        "artifact_path": output_path,
+        "git_sha": command_output("git", &["rev-parse", "--short=12", "HEAD"]),
+        "seed": base_seed,
+        "parameter_names": parameter_names,
+        "fitness_decks": matchups.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        "holdout_decks": HOLDOUT_MATCHUP_IDS,
+        "opponent_pool": ["Easy", "Medium", "Hard"],
+        "draws_excluded_from_fitness": true,
+        "paired_mirrored_seeds": true,
+        "games_per_eval": games,
+        "generations": generations,
+        "population": population,
+        "baseline_config_hash": config_hash(&baseline),
+    });
+    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
+    let manifest_path = manifest_output_path(output_path);
+    std::fs::write(&manifest_path, manifest_json).unwrap();
     eprintln!("\nOptimized weights written to {}", output_path.display());
+    eprintln!("Tune manifest written to {}", manifest_path.display());
     println!("{json}");
 }
 
@@ -1059,8 +1379,55 @@ mod tests {
 
     #[test]
     fn initial_params_has_correct_length() {
-        let params = initial_params();
-        assert_eq!(params.len(), PARAM_COUNT);
+        assert_eq!(initial_params().len(), EVAL_PARAMETER_NAMES.len());
+        assert_eq!(
+            initial_params_for(TuneGroup::Penalties).len(),
+            ACTIVE_POLICY_PENALTY_FIELDS.len()
+        );
+        assert_eq!(
+            initial_params_for(TuneGroup::Keywords).len(),
+            KEYWORD_PARAMETER_NAMES.len()
+        );
+        assert_eq!(
+            initial_params_for(TuneGroup::Archetype).len(),
+            ARCHETYPE_NAMES.len() * ARCHETYPE_WEIGHT_NAMES.len()
+        );
+    }
+
+    #[test]
+    fn grouped_params_round_trip_to_config_sections() {
+        let penalties = initial_params_for(TuneGroup::Penalties);
+        let config = params_to_config_for(TuneGroup::Penalties, &penalties);
+        assert_eq!(
+            config.policy_penalties.combo_progress_this_turn_bonus,
+            PolicyPenalties::default().combo_progress_this_turn_bonus
+        );
+
+        let keywords = initial_params_for(TuneGroup::Keywords);
+        let config = params_to_config_for(TuneGroup::Keywords, &keywords);
+        assert_eq!(
+            config.keyword_bonuses.flying_mult,
+            KeywordBonuses::default().flying_mult
+        );
+    }
+
+    #[test]
+    fn load_cma_tuned_config_rejects_wrong_kind() {
+        let path = std::env::temp_dir().join("phase-ai-wrong-kind.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "kind": "17lands_phase_weights",
+              "weights": {},
+              "profile": {}
+            }"#,
+        )
+        .unwrap();
+
+        let error = load_cma_tuned_config(&path).unwrap_err();
+
+        assert!(error.contains("expected artifact kind"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

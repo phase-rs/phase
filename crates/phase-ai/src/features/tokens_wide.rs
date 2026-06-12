@@ -39,6 +39,7 @@ use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Effect, QuantityExpr, StaticDefinition,
     TargetFilter, TriggerDefinition,
 };
+use engine::types::card_type::CoreType;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 
@@ -46,6 +47,7 @@ use crate::ability_chain::collect_chain_effects;
 use crate::features::aristocrats::{
     filter_references_creature_you_control_or_any, typed_filter_is_creature_you_control_or_any,
 };
+use crate::features::commitment;
 
 /// Commitment floor below which the TokensWidePolicy opts out.
 pub const COMMITMENT_FLOOR: f32 = 0.30;
@@ -107,9 +109,13 @@ pub fn detect(deck: &[DeckEntry]) -> TokensWideFeature {
     let mut wide_payoff_count = 0u32;
     let mut payoff_names: Vec<String> = Vec::new();
     let mut anthem_names: Vec<String> = Vec::new();
+    let mut total_nonland = 0u32;
 
     for entry in deck {
         let face = &entry.card;
+        if !face.card_type.core_types.contains(&CoreType::Land) {
+            total_nonland = total_nonland.saturating_add(entry.count);
+        }
 
         let is_gen = is_token_generator_parts(&face.abilities, &face.triggers);
         let is_mass = is_gen && is_mass_token_generator_parts(&face.abilities, &face.triggers);
@@ -149,6 +155,7 @@ pub fn detect(deck: &[DeckEntry]) -> TokensWideFeature {
         mass_pump_count,
         wide_payoff_count,
         mass_token_generator_count,
+        total_nonland,
     );
 
     TokensWideFeature {
@@ -174,10 +181,20 @@ fn compute_commitment(
     mass_pump_count: u32,
     wide_payoff_count: u32,
     mass_token_generator_count: u32,
+    total_nonland: u32,
 ) -> f32 {
-    let g = (token_generator_count as f32 / 6.0).min(1.0);
-    let a = ((anthem_count + mass_pump_count) as f32 / 4.0).min(1.0);
-    let p = (wide_payoff_count as f32 / 3.0).min(1.0);
+    let generator_density = commitment::density_per_60(token_generator_count, total_nonland);
+    let anthem_density =
+        commitment::density_per_60(anthem_count.saturating_add(mass_pump_count), total_nonland);
+    let payoff_density = commitment::density_per_60(
+        wide_payoff_count
+            .saturating_add(anthem_count)
+            .saturating_add(mass_pump_count),
+        total_nonland,
+    );
+    let g = (generator_density / 6.0).min(1.0);
+    let a = (anthem_density / 4.0).min(1.0);
+    let p = (payoff_density / 3.0).min(1.0);
     let mass_bonus = (0.04 * mass_token_generator_count as f32).min(0.15);
 
     // mass_token_generator_count is a strict subset of token_generator_count,
@@ -187,7 +204,7 @@ fn compute_commitment(
     if token_generator_count == 0 || (anthem_count + mass_pump_count) == 0 {
         0.0
     } else {
-        ((g * a * p).powf(1.0 / 3.0) + mass_bonus).min(1.0)
+        (commitment::geometric_mean(&[g, a, p]) + mass_bonus).min(1.0)
     }
 }
 

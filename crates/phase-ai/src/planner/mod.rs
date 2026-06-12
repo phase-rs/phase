@@ -315,7 +315,10 @@ impl<'a> PlannerServices<'a> {
             OpponentModel::SampledReply => Box::new(SampledReplyUtilityReducer),
         };
 
-        let deadline = match (config.search.deterministic, config.search.time_budget_ms) {
+        let deadline = match (
+            config.execution_mode.is_measurement(),
+            config.search.time_budget_ms,
+        ) {
             (false, Some(ms)) => engine::util::Deadline::after(ms),
             _ => engine::util::Deadline::none(),
         };
@@ -1079,9 +1082,9 @@ mod tests {
 
         let priors = services.policy_priors(&state, &decision, &candidates, PlayerId(0));
         assert_eq!(priors.len(), 2);
-        assert!(priors
-            .iter()
-            .all(|prior| prior.prior.is_finite() && prior.prior > 0.0));
+        assert!(priors.iter().all(|prior| prior.prior.is_finite()));
+        assert!(priors.iter().any(|prior| prior.prior > 0.0));
+        assert_eq!(priors[0].prior, 0.0);
         assert!(priors[1].prior > priors[0].prior);
     }
 

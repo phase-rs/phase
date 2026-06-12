@@ -36,9 +36,9 @@ impl MulliganPolicy for AristocratsKeepablesMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        _plan: &PlanSnapshot, // input-unused: aristocrats opener scoring is card-composition only
+        _turn_order: TurnOrder, // input-unused: aristocrats opener scoring is card-composition only
+        _mulligans_taken: u8, // input-unused: aristocrats opener scoring is card-composition only
     ) -> MulliganScore {
         let commitment = features.aristocrats.commitment;
         if commitment <= COMMITMENT_THRESHOLD {
