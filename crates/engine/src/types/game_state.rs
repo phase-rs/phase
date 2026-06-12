@@ -5125,10 +5125,11 @@ pub struct GameState {
     /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
     /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with multiple eligible lands). It re-parks the
-    /// pending replacement (`may_cost_paid: true`) and leaves `waiting_for` on
-    /// the live sub-choice prompt. `handle_replacement_choice` reads this flag to
-    /// surface that prompt instead of re-applying the replacement, and the
-    /// sub-choice's resolution resumes the accept once the cost is settled.
+    /// pending replacement (`may_cost_paid: true`, plus any `may_cost_remaining`)
+    /// and leaves `waiting_for` on the live sub-choice prompt.
+    /// `handle_replacement_choice` reads this flag to surface that prompt instead
+    /// of re-applying the replacement, and the sub-choice's resolution resumes
+    /// the accept once the cost is settled.
     /// Cleared the moment it is observed. Transient — never serialized.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replacement_may_cost_paused: bool,
@@ -6334,10 +6335,17 @@ pub struct PendingReplacement {
     /// "discard a land card" with more than one eligible land surfaces a
     /// `WaitingFor::DiscardChoice`). The pending record is re-parked so the
     /// post-choice resume re-enters `continue_replacement` with the accept
-    /// index; this flag tells that resume the cost is already settled and must
-    /// NOT be charged a second time. `false` for every other parked event.
+    /// index; this flag tells that resume to continue MayCost payment from
+    /// `may_cost_remaining` instead of restarting the whole cost. `false` for
+    /// every other parked event.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub may_cost_paid: bool,
+    /// CR 614.12a + CR 118.12: unpaid suffix of a composite `MayCost` after an
+    /// interactive sub-choice paused payment. `None` means the sub-choice was
+    /// the final cost component; `Some(cost)` is paid on the post-choice resume
+    /// before the replacement is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_cost_remaining: Option<AbilityCost>,
 }
 
 /// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending

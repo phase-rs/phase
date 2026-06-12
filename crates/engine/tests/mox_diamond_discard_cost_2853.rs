@@ -17,7 +17,9 @@
 
 use engine::game::effects::change_zone::resolve;
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{ResolvedAbility, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, QuantityExpr, ReplacementMode, ResolvedAbility, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -245,5 +247,85 @@ fn mox_diamond_accept_with_multiple_lands_requires_choice() {
         runner.state().objects[&mox].zone,
         Zone::Battlefield,
         "Mox Diamond enters after the discard choice is committed"
+    );
+}
+
+/// CR 614.12a + CR 118.12: if a composite MayCost pauses for an interactive
+/// discard choice, the post-choice resume must still pay the remaining suffix
+/// before the replacement applies.
+#[test]
+fn may_cost_discard_choice_resume_pays_remaining_composite_suffix() {
+    let mut scenario = GameScenario::new();
+    let mox = scenario
+        .add_creature_to_hand(P0, "Mox Diamond", 0, 0)
+        .as_artifact()
+        .from_oracle_text(MOX_DIAMOND_ORACLE)
+        .id();
+    let forest_a = scenario.add_land_to_hand(P0, "Forest").id();
+    let forest_b = scenario.add_land_to_hand(P0, "Forest").id();
+
+    let mut runner = scenario.build();
+
+    {
+        let obj = runner.state_mut().objects.get_mut(&mox).unwrap();
+        let replacement_index = obj
+            .replacement_definitions
+            .iter_unchecked()
+            .position(|definition| matches!(definition.mode, ReplacementMode::MayCost { .. }))
+            .expect("Mox Diamond replacement should parse as MayCost");
+        let replacement = &mut obj.replacement_definitions[replacement_index];
+        let (discard_cost, decline) = match &replacement.mode {
+            ReplacementMode::MayCost { cost, decline } => (cost.clone(), decline.clone()),
+            other => panic!("expected MayCost, got {other:?}"),
+        };
+        replacement.mode = ReplacementMode::MayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    discard_cost,
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                ],
+            },
+            decline,
+        };
+    }
+
+    enter_via_change_zone(runner.state_mut(), mox);
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the composite MayCost should surface discard choice");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::DiscardChoice { .. }),
+        "expected a DiscardChoice for the two-land composite case, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![forest_a],
+        })
+        .expect("selecting the land to discard should resume the remaining cost");
+
+    assert_eq!(
+        runner.state().objects[&forest_a].zone,
+        Zone::Graveyard,
+        "the chosen land is discarded"
+    );
+    assert_eq!(
+        runner.state().objects[&forest_b].zone,
+        Zone::Hand,
+        "the un-chosen land stays in hand"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        18,
+        "the remaining PayLife suffix must be paid after the discard choice"
+    );
+    assert_eq!(
+        runner.state().objects[&mox].zone,
+        Zone::Battlefield,
+        "Mox Diamond enters only after all composite cost components are paid"
     );
 }

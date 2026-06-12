@@ -543,16 +543,33 @@ fn replacement_mode_decline_cloned(mode: &ReplacementMode) -> Option<Box<Ability
 /// [`Unpaid`] it falls through to the decline branch (CR 614.12); on
 /// [`PausedForChoice`] the payment has set an interactive `WaitingFor` (e.g. a
 /// `DiscardChoice`) and the replacement must re-park itself so the post-choice
-/// resume can finish entering the permanent — never let it enter early.
+/// resume can finish any remaining cost before entering the permanent — never
+/// let it enter early.
 ///
 /// [`Paid`]: MayCostOutcome::Paid
 /// [`Unpaid`]: MayCostOutcome::Unpaid
 /// [`PausedForChoice`]: MayCostOutcome::PausedForChoice
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MayCostOutcome {
     Paid,
     Unpaid,
-    PausedForChoice,
+    PausedForChoice { remaining_cost: Option<AbilityCost> },
+}
+
+fn combine_paused_may_cost(
+    paused_remaining: Option<AbilityCost>,
+    following_costs: &[AbilityCost],
+) -> Option<AbilityCost> {
+    let mut costs = Vec::new();
+    if let Some(cost) = paused_remaining {
+        costs.push(cost);
+    }
+    costs.extend(following_costs.iter().cloned());
+    match costs.len() {
+        0 => None,
+        1 => costs.into_iter().next(),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
 }
 
 fn pay_replacement_may_cost(
@@ -580,11 +597,20 @@ fn pay_replacement_may_cost(
         }
         AbilityCost::Composite { costs } => {
             // CR 614.12a: a composite accept-cost pays each sub-cost in order; a
-            // mid-composite pause propagates so the resume completes the rest.
-            for sub_cost in costs {
+            // mid-composite pause carries the unpaid suffix so the resume
+            // completes the rest before the replacement applies.
+            for (index, sub_cost) in costs.iter().enumerate() {
                 match pay_replacement_may_cost(state, player, source_id, sub_cost, events) {
                     MayCostOutcome::Paid => {}
-                    other => return other,
+                    MayCostOutcome::PausedForChoice { remaining_cost } => {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: combine_paused_may_cost(
+                                remaining_cost,
+                                &costs[index + 1..],
+                            ),
+                        };
+                    }
+                    MayCostOutcome::Unpaid => return MayCostOutcome::Unpaid,
                 }
             }
             true
@@ -637,12 +663,14 @@ fn pay_replacement_may_cost(
                     if state.waiting_for != prior_waiting_for
                         && matches!(state.waiting_for, WaitingFor::DiscardChoice { .. })
                     {
-                        return MayCostOutcome::PausedForChoice;
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: None,
+                        };
                     }
                     true
                 }
-                Ok(crate::game::costs::PaymentOutcome::Paused { .. }) => {
-                    return MayCostOutcome::PausedForChoice;
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
                 }
                 Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
@@ -4959,6 +4987,7 @@ fn pipeline_loop(
                     // CR 614.12a: first park of this choice — no MayCost has been
                     // paid yet. Set only when re-parking after a paused accept.
                     may_cost_paid: false,
+                    may_cost_remaining: None,
                 });
                 return ReplacementResult::NeedsChoice(affected);
             }
@@ -4990,6 +5019,7 @@ fn pipeline_loop(
                 library_placement: None,
                 // CR 614.12a: distinct-replacement choices carry no MayCost.
                 may_cost_paid: false,
+                may_cost_remaining: None,
             });
             return ReplacementResult::NeedsChoice(affected);
         } else {
@@ -5125,10 +5155,11 @@ pub fn continue_replacement(
         let rid = pending.candidates[0];
         let payer = pending.proposed.affected_player(state);
         // CR 614.12a: a `true` flag means this is the post-choice resume of an
-        // accept whose `MayCost` already paid (the interactive sub-choice, e.g.
-        // a `DiscardChoice`, has just committed). Re-park fields are captured up
-        // front so a fresh pause can re-stash the same record.
+        // accept whose `MayCost` payment paused for an interactive sub-choice
+        // (e.g. a `DiscardChoice`). Re-park fields are captured up front so a
+        // fresh pause can re-stash the same record.
         let resuming_after_paid_cost = pending.may_cost_paid;
+        let remaining_may_cost = pending.may_cost_remaining.clone();
         let reparked_candidates = pending.candidates.clone();
         let reparked_depth = pending.depth;
         let reparked_library_placement = pending.library_placement.clone();
@@ -5154,13 +5185,17 @@ pub fn continue_replacement(
         // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
         // `PausedForChoice` outcome means the payment surfaced an interactive
         // sub-choice (`WaitingFor` already set) — re-park the SAME pending record
-        // with `may_cost_paid: true` so the post-choice resume re-enters here,
-        // skips re-payment, and finishes entering the permanent. The permanent
-        // must NOT enter until the card actually leaves the hand.
+        // with `may_cost_paid: true` plus any unpaid suffix so the post-choice
+        // resume re-enters here, continues payment, and finishes entering the
+        // permanent. The permanent must NOT enter until the card actually leaves
+        // the hand.
         let pay_outcome = if chosen_index != 0 {
             MayCostOutcome::Unpaid
         } else if resuming_after_paid_cost {
-            MayCostOutcome::Paid
+            match &remaining_may_cost {
+                None => MayCostOutcome::Paid,
+                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+            }
         } else {
             match &may_cost {
                 None => MayCostOutcome::Paid,
@@ -5168,28 +5203,31 @@ pub fn continue_replacement(
             }
         };
 
-        if matches!(pay_outcome, MayCostOutcome::PausedForChoice) {
-            // CR 614.12a: the payment surfaced an interactive sub-choice (e.g. a
-            // `DiscardChoice`); `state.waiting_for` is already set to it. Re-park
-            // the SAME pending record with `may_cost_paid: true` and flag the
-            // pause so `handle_replacement_choice` surfaces the live sub-choice
-            // (not a fresh ReplacementChoice). The permanent enters only when the
-            // resume re-runs accept after the cost is settled. The carried
-            // `Execute` payload is inert — the flag short-circuits the caller
-            // before it is read.
-            state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
-                proposed: proposed.clone(),
-                candidates: reparked_candidates,
-                depth: reparked_depth,
-                is_optional: true,
-                library_placement: reparked_library_placement,
-                may_cost_paid: true,
-            });
-            state.replacement_may_cost_paused = true;
-            return ReplacementResult::Execute(proposed);
-        }
-
-        let paid_may_cost = matches!(pay_outcome, MayCostOutcome::Paid);
+        let paid_may_cost = match pay_outcome {
+            MayCostOutcome::Paid => true,
+            MayCostOutcome::Unpaid => false,
+            MayCostOutcome::PausedForChoice { remaining_cost } => {
+                // CR 614.12a: the payment surfaced an interactive sub-choice (e.g. a
+                // `DiscardChoice`); `state.waiting_for` is already set to it. Re-park
+                // the SAME pending record with `may_cost_paid: true` and flag the
+                // pause so `handle_replacement_choice` surfaces the live sub-choice
+                // (not a fresh ReplacementChoice). The permanent enters only when
+                // the resume finishes any `may_cost_remaining`. The carried
+                // `Execute` payload is inert — the flag short-circuits the caller
+                // before it is read.
+                state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+                    proposed: proposed.clone(),
+                    candidates: reparked_candidates,
+                    depth: reparked_depth,
+                    is_optional: true,
+                    library_placement: reparked_library_placement,
+                    may_cost_paid: true,
+                    may_cost_remaining: remaining_cost,
+                });
+                state.replacement_may_cost_paused = true;
+                return ReplacementResult::Execute(proposed);
+            }
+        };
 
         let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
             // CR 614.1c: Accept path — walk past modifier-only effects (already
@@ -6423,6 +6461,7 @@ mod tests {
             is_optional: true,
             library_placement: None,
             may_cost_paid: false,
+            may_cost_remaining: None,
         });
 
         let WaitingFor::ReplacementChoice {

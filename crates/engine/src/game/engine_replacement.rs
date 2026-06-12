@@ -86,7 +86,8 @@ pub(super) fn handle_replacement_choice(
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
-    // `may_cost_paid: true` and left `waiting_for` on the live sub-choice prompt.
+    // `may_cost_paid: true` plus any `may_cost_remaining`, and left
+    // `waiting_for` on the live sub-choice prompt.
     // Surface that prompt as-is; the sub-choice's resolution re-enters
     // `continue_replacement` (resume) to finish entering the permanent once the
     // cost is paid. The carried `Execute` payload is inert and must not be
@@ -1593,6 +1594,7 @@ mod tests {
             is_optional: false,
             library_placement: None,
             may_cost_paid: false,
+            may_cost_remaining: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);

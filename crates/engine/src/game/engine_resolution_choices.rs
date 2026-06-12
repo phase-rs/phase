@@ -2317,10 +2317,10 @@ pub(super) fn handle_resolution_choice(
             // optional `MayCost` replacement's accept (e.g. Mox Diamond's
             // "discard a land card" with multiple eligible lands). The cost is
             // now paid, so resume the parked replacement with the accept index —
-            // `continue_replacement` sees `may_cost_paid: true`, skips
-            // re-payment, and finishes entering the permanent. This runs instead
-            // of the ordinary continuation drain (there is no `Effect::PayCost`
-            // chain behind a replacement-originated discard).
+            // `continue_replacement` sees `may_cost_paid: true`, pays any
+            // `may_cost_remaining`, and finishes entering the permanent. This
+            // runs instead of the ordinary continuation drain (there is no
+            // `Effect::PayCost` chain behind a replacement-originated discard).
             if state
                 .pending_replacement
                 .as_ref()
