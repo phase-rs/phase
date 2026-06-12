@@ -163,8 +163,6 @@ fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
     stripped.trim()
 }
 
-/// Dynamic "for each" counts are extracted when present.
-///
 /// CR 601.2f + CR 118.8: Parse static-imposed additional non-mana costs such as
 /// Terror of the Peaks ("cost an additional 3 life to cast") and Thran Portal
 /// ("cost an additional 1 life to activate").
@@ -172,48 +170,42 @@ pub(crate) fn try_parse_impose_additional_cost(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
-    let action = if nom_primitives::scan_contains(lower, "life to cast") {
-        AdditionalCostTaxAction::Cast
-    } else if nom_primitives::scan_contains(lower, "life to activate") {
-        AdditionalCostTaxAction::Activate
-    } else {
-        return None;
-    };
-    if !nom_primitives::scan_contains(lower, "cost an additional") {
-        return None;
-    }
+    type VE<'a> = OracleError<'a>;
 
-    let cost_idx = lower.find(" cost an additional ")?;
-    let life_fragment = &lower[cost_idx + " cost an additional ".len()..];
-    let life_end = life_fragment.find(" life to ").filter(|&idx| {
-        life_fragment[idx..].starts_with(match action {
-            AdditionalCostTaxAction::Cast => " life to cast",
-            AdditionalCostTaxAction::Activate => " life to activate",
-        })
-    })?;
-    let life_text = life_fragment[..life_end].trim();
-    let life_amount = nom_primitives::parse_number(life_text)
-        .ok()
-        .map(|(_, n)| n)
-        .or_else(|| {
-            if life_text == "x" || life_text == "{x}" {
-                Some(0)
-            } else {
-                None
-            }
-        })?;
-    let cost = AbilityCost::PayLife {
-        amount: if life_text == "x" || life_text == "{x}" {
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
+    let (prefix, (life_amount, action), _) = nom_primitives::scan_preceded(lower, |i| {
+        let (i, _) = tag::<_, _, VE>("cost an additional ").parse(i)?;
+        let (i, life_amount) = alt((
+            map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                value: n as i32,
+            }),
+            value(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
-            }
-        } else {
-            QuantityExpr::Fixed {
-                value: life_amount as i32,
-            }
-        },
+                tag("x"),
+            ),
+            value(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                tag("{x}"),
+            ),
+        ))
+        .parse(i)?;
+        let (i, action) = alt((
+            value(AdditionalCostTaxAction::Cast, tag(" life to cast")),
+            value(AdditionalCostTaxAction::Activate, tag(" life to activate")),
+        ))
+        .parse(i)?;
+        Ok((i, (life_amount, action)))
+    })?;
+
+    let cost = AbilityCost::PayLife {
+        amount: life_amount,
     };
 
     let controller = if nom_primitives::scan_contains(lower, "your opponents cast")
@@ -234,19 +226,16 @@ pub(crate) fn try_parse_impose_additional_cost(
 
     let spell_filter = if let Some(filter) = target_cost_filter.clone() {
         Some(filter)
-    } else if let Some(cost_idx) = lower.find(" cost") {
-        let prefix = &lower[..cost_idx];
-        let prefix = strip_cost_modifier_target_clause(prefix);
-        let prefix = strip_cost_mod_cast_scope_suffix(prefix);
-        let prefix = strip_cost_mod_spell_noun_suffix(prefix);
-        let (type_filter, _) = parse_type_phrase(prefix.trim());
+    } else {
+        let type_prefix = strip_cost_modifier_target_clause(prefix);
+        let type_prefix = strip_cost_mod_cast_scope_suffix(type_prefix);
+        let type_prefix = strip_cost_mod_spell_noun_suffix(type_prefix);
+        let (type_filter, _) = parse_type_phrase(type_prefix.trim());
         if matches!(type_filter, TargetFilter::Any) {
             None
         } else {
             Some(type_filter)
         }
-    } else {
-        None
     };
 
     let is_self_scoped = nom_primitives::scan_contains(lower, "of this land")
