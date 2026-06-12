@@ -11784,6 +11784,10 @@ pub struct SpellContext {
     /// to ETB triggers so conditions like "if you cast it from your hand" can evaluate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
+    /// CR 601.2a + CR 603.4: The player who cast the spell. Propagated with
+    /// `cast_from_zone` for caster-scoped intervening-if conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
     /// CR 601.2: Phase at the time the spell was cast. Used by addendum-style
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11941,10 +11945,12 @@ pub enum TriggerCondition {
     /// the roll from `AttractionVisited` must fall within the printed range.
     AttractionVisitRoll { min: u8, max: u8 },
 
-    /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
+    /// CR 601.2 + CR 603.4: reads the ENTERING object's cast provenance, never the source.
     WasCast {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         zone: Option<Zone>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<ControllerRef>,
     },
     /// CR 305.1 + CR 603.4: Intervening/event condition for zone-change
     /// triggers whose subject must have been played as a land. Negation

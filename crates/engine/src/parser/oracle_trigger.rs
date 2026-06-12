@@ -2521,7 +2521,10 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 
         // CR 601.2 + CR 611.3a: "as long as it was cast" — 1:1 bridge to the
         // trigger-side cast-origin check (same `cast_from_zone` field).
-        StaticCondition::WasCast { zone } => Some(TriggerCondition::WasCast { zone: *zone }),
+        StaticCondition::WasCast { zone } => Some(TriggerCondition::WasCast {
+            zone: *zone,
+            controller: None,
+        }),
 
         // CR 702.176a + CR 603.4: Impending's battlefield trigger checks the
         // persistent alternative-cost marker, not whether it was paid this turn.
@@ -2721,7 +2724,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 /// own; "a graveyard" (any graveyard) leaves it unrestricted.
 fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerCondition {
     let filter = match owner {
-        Some(controller) => with_owner_scope(TargetFilter::Any, controller),
+        Some(ref controller) => with_owner_scope(TargetFilter::Any, controller.clone()),
         None => TargetFilter::Any,
     };
     TriggerCondition::Or {
@@ -2733,6 +2736,7 @@ fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerConditi
             },
             TriggerCondition::WasCast {
                 zone: Some(Zone::Graveyard),
+                controller: owner,
             },
         ],
     }
@@ -2820,7 +2824,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if !after.starts_with(" from") {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
-                Some(TriggerCondition::WasCast { zone: None }),
+                Some(TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                }),
             );
         }
     }
@@ -2851,7 +2858,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Or {
                 conditions: vec![
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
+                        condition: Box::new(TriggerCondition::WasCast {
+                            zone: None,
+                            controller: None,
+                        }),
                     },
                     TriggerCondition::ManaSpentCondition {
                         text: "no mana was spent to cast them".to_string(),
@@ -2887,7 +2897,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     if let Some(pos) = was_cast_pos {
         return (
             strip_condition_clause(text, pos, "if it was cast".len()),
-            Some(TriggerCondition::WasCast { zone: None }),
+            Some(TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+            }),
         );
     }
 
@@ -2896,7 +2909,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return (
             strip_condition_clause(text, pos, "if it wasn't cast".len()),
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast { zone: None }),
+                condition: Box::new(TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                }),
             }),
         );
     }
@@ -25359,7 +25375,10 @@ mod tests {
                 assert_eq!(
                     conditions[0],
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
+                        condition: Box::new(TriggerCondition::WasCast {
+                            zone: None,
+                            controller: None,
+                        }),
                     }
                 );
                 assert!(
@@ -25389,7 +25408,10 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast { zone: None }),
+                condition: Box::new(TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                }),
             })
         );
     }
@@ -28354,7 +28376,8 @@ mod snapshot_tests {
                 assert_eq!(
                     conditions[1],
                     TriggerCondition::WasCast {
-                        zone: Some(Zone::Graveyard)
+                        zone: Some(Zone::Graveyard),
+                        controller: None
                     }
                 );
             }
@@ -28382,7 +28405,8 @@ mod snapshot_tests {
                 assert_eq!(
                     conditions[1],
                     TriggerCondition::WasCast {
-                        zone: Some(Zone::Graveyard)
+                        zone: Some(Zone::Graveyard),
+                        controller: None
                     }
                 );
             }
@@ -28395,7 +28419,8 @@ mod snapshot_tests {
 mod slicer_control_handoff_tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityDefinition, ControllerRef, Effect, EffectScope, TapStateChange, TargetFilter,
+        AbilityDefinition, ControllerRef, Effect, EffectScope, FilterProp, TapStateChange,
+        TargetFilter,
     };
     use crate::types::TriggerMode;
 
@@ -28648,6 +28673,7 @@ mod slicer_control_handoff_tests {
                 } => true,
                 TriggerCondition::WasCast {
                     zone: Some(Zone::Graveyard),
+                    ..
                 } => true,
                 TriggerCondition::Or { conditions } | TriggerCondition::And { conditions } => {
                     conditions.iter().any(references_graveyard_origin)
@@ -28660,5 +28686,32 @@ mod slicer_control_handoff_tests {
             references_graveyard_origin(condition),
             "condition must gate on graveyard origin, got {condition:?}"
         );
+        match condition {
+            TriggerCondition::Or { conditions } => {
+                assert!(
+                    matches!(
+                        &conditions[0],
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            filter: TargetFilter::Typed(typed),
+                            ..
+                        } if typed.properties.contains(&FilterProp::Owned {
+                            controller: ControllerRef::You
+                        })
+                    ),
+                    "entered-from-your-graveyard branch must be owner-scoped to you, got {condition:?}"
+                );
+                assert!(
+                    matches!(
+                        &conditions[1],
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Graveyard),
+                            controller: Some(ControllerRef::You),
+                        }
+                    ),
+                    "cast-from-your-graveyard branch must be caster-scoped to you, got {condition:?}"
+                );
+            }
+            other => panic!("expected Or condition, got {other:?}"),
+        }
     }
 }

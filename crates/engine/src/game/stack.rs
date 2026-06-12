@@ -730,6 +730,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let Some(cast_from_zone) = ability.context.cast_from_zone {
                         obj.cast_from_zone = Some(cast_from_zone);
                     }
+                    obj.cast_controller =
+                        ability.context.cast_controller.or(Some(entry.controller));
                 }
             }
             let cast_timing_permission = state
@@ -966,6 +968,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             controller: entry.controller,
                             casting_variant,
                             cast_from_zone,
+                            cast_controller: Some(entry.controller),
                             cast_timing_permission,
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
@@ -2392,6 +2395,8 @@ mod tests {
             obj.kickers_paid = vec![KickerVariant::First];
             obj.additional_cost_payment_count = 1;
             obj.convoked_creatures = vec![ObjectId(900)];
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
             obj.cast_timing_permission =
                 Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
         }
@@ -2422,6 +2427,8 @@ mod tests {
         );
         assert_eq!(obj.additional_cost_payment_count, 1);
         assert_eq!(obj.convoked_creatures, vec![ObjectId(900)]);
+        assert_eq!(obj.cast_from_zone, Some(Zone::Graveyard));
+        assert_eq!(obj.cast_controller, Some(PlayerId(0)));
         assert_eq!(
             obj.cast_timing_permission,
             Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),

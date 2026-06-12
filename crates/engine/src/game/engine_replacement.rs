@@ -1048,6 +1048,7 @@ fn apply_pending_spell_resolution(
     // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        obj.cast_controller = ctx.cast_controller;
         if let Some(permission) = ctx.cast_timing_permission {
             obj.cast_timing_permission = Some((permission, state.turn_number));
         }
@@ -1547,6 +1548,7 @@ mod tests {
             controller: PlayerId(0),
             casting_variant: CastingVariant::Normal,
             cast_from_zone: None,
+            cast_controller: None,
             cast_timing_permission: None,
             spell_targets: vec![],
             actual_mana_spent: 0,
@@ -1662,6 +1664,8 @@ mod tests {
             obj.kickers_paid = vec![KickerVariant::First];
             obj.additional_cost_payment_count = 1;
             obj.convoked_creatures = vec![ObjectId(777)];
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
             obj.cast_timing_permission =
                 Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
         }
@@ -1689,6 +1693,8 @@ mod tests {
         );
         assert_eq!(obj.additional_cost_payment_count, 1);
         assert_eq!(obj.convoked_creatures, vec![ObjectId(777)]);
+        assert_eq!(obj.cast_from_zone, Some(Zone::Graveyard));
+        assert_eq!(obj.cast_controller, Some(PlayerId(0)));
         assert_eq!(
             obj.cast_timing_permission,
             Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
@@ -1724,6 +1730,8 @@ mod tests {
             // effect-driven battlefield entry).
             obj.kickers_paid = vec![KickerVariant::First];
             obj.additional_cost_payment_count = 2;
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
         }
 
         let mut events = Vec::new();
@@ -1743,6 +1751,8 @@ mod tests {
              `from == Stack`)"
         );
         assert_eq!(obj.additional_cost_payment_count, 0);
+        assert_eq!(obj.cast_from_zone, None);
+        assert_eq!(obj.cast_controller, None);
     }
 
     /// CR 615.1: When the player declines (or the replacement pipeline returns
