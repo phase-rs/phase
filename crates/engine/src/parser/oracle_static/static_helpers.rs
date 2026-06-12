@@ -221,9 +221,8 @@ pub(crate) fn try_parse_impose_additional_cost(
         || nom_primitives::scan_contains(lower, "each opponent casts")
     {
         Some(ControllerRef::Opponent)
-    } else if nom_primitives::scan_contains(lower, "you cast") {
-        Some(ControllerRef::You)
-    } else if nom_primitives::scan_contains(lower, " you activate")
+    } else if nom_primitives::scan_contains(lower, "you cast")
+        || nom_primitives::scan_contains(lower, " you activate")
         || nom_primitives::scan_contains(lower, " you may activate")
     {
         Some(ControllerRef::You)
