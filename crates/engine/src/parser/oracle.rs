@@ -4804,6 +4804,7 @@ fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
 mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::CountScope;
 
     /// CR 601.2c (#2344): a single "target opponent" governs the whole verb list
     /// ("sacrifices …, discards …, and loses 3 life") — the player is chosen once
@@ -8556,6 +8557,61 @@ mod tests {
             Some(ControllerRef::You),
             "inner affected filter must scope to spells you cast"
         );
+    }
+
+    /// Issue #2858: Archangel Elspeth's three loyalty abilities must parse as
+    /// three separate activated abilities in printed order with costs +1, -2,
+    /// and -6. If the -6 line drops or mis-costs, activating it charges the wrong
+    /// loyalty. The -6 effect is the mass return-from-graveyard.
+    #[test]
+    fn archangel_elspeth_loyalty_abilities_parse() {
+        let r = parse(
+            "[+1]: Create a 1/1 white Soldier creature token with lifelink.\n\
+             [\u{2212}2]: Put two +1/+1 counters on target creature. It becomes an Angel in addition to its other types and gains flying.\n\
+             [\u{2212}6]: Return all nonland permanent cards with mana value 3 or less from your graveyard to the battlefield.",
+            "Archangel Elspeth",
+            &[],
+            &["Planeswalker"],
+            &["Elspeth"],
+        );
+        assert_eq!(r.abilities.len(), 3, "abilities: {:?}", r.abilities);
+        assert!(
+            matches!(
+                r.abilities[0].cost,
+                Some(AbilityCost::Loyalty { amount: 1 })
+            ),
+            "ability 0 cost: {:?}",
+            r.abilities[0].cost
+        );
+        assert!(
+            matches!(
+                r.abilities[1].cost,
+                Some(AbilityCost::Loyalty { amount: -2 })
+            ),
+            "ability 1 cost: {:?}",
+            r.abilities[1].cost
+        );
+        assert!(
+            matches!(
+                r.abilities[2].cost,
+                Some(AbilityCost::Loyalty { amount: -6 })
+            ),
+            "ability 2 cost: {:?}",
+            r.abilities[2].cost
+        );
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            ..
+        } = &*r.abilities[2].effect
+        else {
+            panic!(
+                "the -6 effect must be a graveyard-to-battlefield mass return, got {:?}",
+                r.abilities[2].effect
+            );
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Battlefield);
     }
 
     #[test]
@@ -15466,7 +15522,10 @@ mod tests {
                 inner.as_ref(),
                 AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::AttackedThisTurn { filter: None },
+                        qty: QuantityRef::AttackedThisTurn {
+                            scope: CountScope::Controller,
+                            filter: None,
+                        },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -17369,6 +17428,96 @@ mod pipeline_snapshot_tests {
             &[],
         );
         insta::assert_json_snapshot!(result);
+    }
+
+    /// CR 601.2a + CR 611.2a (issue #2851): Chandra, Hope's Beacon +1 —
+    /// "Exile the top five cards of your library. Until the end of your next
+    /// turn, you may cast an instant or sorcery spell from among those exiled
+    /// cards." The cast-from-exile grant must carry BOTH the instant/sorcery
+    /// type filter AND the single-spell-total cap, not the unrestricted
+    /// impulse-draw shape (which dropped the filter, the cap, and the duration).
+    #[test]
+    fn pipeline_chandra_plus_one_exile_cast_typed_single_use() {
+        use crate::types::ability::{
+            CastingPermission, Duration, Effect, PlayerScope, TargetFilter, TypeFilter, TypedFilter,
+        };
+        let result = pipeline_parse(
+            "Exile the top five cards of your library. Until the end of your next turn, you may cast an instant or sorcery spell from among those exiled cards.",
+            "Chandra, Hope's Beacon",
+            &["Sorcery"],
+            &[],
+        );
+        let exile_top = result
+            .abilities
+            .first()
+            .expect("ExileTop root ability present");
+        assert!(
+            matches!(*exile_top.effect, Effect::ExileTop { .. }),
+            "root effect must be ExileTop, got {:?}",
+            exile_top.effect
+        );
+        let grant = exile_top
+            .sub_ability
+            .as_deref()
+            .expect("cast-from-exile grant must chain off ExileTop, not be swallowed");
+        match &*grant.effect {
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        duration:
+                            Duration::UntilEndOfNextTurnOf {
+                                player: PlayerScope::Controller,
+                            },
+                        card_filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
+                        single_use: true,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(
+                    type_filters.as_slice(),
+                    [TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery])],
+                    "card filter must restrict to instant or sorcery"
+                );
+            }
+            other => panic!(
+                "expected single-use, instant/sorcery-filtered PlayFromExile with UntilEndOfNextTurnOf, got {other:?}"
+            ),
+        }
+    }
+
+    /// CR 601.2a: The plural unbounded form ("you may cast spells from among
+    /// those exiled cards") must keep its unrestricted shape — no card filter,
+    /// not single-use — so existing impulse-cast cards (Nassari, Stolen
+    /// Strategy) are unaffected by the typed-grant extension.
+    #[test]
+    fn pipeline_plural_exile_cast_stays_unrestricted() {
+        use crate::types::ability::{CastingPermission, Effect};
+        let result = pipeline_parse(
+            "Exile the top five cards of your library. Until the end of your next turn, you may cast spells from among those exiled cards.",
+            "Plural Impulse",
+            &["Sorcery"],
+            &[],
+        );
+        let grant = result.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("grant chains off ExileTop");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        card_filter: None,
+                        single_use: false,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "plural form must stay unrestricted (no filter, not single-use), got {:?}",
+            grant.effect
+        );
     }
 
     #[test]
