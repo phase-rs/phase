@@ -8,8 +8,8 @@ import type { GroupedPermanent } from "../../viewmodel/battlefieldProps";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import {
-  GROUP_STAGGER_PX,
   getGroupRenderMode,
+  groupStaggerPx,
   type BattlefieldRowType,
   visibleCardSlotCount,
   visibleStaggerCount,
@@ -138,7 +138,7 @@ export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex 
     0,
   );
   const totalVisibleStagger = renderedGroups.reduce(
-    (total, { group, renderMode }) => total + visibleStaggerCount(renderMode, group) * GROUP_STAGGER_PX,
+    (total, { group, renderMode }) => total + visibleStaggerCount(renderMode, group) * groupStaggerPx(rowType),
     0,
   );
 
