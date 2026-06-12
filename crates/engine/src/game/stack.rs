@@ -2133,6 +2133,12 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
         ));
     }
+    // CR 400.7: Stamp the source's current incarnation so the SelfRef target
+    // resolves only while the permanent is the same object. If the creature is
+    // blinked before the delayed trigger fires, the re-entered permanent has a
+    // higher incarnation and the exile finds no valid target.
+    delayed_ability
+        .set_source_incarnation_recursive(state.objects.get(&object_id).map(|o| o.incarnation));
 
     state
         .delayed_triggers
@@ -2964,6 +2970,87 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, crate::types::events::GameEvent::Airbend { .. })),
             "WarpExile should NOT emit Airbend event"
+        );
+    }
+
+    #[test]
+    fn warp_delayed_trigger_does_not_exile_blinked_creature() {
+        // CR 400.7: A blinked creature is a new object (higher incarnation).
+        // The warp delayed trigger's SelfRef must fail to resolve against the
+        // re-entered permanent, leaving it on the battlefield.
+        use crate::game::triggers::check_delayed_triggers;
+        use crate::game::zones::move_to_zone;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+
+        let mut state = setup();
+        state.turn_number = 3;
+        state.active_player = PlayerId(0);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quantum Riddler".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.keywords.push(Keyword::Warp(ManaCost::generic(3)));
+            obj.mana_cost = ManaCost::generic(4);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        // Push a stack entry as if cast via Warp, then resolve to install the
+        // delayed trigger (which now stamps source_incarnation).
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Warp,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.delayed_triggers.len(), 1);
+
+        // Record the incarnation at the time the delayed trigger was created.
+        let stamped_incarnation = state.objects[&obj_id].incarnation;
+
+        // Simulate a blink: exile then return to battlefield.
+        move_to_zone(&mut state, obj_id, Zone::Exile, &mut Vec::new());
+        move_to_zone(&mut state, obj_id, Zone::Battlefield, &mut Vec::new());
+
+        // The re-entered permanent has a higher incarnation.
+        assert!(
+            state.objects[&obj_id].incarnation > stamped_incarnation,
+            "blink must bump incarnation"
+        );
+        assert_eq!(state.objects[&obj_id].zone, Zone::Battlefield);
+
+        // Fire the delayed trigger at the next end step.
+        state.phase = Phase::End;
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert!(
+            !stacked.is_empty(),
+            "the warp delayed trigger still fires (it keys on the phase)"
+        );
+
+        // Resolve the delayed trigger — SelfRef should find nothing because
+        // the incarnation no longer matches.
+        resolve_top(&mut state, &mut Vec::new());
+
+        // The creature must still be on the battlefield.
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Battlefield,
+            "a blinked warp creature must NOT be exiled by the stale delayed trigger"
         );
     }
 
