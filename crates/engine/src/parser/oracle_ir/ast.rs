@@ -749,6 +749,11 @@ pub(crate) enum TargetedImperativeAst {
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 708.2a + CR 708.3: "face down" — the returned object is turned
+        /// face down before it enters (Yedora's "return it ... face down ... It's
+        /// a Forest land."). Lowered to a default vanilla-2/2 `face_down_profile`,
+        /// refined by a trailing "It's a <type>" `FaceDownProfileSpec`.
+        face_down: bool,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {

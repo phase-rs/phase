@@ -8243,6 +8243,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_tapped: d.enter_tapped,
                             enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
+                            face_down: d.face_down,
                         },
                         rem,
                     ))

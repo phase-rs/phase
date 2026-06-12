@@ -1415,6 +1415,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_tapped: d.enter_tapped,
                         enters_attacking: d.enters_attacking,
                         enter_with_counters: d.enter_with_counters,
+                        face_down: d.face_down,
                     })
                 }
             }
@@ -1641,6 +1642,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enters_attacking,
             enter_with_counters,
+            face_down,
         } => Effect::ChangeZone {
             origin,
             destination: Zone::Battlefield,
@@ -1652,7 +1654,10 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
-            face_down_profile: None,
+            // CR 708.2a + CR 708.3: a "face down" return seeds the default
+            // vanilla-2/2 face-down profile; a trailing "It's a <type>" sentence
+            // (Yedora's "It's a Forest land.") refines it via FaceDownProfileSpec.
+            face_down_profile: face_down.then(crate::types::ability::FaceDownProfile::vanilla_2_2),
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {

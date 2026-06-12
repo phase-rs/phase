@@ -2514,6 +2514,10 @@ pub(super) fn handle_resolution_choice(
                         enter_with_counters: vec![],
                         duration: None,
                         track_exiled_by_source,
+                        // CR 708.2a: interactive `EffectZoneChoice` selections
+                        // bring chosen cards in face up; no face-down-on-entry
+                        // effect routes through this player-choice resume path.
+                        face_down_profile: None,
                     };
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {

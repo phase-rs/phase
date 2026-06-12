@@ -152,6 +152,7 @@ mod issue_2916_torment_repeat_unless;
 mod issue_2918_future_sight_reveal;
 mod issue_2919_tarrasque_was_cast;
 mod issue_2921_amareth_shares_card_type;
+mod issue_2923_yedora_forest_land;
 mod issue_2925_mystic_confluence_repeated_counter;
 mod issue_2929_arc_trail_any_other_target;
 mod issue_2938_deflecting_swat;

@@ -566,6 +566,14 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_with_counters,
             duration,
             track_exiled_by_source,
+            // CR 708.2a + CR 708.3: face-down entry is not threaded through the
+            // interactive `EffectZoneChoice` resume carrier
+            // (`PendingChangeZoneIteration`), so a face-down move that ALSO
+            // parked on a per-permanent replacement choice resumes face up. The
+            // synchronous direct/multi-target loop (the Yedora path) DOES apply
+            // it. Latent gap only for a face-down return that simultaneously
+            // surfaces an ETB replacement-ordering prompt — no such card exists.
+            face_down_profile: None,
         };
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in THIS resume can be stamped as a co-departed group and

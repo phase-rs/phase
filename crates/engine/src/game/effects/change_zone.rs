@@ -562,6 +562,7 @@ pub fn resolve(
         enter_with_counters: effect_enter_with_counters,
         duration: ability.duration.clone(),
         track_exiled_by_source,
+        face_down_profile: face_down_profile.clone(),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
@@ -683,6 +684,10 @@ pub(crate) struct ChangeZoneIterationCtx {
     pub enter_with_counters: Vec<(CounterType, u32)>,
     pub duration: Option<Duration>,
     pub track_exiled_by_source: bool,
+    /// CR 708.2a + CR 708.3: `Some` turns the object face down before it enters
+    /// the battlefield with these characteristics ("return it face down ... It's
+    /// a Forest land" — Yedora). `None` = normal face-up entry.
+    pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
 }
 
 /// Move one object through the full zone-change pipeline used by the
@@ -721,13 +726,11 @@ pub(crate) fn process_one_zone_move(
     // CR 110.2a: `enters_under_player` was pre-resolved at resolver entry;
     // pass it straight to the zone-move pipeline so replacement effects see
     // the correct controller without re-evaluating the `ControllerRef`.
-    // NOTE: `face_down_profile` is not yet threaded through the interactive
-    // single-selection carriers (`ChangeZoneIterationCtx`,
-    // `PendingChangeZoneIteration`, `WaitingFor::EffectZoneChoice`). The only
-    // current face-down-on-entry effect (Cyber-Controller) resolves via the mass
-    // `resolve_all` path, so this multi-target/interactive single path passes
-    // `None`. Latent: threading it here would extend face-down entry to
-    // interactive single-card "put X face down" effects if any are added.
+    // CR 708.2a + CR 708.3: thread the face-down profile through the
+    // multi-target/direct-target loop so a "return it face down" move
+    // (Yedora's dies trigger, target `TriggeringSource`) turns the returned
+    // permanent face down with the effect's characteristics. `None` keeps the
+    // normal face-up entry for every non-face-down move.
     let result = execute_zone_move(
         state,
         obj_id,
@@ -739,7 +742,7 @@ pub(crate) fn process_one_zone_move(
         ctx.enter_tapped,
         ctx.enters_under_player,
         &ctx.enter_with_counters,
-        None,
+        ctx.face_down_profile.as_ref(),
         ctx.track_exiled_by_source,
         events,
     );
@@ -5484,6 +5487,7 @@ mod tests {
                 face_down_profile: Some(FaceDownProfile {
                     power: Some(2),
                     toughness: Some(2),
+                    body: crate::types::ability::FaceDownBody::Creature,
                     extra_core_types: vec![CoreType::Artifact],
                     subtypes: vec!["Cyberman".to_string()],
                     ward: None,
