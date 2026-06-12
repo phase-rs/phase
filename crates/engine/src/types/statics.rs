@@ -563,15 +563,12 @@ pub enum CostModifyMode {
     Minimum,
 }
 
-/// CR 601.2f + CR 602.2: Whether a static-imposed additional cost applies to
-/// spell casting or ability activation. Distinct from [`CostModifyMode`], which
-/// only adjusts the mana component.
+/// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
+/// Distinct from [`CostModifyMode`], which only adjusts the mana component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AdditionalCostTaxAction {
     /// "... cost an additional N life to cast."
     Cast,
-    /// "... cost an additional N life to activate."
-    Activate,
 }
 
 /// CR 702.122c: How a creature's contributed power is modified when it crews a
@@ -746,11 +743,10 @@ pub enum StaticMode {
         dynamic_count: Option<QuantityRef>,
     },
     /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
-    /// activations matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
+    /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
     /// which adjusts only the mana component. Terror of the Peaks class:
     /// "Spells your opponents cast that target this creature cost an additional
-    /// 3 life to cast." Thran Portal class: "Mana abilities of this land cost
-    /// an additional 1 life to activate."
+    /// 3 life to cast."
     ImposeAdditionalCost {
         cost: super::ability::AbilityCost,
         spell_filter: Option<TargetFilter>,
@@ -1622,7 +1618,6 @@ impl fmt::Display for StaticMode {
             },
             StaticMode::ImposeAdditionalCost { action, .. } => match action {
                 AdditionalCostTaxAction::Cast => write!(f, "ImposeAdditionalCastCost"),
-                AdditionalCostTaxAction::Activate => write!(f, "ImposeAdditionalActivateCost"),
             },
             StaticMode::ReduceAbilityCost {
                 keyword,

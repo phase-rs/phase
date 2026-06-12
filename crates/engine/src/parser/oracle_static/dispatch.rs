@@ -85,8 +85,7 @@ pub(crate) fn parse_static_line_inner(
     // Use word-boundary scans only on phrases that start a token; numeric life amounts
     // sit immediately before "life" without a leading space ("3 life to cast").
     if nom_primitives::scan_contains(tp.lower, "cost an additional")
-        && (nom_primitives::scan_contains(tp.lower, "life to cast")
-            || nom_primitives::scan_contains(tp.lower, "life to activate"))
+        && nom_primitives::scan_contains(tp.lower, "life to cast")
     {
         if let Some(def) = try_parse_impose_additional_cost(&text, &lower) {
             return Some(def);

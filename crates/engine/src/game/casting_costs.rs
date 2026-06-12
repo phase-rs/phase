@@ -620,6 +620,26 @@ fn finish_pending_cost_or_cast(
         }
     }
 
+    if pending.additional_cost_flow.is_none() {
+        if let Some(req_cost) = pending.deferred_required_additional_cost.take() {
+            if !req_cost.is_payable(state, player, pending.object_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay required additional cost".to_string(),
+                ));
+            }
+            let cost_source = pending.additional_cost_source;
+            pending.additional_cost_source = SpellCostSource::Other;
+            return pay_additional_cost_with_source(
+                state,
+                player,
+                req_cost,
+                cost_source,
+                pending,
+                events,
+            );
+        }
+    }
+
     // CR 601.2b: Optional additional costs (Casualty) that must be declared before
     // targets. When deferred_target_selection is true, present the choice first.
     // After the choice resolves, additional_cost_flow is cleared by
@@ -2395,6 +2415,69 @@ pub(super) fn begin_required_cost_before_targets(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+fn combined_imposed_additional_cast_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> Option<AbilityCost> {
+    let imposed_costs =
+        super::casting::collect_imposed_additional_cast_costs(state, player, object_id, ability);
+    match imposed_costs.len() {
+        0 => None,
+        1 => imposed_costs.into_iter().next(),
+        _ => Some(AbilityCost::Composite {
+            costs: imposed_costs,
+        }),
+    }
+}
+
+fn merge_required_additional_cost(
+    additional: Option<AdditionalCost>,
+    imposed: Option<AbilityCost>,
+) -> Option<AdditionalCost> {
+    match (additional, imposed) {
+        (Some(AdditionalCost::Required(required)), Some(imposed)) => Some(
+            AdditionalCost::Required(merge_required_cost(required, Some(imposed))),
+        ),
+        (Some(additional), _) => Some(additional),
+        (None, Some(imposed)) => Some(AdditionalCost::Required(imposed)),
+        (None, None) => None,
+    }
+}
+
+fn merge_required_cost(required: AbilityCost, imposed: Option<AbilityCost>) -> AbilityCost {
+    let Some(imposed) = imposed else {
+        return required;
+    };
+    match (required, imposed) {
+        (AbilityCost::Composite { mut costs }, AbilityCost::Composite { costs: imposed }) => {
+            costs.extend(imposed);
+            AbilityCost::Composite { costs }
+        }
+        (AbilityCost::Composite { mut costs }, imposed) => {
+            costs.push(imposed);
+            AbilityCost::Composite { costs }
+        }
+        (required, AbilityCost::Composite { costs: imposed }) => {
+            let mut costs = Vec::with_capacity(imposed.len() + 1);
+            costs.push(required);
+            costs.extend(imposed);
+            AbilityCost::Composite { costs }
+        }
+        (required, imposed) => AbilityCost::Composite {
+            costs: vec![required, imposed],
+        },
+    }
+}
+
+fn required_cost_from_additional(additional: Option<AdditionalCost>) -> Option<AbilityCost> {
+    match additional {
+        Some(AdditionalCost::Required(cost)) => Some(cost),
+        _ => None,
+    }
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
@@ -2470,6 +2553,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone())
         .or(flash_additional);
+    let imposed_required_cost =
+        combined_imposed_additional_cast_cost(state, player, object_id, &ability);
 
     // CR 601.2b: Optional costs (Casualty/Replicate) must be declared before
     // required additional costs. When obj.additional_cost is Required and the
@@ -2492,32 +2577,52 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                         "Cannot pay required additional cost".to_string(),
                     ));
                 }
-                (
-                    Some(granted_optional),
-                    obj_additional,
-                    SpellCostSource::Other,
-                )
+                let deferred =
+                    merge_required_additional_cost(obj_additional, imposed_required_cost.clone());
+                (Some(granted_optional), deferred, SpellCostSource::Other)
             } else {
-                (obj_additional, None, SpellCostSource::Other)
+                let additional =
+                    merge_required_additional_cost(obj_additional, imposed_required_cost.clone());
+                (additional, None, SpellCostSource::Other)
             }
         } else if obj_additional.is_some() {
-            (obj_additional, None, SpellCostSource::Other)
+            (
+                obj_additional,
+                imposed_required_cost.clone().map(AdditionalCost::Required),
+                SpellCostSource::Other,
+            )
         } else if let Some(casualty) = casualty_additional {
-            (Some(casualty), None, SpellCostSource::Other)
+            (
+                Some(casualty),
+                imposed_required_cost.clone().map(AdditionalCost::Required),
+                SpellCostSource::Other,
+            )
         } else if let Some(replicate) = replicate_additional {
-            (Some(replicate), None, SpellCostSource::Other)
+            (
+                Some(replicate),
+                imposed_required_cost.clone().map(AdditionalCost::Required),
+                SpellCostSource::Other,
+            )
         } else if let Some(offering) = offering_additional {
             // CR 702.48a: Offering — optional sacrifice before target selection
             // (becomes Required when cast via Offering instant-speed timing; that
             // case is handled in the casting dispatch which routes to
             // `begin_required_cost_before_targets` before this function is reached).
-            (Some(offering), None, SpellCostSource::Offering)
+            (
+                Some(offering),
+                imposed_required_cost.clone().map(AdditionalCost::Required),
+                SpellCostSource::Offering,
+            )
         } else if let Some(conspire) = conspire_additional {
             // CR 702.78a: statics-granted Conspire (Wort, the Raidmother /
             // Rassilon, the War President). Printed Conspire sets
             // `obj.additional_cost` and is caught by the `obj_additional.is_some()`
             // arm above, so this arm fires only for the granted path.
-            (Some(conspire), None, SpellCostSource::Other)
+            (
+                Some(conspire),
+                imposed_required_cost.clone().map(AdditionalCost::Required),
+                SpellCostSource::Other,
+            )
         } else {
             (None, None, SpellCostSource::Other)
         };
@@ -2541,6 +2646,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute.clone();
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.additional_cost_flow =
+                imposed_required_cost.clone().map(AdditionalCost::Required);
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
                 && alt_cost.timing_permission == cast_timing_permission;
             if alt_cost_required_for_timing {
@@ -2605,9 +2712,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
-                if costs.is_empty() {
-                    return finish_pending_cost_or_cast(state, player, pending, events);
-                }
+                pending.deferred_required_additional_cost =
+                    required_cost_from_additional(deferred_required.clone());
                 pending.additional_cost_flow = Some(AdditionalCost::Kicker {
                     costs: costs.clone(),
                     repeatability: *repeatability,
@@ -2635,6 +2741,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                pending.deferred_required_additional_cost =
+                    required_cost_from_additional(deferred_required.clone());
                 pending.additional_cost_flow = Some(AdditionalCost::Optional {
                     cost: repeatable_cost.clone(),
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
@@ -2678,6 +2786,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.distribute = distribute;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                pending.additional_cost_flow =
+                    imposed_required_cost.clone().map(AdditionalCost::Required);
                 // CR 601.2b: If the preferred branch is unpayable, fall through
                 // to the fallback without prompting. If both are unpayable, the
                 // spell cannot be cast.
@@ -2721,6 +2831,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.cast_timing_permission = cast_timing_permission;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return pay_additional_cost(
             state,
             player,
@@ -2772,6 +2883,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
@@ -2784,6 +2896,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.cast_timing_permission = cast_timing_permission;
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.additional_cost_flow =
+                imposed_required_cost.clone().map(AdditionalCost::Required);
             return pay_additional_cost(
                 state,
                 player,
@@ -2808,6 +2922,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return pay_additional_cost(state, player, retrace_discard_land_cost(), pending, events);
     }
 
@@ -2821,6 +2936,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return pay_additional_cost(
             state,
             player,
@@ -2848,6 +2964,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute;
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.additional_cost_flow =
+                imposed_required_cost.clone().map(AdditionalCost::Required);
             return pay_additional_cost(state, player, non_mana_cost, pending, events);
         }
     }
@@ -2876,6 +2994,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute;
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.additional_cost_flow =
+                imposed_required_cost.clone().map(AdditionalCost::Required);
             return pay_additional_cost(state, player, non_mana_cost, pending, events);
         }
     }
@@ -2903,6 +3023,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute;
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.additional_cost_flow =
+                imposed_required_cost.clone().map(AdditionalCost::Required);
             return pay_additional_cost(state, player, non_mana_cost, pending, events);
         }
     }
@@ -2917,6 +3039,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return Ok(WaitingFor::DefilerPayment {
             player,
             life_cost,
@@ -2925,16 +3048,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         });
     }
 
-    let imposed_costs =
-        super::casting::collect_imposed_additional_cast_costs(state, player, object_id, &ability);
-    if !imposed_costs.is_empty() {
-        let combined = match imposed_costs.len() {
-            1 => imposed_costs.into_iter().next().expect("checked len"),
-            _ => AbilityCost::Composite {
-                costs: imposed_costs,
-            },
-        };
-        if !combined.is_payable(state, player, object_id) {
+    if let Some(imposed_cost) = imposed_required_cost {
+        if !imposed_cost.is_payable(state, player, object_id) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay imposed additional cost".to_string(),
             ));
@@ -2946,7 +3061,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
-        return pay_additional_cost(state, player, combined, pending, events);
+        return pay_additional_cost(state, player, imposed_cost, pending, events);
     }
 
     let waiting_for = pay_and_push(
@@ -7330,6 +7445,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11439,6 +11555,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11561,6 +11678,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11652,6 +11770,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11732,6 +11851,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11845,6 +11965,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,

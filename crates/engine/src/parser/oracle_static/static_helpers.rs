@@ -164,15 +164,14 @@ fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
 }
 
 /// CR 601.2f + CR 118.8: Parse static-imposed additional non-mana costs such as
-/// Terror of the Peaks ("cost an additional 3 life to cast") and Thran Portal
-/// ("cost an additional 1 life to activate").
+/// Terror of the Peaks ("cost an additional 3 life to cast").
 pub(crate) fn try_parse_impose_additional_cost(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
-    let (prefix, (life_amount, action), _) = nom_primitives::scan_preceded(lower, |i| {
+    let (_prefix, (life_amount, action), _) = nom_primitives::scan_preceded(lower, |i| {
         let (i, _) = tag::<_, _, VE>("cost an additional ").parse(i)?;
         let (i, life_amount) = alt((
             map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
@@ -196,11 +195,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             ),
         ))
         .parse(i)?;
-        let (i, action) = alt((
-            value(AdditionalCostTaxAction::Cast, tag(" life to cast")),
-            value(AdditionalCostTaxAction::Activate, tag(" life to activate")),
-        ))
-        .parse(i)?;
+        let (i, action) = value(AdditionalCostTaxAction::Cast, tag(" life to cast")).parse(i)?;
         Ok((i, (life_amount, action)))
     })?;
 
@@ -222,21 +217,8 @@ pub(crate) fn try_parse_impose_additional_cost(
         None
     };
 
-    let target_cost_filter = parse_cost_modifier_target_filter(lower);
-
-    let spell_filter = if let Some(filter) = target_cost_filter.clone() {
-        Some(filter)
-    } else {
-        let type_prefix = strip_cost_modifier_target_clause(prefix);
-        let type_prefix = strip_cost_mod_cast_scope_suffix(type_prefix);
-        let type_prefix = strip_cost_mod_spell_noun_suffix(type_prefix);
-        let (type_filter, _) = parse_type_phrase(type_prefix.trim());
-        if matches!(type_filter, TargetFilter::Any) {
-            None
-        } else {
-            Some(type_filter)
-        }
-    };
+    let target_cost_filter = parse_cost_modifier_target_filter(lower)?;
+    let spell_filter = Some(target_cost_filter);
 
     let is_self_scoped = nom_primitives::scan_contains(lower, "of this land")
         || nom_primitives::scan_contains(lower, "of this creature")

@@ -2548,22 +2548,12 @@ fn static_opponent_spells_targeting_self_cost_additional_life_to_cast() {
 }
 
 #[test]
-fn static_mana_abilities_cost_additional_life_to_activate() {
-    let def =
+fn static_mana_abilities_cost_additional_life_to_activate_stays_gap() {
+    assert!(
         parse_static_line("Mana abilities of this land cost an additional 1 life to activate.")
-            .unwrap();
-
-    let StaticMode::ImposeAdditionalCost {
-        cost: AbilityCost::PayLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-        },
-        action: AdditionalCostTaxAction::Activate,
-        ..
-    } = def.mode
-    else {
-        panic!("expected activate-life tax, got {:?}", def.mode);
-    };
-    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+            .is_none(),
+        "activation taxes need activation-pipeline support before coverage can claim them"
+    );
 }
 
 #[test]

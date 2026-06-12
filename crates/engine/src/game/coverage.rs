@@ -6825,10 +6825,6 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("cost an additional")
                         && effective_lower.contains("life to cast")
                 }
-                crate::types::statics::AdditionalCostTaxAction::Activate => {
-                    effective_lower.contains("cost an additional")
-                        && effective_lower.contains("life to activate")
-                }
             },
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
             StaticMode::CantBeCopied => effective_lower.contains("can't be copied"),

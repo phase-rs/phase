@@ -1533,6 +1533,12 @@ pub struct PendingCast {
     /// kicker costs and multikicker loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 601.2f/h: Required additional cost to pay after a multi-step
+    /// optional additional-cost flow completes. Used when a target-dependent
+    /// static imposes a required non-mana cost on a spell that is also walking
+    /// Kicker/Multikicker choices in `additional_cost_flow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_required_additional_cost: Option<AbilityCost>,
     /// CR 601.2b + CR 702.48c: Source of the currently pending additional-cost
     /// component. This disambiguates same-shaped costs when a later object
     /// selection resumes payment.
@@ -1626,6 +1632,7 @@ impl PendingCast {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -7530,6 +7537,7 @@ mod tests {
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
+                deferred_required_additional_cost: None,
                 additional_cost_source: SpellCostSource::Other,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
@@ -7858,6 +7866,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
