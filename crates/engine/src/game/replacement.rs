@@ -1347,6 +1347,179 @@ fn remove_counter_applier(
 
 // --- 9. CreateToken ---
 
+/// CR 614.1a: The single authority for how a `QuantityModification` scales a
+/// token-creation count. `None` modification leaves the count unchanged; a
+/// `Prevent` modification returns `None` to signal the creation event is fully
+/// suppressed (CR 614.6 + CR 614.7). Both the predefined-token applier
+/// (`create_token_applier`) and the copy-token count path
+/// (`apply_create_token_count_replacements`) fold doublers through here so the
+/// scaling math lives in exactly one place.
+fn apply_token_count_modification(
+    count: u32,
+    modification: Option<&crate::types::ability::QuantityModification>,
+) -> Option<u32> {
+    use crate::types::ability::QuantityModification;
+    match modification {
+        Some(QuantityModification::Double) => Some(count.saturating_mul(2)),
+        Some(QuantityModification::Plus { value }) => Some(count.saturating_add(*value)),
+        Some(QuantityModification::Minus { value }) => Some(count.saturating_sub(*value)),
+        // CR 614.6 + CR 614.7: the proposed creation event never happens.
+        Some(QuantityModification::Prevent) => None,
+        None => Some(count),
+    }
+}
+
+/// CR 614.1a + CR 707.1: The outcome of folding every applicable `CreateToken`
+/// count-modification replacement (Doubling Season, Parallel Lives, Anointed
+/// Procession, Adrix and Nev, Primal Vigor, Mondrak, …) into a base token count
+/// for a given creating player. Mirrors `ReplacementResult` but is specialized
+/// to the count axis: the copy-token path materializes the copies itself
+/// (CR 707.2 — each copy carries the live source's copiable values), so no
+/// `ProposedEvent` is threaded back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountReplacementOutcome {
+    /// The base count after all mandatory count-modifications were folded in.
+    Count(u32),
+    /// CR 614.6 + CR 614.7: a `Prevent` replacement suppressed the creation —
+    /// no tokens are created.
+    Prevented,
+    /// CR 616.1 + CR 614.7: at least one optional ("you may", Mondrak)
+    /// replacement co-exists with the (already-applied) mandatory doublers, and
+    /// resolving that optional choice is a deferral the copy-token path does not
+    /// yet plumb. The carried `floor` is the base count AFTER folding in every
+    /// mandatory doubler (CR 616.1f: each mandatory replacement still applies) —
+    /// the copy path declines the optional and uses this mandatory floor, so a
+    /// guaranteed mandatory ×2 is never dropped just because an optional doubler
+    /// is also present. `affected` is the player who would make the deferred
+    /// optional choice.
+    NeedsChoice { affected: PlayerId, floor: u32 },
+}
+
+/// CR 614.1a + CR 616.1 + CR 707.1: Apply the `CreateToken` count-modification
+/// replacements that affect a token created under `owner`'s control to a
+/// `base_count`, reusing the live replacement pipeline's candidate finder,
+/// owner-scope matching, optional-mode detection, and ordering-material check.
+///
+/// This is the single shared authority for token-count doubling on the
+/// `Effect::CopyTokenOf` path. It deliberately applies ONLY the
+/// `quantity_modification` axis of each `CreateToken` replacement — the
+/// spec-based axes (`additional_token_spec` → Chatterfang Squirrels,
+/// `ensure_token_specs` → Manufactor, `token_owner_redirect` → Crafty Cutpurse)
+/// are intentionally NOT evaluated here, because a copy-token carries the live
+/// source's copiable values (CR 707.2) and must be materialized through the
+/// copy loop, never through the predefined `TokenSpec` apply path. Routing a
+/// full `ProposedEvent::CreateToken` through `replace_event` would otherwise
+/// spawn those spurious predefined tokens on the copy. The count math itself
+/// flows through `apply_token_count_modification`, the same helper
+/// `create_token_applier` uses, so predefined and copy tokens double by one
+/// authority.
+///
+/// CR 616.1f: the applicable candidates are partitioned by
+/// `replacement_mode_is_optional` (the SAME predicate the predefined-token
+/// pipeline uses in `token_creation_needs_choice`), then EVERY mandatory
+/// doubler is folded into `base_count` first — a mandatory ×2 is therefore
+/// always baked in and never dropped just because an optional doubler also
+/// applies. A mandatory `Prevent` still suppresses creation. Only after the
+/// mandatory fold does an optional choice come into play.
+///
+/// Returns [`CountReplacementOutcome`]: `Count(n)` after all mandatory doublers
+/// (with no optional candidate remaining), `Prevented` for a mandatory `Prevent`
+/// replacement, or `NeedsChoice { affected, floor }` when an optional doubler
+/// co-exists — `floor` is the already-mandatory-doubled count the copy path
+/// falls back to (declining the deferred optional), so the mandatory floor is
+/// honored regardless of any co-present optional doubler.
+pub fn apply_create_token_count_replacements(
+    state: &GameState,
+    owner: PlayerId,
+    base_count: u32,
+) -> CountReplacementOutcome {
+    if base_count == 0 {
+        // CR 609.3 + CR 101.3: nothing to create — no doubling artifacts.
+        return CountReplacementOutcome::Count(0);
+    }
+
+    let registry = build_replacement_registry();
+    // CR 614.1a: A count-only probe. `CreateToken` replacements key purely on
+    // `token_owner_scope` (owner == source controller) — `affected_object_id`
+    // is `None` for token creation, so `valid_card`/characteristic filters
+    // never gate count-doubling. A minimal placeholder spec therefore suffices
+    // to find every applicable count-modification replacement for `owner`.
+    let probe = ProposedEvent::CreateToken {
+        owner,
+        spec: Box::new(crate::types::proposed_event::TokenSpec::placeholder_for_count_probe(owner)),
+        enter_tapped: EtbTapState::Unspecified,
+        count: base_count,
+        applied: HashSet::new(),
+    };
+
+    // NOTE: the placeholder spec carries empty subtypes, so this probe finds
+    // every owner-scoped count doubler (they key only on `token_owner_scope`),
+    // but it cannot evaluate a hypothetical SUBTYPE-conditional
+    // `quantity_modification` count doubler — none exist in the card pool today
+    // (Chatterfang / Manufactor are non-count-axis and handled separately).
+    let candidates = find_applicable_replacements(state, &probe, &registry);
+    if candidates.is_empty() {
+        return CountReplacementOutcome::Count(base_count);
+    }
+
+    // CR 616.1f: Partition the applicable candidates into mandatory vs optional
+    // using `replacement_mode_is_optional` — the SAME predicate the predefined
+    // token pipeline uses in `token_creation_needs_choice`. Mandatory doublers
+    // are folded FIRST (below) so their ×2 floor is always baked in; an optional
+    // ("you may", Mondrak shape) doubler only matters after the mandatory fold.
+    // An object/definition that cannot be resolved is conservatively treated as
+    // optional (mirrors the predefined pipeline's `unwrap_or(true)`).
+    let (mandatory, optional): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|rid| {
+        let is_optional = state
+            .objects
+            .get(&rid.source)
+            .and_then(|o| o.replacement_definitions.get(rid.index))
+            .map(|r| replacement_mode_is_optional(&r.mode))
+            .unwrap_or(true);
+        !is_optional
+    });
+
+    // CR 616.1f: All mandatory candidates apply exactly once regardless of the
+    // order the affected player would pick. The realistic copy-token
+    // count-modification class is one or more `Double`s, which commute, so
+    // applying them in candidate order yields the order-independent result (two
+    // doublers stack to ×4 exactly as predefined tokens do). A hypothetical
+    // non-commuting mandatory mix (Double + Plus — no printed copy-token card
+    // combines these today) is applied in candidate order rather than prompting;
+    // predefined tokens surface the CR 616.1 ordering prompt for that case via
+    // the full pipeline, a refinement the copy path can adopt if such a card
+    // appears. Each modification folds through the shared math authority
+    // (`apply_token_count_modification`). A mandatory `Prevent` still suppresses
+    // creation even if an optional doubler co-exists.
+    let mut count = base_count;
+    for rid in mandatory {
+        let modification = state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|def| def.quantity_modification.clone());
+        match apply_token_count_modification(count, modification.as_ref()) {
+            Some(n) => count = n,
+            // CR 614.6 + CR 614.7: a mandatory `Prevent` suppresses creation.
+            None => return CountReplacementOutcome::Prevented,
+        }
+    }
+
+    // CR 616.1: with no optional candidate remaining, the mandatory-folded count
+    // is final. Otherwise an optional ("you may") choice is available that the
+    // copy path does not yet plumb — surface it as `NeedsChoice` carrying the
+    // ALREADY-mandatory-doubled `count` as the floor, so the caller declines the
+    // optional but keeps the guaranteed mandatory ×2 (never falls back below it).
+    if optional.is_empty() {
+        CountReplacementOutcome::Count(count)
+    } else {
+        CountReplacementOutcome::NeedsChoice {
+            affected: probe.affected_player(state),
+            floor: count,
+        }
+    }
+}
+
 fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::CreateToken { .. })
 }
@@ -1357,7 +1530,6 @@ fn create_token_applier(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    use crate::types::ability::QuantityModification;
     let (modification, additional_spec, ensure_specs, owner_redirect, source_controller) = state
         .objects
         .get(&rid.source)
@@ -1410,18 +1582,20 @@ fn create_token_applier(
         if owner != original_owner {
             spec.controller = owner;
         }
-        // CR 614.1a: Modify token count per replacement effect.
-        let new_count = match modification {
-            Some(QuantityModification::Double) => count.saturating_mul(2),
-            Some(QuantityModification::Plus { value }) => count.saturating_add(value),
-            Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
+        // CR 614.1a: Modify token count per replacement effect through the
+        // single authority for count-replacement math (`apply_token_count_modification`).
+        // Both this predefined-token applier and `Effect::CopyTokenOf`'s copy
+        // path (`apply_create_token_count_replacements`) fold doublers through
+        // the same helper so there is exactly one place that knows how a
+        // `QuantityModification` scales a token-creation count.
+        let new_count = match apply_token_count_modification(count, modification.as_ref()) {
             // CR 614.6 + CR 614.7 + CR 111.1: No printed token-creation
             // replacement uses Prevent today, but the variant composes here for
             // symmetry — fully suppress the token-creation event so any future
             // "tokens can't be created" replacement slots in without re-touching
             // this applier.
-            Some(QuantityModification::Prevent) => return ApplyResult::Prevented,
-            None => count,
+            None => return ApplyResult::Prevented,
+            Some(n) => n,
         };
 
         // CR 614.1a + CR 111.1: "those tokens plus ..." — emit an additional

@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
 /// Copies copiable characteristics from the target to a newly created token.
 ///
-/// CR 707.10: When `count` resolves to N > 1, N independent copy-tokens are
+/// CR 707.1: When `count` resolves to N > 1, N independent copy-tokens are
 /// created (e.g., Rite of Replication kicked = 5, Adrix and Nev doubling).
 pub fn resolve(
     state: &mut GameState,
@@ -57,7 +57,8 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
     };
-    let count = resolve_quantity(state, &count_expr, ability.controller, ability.source_id).max(0);
+    let base_count =
+        resolve_quantity(state, &count_expr, ability.controller, ability.source_id).max(0);
 
     // CR 109.4 + CR 111.2: The token's creator (and therefore controller) is
     // determined by the `owner` filter. Resolved once, before the creation
@@ -66,6 +67,36 @@ pub fn resolve(
     // under the chosen opponent's control rather than the trigger controller's.
     let token_owner =
         crate::game::effects::token::resolve_token_owner(state, ability, owner_filter);
+
+    // CR 614.1a + CR 707.1: A copy-token's count is subject to the SAME
+    // `CreateToken` count-doubling replacements (Doubling Season, Parallel
+    // Lives, Anointed Procession, Adrix and Nev, Primal Vigor, Mondrak) that a
+    // predefined `Effect::Token` is. Route the resolved base count through the
+    // single shared authority keyed on the copy's CONTROLLER (`token_owner`,
+    // CR 111.2) — not the ability controller — so "target opponent creates a
+    // copy" doubles for the opponent's doublers, mirroring predefined tokens.
+    // The doubled count then flows into the per-copy loop below, so each
+    // doubled instance independently runs its own ETB / enter-with-counters
+    // body (CR 707.2). CR 616.1f: every MANDATORY doubler is baked in first, so
+    // the count is at least doubled whenever a mandatory doubler is present —
+    // even if an optional ("you may", Mondrak) doubler co-exists. An optional
+    // doubler is a deferral the copy path does not yet plumb: the helper returns
+    // `NeedsChoice { floor, .. }` carrying the already-mandatory-doubled `floor`,
+    // and we decline the optional and use that floor (no panic, no silent forced
+    // optional double — and never below the guaranteed mandatory ×2). A mandatory
+    // `Prevent` replacement (no printed copy-token card uses one today) suppresses
+    // creation entirely.
+    let count = match crate::game::replacement::apply_create_token_count_replacements(
+        state,
+        token_owner,
+        base_count as u32,
+    ) {
+        crate::game::replacement::CountReplacementOutcome::Count(n) => n as i32,
+        crate::game::replacement::CountReplacementOutcome::Prevented => 0,
+        crate::game::replacement::CountReplacementOutcome::NeedsChoice { floor, .. } => {
+            floor as i32
+        }
+    };
 
     // Step 1: Resolve the copy source list.
     // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant
@@ -181,9 +212,9 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 707.10 + CR 115.1d: Create `count` independent copy-tokens per copy
-    // source. Each is snapshotted from the source values so that subsequent
-    // SBAs (e.g., legendary rule) see identical copies.
+    // CR 707.1: Create `count` independent copy-tokens per copy source. Each is
+    // snapshotted from the source values so that subsequent SBAs (e.g., legendary
+    // rule) see identical copies.
     let mut created_ids: Vec<ObjectId> = Vec::with_capacity(count as usize * copy_source_ids.len());
     for copy_source_id in &copy_source_ids {
         let copy_source_id = *copy_source_id;
@@ -667,6 +698,372 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
+
+    /// Create a Grizzly-Bears-shaped source creature (2/2 Bear) on the
+    /// battlefield for the copy-doubling tests, returning its id.
+    fn grizzly_bears_source(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let source_id = create_object(
+            state,
+            CardId(1),
+            controller,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let s = state.objects.get_mut(&source_id).unwrap();
+        s.base_power = Some(2);
+        s.base_toughness = Some(2);
+        s.power = Some(2);
+        s.toughness = Some(2);
+        s.base_card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Bear".to_string()],
+        };
+        s.card_types = s.base_card_types.clone();
+        source_id
+    }
+
+    /// Attach a `CreateToken` count-doubling replacement (Doubling-Season shape)
+    /// to a fresh permanent controlled by `controller`. `optional` chooses the
+    /// Mondrak-shape optional mode; otherwise mandatory.
+    fn attach_token_doubler(
+        state: &mut GameState,
+        controller: PlayerId,
+        optional: bool,
+    ) -> ObjectId {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+        let doubler_id = create_object(
+            state,
+            CardId(99),
+            controller,
+            "Token Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
+        def.mode = if optional {
+            ReplacementMode::Optional { decline: None }
+        } else {
+            ReplacementMode::Mandatory
+        };
+        def.quantity_modification = Some(QuantityModification::Double);
+        def.token_owner_scope = Some(crate::types::ability::ControllerRef::You);
+        let obj = state.objects.get_mut(&doubler_id).unwrap();
+        obj.replacement_definitions = std::sync::Arc::new(vec![def]).into();
+        obj.base_replacement_definitions = std::sync::Arc::new(vec![]);
+        doubler_id
+    }
+
+    fn copy_self_ability(source_id: ObjectId, count: i32, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SpecificObject { id: source_id },
+                owner: TargetFilter::Controller,
+                source_filter: Some(TargetFilter::SpecificObject { id: source_id }),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: count },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+    }
+
+    fn count_grizzly_copies(state: &GameState) -> usize {
+        state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.name == "Grizzly Bears")
+            .count()
+    }
+
+    /// CR 614.1a + CR 707.1 (issue #1511 (a)): a single mandatory
+    /// `CreateToken` count-doubler (Doubling-Season shape) keyed to the copy's
+    /// controller doubles `CopyTokenOf { count: 1 }` to exactly 2 copies. Each
+    /// is a correct copy of the source (name / P-T / types) entering
+    /// independently. MUST fail if the fix is reverted (un-doubled count = 1).
+    #[test]
+    fn copy_token_mandatory_doubler_doubles_one_to_two() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        attach_token_doubler(&mut state, PlayerId(0), false);
+
+        let mut events = Vec::new();
+        let ability = copy_self_ability(source_id, 1, PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let copies: Vec<_> = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.name == "Grizzly Bears")
+            .collect();
+        assert_eq!(
+            copies.len(),
+            2,
+            "a mandatory CreateToken doubler must double CopyTokenOf to 2 copies"
+        );
+        // CR 707.2: each doubled copy carries the source's copiable values and
+        // entered the battlefield independently.
+        for copy in &copies {
+            assert_eq!(copy.power, Some(2));
+            assert_eq!(copy.toughness, Some(2));
+            assert!(copy.card_types.core_types.contains(&CoreType::Creature));
+            assert!(copy.card_types.subtypes.contains(&"Bear".to_string()));
+            assert_eq!(copy.zone, Zone::Battlefield);
+        }
+        // CR 603.6a: each copy emitted its own ETB/TokenCreated pair, so two
+        // independent ETB triggers can fire.
+        let token_created = events
+            .iter()
+            .filter(
+                |e| matches!(e, GameEvent::TokenCreated { name, .. } if name == "Grizzly Bears"),
+            )
+            .count();
+        assert_eq!(
+            token_created, 2,
+            "each doubled copy emits its own TokenCreated"
+        );
+    }
+
+    /// CR 614.1a + CR 707.1 (issue #1511 (b)): doubling applies to the FULL
+    /// base count — base `count: 3` + one mandatory doubler => 6 copies.
+    #[test]
+    fn copy_token_mandatory_doubler_doubles_full_base_count() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        attach_token_doubler(&mut state, PlayerId(0), false);
+
+        let mut events = Vec::new();
+        let ability = copy_self_ability(source_id, 3, PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            count_grizzly_copies(&state),
+            6,
+            "doubling applies to the full base count (3 * 2 = 6)"
+        );
+    }
+
+    /// CR 616.1 + CR 707.1 (issue #1511 (c)): two mandatory doublers STACK —
+    /// `CopyTokenOf { count: 1 }` => 4 copies. Proves the fix reuses the real
+    /// replacement stack (folding each applicable replacement) rather than a
+    /// hardcoded ×2.
+    #[test]
+    fn copy_token_two_doublers_stack_to_four() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        attach_token_doubler(&mut state, PlayerId(0), false);
+        attach_token_doubler(&mut state, PlayerId(0), false);
+
+        let mut events = Vec::new();
+        let ability = copy_self_ability(source_id, 1, PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            count_grizzly_copies(&state),
+            4,
+            "two mandatory doublers stack (1 * 2 * 2 = 4)"
+        );
+    }
+
+    /// Issue #1511 (d) NON-REGRESSION: with NO doubler, `CopyTokenOf` count is
+    /// unchanged — `count: 1` => 1 copy, `count: 3` => 3 copies. MUST pass both
+    /// pre- and post-fix.
+    #[test]
+    fn copy_token_no_doubler_count_unchanged() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &copy_self_ability(source_id, 1, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            count_grizzly_copies(&state),
+            1,
+            "no doubler: count 1 stays 1"
+        );
+
+        // Reset and verify count: 3 stays 3.
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &copy_self_ability(source_id, 3, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            count_grizzly_copies(&state),
+            3,
+            "no doubler: count 3 stays 3"
+        );
+    }
+
+    /// CR 111.2 + CR 707.1 (issue #1511 multiplayer): the doubler that applies
+    /// is the one affecting the COPY'S CONTROLLER, not the ability controller.
+    /// PlayerId(0) controls the ability but the copy is created under PlayerId(1)
+    /// (the chosen opponent); only PlayerId(1)'s doubler must double it.
+    #[test]
+    fn copy_token_doubler_keys_on_copy_controller_not_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        // A doubler controlled by the ABILITY controller (PlayerId(0)) must NOT
+        // double a copy created under PlayerId(1).
+        attach_token_doubler(&mut state, PlayerId(0), false);
+
+        let mut events = Vec::new();
+        // "Target opponent creates a token that's a copy of it" — owner resolves
+        // to the chosen opponent PlayerId(1).
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SpecificObject { id: source_id },
+                owner: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                source_filter: Some(TargetFilter::SpecificObject { id: source_id }),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            count_grizzly_copies(&state),
+            1,
+            "ability-controller's doubler must NOT double a copy owned by the opponent"
+        );
+
+        // Now give the OPPONENT (the copy's controller) a doubler — it must double.
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        attach_token_doubler(&mut state, PlayerId(1), false);
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SpecificObject { id: source_id },
+                owner: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                source_filter: Some(TargetFilter::SpecificObject { id: source_id }),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let opp_copies = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.name == "Grizzly Bears" && o.controller == PlayerId(1))
+            .count();
+        assert_eq!(
+            opp_copies, 2,
+            "the copy controller's (opponent's) doubler doubles the copy"
+        );
+    }
+
+    /// Issue #1511 zero: `count: 0` => no tokens and no doubling artifacts even
+    /// with a doubler present.
+    #[test]
+    fn copy_token_zero_count_with_doubler_creates_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        attach_token_doubler(&mut state, PlayerId(0), false);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &copy_self_ability(source_id, 0, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            count_grizzly_copies(&state),
+            0,
+            "count 0 creates nothing even with a doubler present"
+        );
+        assert!(state.last_created_token_ids.is_empty());
+    }
+
+    /// CR 616.1 (issue #1511 optional doubler — DOCUMENTED DEFERRAL): an
+    /// optional ("you may", Mondrak shape) `CreateToken` doubler on the copy
+    /// path returns `NeedsChoice` from the shared count helper, which the copy
+    /// resolver does NOT plumb. The documented behavior is a clean fall-back to
+    /// the un-doubled base count: the resolver must NOT panic or mis-resolve.
+    /// (Mandatory doublers — the primary issue #1511 class — are fully handled;
+    /// the optional-doubler choice plumbing for the copy path is deferred.)
+    #[test]
+    fn copy_token_optional_doubler_falls_back_to_base_count_no_panic() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        attach_token_doubler(&mut state, PlayerId(0), true);
+
+        let mut events = Vec::new();
+        // Must not panic; falls back to the un-doubled base count (1 copy).
+        resolve(
+            &mut state,
+            &copy_self_ability(source_id, 1, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            count_grizzly_copies(&state),
+            1,
+            "optional doubler is deferred: copy path falls back to the base count without panicking"
+        );
+    }
+
+    /// CR 616.1f (issue #1511 mandatory floor): when a MANDATORY doubler
+    /// (Doubling-Season shape) co-exists with an OPTIONAL ("you may", Mondrak
+    /// shape) doubler on the copy's controller, the mandatory replacement still
+    /// applies (CR 616.1f: each applicable replacement is applied in turn until
+    /// none remain), so `CopyTokenOf { count: 1 }` yields AT LEAST 2 copies. The
+    /// optional doubler is the deferral the copy path declines — but it must NOT
+    /// cause the guaranteed mandatory ×2 to be dropped. This fails on the
+    /// pre-fix code (which short-circuited to `NeedsChoice` on the first optional
+    /// candidate and fell back to the un-doubled base count = 1 copy).
+    #[test]
+    fn copy_token_mandatory_floor_survives_co_present_optional_doubler() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = grizzly_bears_source(&mut state, PlayerId(0));
+        // Both controlled by the copy's controller (PlayerId(0)): one mandatory,
+        // one optional. The mandatory ×2 must be honored regardless of the
+        // optional doubler that the copy path declines.
+        attach_token_doubler(&mut state, PlayerId(0), false); // mandatory
+        attach_token_doubler(&mut state, PlayerId(0), true); // optional
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &copy_self_ability(source_id, 1, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            count_grizzly_copies(&state) >= 2,
+            "a mandatory doubler's ×2 floor must survive a co-present optional doubler \
+             (got {}, expected >= 2)",
+            count_grizzly_copies(&state)
+        );
+    }
 
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
     /// color, and replaces creature subtypes (The Scarab God shape) stamps each

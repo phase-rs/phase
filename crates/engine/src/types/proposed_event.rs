@@ -126,6 +126,47 @@ pub struct TokenSpec {
     pub attach_to: Option<AttachTarget>,
 }
 
+impl TokenSpec {
+    /// CR 614.1a: A minimal placeholder spec for count-only `CreateToken`
+    /// replacement probing on the copy-token path. `CreateToken` count
+    /// replacements (Doubling Season, Parallel Lives, …) key on
+    /// `token_owner_scope` (owner == source controller) and do not read the
+    /// token's characteristics — `ProposedEvent::affected_object_id` is `None`
+    /// for token creation, so no `valid_card`/characteristic filter gates
+    /// count-doubling. This placeholder therefore carries only the creating
+    /// player's identity; it is never materialized into an object (the copy
+    /// loop materializes copies from the live source per CR 707.2).
+    ///
+    /// Limitation: the placeholder carries EMPTY subtypes, so it correctly finds
+    /// all owner-scoped count doublers (which key only on `token_owner_scope`),
+    /// but it cannot evaluate a hypothetical SUBTYPE-conditional
+    /// `quantity_modification` count doubler. None exist in the card pool today
+    /// (Chatterfang / Manufactor are non-count-axis and handled separately).
+    pub fn placeholder_for_count_probe(owner: PlayerId) -> Self {
+        TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: String::new(),
+                power: None,
+                toughness: None,
+                core_types: Vec::new(),
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: String::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: owner,
+            attach_to: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
