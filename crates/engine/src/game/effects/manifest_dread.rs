@@ -41,8 +41,14 @@ pub fn resolve(
     if count == 1 {
         // Only one card — must manifest it (no choice needed)
         let card_id = cards[0];
-        crate::game::morph::manifest_card(state, player, card_id, events)
-            .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+        crate::game::morph::manifest_card(
+            state,
+            player,
+            card_id,
+            crate::types::ability::FaceDownProfile::vanilla_2_2(),
+            events,
+        )
+        .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
     } else {
         // CR 701.62a: Player chooses which card to manifest
         // Mark these cards as revealed to the controller only

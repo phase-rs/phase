@@ -19,8 +19,8 @@ use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
-    QuantityExpr, QuantityRef, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
-    REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    QuantityExpr, QuantityRef, SacrificeCost, TargetFilter, TypedFilter, EXILE_COST_X,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -127,7 +127,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
     #[allow(clippy::needless_range_loop)]
     for i in 0..costs.len() {
         match &costs[i] {
-            AbilityCost::Sacrifice { .. } => last_verb = Some(PrecedingVerb::Sacrifice),
+            AbilityCost::Sacrifice(_) => last_verb = Some(PrecedingVerb::Sacrifice),
             AbilityCost::Exile { zone, .. } => {
                 last_verb = Some(PrecedingVerb::Exile { zone: *zone })
             }
@@ -144,10 +144,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 }
                 match last_verb.unwrap() {
                     PrecedingVerb::Sacrifice => {
-                        costs[i] = AbilityCost::Sacrifice {
-                            target: filter,
-                            count: 1,
-                        };
+                        costs[i] = AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
                     }
                     PrecedingVerb::Exile { zone } => {
                         costs[i] = AbilityCost::Exile {
@@ -348,10 +345,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             value((), alt((tag("~"), tag("cardname"), tag("this ")))).parse(i)
         });
         if is_self.is_some() {
-            return AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            };
+            return AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
         }
         // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
         // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
@@ -362,10 +356,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             let target_phrase = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_phrase);
             if remainder.trim().is_empty() {
-                return AbilityCost::Sacrifice {
-                    target: filter,
-                    count: u32::MAX,
-                };
+                return AbilityCost::Sacrifice(SacrificeCost::count(filter, u32::MAX));
             }
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
@@ -390,10 +381,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             (1, stripped.to_string())
         };
         let (filter, _) = parse_target(&format!("target {}", filter_text));
-        return AbilityCost::Sacrifice {
-            target: filter,
-            count: use_count,
-        };
+        return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
     }
 
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
@@ -743,12 +731,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     zone: Some(Zone::Graveyard),
                     filter: None,
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(
-                        TypedFilter::permanent().subtype("Food".to_string()),
-                    ),
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::permanent().subtype("Food".to_string())),
+                    1,
+                )),
             ],
         };
     }
@@ -1457,10 +1443,7 @@ mod tests {
     fn cost_sacrifice_self() {
         assert_eq!(
             parse_oracle_cost("Sacrifice ~"),
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
         );
     }
 
@@ -1491,7 +1474,8 @@ mod tests {
     #[test]
     fn cost_sacrifice_creature() {
         match parse_oracle_cost("Sacrifice a creature") {
-            AbilityCost::Sacrifice { target, .. } => {
+            AbilityCost::Sacrifice(cost) => {
+                let target = &cost.target;
                 assert!(matches!(
                     target,
                     TargetFilter::Typed(ref tf) if matches!(tf.get_primary_type(), Some(TypeFilter::Creature))
@@ -1504,10 +1488,13 @@ mod tests {
     #[test]
     fn cost_sacrifice_any_number_nonland_permanents() {
         match parse_oracle_cost("Sacrifice any number of nonland permanents") {
-            AbilityCost::Sacrifice { target, count } => {
-                assert_eq!(count, u32::MAX);
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { count: u32::MAX }
+                );
                 assert!(matches!(
-                    target,
+                    cost.target,
                     TargetFilter::Typed(ref tf)
                         if tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Non(_)))
                 ));
@@ -1519,10 +1506,13 @@ mod tests {
     #[test]
     fn cost_sacrifice_x_squirrels() {
         match parse_oracle_cost("Sacrifice X Squirrels") {
-            AbilityCost::Sacrifice { target, count } => {
-                assert_eq!(count, u32::MAX);
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { count: u32::MAX }
+                );
                 assert!(matches!(
-                    target,
+                    cost.target,
                     TargetFilter::Typed(ref tf)
                         if tf
                             .type_filters
@@ -1757,7 +1747,7 @@ mod tests {
             AbilityCost::Composite { costs } => {
                 assert_eq!(costs.len(), 3);
                 assert_eq!(costs[0], AbilityCost::Tap);
-                assert!(matches!(costs[2], AbilityCost::Sacrifice { .. }));
+                assert!(matches!(costs[2], AbilityCost::Sacrifice(_)));
             }
             other => panic!("Expected Composite, got {:?}", other),
         }

@@ -2205,6 +2205,22 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
+    // CR 106.4: "unspent [color] mana you have" (Omnath, Locus of Mana) — the
+    // amount of floating mana of that color (or any color) in the controller's
+    // pool. A bare color word is optional, so "unspent mana you have" counts
+    // all colors.
+    if let Some((color, rest)) = nom_on_lower(clause, clause, |i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("unspent ").parse(i)?;
+        let (i, color) = opt(nom_primitives::parse_color).parse(i)?;
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>(" ")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("mana you have").parse(i)?;
+        Ok((i, color))
+    }) {
+        if rest.trim().is_empty() {
+            return Some(QuantityRef::UnspentMana { color });
+        }
+    }
+
     // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
     // / "opponent who was dealt combat damage this turn". Mirrors the
     // lost-life / gained-life arms above, but consumes the full clause instead

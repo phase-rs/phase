@@ -1882,6 +1882,7 @@ mod tests {
                     permanents: vec![ObjectId(22)],
                     pending_effect: Box::new(dummy_ability()),
                     remaining: 1,
+                    min_total_power: None,
                 },
                 PlayerId(0),
             ),

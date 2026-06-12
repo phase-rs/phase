@@ -888,7 +888,11 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
 
 /// CR 702: Split a keyword list like "flying and first strike" into individual keywords.
 pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
-    let text = text.trim().trim_end_matches('.');
+    // Strip both trailing periods and trailing commas. A comma tail arises when
+    // `strip_quoted_segments` removes `and "Whenever..."` from the end of a list
+    // like "has first strike, trample, haste, and \"Whenever...\""— the connector
+    // `, and` is dropped but the comma after the last bare keyword remains.
+    let text = text.trim().trim_end_matches(['.', ',']).trim();
     // Split on ", and/or ", ", and ", " and ", or ", " — longest-match-first
     // ordering prevents ", and " from consuming the prefix of ", and/or ".
     let mut parts: Vec<&str> = Vec::new();

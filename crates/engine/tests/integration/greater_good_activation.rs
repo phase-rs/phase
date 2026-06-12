@@ -26,7 +26,7 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ObjectScope, QuantityExpr, QuantityRef,
-    TargetFilter, TypeFilter, TypedFilter,
+    SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -419,10 +419,10 @@ fn multi_sacrifice_cost_count_is_honored() {
             target: TargetFilter::Controller,
         },
     )
-    .cost(AbilityCost::Sacrifice {
-        target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
-        count: 2,
-    });
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        2,
+    )));
 
     let host_id = scenario
         .add_creature(P0, "Twin Sacrifice", 0, 0)
@@ -439,7 +439,10 @@ fn multi_sacrifice_cost_count_is_honored() {
     {
         let ability = &runner.state().objects[&host_id].abilities[0];
         assert!(
-            matches!(ability.cost, Some(AbilityCost::Sacrifice { count: 2, .. })),
+            matches!(
+                ability.cost,
+                Some(AbilityCost::Sacrifice(ref c)) if c.requirement.fixed_count() == Some(2)
+            ),
             "the synthetic ability must carry a count: 2 Sacrifice cost",
         );
     }
@@ -504,10 +507,10 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
                 target: TargetFilter::Controller,
             },
         )
-        .cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
-            count: 2,
-        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            2,
+        )))
     };
 
     // Positive case: select exactly two victims → both sacrificed, cost cleared.

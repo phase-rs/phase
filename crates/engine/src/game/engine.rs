@@ -19895,11 +19895,12 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     /// CR 702.24a: cumulative upkeep cost format is `[cost]` where `[cost]`
     /// may be any cost. Sacrifice-a-land is the canonical non-mana variant
     /// (Polar Kraken, Phyrexian Soulgorger).
+    use crate::types::ability::SacrificeCost;
+
     fn cumulative_upkeep_sacrifice_land_trigger() -> TriggerDefinition {
-        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::land()),
-            count: 1,
-        })
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice(
+            SacrificeCost::count(TargetFilter::Typed(TypedFilter::land()), 1),
+        ))
     }
 
     /// Construct a solo state with Polar Kraken on the battlefield (controller
@@ -19983,10 +19984,14 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             WaitingFor::UnlessPayment { player, cost, .. } => {
                 assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
                 match cost {
-                    AbilityCost::Sacrifice { target, count } => {
-                        assert_eq!(*count, 1, "1 age counter × base count 1 = 1");
+                    AbilityCost::Sacrifice(cost) => {
                         assert_eq!(
-                            *target,
+                            cost.requirement.fixed_count(),
+                            Some(1),
+                            "1 age counter × base count 1 = 1"
+                        );
+                        assert_eq!(
+                            cost.target,
                             TargetFilter::Typed(TypedFilter::land()),
                             "unless-cost target filter must remain Land"
                         );

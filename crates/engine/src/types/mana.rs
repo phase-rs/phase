@@ -1180,11 +1180,13 @@ pub fn apply_empty_mana_pool_decisions(
     // Descending pool_index order preserves index validity across removes.
     let mut sorted: Vec<&UnitDecision> = units.iter().collect();
     sorted.sort_by_key(|d| std::cmp::Reverse(d.pool_index));
+    let mut changed = false;
     for decision in sorted {
         match decision.disposition {
             UnitDisposition::Drop => {
                 if decision.pool_index < player.mana_pool.mana.len() {
                     let removed = player.mana_pool.mana.remove(decision.pool_index);
+                    changed = true;
                     events.push(GameEvent::ManaPoolEmptied {
                         player_id,
                         source_id: removed.source_id,
@@ -1197,6 +1199,7 @@ pub fn apply_empty_mana_pool_decisions(
                 if let Some(unit) = player.mana_pool.mana.get_mut(decision.pool_index) {
                     let from = unit.color;
                     unit.color = to;
+                    changed = true;
                     events.push(GameEvent::ManaRecolored {
                         player_id,
                         from,
@@ -1205,6 +1208,9 @@ pub fn apply_empty_mana_pool_decisions(
                 }
             }
         }
+    }
+    if changed {
+        state.layers_dirty.mark_full();
     }
 }
 

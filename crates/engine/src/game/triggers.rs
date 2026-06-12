@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
-    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, TargetFilter,
-    TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, SacrificeCost,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -147,10 +149,9 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
-        WardCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
-            target: filter.clone(),
-            count: *count,
-        },
+        WardCost::Sacrifice { count, filter } => {
+            AbilityCost::Sacrifice(SacrificeCost::count(filter.clone(), *count))
+        }
         // CR 702.21a + CR 701.67: Waterbend ward cost maps to mana payment.
         // Full tap-to-help semantics deferred to waterbend cost integration.
         WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
@@ -289,6 +290,64 @@ fn contextual_batched_trigger_event(
     })
 }
 
+fn synthesize_granted_keyword_triggers<'a>(
+    source_obj: &GameObject,
+    keywords: impl IntoIterator<Item = &'a Keyword>,
+) -> Vec<(KeywordKind, TriggerDefinition)> {
+    let mut base_keywords = source_obj.base_keywords.clone();
+    let mut granted_keywords = Vec::new();
+    for kw in keywords {
+        if let Some(pos) = base_keywords.iter().position(|base| base == kw) {
+            base_keywords.remove(pos);
+        } else {
+            granted_keywords.push(kw);
+        }
+    }
+
+    granted_keywords
+        .into_iter()
+        .flat_map(|kw| {
+            KeywordTriggerInstaller::triggers_for(kw)
+                .into_iter()
+                .map(move |trig| (kw.kind(), trig))
+        })
+        .collect()
+}
+
+fn keyword_kind_for_trigger(
+    keywords: &[Keyword],
+    trigger: &TriggerDefinition,
+) -> Option<KeywordKind> {
+    keywords
+        .iter()
+        .find(|keyword| KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword))
+        .map(Keyword::kind)
+}
+
+fn runtime_granted_lki_keyword_triggers(
+    source_obj: &GameObject,
+    record: &crate::types::game_state::ZoneChangeRecord,
+) -> Vec<(KeywordKind, TriggerDefinition)> {
+    let mut base_triggers: Vec<TriggerDefinition> = source_obj
+        .base_trigger_definitions
+        .iter()
+        .cloned()
+        .collect();
+    record
+        .trigger_definitions
+        .iter()
+        .filter_map(|trigger| {
+            if let Some(pos) = base_triggers.iter().position(|base| base == trigger) {
+                base_triggers.remove(pos);
+                None
+            } else {
+                keyword_kind_for_trigger(&record.keywords, trigger)
+                    .map(|kind| (kind, trigger.clone()))
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -313,26 +372,34 @@ fn collect_matching_triggers(
     // the off-zone trigger scan sees them, mirroring how `off_zone_characteristics`
     // synthesizes the keyword itself. The printed-keyword path is unaffected:
     // printed Suspend already carries these triggers in `base_trigger_definitions`.
-    let granted_off_zone_triggers: Vec<(crate::types::keywords::KeywordKind, TriggerDefinition)> =
-        if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
-            let base_keyword_kinds: Vec<_> =
-                source_obj.base_keywords.iter().map(|k| k.kind()).collect();
-            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id)
-                .iter()
-                // Only synthesize for keywords that were *granted* (absent from
-                // the printed/base set) — printed keywords already carry their
-                // companion triggers via synthesis at database-build time.
-                .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
-                .flat_map(|kw| {
-                    let kind = kw.kind();
-                    crate::database::synthesis::KeywordTriggerInstaller::triggers_for(kw)
-                        .into_iter()
-                        .map(move |trig| (kind, trig))
-                })
-                .collect()
+    //
+    // CR 603.10a: The same keyword-origin treatment applies when a battlefield
+    // object just left the battlefield. Runtime-granted keyword triggers such
+    // as Undying/Persist may be cleaned from the live object before the LTB
+    // trigger scan, but the ZoneChangeRecord preserves the LKI keyword set.
+    let granted_keyword_triggers = if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
+        let off_zone_keywords =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id);
+        synthesize_granted_keyword_triggers(source_obj, off_zone_keywords.iter())
+    } else if matches!(zone_filter, Some(Zone::Battlefield)) {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if *object_id == obj_id {
+                runtime_granted_lki_keyword_triggers(source_obj, record)
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
-        };
+        }
+    } else {
+        Vec::new()
+    };
 
     let source_phase_out_event = matches!(
         event,
@@ -348,9 +415,9 @@ fn collect_matching_triggers(
     // after the status flip, so this one event must read only PhaseOut definitions
     // directly from the source while leaving all other phased-out abilities inert.
     //
-    // Synthesized off-zone granted-keyword triggers are appended after the
-    // printed set with indices offset past `obj.trigger_definitions.len()` so
-    // the `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
+    // Synthesized granted-keyword triggers are appended after the printed set
+    // with indices offset past `obj.trigger_definitions.len()` so the
+    // `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
     let printed_trigger_count = source_obj.trigger_definitions.len();
     let printed_triggers: Vec<(
         usize,
@@ -372,16 +439,16 @@ fn collect_matching_triggers(
             .collect()
     };
     let all_triggers = printed_triggers.into_iter().chain(
-        granted_off_zone_triggers
+        granted_keyword_triggers
             .iter()
             .enumerate()
             .map(|(i, (kind, def))| (printed_trigger_count + i, def, Some(*kind))),
     );
     for (trig_idx, trig_def, granted_keyword_kind) in all_triggers {
-        // Synthesized granted-keyword companion triggers (off-zone Suspend
-        // grant) carry a keyword-keyed `MayTriggerOrigin` — the synthetic
-        // `trig_idx` points past `trigger_definitions` and must not be used as
-        // a `Printed` index. Printed triggers keep their stable index.
+        // Synthesized granted-keyword companion triggers carry a keyword-keyed
+        // `MayTriggerOrigin` — the synthetic `trig_idx` points past
+        // `trigger_definitions` and must not be used as a `Printed` index.
+        // Printed triggers keep their stable index.
         // Zone guard: only fire a trigger if its declared zones include the zone being scanned.
         // Empty trigger_zones defaults to battlefield-only (engine-internal triggers like
         // prowess/ward). Parser-created non-battlefield triggers set trigger_zones explicitly.
@@ -9870,7 +9937,9 @@ pub mod tests {
             filter: TargetFilter::Any,
         };
         let result = ward_cost_to_ability_cost(&sacrifice);
-        assert!(matches!(result, AbilityCost::Sacrifice { count: 1, .. }));
+        assert!(
+            matches!(result, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1))
+        );
 
         // Waterbend
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
@@ -14160,10 +14229,10 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Instant);
             obj.cast_from_zone = Some(Zone::Hand);
             obj.additional_cost = Some(AdditionalCost::Optional {
-                cost: AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: 1,
-                },
+                cost: AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    1,
+                )),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             obj.keywords.push(Keyword::Casualty(2));

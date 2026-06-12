@@ -381,12 +381,16 @@ pub fn handle_companion_to_hand(
     }
 
     // Validate and deduct mana
-    let player_data = &mut state.players[player.0 as usize];
-    if !player_data.mana_pool.spend_generic(COMPANION_COST) {
-        return Err("Not enough mana to pay companion cost ({3})".to_string());
+    {
+        let player_data = &mut state.players[player.0 as usize];
+        if !player_data.mana_pool.spend_generic(COMPANION_COST) {
+            return Err("Not enough mana to pay companion cost ({3})".to_string());
+        }
     }
+    state.layers_dirty.mark_full();
 
     // Take the companion card data and mark as used
+    let player_data = &mut state.players[player.0 as usize];
     let card_face = player_data
         .companion
         .as_ref()
