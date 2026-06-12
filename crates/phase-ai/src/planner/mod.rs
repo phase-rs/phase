@@ -272,7 +272,7 @@ fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
             5u8.hash(hasher);
             entries.len().hash(hasher);
             let mut entries: Vec<_> = entries.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             for (key, value) in entries {
                 key.hash(hasher);
                 hash_json_value(value, hasher);
