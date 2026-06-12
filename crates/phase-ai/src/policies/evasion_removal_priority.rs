@@ -5,6 +5,7 @@ use engine::types::game_state::GameState;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
+use crate::eval::evaluate_creature;
 use crate::features::DeckFeatures;
 use crate::projection::{ProjectionHorizon, VelocitySample};
 
@@ -48,10 +49,41 @@ impl EvasionRemovalPriorityPolicy {
             return 0.0;
         }
 
+        let target_quality_bonus = removal_target_quality_score(ctx, target, *target_id);
         let evasion_bonus = evasion_score(ctx, target, *target_id);
         let velocity_bonus = velocity_score(ctx, target, *target_id);
 
-        evasion_bonus + velocity_bonus
+        target_quality_bonus + evasion_bonus + velocity_bonus
+    }
+}
+
+fn removal_target_quality_score(
+    ctx: &PolicyContext<'_>,
+    target: &engine::game::game_object::GameObject,
+    target_id: engine::types::identifiers::ObjectId,
+) -> f64 {
+    if target.controller == ctx.ai_player {
+        return 0.0;
+    }
+
+    let value = if target.card_types.core_types.contains(&CoreType::Creature) {
+        evaluate_creature(ctx.state, target_id)
+    } else if target
+        .card_types
+        .core_types
+        .contains(&CoreType::Planeswalker)
+    {
+        2.0 + target.loyalty.unwrap_or(0) as f64 * 0.4
+    } else if target.card_types.core_types.contains(&CoreType::Land) {
+        1.0
+    } else {
+        target.mana_cost.mana_value() as f64 * 0.5
+    };
+
+    if value < 2.0 {
+        -0.8
+    } else {
+        (value / 4.0).min(2.0)
     }
 }
 
@@ -339,8 +371,8 @@ mod tests {
 
         let score = EvasionRemovalPriorityPolicy.score(&ctx);
         assert!(
-            score.abs() < 0.01,
-            "No bonus for ground creature, got {score}"
+            score > 0.0,
+            "Ground creature should get baseline removal target-quality score, got {score}"
         );
     }
 }

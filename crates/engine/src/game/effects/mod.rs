@@ -1018,6 +1018,113 @@ fn is_public_zone(zone: crate::types::zones::Zone) -> bool {
     )
 }
 
+/// CR 603.12: Begin reflexive target selection for a `WhenYouDo` /
+/// `QuantityCheck` ability whose targets were deferred to resolution time.
+/// Returns `true` when `WaitingFor::TriggerTargetSelection` (or inline random
+/// resolution) was entered.
+fn try_begin_reflexive_target_selection(
+    state: &mut GameState,
+    reflexive: &ResolvedAbility,
+    parent: Option<&ResolvedAbility>,
+    effect_context_object: Option<&CostPaidObjectSnapshot>,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<bool, EffectError> {
+    if !reflexive.targets.is_empty() {
+        return Ok(false);
+    }
+    let target_slots = crate::game::ability_utils::build_target_slots(state, reflexive)
+        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+    if target_slots.is_empty() {
+        return Ok(false);
+    }
+
+    if matches!(
+        reflexive.target_selection_mode,
+        crate::types::ability::TargetSelectionMode::Random
+    ) {
+        // CR 115.1d + CR 603.12: Random-mode reflexive triggers still choose
+        // the targets for the reflexive triggered ability; the seeded RNG
+        // supplies that choice without entering an interactive prompt.
+        let chosen = crate::game::ability_utils::random_select_targets_for_ability(
+            state,
+            &target_slots,
+            &reflexive.target_constraints,
+        )
+        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+        let mut reflexive_clone = reflexive.clone();
+        if let Some(parent) = parent {
+            apply_parent_chain_context(&mut reflexive_clone, parent, effect_context_object);
+        }
+        crate::game::ability_utils::assign_targets_in_chain(state, &mut reflexive_clone, &chosen)
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+        resolve_ability_chain(state, &reflexive_clone, events, depth + 1)?;
+        return Ok(true);
+    }
+
+    let selection = crate::game::ability_utils::begin_target_selection_for_ability(
+        state,
+        reflexive,
+        &target_slots,
+        &reflexive.target_constraints,
+    )
+    .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+
+    let mut reflexive_clone = reflexive.clone();
+    if let Some(parent) = parent {
+        apply_parent_chain_context(&mut reflexive_clone, parent, effect_context_object);
+    }
+    let trigger_description = reflexive_clone
+        .description
+        .clone()
+        .or_else(|| parent.and_then(|p| p.description.clone()));
+    let source_id = parent.map(|p| p.source_id).unwrap_or(reflexive.source_id);
+    let controller = parent.map(|p| p.controller).unwrap_or(reflexive.controller);
+
+    let pending = crate::game::triggers::PendingTrigger {
+        source_id,
+        controller,
+        condition: None,
+        ability: reflexive_clone,
+        timestamp: state.turn_number,
+        target_constraints: reflexive.target_constraints.clone(),
+        distribute: None,
+        trigger_event: state.current_trigger_event.clone(),
+        modal: None,
+        mode_abilities: vec![],
+        description: trigger_description.clone(),
+        may_trigger_origin: None,
+        subject_match_count: None,
+        // CR 706.2 + CR 603.12: capture the live die-roll result from the
+        // creating ability so the reflexive entry can re-stamp it when it
+        // resolves as its own stack object.
+        die_result: state.die_result_this_resolution,
+    };
+    let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
+    let pending_for_state = pending.clone();
+    let entry_id = crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
+        state,
+        pending,
+        trigger_events,
+        events,
+    );
+    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger_entry = Some(entry_id);
+    // CR 115.1d + CR 603.3d: the reflexive triggered ability is on the stack
+    // before targets are chosen; finalization mutates this pending entry once
+    // the controller completes TriggerTargetSelection.
+    state.waiting_for = WaitingFor::TriggerTargetSelection {
+        player: controller,
+        target_slots,
+        mode_labels: Vec::new(),
+        target_constraints: reflexive.target_constraints.clone(),
+        selection,
+        source_id: Some(source_id),
+        description: trigger_description,
+    };
+    Ok(true)
+}
+
 fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -4053,6 +4160,18 @@ fn resolve_chain_body(
             }
             return Ok(());
         }
+        // CR 603.12: A `WhenYouDo` / `QuantityCheck` ability resumed from
+        // `pending_continuation` (e.g. Inti's attack trigger after an
+        // interactive `DiscardChoice`) carries its gate on `ability.condition`
+        // itself, not as a parent's `sub_ability`. Mirror the reflexive target
+        // selection path used for inline sub-chains.
+        if matches!(
+            condition,
+            AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
+        ) && try_begin_reflexive_target_selection(state, ability, None, None, events, depth)?
+        {
+            return Ok(());
+        }
     }
 
     // CR 608.2d + CR 101.4: "Any opponent may" — prompt opponents in APNAP order.
@@ -4944,125 +5063,19 @@ fn resolve_chain_body(
                 state.chain_tracked_set_id = None;
             }
 
-            // CR 603.12: When a deferred conditional sub-ability (WhenYouDo,
-            // QuantityCheck) has its condition met and needs player-selected targets,
-            // create a reflexive trigger that goes on the stack for target selection.
-            // Targets were not pre-collected (see defers_conditional_target_selection
-            // in ability_utils), so we must collect them now.
+            // CR 603.12: Deferred reflexive target selection for inline sub-chains.
             if matches!(
                 condition,
                 AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
-            ) && sub.targets.is_empty()
-            {
-                let target_slots = crate::game::ability_utils::build_target_slots(state, sub)
-                    .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
-                if !target_slots.is_empty() {
-                    // CR 115.1 + CR 701.9b: Random-mode reflexive triggers (WhenYouDo /
-                    // QuantityCheck) auto-resolve via the seeded RNG. Same shape as
-                    // casting/activation: no `WaitingFor::TriggerTargetSelection` is
-                    // emitted; the chosen targets are assigned and the resolution
-                    // continues inline.
-                    if matches!(
-                        sub.target_selection_mode,
-                        crate::types::ability::TargetSelectionMode::Random
-                    ) {
-                        let chosen = crate::game::ability_utils::random_select_targets_for_ability(
-                            state,
-                            &target_slots,
-                            &sub.target_constraints,
-                        )
-                        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
-                        let mut reflexive = sub.as_ref().clone();
-                        apply_parent_chain_context(
-                            &mut reflexive,
-                            ability,
-                            effect_context_object.as_ref(),
-                        );
-                        crate::game::ability_utils::assign_targets_in_chain(
-                            state,
-                            &mut reflexive,
-                            &chosen,
-                        )
-                        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
-                        resolve_ability_chain(state, &reflexive, events, depth + 1)?;
-                        return Ok(());
-                    }
-
-                    // Compute selection first — if this fails (no legal targets for a
-                    // required slot), we skip the reflexive trigger cleanly without
-                    // leaving an orphaned pending_trigger.
-                    let selection = crate::game::ability_utils::begin_target_selection_for_ability(
-                        state,
-                        sub,
-                        &target_slots,
-                        &sub.target_constraints,
-                    )
-                    .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
-
-                    let mut reflexive = sub.as_ref().clone();
-                    apply_parent_chain_context(
-                        &mut reflexive,
-                        ability,
-                        effect_context_object.as_ref(),
-                    );
-                    let trigger_description = sub
-                        .description
-                        .clone()
-                        .or_else(|| ability.description.clone());
-                    // CR 601.2c + CR 603.3d: Reflexive triggered ability whose
-                    // target choice is still outstanding. Push the entry to the
-                    // stack FIRST (in mid-construction state — `ability.targets`
-                    // empty), then enter `TriggerTargetSelection`. The on-stack
-                    // entry is identified by `state.pending_trigger_entry` and
-                    // mutated by `engine_stack::finalize_trigger_target_selection`
-                    // when the selection completes. The resolver refuses to
-                    // fire entries identified by `pending_trigger_entry` (see
-                    // `stack::resolve_top`).
-                    let pending = crate::game::triggers::PendingTrigger {
-                        source_id: ability.source_id,
-                        controller: ability.controller,
-                        condition: None,
-                        ability: reflexive,
-                        timestamp: state.turn_number,
-                        target_constraints: sub.target_constraints.clone(),
-                        distribute: None,
-                        trigger_event: state.current_trigger_event.clone(),
-                        modal: None,
-                        mode_abilities: vec![],
-                        description: trigger_description.clone(),
-                        may_trigger_origin: None,
-                        subject_match_count: None,
-                        // CR 706.2 + CR 603.12: capture the live die-roll result
-                        // (still stamped by the inline `roll_die::resolve` of the
-                        // creating ability) onto the reflexive entry so the
-                        // "When you do … the result" sub-ability — which resolves
-                        // on its own stack entry in a later apply() — can re-stamp
-                        // it into resolution scope.
-                        die_result: state.die_result_this_resolution,
-                    };
-                    let trigger_events =
-                        crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
-                    let pending_for_state = pending.clone();
-                    let entry_id =
-                        crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
-                            state,
-                            pending,
-                            trigger_events,
-                            events,
-                        );
-                    state.pending_trigger = Some(pending_for_state);
-                    state.pending_trigger_entry = Some(entry_id);
-                    state.waiting_for = WaitingFor::TriggerTargetSelection {
-                        player: ability.controller,
-                        target_slots,
-                        mode_labels: Vec::new(),
-                        target_constraints: sub.target_constraints.clone(),
-                        selection,
-                        source_id: Some(ability.source_id),
-                        description: trigger_description,
-                    };
-                    return Ok(());
-                }
+            ) && try_begin_reflexive_target_selection(
+                state,
+                sub,
+                Some(ability),
+                effect_context_object.as_ref(),
+                events,
+                depth,
+            )? {
+                return Ok(());
             }
         }
         // If the effect resolver already set up a pending_continuation without

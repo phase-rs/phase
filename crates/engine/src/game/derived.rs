@@ -76,6 +76,7 @@ pub fn derive_display_state(state: &mut GameState) {
     // token never triggers this auto-tap sweep over every land.
     if dirty.mana_display_dirty || dirty.all_objects_dirty {
         let battlefield_ids: Vec<_> = state.battlefield.iter().copied().collect();
+        crate::game::perf_counters::record_mana_display_sweep(battlefield_ids.len());
         let mana_availability: Vec<(crate::types::identifiers::ObjectId, Option<usize>, _)> =
             battlefield_ids
                 .into_iter()

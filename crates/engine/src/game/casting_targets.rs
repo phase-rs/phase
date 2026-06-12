@@ -482,7 +482,7 @@ fn pay_activation_costs_after_target_selection(
     }
 
     if let Some(ref activation_cost) = pending.activation_cost {
-        let should_record_loyalty = matches!(activation_cost, AbilityCost::Loyalty { .. })
+        let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(activation_cost)
             && super::planeswalker::can_activate_loyalty_ability(
                 state,
                 pending.object_id,

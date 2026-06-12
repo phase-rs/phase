@@ -5,18 +5,11 @@
 use std::fs;
 use std::time::Instant;
 
-use engine::types::game_state::GameState;
 use phase_ai::choose_action;
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
+use phase_ai::saved_state::load_saved_game_state;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct Saved {
-    #[serde(rename = "gameState")]
-    game_state: GameState,
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -54,9 +47,8 @@ fn main() {
     let t_read = t_load_start.elapsed();
 
     let t_parse_start = Instant::now();
-    let saved: Saved = serde_json::from_str(&raw).expect("parse json");
+    let state = load_saved_game_state(&raw).expect("parse json");
     let t_parse = t_parse_start.elapsed();
-    let state = saved.game_state;
 
     let t_clone_start = Instant::now();
     for _ in 0..100 {

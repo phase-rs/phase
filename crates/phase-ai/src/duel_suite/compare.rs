@@ -2,29 +2,23 @@
 //!
 //! Emits a markdown table and returns a `CompareReport` whose `any_fail()`
 //! determines the process exit code. This is the CI gate for the duel suite:
-//! regressions (PASS→FAIL, winrate drift > fail threshold, new matchups that
-//! are already failing) return a non-zero status.
+//! paired-seed outcome regressions and new matchups that are already failing
+//! return a non-zero status.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use super::run::{MatchupResult, SuiteReport, SuiteStatus};
-use super::FeatureKind;
+use super::run::{GameResult, MatchupResult, SuiteReport, SuiteStatus};
+use super::{Expected, FeatureKind};
 
-/// Drift thresholds in percentage points (0..100 scale). A drift of +10.0pp
-/// means P0 winrate rose by 10 percentage points vs baseline.
+const MIRROR_AVG_TURN_WARN_DELTA: f64 = 3.0;
+
 #[derive(Debug, Clone, Copy)]
-pub struct CompareOptions {
-    pub warn_pp: f32,
-    pub fail_pp: f32,
-}
+pub struct CompareOptions;
 
 impl Default for CompareOptions {
     fn default() -> Self {
-        Self {
-            warn_pp: 8.0,
-            fail_pp: 15.0,
-        }
+        Self
     }
 }
 
@@ -44,6 +38,10 @@ pub struct CompareRow {
     pub baseline: Option<MatchupResult>,
     pub current: Option<MatchupResult>,
     pub delta_p0_pp: Option<f32>,
+    pub flipped_w_to_l: usize,
+    pub flipped_l_to_w: usize,
+    pub unchanged: usize,
+    pub sign_test_p: Option<f64>,
     pub status: CompareStatus,
     pub reason: Option<String>,
 }
@@ -151,7 +149,7 @@ fn classify_row(
     id: &str,
     baseline: Option<&MatchupResult>,
     current: Option<&MatchupResult>,
-    options: &CompareOptions,
+    _options: &CompareOptions,
 ) -> CompareRow {
     match (baseline, current) {
         (None, None) => unreachable!("id must appear in at least one report"),
@@ -161,6 +159,10 @@ fn classify_row(
             baseline: Some(b.clone()),
             current: None,
             delta_p0_pp: None,
+            flipped_w_to_l: 0,
+            flipped_l_to_w: 0,
+            unchanged: 0,
+            sign_test_p: None,
             status: CompareStatus::Removed,
             reason: Some("matchup removed from current report".to_string()),
         },
@@ -181,6 +183,10 @@ fn classify_row(
                 baseline: None,
                 current: Some(c.clone()),
                 delta_p0_pp: None,
+                flipped_w_to_l: 0,
+                flipped_l_to_w: 0,
+                unchanged: 0,
+                sign_test_p: None,
                 status,
                 reason,
             }
@@ -189,29 +195,37 @@ fn classify_row(
             let b_rate = winrate(b);
             let c_rate = winrate(c);
             let delta_pp = (c_rate - b_rate) * 100.0;
-            let regressed_status =
-                matches!(b.status, SuiteStatus::Pass) && matches!(c.status, SuiteStatus::Fail);
+            let paired = paired_seed_shift(b, c);
+            let avg_turn_delta = c.avg_turns - b.avg_turns;
 
-            let (status, reason) = if regressed_status {
+            let (status, reason) = if paired.flipped_w_to_l > paired.flipped_l_to_w
+                && paired.sign_test_p.is_some_and(|p| p < 0.05)
+            {
                 (
                     CompareStatus::Fail,
                     Some(format!(
-                        "regression: baseline PASS → current FAIL ({})",
-                        c.fail_reason.as_deref().unwrap_or("no reason")
+                        "paired regression: W→L={} L→W={} sign-test p={:.4}",
+                        paired.flipped_w_to_l,
+                        paired.flipped_l_to_w,
+                        paired.sign_test_p.unwrap_or(1.0),
                     )),
                 )
-            } else if delta_pp.abs() > options.fail_pp {
-                (
-                    CompareStatus::Fail,
-                    Some(format!(
-                        "winrate drift {:+.1}pp exceeds fail threshold ±{:.1}pp",
-                        delta_pp, options.fail_pp
-                    )),
-                )
-            } else if delta_pp.abs() > options.warn_pp {
+            } else if paired.flipped_w_to_l != paired.flipped_l_to_w {
                 (
                     CompareStatus::Warn,
-                    Some(format!("winrate drift {delta_pp:+.1}pp")),
+                    Some(format!(
+                        "paired shift: W→L={} L→W={} sign-test p={:.4}",
+                        paired.flipped_w_to_l,
+                        paired.flipped_l_to_w,
+                        paired.sign_test_p.unwrap_or(1.0),
+                    )),
+                )
+            } else if matches!(c.expected, Expected::Mirror { .. })
+                && avg_turn_delta.abs() > MIRROR_AVG_TURN_WARN_DELTA
+            {
+                (
+                    CompareStatus::Warn,
+                    Some(format!("mirror avg-turn drift {avg_turn_delta:+.1} turns")),
                 )
             } else {
                 (CompareStatus::Pass, None)
@@ -223,11 +237,68 @@ fn classify_row(
                 baseline: Some(b.clone()),
                 current: Some(c.clone()),
                 delta_p0_pp: Some(delta_pp),
+                flipped_w_to_l: paired.flipped_w_to_l,
+                flipped_l_to_w: paired.flipped_l_to_w,
+                unchanged: paired.unchanged,
+                sign_test_p: paired.sign_test_p,
                 status,
                 reason,
             }
         }
     }
+}
+
+struct PairedSeedShift {
+    flipped_w_to_l: usize,
+    flipped_l_to_w: usize,
+    unchanged: usize,
+    sign_test_p: Option<f64>,
+}
+
+fn paired_seed_shift(baseline: &MatchupResult, current: &MatchupResult) -> PairedSeedShift {
+    let current_by_seed: BTreeMap<u64, &GameResult> =
+        current.games.iter().map(|game| (game.seed, game)).collect();
+    let mut flipped_w_to_l = 0;
+    let mut flipped_l_to_w = 0;
+    let mut unchanged = 0;
+
+    for baseline_game in &baseline.games {
+        let Some(current_game) = current_by_seed.get(&baseline_game.seed) else {
+            continue;
+        };
+        match (baseline_game.winner, current_game.winner) {
+            (Some(0), Some(1)) => flipped_w_to_l += 1,
+            (Some(1), Some(0)) => flipped_l_to_w += 1,
+            _ => unchanged += 1,
+        }
+    }
+
+    let flips = flipped_w_to_l + flipped_l_to_w;
+    let sign_test_p =
+        (flips > 0).then(|| sign_test_mid_p_upper_tail(flips, flipped_w_to_l.max(flipped_l_to_w)));
+
+    PairedSeedShift {
+        flipped_w_to_l,
+        flipped_l_to_w,
+        unchanged,
+        sign_test_p,
+    }
+}
+
+pub fn sign_test_mid_p_upper_tail(n: usize, k: usize) -> f64 {
+    ((k + 1)..=n)
+        .map(|i| binomial_probability(n, i))
+        .sum::<f64>()
+        + (binomial_probability(n, k) / 2.0)
+}
+
+fn binomial_probability(n: usize, k: usize) -> f64 {
+    binomial_coefficient(n, k) as f64 / 2_f64.powi(n as i32)
+}
+
+fn binomial_coefficient(n: usize, k: usize) -> u128 {
+    let k = k.min(n - k);
+    (0..k).fold(1u128, |acc, i| acc * (n - i) as u128 / (i + 1) as u128)
 }
 
 fn winrate(r: &MatchupResult) -> f32 {
@@ -252,8 +323,8 @@ fn status_str(s: CompareStatus) -> &'static str {
 /// Render a markdown table of the comparison to stdout + emit a summary line.
 pub fn print_markdown(report: &CompareReport) {
     println!();
-    println!("| matchup | exercises | baseline p0% | current p0% | Δpp | status |");
-    println!("|---------|-----------|--------------|-------------|-----|--------|");
+    println!("| matchup | exercises | baseline p0% | current p0% | flips W→L | flips L→W | sign p | status |");
+    println!("|---------|-----------|--------------|-------------|-----------|-----------|--------|--------|");
     for row in &report.rows {
         let exercises: Vec<String> = row.exercises.iter().map(|f| format!("{f:?}")).collect();
         let baseline_cell = match &row.baseline {
@@ -264,22 +335,24 @@ pub fn print_markdown(report: &CompareReport) {
             Some(c) => format!("{:.0}%", winrate(c) * 100.0),
             None => "—".to_string(),
         };
-        let delta_cell = match row.delta_p0_pp {
-            Some(d) => format!("{d:+.1}pp"),
+        let sign_p_cell = match row.sign_test_p {
+            Some(p) => format!("{p:.4}"),
             None => "—".to_string(),
         };
         println!(
-            "| {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
             row.matchup_id,
             exercises.join(", "),
             baseline_cell,
             current_cell,
-            delta_cell,
+            row.flipped_w_to_l,
+            row.flipped_l_to_w,
+            sign_p_cell,
             status_str(row.status),
         );
         if let Some(reason) = &row.reason {
             if !matches!(row.status, CompareStatus::Pass) {
-                println!("|  ↳ _{reason}_ | | | | | |");
+                println!("|  ↳ _{reason}_ | | | | | | | |");
             }
         }
     }
@@ -309,7 +382,9 @@ mod tests {
 
     fn mk_report(results: Vec<MatchupResult>) -> SuiteReport {
         SuiteReport {
-            schema_version: 1,
+            schema_version: 2,
+            git_sha: None,
+            card_data_hash: None,
             unix_timestamp_secs: 0,
             difficulty: "Easy".into(),
             games_per_matchup: 10,
@@ -321,6 +396,13 @@ mod tests {
     fn mk_result(id: &str, p0_wins: usize, total: usize, status: SuiteStatus) -> MatchupResult {
         let total = total.max(p0_wins);
         let p1_wins = total - p0_wins;
+        let games = (0..total)
+            .map(|idx| GameResult {
+                seed: idx as u64,
+                winner: Some(if idx < p0_wins { 0 } else { 1 }),
+                turns: 7,
+            })
+            .collect();
         MatchupResult {
             matchup_id: id.into(),
             exercises: vec![FeatureKind::AggroPressure],
@@ -330,6 +412,7 @@ mod tests {
             p0_wins,
             p1_wins,
             draws: 0,
+            games,
             total_turns: 0,
             total_duration_ms: 0,
             avg_turns: 10.0,
@@ -347,7 +430,7 @@ mod tests {
     #[test]
     fn compare_identity_is_pass() {
         let report = mk_report(vec![mk_result("red-mirror", 5, 10, SuiteStatus::Pass)]);
-        let result = compare(&report, &report, &CompareOptions::default()).unwrap();
+        let result = compare(&report, &report, &CompareOptions).unwrap();
         assert!(!result.any_fail());
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].status, CompareStatus::Pass);
@@ -355,42 +438,68 @@ mod tests {
 
     #[test]
     fn compare_regression_pass_to_fail_flags_fail() {
-        let baseline = mk_report(vec![mk_result("red-mirror", 5, 10, SuiteStatus::Pass)]);
-        let current = mk_report(vec![mk_result("red-mirror", 1, 10, SuiteStatus::Fail)]);
-        let result = compare(&baseline, &current, &CompareOptions::default()).unwrap();
+        let baseline = mk_report(vec![mk_result("red-mirror", 10, 10, SuiteStatus::Pass)]);
+        let current = mk_report(vec![mk_result("red-mirror", 0, 10, SuiteStatus::Fail)]);
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
         assert!(result.any_fail());
         assert_eq!(result.rows[0].status, CompareStatus::Fail);
         assert!(result.rows[0]
             .reason
             .as_ref()
             .unwrap()
-            .contains("regression"));
+            .contains("paired regression"));
     }
 
     #[test]
-    fn compare_drift_over_fail_threshold_flags_fail() {
-        let baseline = mk_report(vec![mk_result("m", 5, 10, SuiteStatus::Pass)]);
-        let current = mk_report(vec![mk_result("m", 8, 10, SuiteStatus::Pass)]); // 30pp drift
-        let result = compare(&baseline, &current, &CompareOptions::default()).unwrap();
+    fn compare_paired_regression_flags_fail() {
+        let baseline = mk_report(vec![mk_result("m", 10, 10, SuiteStatus::Pass)]);
+        let current = mk_report(vec![mk_result("m", 0, 10, SuiteStatus::Pass)]);
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
         assert!(result.any_fail());
         assert_eq!(result.rows[0].status, CompareStatus::Fail);
     }
 
     #[test]
-    fn compare_drift_between_warn_and_fail_flags_warn() {
-        // Default warn=8, fail=15. Craft a 10pp drift so we land in warn.
-        let baseline = mk_report(vec![mk_result("m", 50, 100, SuiteStatus::Pass)]);
-        let current = mk_report(vec![mk_result("m", 60, 100, SuiteStatus::Pass)]);
-        let result = compare(&baseline, &current, &CompareOptions::default()).unwrap();
+    fn compare_paired_shift_without_significance_warns() {
+        let baseline = mk_report(vec![mk_result("m", 5, 10, SuiteStatus::Pass)]);
+        let current = mk_report(vec![mk_result("m", 7, 10, SuiteStatus::Pass)]);
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
         assert!(!result.any_fail());
         assert_eq!(result.rows[0].status, CompareStatus::Warn);
+    }
+
+    #[test]
+    fn sign_test_mid_p_matches_quick_gate_threshold() {
+        let p = sign_test_mid_p_upper_tail(10, 8);
+
+        assert!((p - 0.032_714_843_75).abs() < f64::EPSILON);
+        assert!(p < 0.05);
+    }
+
+    #[test]
+    fn mirror_avg_turn_drift_warns_without_outcome_flips() {
+        let baseline_result = mk_result("mirror", 5, 10, SuiteStatus::Pass);
+        let mut current_result = baseline_result.clone();
+        current_result.avg_turns += MIRROR_AVG_TURN_WARN_DELTA + 0.1;
+        let baseline = mk_report(vec![baseline_result]);
+        let current = mk_report(vec![current_result]);
+
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
+
+        assert!(!result.any_fail());
+        assert_eq!(result.rows[0].status, CompareStatus::Warn);
+        assert!(result.rows[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("avg-turn drift"));
     }
 
     #[test]
     fn compare_new_matchup_flagged_as_new() {
         let baseline = mk_report(vec![]);
         let current = mk_report(vec![mk_result("x", 5, 10, SuiteStatus::Pass)]);
-        let result = compare(&baseline, &current, &CompareOptions::default()).unwrap();
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
         assert_eq!(result.rows[0].status, CompareStatus::New);
         assert!(!result.any_fail());
     }
@@ -399,7 +508,7 @@ mod tests {
     fn compare_new_failing_matchup_flagged_as_fail() {
         let baseline = mk_report(vec![]);
         let current = mk_report(vec![mk_result("x", 0, 10, SuiteStatus::Fail)]);
-        let result = compare(&baseline, &current, &CompareOptions::default()).unwrap();
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
         assert_eq!(result.rows[0].status, CompareStatus::Fail);
         assert!(result.any_fail());
     }
@@ -408,7 +517,7 @@ mod tests {
     fn compare_removed_matchup_is_informational() {
         let baseline = mk_report(vec![mk_result("gone", 5, 10, SuiteStatus::Pass)]);
         let current = mk_report(vec![]);
-        let result = compare(&baseline, &current, &CompareOptions::default()).unwrap();
+        let result = compare(&baseline, &current, &CompareOptions).unwrap();
         assert_eq!(result.rows[0].status, CompareStatus::Removed);
         assert!(!result.any_fail());
     }
@@ -416,9 +525,9 @@ mod tests {
     #[test]
     fn compare_schema_mismatch_returns_error() {
         let mut baseline = mk_report(vec![]);
-        baseline.schema_version = 2;
+        baseline.schema_version = 1;
         let current = mk_report(vec![]);
-        let err = compare(&baseline, &current, &CompareOptions::default()).unwrap_err();
+        let err = compare(&baseline, &current, &CompareOptions).unwrap_err();
         assert!(matches!(err, CompareError::SchemaMismatch { .. }));
     }
 }

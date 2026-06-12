@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
-use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
+use engine::game::deck_loading::{
+    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    PlayerDeckPayload,
+};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
 use engine::types::player::PlayerId;
@@ -15,18 +19,22 @@ use phase_ai::duel_suite::compare::{
 };
 use phase_ai::duel_suite::run::{resolve_matchup, run_suite, AttributionMode, SuiteOptions};
 use phase_ai::duel_suite::{all_matchups, find_matchup};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 const MAX_TOTAL_ACTIONS: usize = 10_000;
+const COMMANDER_MAX_TOTAL_ACTIONS: usize = 200_000;
 
 enum Mode {
     Single,
     Suite,
+    CommanderSuite,
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // `compare` subcommand: `ai-duel compare BASELINE CURRENT [--warn-pp N] [--fail-pp N]`
+    // `compare` subcommand: `ai-duel compare BASELINE CURRENT`
     // Does not require a card database or any of the single/suite-mode flags.
     if args.get(1).map(|s| s.as_str()) == Some("compare") {
         let exit = run_compare(&args[1..]);
@@ -37,12 +45,14 @@ fn main() {
     let mut batch: Option<usize> = None;
     let mut seed: Option<u64> = None;
     let mut difficulty = AiDifficulty::Medium;
+    let mut baseline_difficulty = AiDifficulty::Medium;
     let mut matchup = "red-vs-green".to_string();
     let mut mode = Mode::Single;
     let mut suite_games: Option<usize> = None;
     let mut output: Option<PathBuf> = None;
     let mut suite_filter: Option<String> = None;
     let mut attribution = AttributionMode::Disabled;
+    let mut commander_feed = "feeds/mtggoldfish-commander.json".to_string();
 
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -55,16 +65,27 @@ fn main() {
                     difficulty = parse_difficulty(level);
                 }
             }
+            "--baseline-difficulty" => {
+                if let Some(level) = args_iter.next() {
+                    baseline_difficulty = parse_difficulty(level);
+                }
+            }
             "--matchup" => {
                 if let Some(m) = args_iter.next() {
                     matchup = m.clone();
                 }
             }
             "--suite" => mode = Mode::Suite,
+            "--commander-suite" => mode = Mode::CommanderSuite,
             "--games" => suite_games = args_iter.next().and_then(|v| v.parse().ok()),
             "--output" => output = args_iter.next().map(PathBuf::from),
             "--suite-filter" => suite_filter = args_iter.next().cloned(),
             "--show-attribution" => attribution = AttributionMode::Enabled,
+            "--feed" => {
+                if let Some(feed) = args_iter.next() {
+                    commander_feed = feed.clone();
+                }
+            }
             "--list-matchups" => {
                 list_matchups();
                 return;
@@ -123,6 +144,21 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        Mode::CommanderSuite => {
+            let games = suite_games.unwrap_or(4);
+            run_commander_suite(
+                &db,
+                CommanderSuiteOptions {
+                    cards_root: &path,
+                    feed: &commander_feed,
+                    games_per_seat: games,
+                    base_seed,
+                    candidate_difficulty: difficulty,
+                    baseline_difficulty,
+                    output,
+                },
+            );
         }
         Mode::Single => {
             run_single(&db, &matchup, batch, base_seed, difficulty, verbose);
@@ -229,19 +265,27 @@ fn run_game(
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
-    // Pin deterministic mode for regression runs: search is bounded by
+    // Pin measurement mode for regression runs: search is bounded by
     // max_nodes only, so duel outcomes don't observe wall-clock variance
     // across hardware. Production code leaves this off to use time budgets.
-    let config = create_config_for_players(difficulty, Platform::Native, 2).into_deterministic();
+    let config = create_config_for_players(difficulty, Platform::Native, 2).into_measurement(seed);
     let ai_configs: HashMap<PlayerId, _> = [(PlayerId(0), config.clone()), (PlayerId(1), config)]
         .into_iter()
         .collect();
 
     let mut total_actions: usize = 0;
     let mut last_turn: u32 = 0;
+    let mut ai_rng = StdRng::seed_from_u64(seed);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
 
     loop {
-        let results = run_ai_actions(&mut state, &ai_players, &ai_configs);
+        let results = run_ai_actions(
+            &mut state,
+            &ai_players,
+            &ai_configs,
+            &mut ai_rng,
+            &ai_session,
+        );
         if results.is_empty() {
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                 break;
@@ -279,6 +323,295 @@ fn run_game(
         _ => None,
     };
     (winner, state.turn_number)
+}
+
+struct CommanderSuiteOptions<'a> {
+    cards_root: &'a std::path::Path,
+    feed: &'a str,
+    games_per_seat: usize,
+    base_seed: u64,
+    candidate_difficulty: AiDifficulty,
+    baseline_difficulty: AiDifficulty,
+    output: Option<PathBuf>,
+}
+
+fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
+    let deck_lists = load_commander_decks(db, options.cards_root, options.feed);
+    if deck_lists.len() < 4 {
+        eprintln!(
+            "Commander suite needs at least 4 resolvable decks, found {}",
+            deck_lists.len()
+        );
+        std::process::exit(1);
+    }
+    let deck_list = DeckList {
+        player: deck_lists[0].clone(),
+        opponent: deck_lists[1].clone(),
+        ai_decks: vec![deck_lists[2].clone(), deck_lists[3].clone()],
+        ..Default::default()
+    };
+    let payload = resolve_deck_list(db, &deck_list);
+
+    let mut seat_rows = Vec::new();
+    let mut all_games = Vec::new();
+    for candidate_seat in 0..4 {
+        let candidate = PlayerId(candidate_seat as u8);
+        let mut wins = 0usize;
+        let mut total_survival_turns = 0u64;
+        let mut total_elimination_order = 0u64;
+
+        for game_idx in 0..options.games_per_seat {
+            let seed = options
+                .base_seed
+                .wrapping_add(candidate_seat as u64 * 10_000)
+                .wrapping_add(game_idx as u64);
+            let result = run_commander_game(
+                &payload,
+                seed,
+                candidate,
+                options.candidate_difficulty,
+                options.baseline_difficulty,
+            );
+            if result.winner == Some(candidate) {
+                wins += 1;
+            }
+            total_survival_turns += result.candidate_survival_turn as u64;
+            total_elimination_order += result.candidate_elimination_order as u64;
+            all_games.push(serde_json::json!({
+                "candidate_seat": candidate.0,
+                "seed": seed,
+                "winner": result.winner.map(|p| p.0),
+                "turns": result.turns,
+                "candidate_survival_turn": result.candidate_survival_turn,
+                "candidate_elimination_order": result.candidate_elimination_order,
+            }));
+        }
+
+        let n = options.games_per_seat.max(1) as f64;
+        let win_rate = wins as f64 / n;
+        let avg_survival_turns = total_survival_turns as f64 / n;
+        let avg_elimination_order = total_elimination_order as f64 / n;
+        eprintln!(
+            "Commander seat P{}: wins={}/{} ({:.1}%) survival_turns={:.1} elimination_order={:.1}",
+            candidate.0,
+            wins,
+            options.games_per_seat,
+            win_rate * 100.0,
+            avg_survival_turns,
+            avg_elimination_order
+        );
+        seat_rows.push(serde_json::json!({
+            "candidate_seat": candidate.0,
+            "games": options.games_per_seat,
+            "wins": wins,
+            "win_rate": rounded(win_rate),
+            "avg_survival_turns": rounded(avg_survival_turns),
+            "avg_elimination_order": rounded(avg_elimination_order),
+        }));
+    }
+
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "mode": "commander_suite",
+        "feed": options.feed,
+        "candidate_difficulty": format!("{:?}", options.candidate_difficulty),
+        "baseline_difficulty": format!("{:?}", options.baseline_difficulty),
+        "games_per_seat": options.games_per_seat,
+        "base_seed": options.base_seed,
+        "metrics": {
+            "win_rate": "candidate wins / games",
+            "survival_turns": "turn number when candidate was eliminated, or final turn if not eliminated",
+            "elimination_order": "1 = first eliminated, 4 = winner or last survivor",
+        },
+        "seats": seat_rows,
+        "games": all_games,
+    });
+    let output_path = options
+        .output
+        .unwrap_or_else(|| PathBuf::from("target/commander-suite-results.json"));
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_else(|err| {
+            eprintln!("failed to create {}: {err}", parent.display());
+            std::process::exit(1);
+        });
+    }
+    std::fs::write(
+        &output_path,
+        serde_json::to_string_pretty(&report).expect("commander report serializes"),
+    )
+    .unwrap_or_else(|err| {
+        eprintln!("failed to write {}: {err}", output_path.display());
+        std::process::exit(1);
+    });
+    eprintln!(
+        "Commander suite report written to {}",
+        output_path.display()
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("commander report serializes")
+    );
+}
+
+struct CommanderGameResult {
+    winner: Option<PlayerId>,
+    turns: u32,
+    candidate_survival_turn: u32,
+    candidate_elimination_order: u8,
+}
+
+fn run_commander_game(
+    payload: &DeckPayload,
+    seed: u64,
+    candidate: PlayerId,
+    candidate_difficulty: AiDifficulty,
+    baseline_difficulty: AiDifficulty,
+) -> CommanderGameResult {
+    let mut state = GameState::new(FormatConfig::commander(), 4, seed);
+    load_deck_into_state(&mut state, payload);
+    engine::game::engine::start_game(&mut state);
+
+    let ai_players: HashSet<PlayerId> = (0..4).map(|seat| PlayerId(seat as u8)).collect();
+    let mut ai_configs: HashMap<PlayerId, _> = HashMap::new();
+    for seat in 0..4 {
+        let player = PlayerId(seat as u8);
+        let difficulty = if player == candidate {
+            candidate_difficulty
+        } else {
+            baseline_difficulty
+        };
+        ai_configs.insert(
+            player,
+            create_config_for_players(difficulty, Platform::Native, 4)
+                .into_measurement(seed.wrapping_add(seat as u64)),
+        );
+    }
+
+    let mut total_actions = 0usize;
+    let mut ai_rng = StdRng::seed_from_u64(seed);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    let mut elimination_turns = [None; 4];
+    let mut seen_eliminated = HashSet::new();
+
+    loop {
+        for player in &state.eliminated_players {
+            if seen_eliminated.insert(*player) {
+                elimination_turns[player.0 as usize] = Some(state.turn_number);
+            }
+        }
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            break;
+        }
+
+        let results = run_ai_actions(
+            &mut state,
+            &ai_players,
+            &ai_configs,
+            &mut ai_rng,
+            &ai_session,
+        );
+        if results.is_empty() {
+            break;
+        }
+        total_actions += results.len();
+        if total_actions >= COMMANDER_MAX_TOTAL_ACTIONS {
+            break;
+        }
+    }
+
+    for player in &state.eliminated_players {
+        if seen_eliminated.insert(*player) {
+            elimination_turns[player.0 as usize] = Some(state.turn_number);
+        }
+    }
+    let winner = match &state.waiting_for {
+        WaitingFor::GameOver { winner } => *winner,
+        _ => None,
+    };
+    let candidate_survival_turn =
+        elimination_turns[candidate.0 as usize].unwrap_or(state.turn_number);
+    let candidate_elimination_order = state
+        .eliminated_players
+        .iter()
+        .position(|player| *player == candidate)
+        .map(|idx| idx as u8 + 1)
+        .unwrap_or(4);
+
+    CommanderGameResult {
+        winner,
+        turns: state.turn_number,
+        candidate_survival_turn,
+        candidate_elimination_order,
+    }
+}
+
+fn load_commander_decks(
+    db: &CardDatabase,
+    cards_root: &std::path::Path,
+    feed: &str,
+) -> Vec<PlayerDeckList> {
+    let feed_path = cards_root.join(feed);
+    let feed_file = std::fs::File::open(&feed_path).unwrap_or_else(|err| {
+        eprintln!("failed to open {}: {err}", feed_path.display());
+        std::process::exit(1);
+    });
+    let feed_json: serde_json::Value = serde_json::from_reader(feed_file).unwrap_or_else(|err| {
+        eprintln!("failed to parse {}: {err}", feed_path.display());
+        std::process::exit(1);
+    });
+    let decks_json = feed_json["decks"].as_array().unwrap_or_else(|| {
+        eprintln!("{} missing decks array", feed_path.display());
+        std::process::exit(1);
+    });
+
+    let mut deck_lists = Vec::new();
+    for deck in decks_json {
+        if deck_lists.len() == 4 {
+            break;
+        }
+        let deck_name = deck["name"].as_str().unwrap_or("<unnamed>");
+        let commander_names: Vec<String> = match deck["commander"].as_array() {
+            Some(arr) if !arr.is_empty() => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            _ => vec![deck_name.to_string()],
+        };
+        let Some(primary_commander) = commander_names.first() else {
+            continue;
+        };
+        if db.get_face_by_name(primary_commander).is_none() {
+            eprintln!("Skipping {deck_name}: commander '{primary_commander}' not in card db");
+            continue;
+        }
+
+        let mut main_deck = Vec::new();
+        let Some(main_entries) = deck["main"].as_array() else {
+            continue;
+        };
+        for entry in main_entries {
+            let Some(name) = entry["name"].as_str() else {
+                continue;
+            };
+            if commander_names.iter().any(|commander| commander == name) {
+                continue;
+            }
+            let count = entry["count"].as_u64().unwrap_or(0) as usize;
+            main_deck.extend(std::iter::repeat_n(name.to_string(), count));
+        }
+
+        deck_lists.push(PlayerDeckList {
+            main_deck,
+            sideboard: Vec::new(),
+            commander: commander_names,
+            ..Default::default()
+        });
+    }
+    deck_lists
+}
+
+fn rounded(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
 }
 
 fn should_show(entry: &GameLogEntry, verbose: bool) -> bool {
@@ -326,7 +659,7 @@ fn parse_difficulty(s: &str) -> AiDifficulty {
 
 fn print_usage() {
     eprintln!("Usage: ai-duel <data-root> [OPTIONS]");
-    eprintln!("       ai-duel compare BASELINE.json CURRENT.json [--warn-pp N] [--fail-pp N]");
+    eprintln!("       ai-duel compare BASELINE.json CURRENT.json");
     eprintln!("  Or set PHASE_CARDS_PATH environment variable");
     eprintln!();
     eprintln!("Single-matchup mode:");
@@ -334,6 +667,9 @@ fn print_usage() {
     eprintln!("  --batch N          Run N games, print summary only");
     eprintln!("  --seed S           RNG seed (default: time-based)");
     eprintln!("  --difficulty LEVEL VeryEasy|Easy|Medium|Hard|VeryHard (default: Medium)");
+    eprintln!(
+        "  --baseline-difficulty LEVEL Baseline seats for --commander-suite (default: Medium)"
+    );
     eprintln!("  --matchup NAME     Deck matchup (default: red-vs-green)");
     eprintln!("  --list-matchups    Show available matchups");
     eprintln!();
@@ -347,10 +683,19 @@ fn print_usage() {
     eprintln!("  --show-attribution Capture per-policy decision traces and include");
     eprintln!("                     them in the JSON + markdown output.");
     eprintln!();
+    eprintln!("Commander suite mode:");
+    eprintln!("  --commander-suite  Run 4-player Commander candidate-seat rotations");
+    eprintln!(
+        "  --feed PATH        Feed under data-root (default: feeds/mtggoldfish-commander.json)"
+    );
+    eprintln!("  --games N          Games per candidate seat (default: 4)");
+    eprintln!(
+        "  --output PATH      Write JSON report to PATH (default: target/commander-suite-results.json)"
+    );
+    eprintln!();
     eprintln!("Compare mode (CI regression gate):");
     eprintln!("  compare BASELINE CURRENT   Diff two suite reports");
-    eprintln!("  --warn-pp N                Winrate drift warn threshold in pp (default: 8.0)");
-    eprintln!("  --fail-pp N                Winrate drift fail threshold in pp (default: 15.0)");
+    eprintln!("  reports paired-seed flips and a binomial sign-test p-value");
     eprintln!("  Exit code 0 if no regressions; 1 if any matchup FAILs.");
 }
 
@@ -359,27 +704,16 @@ fn print_usage() {
 fn run_compare(args: &[String]) -> i32 {
     // args[0] == "compare"
     if args.len() < 3 {
-        eprintln!("Usage: ai-duel compare BASELINE.json CURRENT.json [--warn-pp N] [--fail-pp N]");
+        eprintln!("Usage: ai-duel compare BASELINE.json CURRENT.json");
         return 2;
     }
     let baseline_path = PathBuf::from(&args[1]);
     let current_path = PathBuf::from(&args[2]);
 
-    let mut options = CompareOptions::default();
-    let mut iter = args.iter().skip(3);
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--warn-pp" => {
-                if let Some(v) = iter.next().and_then(|v| v.parse().ok()) {
-                    options.warn_pp = v;
-                }
-            }
-            "--fail-pp" => {
-                if let Some(v) = iter.next().and_then(|v| v.parse().ok()) {
-                    options.fail_pp = v;
-                }
-            }
-            _ => {}
+    for arg in args.iter().skip(3) {
+        if arg.starts_with("--") {
+            eprintln!("Unknown compare option: {arg}");
+            return 2;
         }
     }
 
@@ -398,7 +732,7 @@ fn run_compare(args: &[String]) -> i32 {
         }
     };
 
-    let report = match compare_reports(&baseline, &current, &options) {
+    let report = match compare_reports(&baseline, &current, &CompareOptions) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Compare failed: {e}");

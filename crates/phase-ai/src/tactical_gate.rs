@@ -35,6 +35,13 @@ pub struct GatedCandidate {
     pub penalty: f64,
 }
 
+/// Layering rule: `tactical_gate` owns rule-derived legality and futility
+/// decisions that are provably never useful, such as impossible counters,
+/// destroy-vs-indestructible targets, redundant removal on already-dying
+/// creatures, and pump with no live combat window. Judgment-weighted
+/// preferences stay in `policies/`; the same predicate must not be scored in
+/// both layers.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TacticalWindow {
     OwnPreCombatMain,

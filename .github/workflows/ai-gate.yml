@@ -1,0 +1,101 @@
+name: AI gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/phase-ai/**'
+      - 'data/card-data.json'
+      - '.cargo/config.toml'
+      - '.github/workflows/ai-gate.yml'
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  ai-gate:
+    name: Paired-seed AI gate
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-ai-gate
+
+      - name: Restore generated card data
+        id: cardgen-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/card-data.json
+            data/card-names.json
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Generate card data
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/mtgjson
+          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+
+      - name: Run quick AI gate
+        run: cargo ai-gate --games 10
+
+  ai-gate-nightly:
+    name: Nightly AI gate drift monitor
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-ai-gate
+
+      - name: Restore generated card data
+        id: cardgen-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/card-data.json
+            data/card-names.json
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Generate card data
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/mtgjson
+          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+
+      - name: Run full AI gate
+        id: gate
+        continue-on-error: true
+        run: |
+          cargo ai-gate --full-suite --games 100 > target/ai-gate-report.md
+
+      - name: Open or update drift issue
+        if: steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Nightly AI gate drift"
+          body="$(cat target/ai-gate-report.md)"
+          existing="$(gh issue list --label ai-gate-drift --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --label ai-gate-drift --body "$body"
+          fi
+
+      - name: Fail only on infrastructure errors
+        if: steps.gate.outcome == 'cancelled'
+        run: exit 1
