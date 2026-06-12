@@ -124,13 +124,15 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
                     push(TriggerEventKey::LeaveBattlefield(narrow));
                 }
                 (Some(Zone::Battlefield), _) => push(TriggerEventKey::LeaveBattlefield(narrow)),
-                // CR 603.6c: destination=Graveyard with unrestricted origin ("from anywhere")
-                // should match battlefield→graveyard events (the most common "to graveyard" case).
-                // This optimizes triggers like Vulturous Zombie that watch cards going to
-                // graveyards from any zone.
+                // CR 603.6c: destination=Graveyard with unrestricted origin
+                // ("from anywhere") must match both battlefield→graveyard and
+                // non-battlefield→graveyard events. Add the battlefield fast-path
+                // keys, but keep unclassified routing for library/hand/stack
+                // origins because there is no generic "to graveyard" event key.
                 (None, Some(Zone::Graveyard)) => {
                     push(TriggerEventKey::Dies(narrow));
                     push(TriggerEventKey::LeaveBattlefield(narrow));
+                    return (keys, true);
                 }
                 _ => {
                     // Non-battlefield zone change (e.g. cast-from-graveyard
@@ -1002,6 +1004,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 mod tests {
     use super::*;
     use crate::types::ability::{TargetFilter, TypedFilter};
+    use crate::types::game_state::ZoneChangeRecord;
     use crate::types::triggers::TriggerEventKey;
 
     fn etb_creature_def() -> TriggerDefinition {
@@ -1092,19 +1095,44 @@ mod tests {
     }
 
     #[test]
-    fn from_anywhere_to_graveyard_emits_dies_and_leave_battlefield() {
+    fn from_anywhere_to_graveyard_emits_battlefield_keys_and_stays_unclassified() {
         // CR 603.6c: A trigger with destination=Graveyard and unrestricted origin
-        // ("from anywhere") should emit Dies and LeaveBattlefield keys to match
-        // the most common battlefield→graveyard events. This optimizes triggers
-        // like Vulturous Zombie that watch cards going to graveyards from any zone.
+        // ("from anywhere") should emit Dies and LeaveBattlefield keys for
+        // battlefield-origin events, but must still route through unclassified
+        // for non-battlefield origins such as library→graveyard or hand→graveyard.
         let def = TriggerDefinition::new(TriggerMode::ChangesZone)
             .destination(Zone::Graveyard)
             .valid_card(TargetFilter::Typed(TypedFilter::card()));
         let (keys, route) = keys_from_trigger_def(&def);
-        // Should emit Dies and LeaveBattlefield keys (broad, since Card is not narrow)
         assert!(keys.contains(&TriggerEventKey::Dies(None)));
         assert!(keys.contains(&TriggerEventKey::LeaveBattlefield(None)));
-        // Should NOT route to unclassified - it's now indexed under specific keys
-        assert!(!route);
+        assert!(route);
+    }
+
+    #[test]
+    fn from_anywhere_to_graveyard_candidate_survives_library_origin_event() {
+        // CR 603.6c: "from anywhere" includes library→graveyard moves. The
+        // event side emits only Milled for this shape, so this class must stay
+        // in the unclassified safety bucket until a generic graveyard key exists.
+        let mut state = GameState::new_two_player(42);
+        let watcher = ObjectId(99);
+        let def = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(TypedFilter::card()));
+        state.trigger_index.add(watcher, &[def], false);
+
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(7),
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        };
+
+        let candidates = candidates_for_event(&state, &event);
+        assert!(candidates.contains(&watcher));
     }
 }
