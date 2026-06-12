@@ -956,6 +956,11 @@ pub struct PendingChangeZoneIteration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
+    /// CR 608.2c: Optional mass-move count carried by `ChangeZoneAll` resume
+    /// paths so a paused Aura host choice still leaves "that many" chained
+    /// effects with the same count the uninterrupted mass path records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_count: Option<i32>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -8054,6 +8059,7 @@ mod tests {
             enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
+            moved_count: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
         };
         let json = serde_json::to_string(&original).expect("serialize");

@@ -550,6 +550,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_with_counters,
             duration,
             track_exiled_by_source,
+            mut moved_count,
             effect_kind,
         } = pending;
         let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
@@ -575,11 +576,33 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
+            let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
                 state, &ctx, *obj_id, events,
             ) {
-                crate::game::effects::change_zone::ZoneMoveResult::Done => {}
+                crate::game::effects::change_zone::ZoneMoveResult::Done => {
+                    if let Some(count) = moved_count.as_mut() {
+                        if before_zone != Some(ctx.destination)
+                            && state
+                                .objects
+                                .get(obj_id)
+                                .is_some_and(|object| object.zone == ctx.destination)
+                        {
+                            *count += 1;
+                        }
+                    }
+                }
                 crate::game::effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    if let Some(count) = moved_count.as_mut() {
+                        if before_zone != Some(ctx.destination)
+                            && state
+                                .objects
+                                .get(obj_id)
+                                .is_some_and(|object| object.zone == ctx.destination)
+                        {
+                            *count += 1;
+                        }
+                    }
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
                             remaining: remaining[i + 1..].to_vec(),
@@ -594,6 +617,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_with_counters: ctx.enter_with_counters.clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            moved_count,
                             effect_kind,
                         });
                     paused = true;
@@ -614,6 +638,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_with_counters: ctx.enter_with_counters.clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            moved_count,
                             effect_kind,
                         });
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -657,6 +682,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // Devour snapshot. NOT cleared on the `paused` break above (a further
         // devourer's sacrifice and the remaining members still need it).
         let _ = state.devour_eligible_snapshot.take();
+        if let Some(count) = moved_count {
+            state.last_effect_count = Some(count);
+        }
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
