@@ -120,8 +120,10 @@ mod tests {
 
     #[test]
     fn eval_is_initiative_matches_designation_holder() {
-        let mut state = GameState::default();
-        state.initiative = Some(PlayerId(0));
+        let state = GameState {
+            initiative: Some(PlayerId(0)),
+            ..Default::default()
+        };
         assert!(eval_is_initiative(&state, PlayerId(0)));
         assert!(!eval_is_initiative(&state, PlayerId(1)));
     }

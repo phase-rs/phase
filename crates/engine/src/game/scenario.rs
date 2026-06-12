@@ -2018,7 +2018,6 @@ impl<'a> CastCommit<'a> {
             targets_players: declared_players,
             optional,
             search_pick,
-            ..ResolutionPolicy::default()
         };
         drive_resolution(runner, &policy);
 
