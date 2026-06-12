@@ -2040,57 +2040,26 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 508.1a: Count creatures that attacked this turn, scoped by controller
-        // or globally across all players.
-        QuantityRef::AttackedThisTurn { scope, filter } => match (scope, filter.as_ref()) {
-            // Fast per-controller tally for the bare "you attacked this turn" form.
-            (CountScope::Controller, None) => state
-                .attacking_creatures_this_turn
-                .get(&controller)
-                .copied()
-                .map(u32_to_i32_saturating)
-                .unwrap_or(0),
-            // Filtered controller scope — this-turn attackers controlled by the
-            // player that match `filter` (Neyali "a token", Neriv "a commander",
-            // Goblin Researcher "~", etc.).
-            (CountScope::Controller, Some(filter)) => usize_to_i32_saturating(
-                state
-                    .attacker_declarations_this_turn
-                    .iter()
-                    .filter(|record| {
-                        record.lki.controller == controller
-                            && matches_target_filter_on_attack_declaration_record(
+        // CR 508.1a: Count creatures that attacked this turn. Declaration-time
+        // records are the authority for every scoped form so attackers that
+        // left the battlefield still count.
+        QuantityRef::AttackedThisTurn { scope, filter } => usize_to_i32_saturating(
+            state
+                .attacker_declarations_this_turn
+                .iter()
+                .filter(|record| {
+                    count_scope_actor_matches(state, scope, ctx, controller, record.lki.controller)
+                        && filter.as_ref().is_none_or(|filter| {
+                            matches_target_filter_on_attack_declaration_record(
                                 state,
                                 record,
                                 filter,
                                 &filter_ctx,
                             )
-                    })
-                    .count(),
-            ),
-            // Global bare form — every attacker declared this turn by any player.
-            (CountScope::All, None) => {
-                usize_to_i32_saturating(state.attacker_declarations_this_turn.len())
-            }
-            // Global filtered form — "no creatures attacked this turn" and kin.
-            (CountScope::All, Some(filter)) => usize_to_i32_saturating(
-                state
-                    .attacker_declarations_this_turn
-                    .iter()
-                    .filter(|record| {
-                        matches_target_filter_on_attack_declaration_record(
-                            state,
-                            record,
-                            filter,
-                            &filter_ctx,
-                        )
-                    })
-                    .count(),
-            ),
-            // Other scopes are unused by AttackedThisTurn today; default to zero
-            // rather than guessing controller semantics.
-            _ => 0,
-        },
+                        })
+                })
+                .count(),
+        ),
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
             if player.is_some_and(|p| p.descended_this_turn) {
@@ -2158,7 +2127,7 @@ fn resolve_ref(
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
-                    counter_added_actor_matches(state, actor, ctx, controller, record.actor)
+                    count_scope_actor_matches(state, actor, ctx, controller, record.actor)
                         && counters.matches(&record.counter_type)
                         && matches_target_filter_on_counter_added_record(
                             state,
@@ -2449,7 +2418,7 @@ fn count_scope_owner_matches(
     }
 }
 
-fn counter_added_actor_matches(
+fn count_scope_actor_matches(
     state: &GameState,
     scope: &CountScope,
     ctx: QuantityContext,
@@ -3886,7 +3855,21 @@ mod tests {
     #[test]
     fn resolve_attacked_this_turn_counts_creatures_attacked_with_by_controller() {
         let mut state = GameState::new_two_player(42);
-        state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
+        let attackers: Vec<_> = (0..3)
+            .map(|idx| {
+                let id = create_object(
+                    &mut state,
+                    CardId(100 + idx),
+                    PlayerId(0),
+                    format!("Attacker {idx}"),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().card_types.core_types =
+                    vec![CoreType::Creature];
+                (id, crate::game::combat::AttackTarget::Player(PlayerId(1)))
+            })
+            .collect();
+        crate::game::combat::declare_attackers(&mut state, &attackers, &mut Vec::new()).unwrap();
 
         let qty = QuantityExpr::Ref {
             qty: QuantityRef::AttackedThisTurn {
