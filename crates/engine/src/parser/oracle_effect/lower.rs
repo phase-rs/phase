@@ -551,20 +551,27 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // and bind direct follow-up ParentTarget references to the affected set.
         if !current_defs.is_empty() {
             let source_text_lower = clause_ir.source_text.to_lowercase();
+            // CR 603.7: Scan ALL prior clauses for a tracked-set publisher — an
+            // intermediate non-publishing clause (e.g. Investigate) must not
+            // shadow an earlier exile clause. Example: Disorder in the Court
+            // (exile → investigate → return the exiled cards).
+            let any_prior_publishes = defs
+                .iter()
+                .any(|d| publishes_tracked_set_from_resolution(&d.effect));
+            if any_prior_publishes {
+                let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
+                    || contains_implicit_tracked_set_pronoun(&source_text_lower);
+                if has_tracked_ref {
+                    for current in &mut current_defs {
+                        mark_uses_tracked_set(current);
+                        rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                    }
+                }
+            }
+
             // Find the previous non-special, non-absorbed clause
             let prev_effect = defs.last().map(|d| &*d.effect);
             if let Some(prev_eff) = prev_effect {
-                if publishes_tracked_set_from_resolution(prev_eff) {
-                    let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
-                        || contains_implicit_tracked_set_pronoun(&source_text_lower);
-                    if has_tracked_ref {
-                        for current in &mut current_defs {
-                            mark_uses_tracked_set(current);
-                            rewrite_parent_targets_to_tracked_set(&mut current.effect);
-                        }
-                    }
-                }
-
                 // CR 603.7c: Stamp the prior clause's zone destination as the
                 // expected origin of any delayed `ParentTarget` return, so the
                 // resolver's CR 400.7 `origin` guard suppresses the return when the
@@ -2686,6 +2693,17 @@ pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     phase: Phase::BeginCombat,
                 },
                 tag("at the beginning of that combat, "),
+            ),
+            // CR 511.2 + CR 603.7a: "At this turn's next end of combat, …"
+            // fires at the end-of-combat step of the current turn.
+            // Covers Triton Tactics, Glyph of Doom, Gaze of the Gorgon,
+            // Venomous Breath, and the full class of spells that schedule
+            // an end-of-combat effect during resolution.
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                tag("at this turn's next end of combat, "),
             ),
         ))
         .parse(i)
@@ -5817,6 +5835,22 @@ mod tests {
             strip_temporal_suffix("you lose the game at the beginning of that turn's end step");
         assert_eq!(rest, "you lose the game");
         assert_eq!(cond, Some(expected));
+    }
+
+    /// CR 511.2 + CR 603.7a: "At this turn's next end of combat, …" prefix-form
+    /// delayed trigger fires at the end-of-combat step of the current turn.
+    /// Covers Triton Tactics, Glyph of Doom.
+    #[test]
+    fn strip_temporal_prefix_at_this_turns_next_end_of_combat() {
+        let (text, cond) =
+            strip_temporal_prefix("at this turn's next end of combat, untap that creature");
+        assert_eq!(text, "untap that creature");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            })
+        );
     }
 
     /// Build-the-class: the extra-turn-with-a-cost family parses to BOTH an
