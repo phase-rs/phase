@@ -4368,6 +4368,17 @@ fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
 }
 
 #[test]
+fn parse_continuous_modifications_are_goaded_emits_goaded_static_mode() {
+    let mods = parse_continuous_modifications("are goaded for the rest of the game");
+    assert!(mods.iter().any(|m| matches!(
+        m,
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded
+        }
+    )));
+}
+
+#[test]
 fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     let defs = parse_static_line_multi(
         "Enchanted creature gets +3/+3, must be blocked if able, and is goaded.",
