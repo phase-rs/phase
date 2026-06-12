@@ -12577,7 +12577,12 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
-        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
     }
 
     #[test]
