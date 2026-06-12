@@ -65,6 +65,22 @@ pub fn resolve(
         }
     }
 
+    // CR 603.7c: A phase-based delayed trigger (`AtNextPhase` /
+    // `AtNextPhaseForPlayer`) fires on a `PhaseChanged` event that carries no
+    // source object, so a `TriggeringSource` reference left in its inner effect
+    // ("return it" / "it becomes a black Zombie") would resolve to nothing at
+    // firing time. Snapshot the triggering object now and rebind the chain's
+    // `TriggeringSource` slots to `ParentTarget` so they resolve against the
+    // snapshot. Event-based conditions (WhenDies/WheneverEvent/…) carry their
+    // own firing event and must keep re-resolving `TriggeringSource` per fire.
+    let phase_based_condition = matches!(
+        condition,
+        crate::types::ability::DelayedTriggerCondition::AtNextPhase { .. }
+            | crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+    );
+    let refs_triggering_source =
+        phase_based_condition && ability_chain_refs_triggering_source(&delayed_ability);
+
     // CR 603.7c + CR 701.36a: If the delayed inner effect references the
     // "token created this way" anaphor via `TargetFilter::LastCreated`,
     // snapshot the currently-tracked token IDs into the delayed ability's
@@ -72,19 +88,24 @@ pub fn resolve(
     // time `last_created_token_ids` will have been overwritten by other
     // token-creating effects (CR 603.7c: a delayed trigger refers to a
     // particular object even if later events change it).
-    let snapshot_targets = if super::effect_refs_parent_target(&delayed_ability.effect) {
-        parent_target_snapshot(state, ability)
-    } else if effect_references_last_created(&delayed_ability.effect)
-        && !state.last_created_token_ids.is_empty()
-    {
-        state
-            .last_created_token_ids
-            .iter()
-            .map(|&id| TargetRef::Object(id))
-            .collect()
-    } else {
-        vec![]
-    };
+    let snapshot_targets =
+        if super::effect_refs_parent_target(&delayed_ability.effect) || refs_triggering_source {
+            parent_target_snapshot(state, ability)
+        } else if effect_references_last_created(&delayed_ability.effect)
+            && !state.last_created_token_ids.is_empty()
+        {
+            state
+                .last_created_token_ids
+                .iter()
+                .map(|&id| TargetRef::Object(id))
+                .collect()
+        } else {
+            vec![]
+        };
+
+    if refs_triggering_source {
+        rebind_triggering_source_to_parent_target(&mut delayed_ability);
+    }
 
     // CR 603.7 + CR 608.2h: Snapshot parent-resolution-dependent
     // quantity refs to Fixed before the delayed trigger gets stashed.
@@ -142,6 +163,49 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
 /// into the delayed ability's `targets` at creation time.
 fn effect_references_last_created(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
+}
+
+/// CR 603.7c: True if any target slot in the ability chain references the
+/// triggering object via `TargetFilter::TriggeringSource` ("return it" /
+/// "exile that creature" / "it becomes …"). Used by `resolve` to decide whether
+/// to snapshot the triggering object at creation time for a phase-based delayed
+/// trigger — see `rebind_triggering_source_to_parent_target`.
+fn ability_chain_refs_triggering_source(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.effect.target_filter(),
+        Some(TargetFilter::TriggeringSource)
+    ) || ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_chain_refs_triggering_source)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_chain_refs_triggering_source)
+}
+
+/// CR 603.7c: A delayed triggered ability whose inner effect refers to the
+/// triggering object via `TriggeringSource` must bind that reference to the
+/// object as it was at creation time, NOT re-resolve it at firing time. For
+/// phase-based delayed triggers (`AtNextPhase` / `AtNextPhaseForPlayer`) the
+/// firing event is a `PhaseChanged` that carries no source object, so a
+/// `TriggeringSource` left in the effect would resolve to nothing when the
+/// delayed ability fires. Rewrite every `TriggeringSource` target slot across
+/// the chain to `ParentTarget`, which the resolver resolves against the
+/// snapshotted `ability.targets` (Grave Betrayal: "return it … as a black
+/// Zombie at the beginning of the next end step").
+fn rebind_triggering_source_to_parent_target(ability: &mut ResolvedAbility) {
+    crate::parser::oracle_effect::each_target_filter_mut(&mut ability.effect, &mut |filter| {
+        if matches!(filter, TargetFilter::TriggeringSource) {
+            *filter = TargetFilter::ParentTarget;
+        }
+    });
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        rebind_triggering_source_to_parent_target(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        rebind_triggering_source_to_parent_target(else_ability);
+    }
 }
 
 fn bind_contextual_filter_to_condition(
@@ -1620,5 +1684,126 @@ mod tests {
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
+    }
+
+    /// CR 603.7b + CR 110.2a + CR 122.6a + CR 613.1: Grave Betrayal — "Whenever
+    /// a creature you don't control dies, return it to the battlefield under
+    /// your control with an additional +1/+1 counter on it at the beginning of
+    /// the next end step. That creature is a black Zombie in addition to its
+    /// other colors and types."
+    ///
+    /// End-to-end runtime regression for issue #2886: an opponent's creature
+    /// dies, the dies trigger creates an `AtNextPhase{End}` delayed trigger
+    /// snapshotting the dead creature, and at the controller's next end step
+    /// the delayed `ChangeZone(Graveyard -> Battlefield, ParentTarget)` returns
+    /// it UNDER THE CONTROLLER'S control with a +1/+1 counter, recolored to a
+    /// black Zombie. Discriminates: control change (CR 110.2a `enters_under`),
+    /// the additional +1/+1 counter placed as it enters (CR 122.6a), and the
+    /// type/color CDA (CR 613.1) all on the returned permanent at the correct
+    /// (end) step.
+    #[test]
+    fn grave_betrayal_returns_opponents_dead_creature_under_your_control() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::triggers::process_triggers;
+        use crate::types::counter::CounterType;
+        use crate::types::mana::ManaColor;
+        use crate::types::zones::Zone;
+
+        let mut scenario = GameScenario::new();
+        // P0 is the active player at a precombat main on turn 2; their end step
+        // is later this same turn, so the AtNextPhase{End} delayed trigger fires
+        // on the controller's turn.
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // Grave Betrayal is an enchantment (CR 303). Build it as a non-creature
+        // permanent so the 0-toughness creature SBA (CR 704.5f) does not destroy
+        // it before it can watch the opponent's creature die.
+        scenario
+            .add_creature(P0, "Grave Betrayal", 0, 0)
+            .from_oracle_text(
+                "Whenever a creature you don't control dies, return it to the battlefield under your control with an additional +1/+1 counter on it at the beginning of the next end step. That creature is a black Zombie in addition to its other colors and types.",
+            )
+            .as_enchantment();
+
+        // An opponent (P1) creature that is about to die.
+        let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+        let mut runner = scenario.build();
+
+        // Kill the opponent's creature: mark lethal damage and run SBAs
+        // (CR 704.5g destroys it -> ZoneChanged to graveyard fires the dies
+        // event), then feed those events to the trigger system.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .damage_marked = 2;
+        let mut events = Vec::new();
+        check_state_based_actions(runner.state_mut(), &mut events);
+        assert_eq!(
+            runner.state().objects.get(&victim).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "victim must die to the graveyard before the dies trigger fires"
+        );
+        process_triggers(runner.state_mut(), &events);
+
+        // Resolve the dies trigger off the stack — this creates the delayed
+        // AtNextPhase{End} trigger that snapshots the dead creature.
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            1,
+            "the dies trigger must register exactly one delayed end-step return"
+        );
+
+        // Advance to P0's end step; the delayed trigger fires and resolves.
+        runner.advance_to_end_step();
+        runner.advance_until_stack_empty();
+
+        // The dead creature must now be on the battlefield under P0's control.
+        let returned = runner
+            .state()
+            .objects
+            .get(&victim)
+            .expect("returned object must exist");
+        assert_eq!(
+            returned.zone,
+            Zone::Battlefield,
+            "Grave Betrayal must return the dead creature to the battlefield"
+        );
+        assert_eq!(
+            returned.controller, P0,
+            "the returned creature must be under the Grave Betrayal controller's control (CR 110.2a)"
+        );
+
+        // It must enter with an additional +1/+1 counter (CR 122.6a).
+        let plus_one_counters = returned
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            plus_one_counters, 1,
+            "the returned creature must have one +1/+1 counter"
+        );
+
+        // It must be a black Zombie in addition to its other colors/types
+        // (CR 613.1 continuous type/color modification). Flush the layer system
+        // so the CDA-style continuous color/subtype mods are applied before we
+        // read the computed `color`/`subtypes`.
+        crate::game::layers::flush_layers(runner.state_mut());
+        let returned = runner.state().objects.get(&victim).unwrap();
+        assert!(
+            returned.color.contains(&ManaColor::Black),
+            "returned creature must be black (got {:?})",
+            returned.color
+        );
+        assert!(
+            returned.card_types.subtypes.iter().any(|s| s == "Zombie"),
+            "returned creature must be a Zombie (got subtypes {:?})",
+            returned.card_types.subtypes
+        );
     }
 }
