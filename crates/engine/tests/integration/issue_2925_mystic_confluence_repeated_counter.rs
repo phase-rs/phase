@@ -1,10 +1,11 @@
 //! Issue #2925: Mystic Confluence — choosing the "counter target spell unless
 //! its controller pays {3}" mode TWICE against the same spell must enforce TWO
-//! independent {3} payments (CR 608.2). The two chosen modes are independent
-//! instructions, so the controller must pay {3} for EACH (i.e. {6} total) or
-//! the spell is countered. Pre-fix, a single {3} payment let the spell resolve:
-//! the first mode's unless-payment success silently dropped the second mode's
-//! `SequentialSibling` counter instead of resolving it.
+//! independent {3} payments. CR 700.2d makes duplicate modal choices repeat in
+//! sequence, and CR 608.2c resolves those instructions in written order, so the
+//! controller must pay {3} for EACH (i.e. {6} total) or the spell is countered.
+//! Pre-fix, a single {3} payment let the spell resolve: the first mode's
+//! unless-payment success silently dropped the second mode's `SequentialSibling`
+//! counter instead of resolving it.
 //!
 //! https://github.com/phase-rs/phase/issues/2925
 
@@ -128,7 +129,7 @@ fn paying_three_once_does_not_save_spell_from_double_counter() {
             WaitingFor::UnlessPayment { player: P1, .. }
         ),
         "second counter mode must independently prompt P1 for a SECOND {{3}} \
-         unless cost (CR 608.2), got {:?}",
+         unless cost (CR 700.2d + CR 608.2c), got {:?}",
         runner.state().waiting_for
     );
 
