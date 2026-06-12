@@ -9,12 +9,12 @@ use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_ora
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
+    AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
+    DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
     ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
@@ -2182,6 +2182,10 @@ fn typecycling_subtype_to_filter(subtype: &str) -> TargetFilter {
 /// `triggers::process_triggers` (instantiated via `build_resolved_from_def`)
 /// share this shape.
 pub fn casualty_copy_ability_definition() -> AbilityDefinition {
+    casualty_copy_ability_definition_for_ordinal(Some(0))
+}
+
+fn casualty_copy_ability_definition_for_ordinal(origin_ordinal: Option<u32>) -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         // CR 702.153a: Casualty — "If the spell has any targets, you may choose
@@ -2192,7 +2196,14 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
             copier: None,
         },
     )
-    .condition(AbilityCondition::additional_cost_paid_any())
+    .condition(AbilityCondition::AdditionalCostPaid {
+        source: AdditionalCostPaymentSource::NonKicker,
+        origin: Some(AdditionalCostOrigin::Casualty),
+        origin_ordinal,
+        variant: None,
+        kicker_cost: None,
+        min_count: 1,
+    })
 }
 
 /// CR 702.153a: Synthesize Casualty N into an optional sacrifice cost + self-cast copy trigger.
@@ -2201,16 +2212,21 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
 /// 1. Optional additional cost: sacrifice a creature with power N or greater
 /// 2. Triggered ability: "When you cast this spell, if a casualty cost was paid, copy it"
 pub fn synthesize_casualty(face: &mut CardFace) {
-    let threshold = match face.keywords.iter().find_map(|k| match k {
-        Keyword::Casualty(n) => Some(*n),
-        _ => None,
-    }) {
-        Some(n) => n,
-        None => return,
-    };
+    let casualty_thresholds: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Casualty(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if casualty_thresholds.is_empty() {
+        return;
+    }
 
     // CR 702.153a: "As an additional cost, you may sacrifice a creature with power N or greater"
     if face.additional_cost.is_none() {
+        let threshold = casualty_thresholds[0];
         let sacrifice_filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::PtComparison {
                 stat: PtStat::Power,
@@ -2229,30 +2245,29 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 
     // CR 702.153a: "When you cast this spell, if a casualty cost was paid, copy it.
     // If the spell has any targets, you may choose new targets for the copy."
-    // Idempotency: skip if the casualty copy-on-cast trigger already exists.
-    let already_has_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::SpellCast)
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-            && t.trigger_zones.contains(&Zone::Stack)
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::CopySpell {
-                    target: TargetFilter::SelfRef,
-                    ..
-                })
-            )
-    });
-    if already_has_trigger {
-        return;
-    }
+    for (casualty_ordinal, _) in casualty_thresholds.iter().enumerate() {
+        let casualty_ordinal = u32::try_from(casualty_ordinal).unwrap_or(u32::MAX);
+        let execute = casualty_copy_ability_definition_for_ordinal(Some(casualty_ordinal));
+        let already_has_trigger = face.triggers.iter().any(|t| {
+            matches!(t.mode, TriggerMode::SpellCast)
+                && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+                && t.trigger_zones.contains(&Zone::Stack)
+                && t.execute
+                    .as_deref()
+                    .is_some_and(|ability| ability == &execute)
+        });
+        if already_has_trigger {
+            continue;
+        }
 
-    face.triggers.push(
-        TriggerDefinition::new(TriggerMode::SpellCast)
-            .valid_card(TargetFilter::SelfRef)
-            .trigger_zones(vec![Zone::Stack])
-            .execute(casualty_copy_ability_definition())
-            .description("Casualty — copy this spell when cast with casualty paid".to_string()),
-    );
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SelfRef)
+                .trigger_zones(vec![Zone::Stack])
+                .execute(execute)
+                .description("Casualty — copy this spell when cast with casualty paid".to_string()),
+        );
+    }
 }
 
 /// CR 702.56a: The canonical `AbilityDefinition` produced by a Replicate
@@ -2269,6 +2284,12 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 /// `resolve_chain_body` iteration loop reads to drive N `CopySpell` iterations
 /// — each producing one stack copy with its own CR 707.10c retarget step.
 pub fn replicate_copy_ability_definition() -> AbilityDefinition {
+    replicate_copy_ability_definition_for_ordinal(Some(0))
+}
+
+pub(crate) fn replicate_copy_ability_definition_for_ordinal(
+    origin_ordinal: Option<u32>,
+) -> AbilityDefinition {
     let mut def = AbilityDefinition::new(
         AbilityKind::Spell,
         // CR 702.56a + CR 707.10c: "If the spell has any targets, you may
@@ -2283,13 +2304,23 @@ pub fn replicate_copy_ability_definition() -> AbilityDefinition {
     // count is also zero, but the condition keeps the trigger's resolution a
     // no-op (no SpellCopied events) when replicate was declined, matching the
     // intervening-if phrasing exactly.
-    .condition(AbilityCondition::additional_cost_paid_any());
+    .condition(AbilityCondition::AdditionalCostPaid {
+        source: AdditionalCostPaymentSource::NonKicker,
+        origin: Some(AdditionalCostOrigin::Replicate),
+        origin_ordinal,
+        variant: None,
+        kicker_cost: None,
+        min_count: 1,
+    });
     // CR 702.56a: "copy it for each time its replicate cost was paid." The
     // replicate cost is a repeatable additional cost, so the number of copies
     // equals the cast-time payment count
     // (`SpellContext::additional_cost_payment_count`).
     def.repeat_for = Some(QuantityExpr::Ref {
-        qty: QuantityRef::AdditionalCostPaymentCount,
+        qty: QuantityRef::AdditionalCostPaymentCountFor {
+            origin: AdditionalCostOrigin::Replicate,
+            origin_ordinal,
+        },
     });
     def
 }
@@ -2324,30 +2355,13 @@ pub fn synthesize_replicate(face: &mut CardFace) {
         return;
     }
 
-    // CR 702.56b: Multiple Replicate instances are paid separately and each
-    // instance's linked trigger counts only its own payments. The engine tracks
-    // a single aggregate `additional_cost_payment_count`, so it cannot keep
-    // per-instance payment tallies. Defer rather than over-count copies. Mirrors
-    // the Squad multi-instance deferral (CR 702.157b).
-    if replicate_costs.len() > 1 {
-        defer_synthesis(
-            face,
-            "replicate_multiple_instances",
-            "CR 702.56b: multiple Replicate instances require per-instance payment tracking"
-                .to_string(),
-        );
-        return;
-    }
-
-    let replicate_cost = replicate_costs[0].clone();
-
     // CR 702.56a: "As an additional cost to cast this spell, you may pay [cost]
     // any number of times." Repeatable optional mana cost — the cast-time
     // payment loop records each payment in `additional_cost_payment_count`.
     if face.additional_cost.is_none() {
         face.additional_cost = Some(AdditionalCost::Optional {
             cost: AbilityCost::Mana {
-                cost: replicate_cost,
+                cost: replicate_costs[0].clone(),
             },
             repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
         });
@@ -2355,33 +2369,32 @@ pub fn synthesize_replicate(face: &mut CardFace) {
 
     // CR 702.56a: "When you cast this spell, if a replicate cost was paid for
     // it, copy it for each time its replicate cost was paid."
-    // Idempotency: skip if the replicate copy-on-cast trigger already exists.
-    let already_has_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::SpellCast)
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-            && t.trigger_zones.contains(&Zone::Stack)
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::CopySpell {
-                    target: TargetFilter::SelfRef,
-                    ..
-                })
-            )
-    });
-    if already_has_trigger {
-        return;
-    }
+    for (replicate_ordinal, _) in replicate_costs.iter().enumerate() {
+        let replicate_ordinal = u32::try_from(replicate_ordinal).unwrap_or(u32::MAX);
+        let execute = replicate_copy_ability_definition_for_ordinal(Some(replicate_ordinal));
+        let already_has_trigger = face.triggers.iter().any(|t| {
+            matches!(t.mode, TriggerMode::SpellCast)
+                && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+                && t.trigger_zones.contains(&Zone::Stack)
+                && t.execute
+                    .as_deref()
+                    .is_some_and(|ability| ability == &execute)
+        });
+        if already_has_trigger {
+            continue;
+        }
 
-    face.triggers.push(
-        TriggerDefinition::new(TriggerMode::SpellCast)
-            .valid_card(TargetFilter::SelfRef)
-            .trigger_zones(vec![Zone::Stack])
-            .execute(replicate_copy_ability_definition())
-            .description(
-                "Replicate — copy this spell once for each time its replicate cost was paid"
-                    .to_string(),
-            ),
-    );
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SelfRef)
+                .trigger_zones(vec![Zone::Stack])
+                .execute(execute)
+                .description(
+                    "Replicate — copy this spell once for each time its replicate cost was paid"
+                        .to_string(),
+                ),
+        );
+    }
 }
 
 /// CR 702.144a: The `AbilityDefinition` produced by a Demonstrate trigger — an
@@ -2996,6 +3009,108 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
     obj.trigger_definitions.push(trigger);
 }
 
+fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinition {
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+        },
+    );
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Any,
+            origin: Some(AdditionalCostOrigin::Offspring),
+            origin_ordinal: Some(origin_ordinal),
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        })
+        .execute(copy_effect)
+        .description(
+            "CR 702.175a + CR 702.175b: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+                .to_string(),
+        )
+}
+
+fn is_offspring_etb_copy_trigger_for_ordinal(
+    trigger: &TriggerDefinition,
+    origin_ordinal: u32,
+) -> bool {
+    matches!(trigger.mode, TriggerMode::ChangesZone)
+        && trigger.destination == Some(Zone::Battlefield)
+        && matches!(trigger.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            trigger.condition,
+            Some(TriggerCondition::AdditionalCostPaid {
+                origin: Some(AdditionalCostOrigin::Offspring),
+                origin_ordinal: Some(existing_ordinal),
+                ..
+            }) if existing_ordinal == origin_ordinal
+        )
+        && trigger.execute.as_deref().is_some_and(|ability| {
+            matches!(
+                ability.effect.as_ref(),
+                Effect::CopyTokenOf {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    additional_modifications,
+                    ..
+                } if additional_modifications.as_slice()
+                    == [
+                        ContinuousModification::SetPower { value: 1 },
+                        ContinuousModification::SetToughness { value: 1 },
+                    ]
+            )
+        })
+}
+
+/// CR 702.175a-b + CR 604.1: Install paid Offspring ETB-copy triggers on a
+/// resolving permanent when Offspring was granted only while it was a spell.
+/// Printed Offspring already has this trigger baked into the card face.
+pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
+    obj: &mut crate::game::game_object::GameObject,
+) {
+    let paid_ordinals: Vec<_> = obj
+        .additional_cost_payments
+        .iter()
+        .filter(|payment| payment.origin == AdditionalCostOrigin::Offspring && payment.count > 0)
+        .map(|payment| payment.origin_ordinal)
+        .collect();
+
+    for origin_ordinal in paid_ordinals {
+        let has_base = obj
+            .base_trigger_definitions
+            .iter()
+            .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal));
+        if has_base {
+            if !obj
+                .trigger_definitions
+                .iter_all()
+                .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal))
+            {
+                obj.trigger_definitions
+                    .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
+            }
+            continue;
+        }
+
+        let trigger = offspring_etb_copy_trigger_for_ordinal(origin_ordinal);
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+        obj.trigger_definitions.push(trigger);
+    }
+}
+
 /// CR 702.30a: Echo is a triggered ability. "Echo [cost]" means "At the
 /// beginning of your upkeep, if this permanent came under your control since
 /// the beginning of your last upkeep, sacrifice it unless you pay [cost]."
@@ -3047,17 +3162,20 @@ fn defer_synthesis(face: &mut CardFace, name: &str, description: String) {
     ));
 }
 
-fn install_etb_copy_on_additional_cost(
-    face: &mut CardFace,
+struct EtbCopyOnAdditionalCost {
     additional_cost: AdditionalCost,
     payment_source: AdditionalCostPaymentSource,
+    payment_origin: AdditionalCostOrigin,
+    payment_origin_ordinal: u32,
     min_count: u32,
     count: QuantityExpr,
     additional_modifications: Vec<ContinuousModification>,
     description: String,
-) {
+}
+
+fn install_etb_copy_on_additional_cost(face: &mut CardFace, spec: EtbCopyOnAdditionalCost) {
     if face.additional_cost.is_none() {
-        face.additional_cost = Some(additional_cost);
+        face.additional_cost = Some(spec.additional_cost.clone());
     }
 
     let already_has_trigger = face.triggers.iter().any(|t| {
@@ -3068,9 +3186,14 @@ fn install_etb_copy_on_additional_cost(
                 t.condition,
                 Some(TriggerCondition::AdditionalCostPaid {
                     source,
+                    origin: Some(existing_origin),
+                    origin_ordinal: Some(existing_origin_ordinal),
                     min_count: existing_min_count,
                     ..
-                }) if source == payment_source && existing_min_count == min_count
+                }) if source == spec.payment_source
+                    && existing_origin == spec.payment_origin
+                    && existing_origin_ordinal == spec.payment_origin_ordinal
+                    && existing_min_count == spec.min_count
             )
             && t.execute.as_deref().is_some_and(|a| match &*a.effect {
                 Effect::CopyTokenOf {
@@ -3078,7 +3201,8 @@ fn install_etb_copy_on_additional_cost(
                     additional_modifications: existing_modifications,
                     ..
                 } => {
-                    existing_count == &count && existing_modifications == &additional_modifications
+                    existing_count == &spec.count
+                        && existing_modifications == &spec.additional_modifications
                 }
                 _ => false,
             })
@@ -3095,22 +3219,24 @@ fn install_etb_copy_on_additional_cost(
             source_filter: None,
             enters_attacking: false,
             tapped: false,
-            count,
+            count: spec.count,
             extra_keywords: vec![],
-            additional_modifications,
+            additional_modifications: spec.additional_modifications,
         },
     );
     let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::SelfRef)
         .condition(TriggerCondition::AdditionalCostPaid {
-            source: payment_source,
+            source: spec.payment_source,
+            origin: Some(spec.payment_origin),
+            origin_ordinal: Some(spec.payment_origin_ordinal),
             variant: None,
             kicker_cost: None,
-            min_count,
+            min_count: spec.min_count,
         })
         .execute(copy_effect)
-        .description(description);
+        .description(spec.description);
     face.triggers.push(trigger);
 }
 
@@ -3125,31 +3251,40 @@ fn install_etb_copy_on_additional_cost(
 /// Build-for-the-class: every card with `Keyword::Offspring(cost)` flows through
 /// this single synthesizer. Idempotent across repeated invocations.
 pub fn synthesize_offspring(face: &mut CardFace) {
-    let Some(offspring_cost) = face.keywords.iter().find_map(|k| match k {
-        Keyword::Offspring(cost) => Some(cost.clone()),
-        _ => None,
-    }) else {
+    let offspring_costs: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Offspring(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .collect();
+    if offspring_costs.is_empty() {
         return;
-    };
+    }
 
-    install_etb_copy_on_additional_cost(
-        face,
-        AdditionalCost::Optional {
-            cost: AbilityCost::Mana {
-                cost: offspring_cost,
+    for (offspring_ordinal, offspring_cost) in offspring_costs.into_iter().enumerate() {
+        let offspring_ordinal = u32::try_from(offspring_ordinal).unwrap_or(u32::MAX);
+        install_etb_copy_on_additional_cost(face, EtbCopyOnAdditionalCost {
+            additional_cost: AdditionalCost::Optional {
+                cost: AbilityCost::Mana {
+                    cost: offspring_cost,
+                },
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             },
-            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-        },
-        AdditionalCostPaymentSource::Any,
-        1,
-        QuantityExpr::Fixed { value: 1 },
-        vec![
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
-        ],
-        "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
-            .to_string(),
-    );
+            payment_source: AdditionalCostPaymentSource::Any,
+            payment_origin: AdditionalCostOrigin::Offspring,
+            payment_origin_ordinal: offspring_ordinal,
+            min_count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
+            additional_modifications: vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+            description: "CR 702.175a + CR 702.175b: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+                .to_string(),
+        });
+    }
 }
 
 /// CR 702.157a: Squad represents a repeatable optional additional cost and an
@@ -3167,39 +3302,28 @@ pub fn synthesize_squad(face: &mut CardFace) {
         return;
     }
 
-    // CR 702.157b: Multiple Squad instances are paid independently and each
-    // instance's linked trigger counts only its own payments. Do not collapse
-    // them into one repeatable cost; leave coverage unsupported until the
-    // linked-instance model exists.
-    if squad_costs.len() > 1 {
-        defer_synthesis(
-            face,
-            "squad_multiple_instances",
-            "CR 702.157b: multiple Squad instances require per-instance payment tracking"
-                .to_string(),
-        );
-        return;
-    }
-
-    let squad_cost = squad_costs[0].clone();
-
-    install_etb_copy_on_additional_cost(
-        face,
-        AdditionalCost::Optional {
-            cost: AbilityCost::Mana {
-                cost: squad_cost,
+    for (squad_ordinal, squad_cost) in squad_costs.into_iter().enumerate() {
+        let squad_ordinal = u32::try_from(squad_ordinal).unwrap_or(u32::MAX);
+        install_etb_copy_on_additional_cost(face, EtbCopyOnAdditionalCost {
+            additional_cost: AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost: squad_cost },
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
             },
-            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
-        },
-        AdditionalCostPaymentSource::NonKicker,
-        0,
-        QuantityExpr::Ref {
-            qty: QuantityRef::AdditionalCostPaymentCount,
-        },
-        vec![],
-        "CR 702.157a: When this permanent enters, create a token that's a copy of it for each time its squad cost was paid."
-            .to_string(),
-    );
+            payment_source: AdditionalCostPaymentSource::NonKicker,
+            payment_origin: AdditionalCostOrigin::Squad,
+            payment_origin_ordinal: squad_ordinal,
+            min_count: 1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::AdditionalCostPaymentCountFor {
+                    origin: AdditionalCostOrigin::Squad,
+                    origin_ordinal: Some(squad_ordinal),
+                },
+            },
+            additional_modifications: vec![],
+            description: "CR 702.157a + CR 702.157b: When this permanent enters, create a token that's a copy of it for each time its squad cost was paid."
+                .to_string(),
+        });
+    }
 }
 
 /// CR 702.123a: Fabricate N — "When this permanent enters, you may put N
@@ -9752,6 +9876,8 @@ mod kicker_synthesis_tests {
                     constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
                         condition: ModalSelectionCondition::AdditionalCostPaid {
                             source: AdditionalCostPaymentSource::Kicker,
+                            origin: None,
+                            origin_ordinal: None,
                             variant: None,
                             kicker_cost: Some(ManaCost::Cost {
                                 generic: 1,
@@ -9789,6 +9915,8 @@ mod kicker_synthesis_tests {
             condition,
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: Some(KickerVariant::Second),
                 kicker_cost: None,
                 min_count: 1
@@ -18383,7 +18511,10 @@ mod squad_synthesis_tests {
                 assert!(matches!(
                     count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AdditionalCostPaymentCount
+                        qty: QuantityRef::AdditionalCostPaymentCountFor {
+                            origin: AdditionalCostOrigin::Squad,
+                            origin_ordinal: Some(0),
+                        },
                     }
                 ));
             }
@@ -18411,7 +18542,7 @@ mod squad_synthesis_tests {
     }
 
     #[test]
-    fn synthesize_squad_defers_multiple_instances() {
+    fn synthesize_squad_emits_one_trigger_per_instance() {
         let mut face = CardFace {
             keywords: vec![
                 Keyword::Squad(ManaCost::Cost {
@@ -18429,21 +18560,31 @@ mod squad_synthesis_tests {
         synthesize_squad(&mut face);
         synthesize_squad(&mut face);
 
-        assert!(face.additional_cost.is_none());
-        assert!(face.triggers.is_empty());
-        assert_eq!(
-            face.abilities
-                .iter()
-                .filter(|ability| {
-                    matches!(
-                        &*ability.effect,
-                        Effect::Unimplemented { name, .. }
-                            if name == "squad_multiple_instances"
-                    )
-                })
-                .count(),
-            1
-        );
+        assert!(face.additional_cost.is_some());
+        let squad_triggers: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|trigger| {
+                matches!(trigger.mode, TriggerMode::ChangesZone)
+                    && trigger.destination == Some(Zone::Battlefield)
+            })
+            .collect();
+        assert_eq!(squad_triggers.len(), 2);
+        for (ordinal, trigger) in squad_triggers.into_iter().enumerate() {
+            let effect = &trigger.execute.as_ref().expect("execute body").effect;
+            match &**effect {
+                Effect::CopyTokenOf { count, .. } => assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AdditionalCostPaymentCountFor {
+                            origin: AdditionalCostOrigin::Squad,
+                            origin_ordinal: Some(found_ordinal),
+                        },
+                    } if *found_ordinal == u32::try_from(ordinal).unwrap()
+                )),
+                other => panic!("expected CopyTokenOf, got {other:?}"),
+            }
+        }
     }
 }
 
@@ -18508,7 +18649,10 @@ mod replicate_synthesis_tests {
         assert!(matches!(
             execute.repeat_for,
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::AdditionalCostPaymentCount,
+                qty: QuantityRef::AdditionalCostPaymentCountFor {
+                    origin: AdditionalCostOrigin::Replicate,
+                    origin_ordinal: Some(0),
+                },
             })
         ));
     }
@@ -18532,10 +18676,10 @@ mod replicate_synthesis_tests {
         assert_eq!(face.triggers.len(), first_trigger_count);
     }
 
-    /// CR 702.56b: Multiple Replicate instances require per-instance payment
-    /// tracking the engine cannot yet model, so synthesis defers.
+    /// CR 702.56b: Multiple Replicate instances are paid independently and each
+    /// linked trigger counts only its own payments.
     #[test]
-    fn synthesize_replicate_defers_multiple_instances() {
+    fn synthesize_replicate_emits_one_trigger_per_instance() {
         let mut face = CardFace {
             keywords: vec![
                 Keyword::Replicate(ManaCost::Cost {
@@ -18552,21 +18696,25 @@ mod replicate_synthesis_tests {
 
         synthesize_replicate(&mut face);
 
-        assert!(face.additional_cost.is_none());
-        assert!(face.triggers.is_empty());
-        assert_eq!(
-            face.abilities
-                .iter()
-                .filter(|ability| {
-                    matches!(
-                        &*ability.effect,
-                        Effect::Unimplemented { name, .. }
-                            if name == "replicate_multiple_instances"
-                    )
-                })
-                .count(),
-            1
-        );
+        assert!(face.additional_cost.is_some());
+        let replicate_triggers: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|trigger| matches!(trigger.mode, TriggerMode::SpellCast))
+            .collect();
+        assert_eq!(replicate_triggers.len(), 2);
+        for (ordinal, trigger) in replicate_triggers.into_iter().enumerate() {
+            let execute = trigger.execute.as_ref().expect("execute body");
+            assert!(matches!(
+                execute.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::AdditionalCostPaymentCountFor {
+                        origin: AdditionalCostOrigin::Replicate,
+                        origin_ordinal: Some(found_ordinal),
+                    },
+                }) if found_ordinal == u32::try_from(ordinal).unwrap()
+            ));
+        }
     }
 }
 

@@ -875,18 +875,24 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: None,
             min_count: 1,
         },
         Permanents::WasKickedWithKicker(cost) => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: Some(mana::convert(cost)?),
             min_count: 1,
         },
         Permanents::WasKickedTwice => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: None,
             min_count: 2,
         },
@@ -3439,6 +3445,8 @@ mod tests {
             TriggerCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
                 variant: None,
+                origin: None,
+                origin_ordinal: None,
                 kicker_cost: None,
                 min_count: 1,
             }

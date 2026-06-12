@@ -9928,6 +9928,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -9957,6 +9959,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,

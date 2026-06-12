@@ -540,15 +540,27 @@ fn modal_selection_condition_matches(
         }
         ModalSelectionCondition::AdditionalCostPaid {
             source,
+            origin,
+            origin_ordinal,
             variant,
             kicker_cost,
             min_count,
-        } => context.additional_cost_paid_matches(
-            *source,
-            *variant,
-            kicker_cost.as_ref(),
-            *min_count,
-        ),
+        } => {
+            if let Some(origin) = origin {
+                let count = origin_ordinal.map_or_else(
+                    || context.instance_payment_count(*origin),
+                    |ordinal| context.instance_payment_count_for_ordinal(*origin, ordinal),
+                );
+                count >= (*min_count).max(1)
+            } else {
+                context.additional_cost_paid_matches(
+                    *source,
+                    *variant,
+                    kicker_cost.as_ref(),
+                    *min_count,
+                )
+            }
+        }
     }
 }
 

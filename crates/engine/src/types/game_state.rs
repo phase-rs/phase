@@ -6,13 +6,14 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost, AttackSubject,
-    BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
+    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
+    CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
+    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
+    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
+    KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -1539,6 +1540,12 @@ pub struct PendingCast {
     /// Kicker/Multikicker choices in `additional_cost_flow`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_required_additional_cost: Option<AbilityCost>,
+    /// CR 601.2b/f + CR 113.2c: Queue of independent non-kicker additional-cost
+    /// keyword instances still being announced for this cast. Kicker keeps its
+    /// existing `additional_cost_flow` path because it already records
+    /// per-variant payments in `SpellContext::kickers_paid`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_queue: Vec<AdditionalCostInstance>,
     /// CR 601.2b + CR 702.48c: Source of the currently pending additional-cost
     /// component. This disambiguates same-shaped costs when a later object
     /// selection resumes payment.
@@ -1633,6 +1640,7 @@ impl PendingCast {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -5025,6 +5033,8 @@ pub struct StackPaidSnapshot {
     pub kickers_paid: usize,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub additional_cost_payment_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
@@ -6442,6 +6452,12 @@ pub struct PendingSpellResolution {
     /// stack-resolution path.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub additional_cost_payment_count: u32,
+    /// CR 607.2g + CR 702.157b/702.175b: Carry per-instance non-kicker
+    /// additional-cost payment data through the replacement-choice detour so
+    /// ETB-linked Squad/Offspring triggers read the same facts as the direct
+    /// stack-resolution path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<crate::types::ability::AdditionalCostInstancePayment>,
     /// CR 702.51c: Carry convoked-creature data through the replacement-choice
     /// detour so ETB triggers/replacements see the same cast history as the
     /// direct resolution path.
@@ -7552,6 +7568,7 @@ mod tests {
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
                 deferred_required_additional_cost: None,
+                additional_cost_queue: Vec::new(),
                 additional_cost_source: SpellCostSource::Other,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
@@ -7881,6 +7898,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,

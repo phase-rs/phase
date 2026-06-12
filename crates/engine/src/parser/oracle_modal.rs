@@ -484,6 +484,8 @@ fn parse_modal_additional_cost_condition(
             rest,
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Any,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,
@@ -503,6 +505,8 @@ fn parse_modal_additional_cost_condition(
         value(
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 2,
@@ -516,6 +520,8 @@ fn parse_modal_additional_cost_condition(
             ),
             |min_count| ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count,
@@ -523,6 +529,8 @@ fn parse_modal_additional_cost_condition(
         ),
         success(ModalSelectionCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -544,6 +552,8 @@ fn parse_modal_specific_kicker_cost_condition(
         rest,
         ModalSelectionCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: Some(kicker_cost),
             min_count: 1,

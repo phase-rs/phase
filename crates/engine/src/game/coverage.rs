@@ -1259,6 +1259,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
         QuantityRef::AdditionalCostPaymentCount => "additional cost payments for this spell".into(),
+        QuantityRef::AdditionalCostPaymentCountFor {
+            origin,
+            origin_ordinal,
+        } => {
+            if let Some(ordinal) = origin_ordinal {
+                format!("{origin:?} additional cost payments for instance {ordinal}")
+            } else {
+                format!("{origin:?} additional cost payments for this spell")
+            }
+        }
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
         QuantityRef::ManaSpentToCast { scope, metric } => {
             format!("mana spent to cast ({scope:?}, {metric:?})")
@@ -5552,6 +5562,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
         QuantityRef::AdditionalCostPaymentCount => ("AdditionalCostPaymentCount", Handled),
+        QuantityRef::AdditionalCostPaymentCountFor { .. } => {
+            ("AdditionalCostPaymentCountFor", Handled)
+        }
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),

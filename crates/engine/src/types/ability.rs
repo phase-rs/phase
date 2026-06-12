@@ -3756,6 +3756,14 @@ pub enum QuantityRef {
     /// payments made for the source spell. Used by Squad so its payment count
     /// remains distinct from Kicker's CR 702.33 payment model.
     AdditionalCostPaymentCount,
+    /// CR 113.2c + CR 702.153b/702.56b/702.157b/702.175b: Number of
+    /// non-kicker additional-cost payments made for one independently
+    /// functioning keyword origin on the source spell/permanent.
+    AdditionalCostPaymentCountFor {
+        origin: AdditionalCostOrigin,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
+    },
     /// CR 702.51c: Number of creatures that convoked the source spell or the
     /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
     /// ETB replacement contexts resolve against the entering object.
@@ -5760,6 +5768,117 @@ pub enum AdditionalCost {
     Choice(AbilityCost, AbilityCost),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
+}
+
+/// CR 113.2c + CR 601.2b/f: Linked identity for one independently functioning
+/// additional-cost keyword instance. Cast-time copy triggers read their own
+/// Casualty/Replicate payments via CR 702.153b / CR 702.56b; ETB-linked
+/// Squad/Offspring triggers read their own payments via CR 607.2g.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AdditionalCostOrigin {
+    Kicker,
+    Casualty,
+    Offspring,
+    Squad,
+    Replicate,
+    #[default]
+    Other,
+}
+
+impl AdditionalCostOrigin {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_other(value: &Self) -> bool {
+        matches!(value, AdditionalCostOrigin::Other)
+    }
+}
+
+/// CR 601.2b/f + CR 113.2c: One announced instance of an additional cost on a
+/// spell. The queue of these records models multiple independent keyword
+/// instances; `AdditionalCost::Optional { repeatability: Repeatable }` models
+/// the within-instance "any number of times" axis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalCostInstance {
+    #[serde(default, skip_serializing_if = "AdditionalCostOrigin::is_other")]
+    pub origin: AdditionalCostOrigin,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub origin_ordinal: u32,
+    pub cost: AdditionalCost,
+}
+
+impl AdditionalCostInstance {
+    pub fn new(origin: AdditionalCostOrigin, cost: AdditionalCost) -> Self {
+        Self {
+            origin,
+            origin_ordinal: 0,
+            cost,
+        }
+    }
+
+    pub fn new_with_ordinal(
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+        cost: AdditionalCost,
+    ) -> Self {
+        Self {
+            origin,
+            origin_ordinal,
+            cost,
+        }
+    }
+}
+
+/// CR 113.2c: Payment record for one independently functioning non-kicker
+/// additional-cost keyword instance. Repeatable instances record their payment
+/// count; non-repeatable instances record `count == 1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalCostInstancePayment {
+    #[serde(default, skip_serializing_if = "AdditionalCostOrigin::is_other")]
+    pub origin: AdditionalCostOrigin,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub origin_ordinal: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub count: u32,
+}
+
+impl AdditionalCostInstancePayment {
+    pub fn new(origin: AdditionalCostOrigin, count: u32) -> Self {
+        Self {
+            origin,
+            origin_ordinal: 0,
+            count,
+        }
+    }
+
+    pub fn new_with_ordinal(origin: AdditionalCostOrigin, origin_ordinal: u32, count: u32) -> Self {
+        Self {
+            origin,
+            origin_ordinal,
+            count,
+        }
+    }
+}
+
+pub(crate) fn additional_cost_instance_payment_count(
+    payments: &[AdditionalCostInstancePayment],
+    origin: AdditionalCostOrigin,
+) -> u32 {
+    payments
+        .iter()
+        .filter(|payment| payment.origin == origin)
+        .map(|payment| payment.count)
+        .sum()
+}
+
+pub(crate) fn additional_cost_instance_payment_count_for_ordinal(
+    payments: &[AdditionalCostInstancePayment],
+    origin: AdditionalCostOrigin,
+    origin_ordinal: u32,
+) -> u32 {
+    payments
+        .iter()
+        .filter(|payment| payment.origin == origin && payment.origin_ordinal == origin_ordinal)
+        .map(|payment| payment.count)
+        .sum()
 }
 
 /// Which casting-time payment stream an `AdditionalCostPaid` condition reads.
@@ -10498,6 +10617,10 @@ pub enum ModalSelectionCondition {
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<AdditionalCostOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kicker_cost: Option<ManaCost>,
@@ -10524,6 +10647,10 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
                 #[serde(default)]
                 source: AdditionalCostPaymentSource,
                 #[serde(default)]
+                origin: Option<AdditionalCostOrigin>,
+                #[serde(default)]
+                origin_ordinal: Option<u32>,
+                #[serde(default)]
                 variant: Option<KickerVariant>,
                 #[serde(default)]
                 kicker_cost: Option<ManaCost>,
@@ -10545,11 +10672,15 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
             }
             Repr::Tagged(Tagged::AdditionalCostPaid {
                 source,
+                origin,
+                origin_ordinal,
                 variant,
                 kicker_cost,
                 min_count,
             }) => Ok(ModalSelectionCondition::AdditionalCostPaid {
                 source,
+                origin,
+                origin_ordinal,
                 variant,
                 kicker_cost,
                 min_count,
@@ -11439,6 +11570,10 @@ pub enum AbilityCondition {
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<AdditionalCostOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kicker_cost: Option<ManaCost>,
@@ -11766,6 +11901,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Any,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -11777,6 +11914,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: Some(variant),
             kicker_cost: None,
             min_count: 1,
@@ -11789,6 +11928,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: Some(cost),
             min_count: 1,
@@ -11800,6 +11941,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count,
@@ -11843,6 +11986,12 @@ pub struct SpellContext {
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub additional_cost_payment_count: u32,
+    /// CR 113.2c + CR 601.2b/f: Per-instance non-kicker additional-cost
+    /// payments declared while casting this spell. This is the non-kicker
+    /// analogue to `kickers_paid`: it is a strict superset of the legacy
+    /// `additional_cost_paid` / `additional_cost_payment_count` aggregate facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     /// CR 702.33d + CR 702.33f: The list of kicker payments declared during
     /// casting, in payment order. For "Kicker {A} and/or {B}" cards (CR 702.33b),
     /// each chosen kicker pushes a corresponding `KickerVariant` entry. For
@@ -11891,6 +12040,46 @@ pub struct SpellContext {
 }
 
 impl SpellContext {
+    pub fn record_additional_cost_payment(&mut self, origin: AdditionalCostOrigin, count: u32) {
+        self.record_additional_cost_instance_payment(origin, 0, count);
+    }
+
+    pub fn record_additional_cost_instance_payment(
+        &mut self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+        count: u32,
+    ) {
+        if count == 0 {
+            return;
+        }
+        self.additional_cost_payments
+            .push(AdditionalCostInstancePayment::new_with_ordinal(
+                origin,
+                origin_ordinal,
+                count,
+            ));
+        self.additional_cost_paid = true;
+        self.additional_cost_payment_count =
+            self.additional_cost_payment_count.saturating_add(count);
+    }
+
+    pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
+        additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
+    }
+
+    pub fn instance_payment_count_for_ordinal(
+        &self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+    ) -> u32 {
+        additional_cost_instance_payment_count_for_ordinal(
+            &self.additional_cost_payments,
+            origin,
+            origin_ordinal,
+        )
+    }
+
     pub fn additional_cost_paid_matches(
         &self,
         source: AdditionalCostPaymentSource,
@@ -11904,13 +12093,23 @@ impl SpellContext {
 
         match variant {
             Some(kicker) => self.kickers_paid.contains(&kicker),
-            None => additional_cost_payment_count_matches(
-                source,
-                self.additional_cost_paid,
-                self.kickers_paid.len(),
-                self.additional_cost_payment_count,
-                min_count,
-            ),
+            None => {
+                let non_kicker_count = if self.additional_cost_payments.is_empty() {
+                    self.additional_cost_payment_count
+                } else {
+                    self.additional_cost_payments
+                        .iter()
+                        .map(|payment| payment.count)
+                        .sum()
+                };
+                additional_cost_payment_count_matches(
+                    source,
+                    self.additional_cost_paid || non_kicker_count > 0,
+                    self.kickers_paid.len(),
+                    non_kicker_count,
+                    min_count,
+                )
+            }
         }
     }
 }
@@ -12049,6 +12248,10 @@ pub enum TriggerCondition {
     AdditionalCostPaid {
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<AdditionalCostOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

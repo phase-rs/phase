@@ -2,11 +2,11 @@ use std::collections::HashSet;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
-    CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
-    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, SacrificeCost,
-    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin, BounceSelection,
+    ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
+    DelayedTriggerCondition, Effect, ModalChoice, PlayerFilter, QuantityExpr, RenownSubject,
+    ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1822,41 +1822,74 @@ fn collect_pending_triggers(
             // only fires on SpellCast, which is only emitted for an actual
             // cast — so the cast-ness is already implied by the trigger event
             // itself and a redundant WasCast condition would add nothing.
-            // CR 702.153a: Skip cards with a printed Casualty keyword — those
-            // already have the copy trigger from synthesize_casualty (face-level
-            // trigger synthesis). Only cards whose Casualty is dynamically
-            // granted (e.g. from Silverquill) need this path. We must NOT use
-            // `obj.additional_cost.is_none()` here: that excluded any card
-            // with ANY printed additional cost (e.g. Corrupted Conviction's
-            // Required sacrifice), which is wrong — only the presence of a
-            // printed Casualty keyword means the face trigger already exists.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
-                .filter(|obj| {
-                    !obj.keywords
-                        .iter()
-                        .any(|k| matches!(k, Keyword::Casualty(_)))
-                })
                 .and_then(|obj| {
-                    let paid = state
+                    let paid_ordinals: Vec<u32> = state
                         .stack
                         .iter()
                         .find(|entry| entry.id == *cast_obj_id)
-                        .is_some_and(|entry| {
-                            entry
-                                .ability()
-                                .is_some_and(|ability| ability.context.additional_cost_paid)
+                        .and_then(|entry| {
+                            entry.ability().map(|ability| {
+                                let ordinals: Vec<_> = ability
+                                    .context
+                                    .additional_cost_payments
+                                    .iter()
+                                    .filter(|payment| {
+                                        payment.origin == AdditionalCostOrigin::Casualty
+                                            && payment.count > 0
+                                    })
+                                    .map(|payment| payment.origin_ordinal)
+                                    .collect();
+                                if ordinals.is_empty() && ability.context.additional_cost_paid {
+                                    vec![0]
+                                } else {
+                                    ordinals
+                                }
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            let ordinals: Vec<_> = obj
+                                .additional_cost_payments
+                                .iter()
+                                .filter(|payment| {
+                                    payment.origin == AdditionalCostOrigin::Casualty
+                                        && payment.count > 0
+                                })
+                                .map(|payment| payment.origin_ordinal)
+                                .collect();
+                            if ordinals.is_empty() && obj.additional_cost_payment_count > 0 {
+                                vec![0]
+                            } else {
+                                ordinals
+                            }
                         });
-                    paid.then_some(obj.controller)
-                })
-                .map(|controller| {
-                    let n =
-                        super::casting::effective_spell_keywords(state, controller, *cast_obj_id)
-                            .iter()
-                            .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
-                            .count();
-                    (n, controller)
+                    if paid_ordinals.is_empty() {
+                        return None;
+                    }
+                    let printed_count = obj
+                        .keywords
+                        .iter()
+                        .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
+                        .count();
+                    let effective_count = super::casting::effective_spell_keyword_instances(
+                        state,
+                        obj.controller,
+                        *cast_obj_id,
+                    )
+                    .iter()
+                    .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
+                    .count();
+                    let granted_count = effective_count.saturating_sub(printed_count);
+                    let granted_start = u32::try_from(printed_count).unwrap_or(u32::MAX);
+                    let granted_end = u32::try_from(effective_count).unwrap_or(u32::MAX);
+                    let paid_granted_count = paid_ordinals
+                        .into_iter()
+                        .filter(|ordinal| *ordinal >= granted_start && *ordinal < granted_end)
+                        .count();
+                    let n = granted_count.min(paid_granted_count);
+                    (n > 0).then_some((n, obj.controller))
                 })
                 .unwrap_or((0, PlayerId(0)));
             for _ in 0..dynamically_granted_casualty_instances.0 {
@@ -1872,7 +1905,9 @@ fn collect_pending_triggers(
                     *cast_obj_id,
                     dynamically_granted_casualty_instances.1,
                 );
-                casualty_ability.context.additional_cost_paid = true;
+                casualty_ability
+                    .context
+                    .record_additional_cost_payment(AdditionalCostOrigin::Casualty, 1);
                 let timestamp = state.next_timestamp() as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
@@ -1971,50 +2006,69 @@ fn collect_pending_triggers(
             // Replicate (StaticMode::CastWithKeyword) has no face-level trigger,
             // so mirror the dynamic Casualty seam here and reuse the canonical
             // Replicate ability definition.
-            let dynamically_granted_replicate = state
-                .objects
-                .get(cast_obj_id)
-                .filter(|obj| {
-                    !obj.keywords
-                        .iter()
-                        .any(|k| matches!(k, Keyword::Replicate(_)))
-                })
-                .and_then(|obj| {
-                    let payment_count = obj.additional_cost_payment_count;
-                    (payment_count > 0).then_some((obj.controller, payment_count))
-                })
-                .and_then(|(controller, payment_count)| {
-                    let has_replicate =
-                        super::casting::effective_spell_keywords(state, controller, *cast_obj_id)
-                            .iter()
-                            .any(|keyword| matches!(keyword, Keyword::Replicate(_)));
-                    has_replicate.then_some((controller, payment_count))
-                });
-            if let Some((controller, payment_count)) = dynamically_granted_replicate {
-                let mut replicate_ability = build_resolved_from_def(
-                    &crate::database::synthesis::replicate_copy_ability_definition(),
+            let dynamically_granted_replicate = state.objects.get(cast_obj_id).and_then(|obj| {
+                let printed_count = obj
+                    .keywords
+                    .iter()
+                    .filter(|keyword| matches!(keyword, Keyword::Replicate(_)))
+                    .count();
+                let effective_count = super::casting::effective_spell_keyword_instances(
+                    state,
+                    obj.controller,
                     *cast_obj_id,
-                    controller,
-                );
-                replicate_ability.context.additional_cost_paid = true;
-                replicate_ability.context.additional_cost_payment_count = payment_count;
-                let timestamp = state.next_timestamp() as u32;
-                pending.push(PendingTriggerContext::single(PendingTrigger {
-                    source_id: *cast_obj_id,
-                    controller,
-                    condition: None,
-                    ability: replicate_ability,
-                    timestamp,
-                    target_constraints: Vec::new(),
-                    distribute: None,
-                    trigger_event: Some(event.clone()),
-                    modal: None,
-                    mode_abilities: vec![],
-                    description: Some("Replicate".to_string()),
-                    may_trigger_origin: None,
-                    subject_match_count: None,
-                    die_result: None,
-                }));
+                )
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::Replicate(_)))
+                .count();
+                let granted_start = u32::try_from(printed_count).unwrap_or(u32::MAX);
+                let granted_end = u32::try_from(effective_count).unwrap_or(u32::MAX);
+                let granted_ordinals: Vec<_> = obj
+                    .additional_cost_payments
+                    .iter()
+                    .filter(|payment| {
+                        payment.origin == AdditionalCostOrigin::Replicate
+                            && payment.count > 0
+                            && payment.origin_ordinal >= granted_start
+                            && payment.origin_ordinal < granted_end
+                    })
+                    .map(|payment| (payment.origin_ordinal, payment.count))
+                    .collect();
+                (!granted_ordinals.is_empty()).then_some((obj.controller, granted_ordinals))
+            });
+            if let Some((controller, granted_ordinals)) = dynamically_granted_replicate {
+                for (replicate_ordinal, payment_count) in granted_ordinals {
+                    let mut replicate_ability = build_resolved_from_def(
+                        &crate::database::synthesis::replicate_copy_ability_definition_for_ordinal(
+                            Some(replicate_ordinal),
+                        ),
+                        *cast_obj_id,
+                        controller,
+                    );
+                    replicate_ability
+                        .context
+                        .record_additional_cost_instance_payment(
+                            AdditionalCostOrigin::Replicate,
+                            replicate_ordinal,
+                            payment_count,
+                        );
+                    let timestamp = state.next_timestamp() as u32;
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
+                        source_id: *cast_obj_id,
+                        controller,
+                        condition: None,
+                        ability: replicate_ability,
+                        timestamp,
+                        target_constraints: Vec::new(),
+                        distribute: None,
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: Some("Replicate".to_string()),
+                        may_trigger_origin: None,
+                        subject_match_count: None,
+                        die_result: None,
+                    }));
+                }
             }
         }
 
@@ -4390,6 +4444,8 @@ pub(crate) fn check_trigger_condition(
         // object; self-referential triggers fall back to the trigger source.
         TriggerCondition::AdditionalCostPaid {
             source,
+            origin,
+            origin_ordinal,
             variant,
             kicker_cost,
             min_count,
@@ -4407,13 +4463,30 @@ pub(crate) fn check_trigger_condition(
                     .and_then(|id| state.objects.get(&id))
                     .is_some_and(|obj| match variant {
                         Some(kicker) => obj.kickers_paid.contains(kicker),
-                        None => crate::types::ability::additional_cost_payment_count_matches(
-                            *source,
-                            obj.additional_cost_payment_count > 0 || !obj.kickers_paid.is_empty(),
-                            obj.kickers_paid.len(),
-                            obj.additional_cost_payment_count,
-                            *min_count,
-                        ),
+                        None => {
+                            let non_kicker_count = if let Some(origin) = origin {
+                                origin_ordinal.map_or_else(
+                                    || obj.instance_payment_count(*origin),
+                                    |ordinal| {
+                                        obj.instance_payment_count_for_ordinal(*origin, ordinal)
+                                    },
+                                )
+                            } else if obj.additional_cost_payments.is_empty() {
+                                obj.additional_cost_payment_count
+                            } else {
+                                obj.additional_cost_payments
+                                    .iter()
+                                    .map(|payment| payment.count)
+                                    .sum()
+                            };
+                            crate::types::ability::additional_cost_payment_count_matches(
+                                *source,
+                                non_kicker_count > 0 || !obj.kickers_paid.is_empty(),
+                                obj.kickers_paid.len(),
+                                non_kicker_count,
+                                *min_count,
+                            )
+                        }
                     })
             }
         }
@@ -5185,6 +5258,13 @@ fn build_triggered_ability(
             }
             if obj.additional_cost_payment_count > 0 {
                 resolved.context.additional_cost_payment_count = obj.additional_cost_payment_count;
+                resolved.context.additional_cost_paid = true;
+            }
+            if !obj.additional_cost_payments.is_empty() {
+                resolved
+                    .context
+                    .additional_cost_payments
+                    .clone_from(&obj.additional_cost_payments);
                 resolved.context.additional_cost_paid = true;
             }
         }
@@ -14657,6 +14737,8 @@ pub mod tests {
             &state,
             &TriggerCondition::AdditionalCostPaid {
                 source: crate::types::ability::AdditionalCostPaymentSource::Any,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,
@@ -14688,6 +14770,8 @@ pub mod tests {
             &state,
             &TriggerCondition::AdditionalCostPaid {
                 source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 2,
