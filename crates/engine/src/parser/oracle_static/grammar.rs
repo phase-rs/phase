@@ -1460,6 +1460,30 @@ pub(crate) fn inject_keyword_kind_filter_prop(
     }
 }
 
+/// CR 601.2f: Classification of a cost-modifier subject against the
+/// "the first <qualifier> spell <timing> costs …" template.
+///
+/// Three outcomes, kept as a typed enum rather than an `Option` so the caller
+/// can tell "not a first-spell line" apart from "a first-spell line whose
+/// qualifier we can't yet represent." The latter MUST decline the whole cost
+/// static — emitting a filterless, gateless reducer would silently drop both
+/// the printed "first … each turn" once-per-turn restriction and the qualifier
+/// (e.g. "kicked"), reducing every spell the controller casts.
+pub(crate) enum FirstQualifiedSpell {
+    /// The subject is not a "the first … spell <timing> costs …" line; the
+    /// caller proceeds with its ordinary cost-modifier parsing.
+    NotApplicable,
+    /// A representable first-spell subject: the qualifying spell filter and the
+    /// timing window over which "first" is measured.
+    Supported(TargetFilter, NthEventTimingKind),
+    /// The "the first … spell <timing>" shape is present, but the qualifier or
+    /// timing window can't be lowered to a spell filter + once-per-turn gate
+    /// (e.g. "the first kicked spell you cast each turn" — kicker-paid state is
+    /// not a representable spell-cost filter, or an opponent-/their-turn window
+    /// with no static condition). The caller must decline the cost static.
+    UnsupportedQualifier,
+}
+
 /// CR 601.2f + CR 107.3: Parse a "first qualified spell <timing> costs less"
 /// cost-reduction subject into the spell filter that qualifies the spell and the
 /// timing window over which "first" is measured.
@@ -1476,30 +1500,45 @@ pub(crate) fn inject_keyword_kind_filter_prop(
 ///      ("each turn", any player's turn) from the controller-turn restricted
 ///      form (reusing `NthEventTimingKind` from the paired trigger).
 ///
-/// Examples this now covers (previously only the "during each of your turns"
-/// form parsed; the "each turn" + "with {X}" form silently dropped its filter
-/// and once-per-turn gate):
+/// Examples this covers (previously only the "during each of your turns" form
+/// parsed; the "each turn" + "with {X}" form silently dropped its filter and
+/// once-per-turn gate):
 ///   - Zimone, Infinite Analyst: "The first spell you cast with {X} in its mana
 ///     cost each turn costs {1} less to cast for each +1/+1 counter on ~."
 ///   - "The first non-Lemur creature spell with flying you cast during each of
 ///     your turns costs {1} less to cast."
-pub(crate) fn parse_first_qualified_spell_filter(
-    lower: &str,
-) -> Option<(TargetFilter, NthEventTimingKind)> {
-    let after_prefix = nom_tag_lower(lower, lower, "the first ")?;
+///
+/// Returns [`FirstQualifiedSpell::UnsupportedQualifier`] when the
+/// "the first … spell <timing>" shape is present but the qualifier/timing can't
+/// be represented (e.g. "the first kicked spell you cast each turn"), so the
+/// caller declines the static instead of emitting a broad reducer.
+pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedSpell {
+    let Some(after_prefix) = nom_tag_lower(lower, lower, "the first ") else {
+        return FirstQualifiedSpell::NotApplicable;
+    };
 
     // Split the subject at the cast infix that separates the pre-spell
     // qualifier ("<type> spell") from the post-spell modifier + timing region
     // ("with {X} in its mana cost each turn cost[s] ..."). CR templating always
     // places the caster phrase between the spell noun and any post-spell modifier.
-    let (pre, post) = split_first_spell_cast_region(after_prefix)?;
+    let Some((pre, post)) = split_first_spell_cast_region(after_prefix) else {
+        return FirstQualifiedSpell::NotApplicable;
+    };
 
     // Scan the post-caster region for the timing phrase. Everything before
     // it is a leading post-spell modifier ("with {X} in its mana cost"); the
     // cost-modification verb ("costs {1} less …") follows the timing phrase and
     // is discarded. The timing phrase — not a " cost" literal — is the anchor,
-    // because " cost" also occurs inside "in its mana cost".
-    let (timing, post_modifier_text) = split_first_spell_timing(post.trim())?;
+    // because " cost" also occurs inside "in its mana cost". A missing timing
+    // phrase means this is some other "the first … you cast" construction, not
+    // the per-turn first-spell cost template.
+    let Some((timing, post_modifier_text)) = split_first_spell_timing(post.trim()) else {
+        return FirstQualifiedSpell::NotApplicable;
+    };
+
+    // From here the "the first … spell <timing> costs …" shape is confirmed, so
+    // any failure to represent the qualifier/timing is an UnsupportedQualifier
+    // (decline the whole static), never a silent fall-through to a broad reducer.
 
     // Only the unrestricted ("each turn") and controller-turn ("during each of
     // your turns") windows have a representable `StaticCondition` for a cost
@@ -1510,7 +1549,7 @@ pub(crate) fn parse_first_qualified_spell_filter(
         timing,
         NthEventTimingKind::Unrestricted | NthEventTimingKind::Restricted(PlayerFilter::Controller)
     ) {
-        return None;
+        return FirstQualifiedSpell::UnsupportedQualifier;
     }
 
     // Pre-spell type/keyword qualifier (strip a bare trailing "spell" noun so a
@@ -1539,9 +1578,9 @@ pub(crate) fn parse_first_qualified_spell_filter(
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             Some(filter)
         } else {
-            // Unrecognized pre-spell qualifier — decline rather than emit a
-            // cost reduction that ignores the printed restriction.
-            return None;
+            // Unrecognized pre-spell qualifier (e.g. "kicked") — decline rather
+            // than emit a cost reduction that ignores the printed restriction.
+            return FirstQualifiedSpell::UnsupportedQualifier;
         }
     };
 
@@ -1551,9 +1590,10 @@ pub(crate) fn parse_first_qualified_spell_filter(
     let post_filter = if post_modifier_text.is_empty() {
         None
     } else {
-        Some(super::oracle_trigger::parse_post_spell_modifier(
-            post_modifier_text,
-        )?)
+        match super::oracle_trigger::parse_post_spell_modifier(post_modifier_text) {
+            Some(filter) => Some(filter),
+            None => return FirstQualifiedSpell::UnsupportedQualifier,
+        }
     };
 
     let filter = match (type_filter, post_filter) {
@@ -1563,7 +1603,7 @@ pub(crate) fn parse_first_qualified_spell_filter(
             filters: vec![a, b],
         },
     };
-    Some((filter, timing))
+    FirstQualifiedSpell::Supported(filter, timing)
 }
 
 fn split_first_spell_cast_region(subject: &str) -> Option<(&str, &str)> {

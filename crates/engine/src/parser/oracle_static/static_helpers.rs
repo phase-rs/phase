@@ -208,7 +208,18 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         None
     };
 
-    let first_qualified_spell = parse_first_qualified_spell_filter(lower);
+    let first_qualified_spell = match parse_first_qualified_spell_filter(lower) {
+        // CR 601.2f: A recognized "the first … spell <timing> costs …" subject
+        // whose qualifier/timing can't be lowered to a filter + once-per-turn
+        // gate (e.g. "the first kicked spell you cast each turn costs {1} less").
+        // Declining here is mandatory — falling through to the generic
+        // cost-modifier path would emit a filterless, conditionless reducer that
+        // drops both the printed "first … each turn" restriction and the
+        // qualifier, reducing every spell the controller casts.
+        FirstQualifiedSpell::UnsupportedQualifier => return None,
+        FirstQualifiedSpell::NotApplicable => None,
+        FirstQualifiedSpell::Supported(filter, timing) => Some((filter, timing)),
+    };
     let first_qualified_spell_filter = first_qualified_spell.as_ref().map(|(filter, _)| filter);
     let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
