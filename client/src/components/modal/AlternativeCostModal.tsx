@@ -56,6 +56,16 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.evokeSubtitle", { name: cardName }),
       };
+    // CR 702.119a-c: Emerge — pay the emerge cost (reduced by the mana value of
+    // a creature you sacrifice as you cast it).
+    case "Emerge":
+      return {
+        eyebrow: t("alternativeCost.emergeEyebrow"),
+        normalLabel: t("alternativeCost.emergeNormalLabel"),
+        altLabel: t("alternativeCost.emergeAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.emergeSubtitle", { name: cardName }),
+      };
     // CR 702.109a: Dash — like Warp, the rider (haste + end-step return to hand)
     // lives on the keyword itself and doesn't change the spell's printed text.
     case "Dash":
@@ -106,6 +116,36 @@ function keywordCopy(
         altLabel: t("alternativeCost.mtmteAltLabel"),
         showOracleText: true,
         subtitle: t("alternativeCost.mtmteSubtitle", { name: cardName }),
+      };
+    // CR 702.176a: Impending — pay the impending cost; the permanent enters with
+    // time counters and isn't a creature until the last counter is removed.
+    case "Impending":
+      return {
+        eyebrow: t("alternativeCost.impendingEyebrow"),
+        normalLabel: t("alternativeCost.impendingNormalLabel"),
+        altLabel: t("alternativeCost.impendingAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.impendingSubtitle", { name: cardName }),
+      };
+    // CR 702.160a: Prototype — pay the prototype cost to cast with the secondary
+    // color, mana value, power, and toughness.
+    case "Prototype":
+      return {
+        eyebrow: t("alternativeCost.prototypeEyebrow"),
+        normalLabel: t("alternativeCost.prototypeNormalLabel"),
+        altLabel: t("alternativeCost.prototypeAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.prototypeSubtitle", { name: cardName }),
+      };
+    // CR 702.137a: Spectacle — pay the spectacle cost instead of the mana cost
+    // if an opponent lost life this turn. A pure cost substitution.
+    case "Spectacle":
+      return {
+        eyebrow: t("alternativeCost.spectacleEyebrow"),
+        normalLabel: t("alternativeCost.spectacleNormalLabel"),
+        altLabel: t("alternativeCost.spectacleAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.spectacleSubtitle", { name: cardName }),
       };
     // CR 702.140a: Mutate — pay the mutate cost to cast as a mutating creature
     // spell targeting a non-Human creature you own.
