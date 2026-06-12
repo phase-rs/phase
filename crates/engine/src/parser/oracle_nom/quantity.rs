@@ -705,7 +705,14 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — the trailing "in your party" is what
         // distinguishes party-size from a controlled-creature count.
         parse_creatures_in_your_party_tail,
-        parse_entered_this_turn_ref,
+        // CR 400.7 + CR 700.4: entered-this-turn and died-this-turn zone-change
+        // counts share a nested alt to stay within nom's top-level `alt` arity.
+        // The died arm must precede `parse_number_of_controlled_type` so the
+        // leading "creatures" token does not commit to the generic controlled-type arm.
+        alt((
+            parse_entered_this_turn_ref,
+            parse_number_of_creatures_died_this_turn,
+        )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
         // CR 107.1 + CR 700.1: "[type] controlled by the player who controls
@@ -2655,30 +2662,69 @@ fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, Quantity
     Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
 }
 
-/// CR 700.4: Parse "creature that died" / "creature that died
-/// under your control" → filtered zone-change count.
-///
-/// Engine tracking is per-turn-only (no last-turn / total counts), so the
-/// trailing "this turn" qualifier is semantically redundant — it gets stripped
-/// upstream by `strip_trailing_duration` before this arm sees the clause.
-/// Both the with-qualifier and without-qualifier forms map to the same
-/// `ZoneChangeCountThisTurn` quantity ref.
-fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((
-        // "creature that died" canonical forms
-        tag("creature that died under your control this turn"),
-        tag("creature that died under your control"),
-        tag("creature that died this turn"),
-        tag("creature that died"),
+/// CR 700.4: Shared tail for "creature(s) that died" / graveyard-from-battlefield
+/// phrasing. Engine tracking is per-turn-only, so the trailing "this turn"
+/// qualifier is semantically redundant when present.
+fn parse_creatures_died_this_turn_tail(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("creatures that died under your control this turn")),
+        value((), tag("creatures that died under your control")),
+        value((), tag("creatures that died this turn")),
+        value((), tag("creatures that died")),
+        value((), tag("creature that died under your control this turn")),
+        value((), tag("creature that died under your control")),
+        value((), tag("creature that died this turn")),
+        value((), tag("creature that died")),
         // CR 700.4: "creature put into [a/your] graveyard from the battlefield"
         // is the long form of "died" — both reference the same battlefield→
         // graveyard transition tracked in `zone_changes_this_turn`.
-        tag("creature put into your graveyard from the battlefield this turn"),
-        tag("creature put into your graveyard from the battlefield"),
-        tag("creature put into a graveyard from the battlefield this turn"),
-        tag("creature put into a graveyard from the battlefield"),
+        value(
+            (),
+            tag("creatures put into your graveyard from the battlefield this turn"),
+        ),
+        value(
+            (),
+            tag("creatures put into your graveyard from the battlefield"),
+        ),
+        value(
+            (),
+            tag("creatures put into a graveyard from the battlefield this turn"),
+        ),
+        value(
+            (),
+            tag("creatures put into a graveyard from the battlefield"),
+        ),
+        value(
+            (),
+            tag("creature put into your graveyard from the battlefield this turn"),
+        ),
+        value(
+            (),
+            tag("creature put into your graveyard from the battlefield"),
+        ),
+        value(
+            (),
+            tag("creature put into a graveyard from the battlefield this turn"),
+        ),
+        value(
+            (),
+            tag("creature put into a graveyard from the battlefield"),
+        ),
     ))
-    .parse(input)?;
+    .parse(input)
+}
+
+/// CR 700.4: Parse "creature(s) that died" → filtered zone-change count for
+/// "for each creature that died this turn" iteration sources.
+fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = parse_creatures_died_this_turn_tail(input)?;
+    Ok((rest, creatures_died_this_turn_ref()))
+}
+
+/// CR 700.4: Parse "the number of creature(s) that died this turn" → the same
+/// `ZoneChangeCountThisTurn` quantity ref used by for-each iteration.
+fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = parse_creatures_died_this_turn_tail(input)?;
     Ok((rest, creatures_died_this_turn_ref()))
 }
 
@@ -5022,6 +5068,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 700.4: plural "creatures that died this turn" must parse for both
+    /// for-each and "the number of" quantity surfaces (Spymaster's Vault).
+    #[test]
+    fn parse_creatures_died_this_turn_plural_and_number_of() {
+        for phrase in [
+            "creatures that died this turn",
+            "creature that died this turn",
+        ] {
+            let (_, for_each) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("for-each {phrase:?} should parse"));
+            let (_, number_of) = parse_quantity_ref(&format!("the number of {phrase}"))
+                .unwrap_or_else(|_| panic!("number-of {phrase:?} should parse"));
+            for q in [for_each, number_of] {
+                assert!(
+                    matches!(
+                        q,
+                        QuantityRef::ZoneChangeCountThisTurn {
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Graveyard),
+                            ..
+                        }
+                    ),
+                    "{phrase:?} got {q:?}"
+                );
+            }
+        }
     }
 
     #[test]

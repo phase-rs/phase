@@ -317,6 +317,7 @@ pub(super) fn handle_replacement_choice(
                     object_id,
                     source_id,
                     applied,
+                    ..
                 } => {
                     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
                         effects::discard::complete_discard_to_graveyard(
@@ -358,6 +359,9 @@ pub(super) fn handle_replacement_choice(
                                 source_id,
                                 tap_state: ManaTapState::from_tap(tapped_for_mana),
                             });
+                        }
+                        if count > 0 {
+                            state.layers_dirty.mark_full();
                         }
                     }
                 }

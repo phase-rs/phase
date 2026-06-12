@@ -483,6 +483,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // then strip result, then clause-level propagation.
         if let Some(spec) = extract_exact_target_multi_target(&clause_ir.source_text) {
             def = def.multi_target(spec);
+        } else if let Some(spec) = extract_bounded_target_multi_target(&clause_ir.source_text) {
+            def = def.multi_target(spec);
         } else if let Some(ref spec) = clause_ir.multi_target {
             def = def.multi_target(spec.clone());
         } else if let Some(ref spec) = clause_ir.parsed.multi_target {
@@ -2666,6 +2668,35 @@ pub(crate) fn extract_exact_target_multi_target(text: &str) -> Option<MultiTarge
         };
         let (count, _) = strip_exact_target_prefix(after_verb)?;
         return Some(MultiTargetSpec::exact(count));
+    }
+    None
+}
+
+/// CR 115.1d: Recover bounded multi-target counts from imperative text where the
+/// verb precedes the count phrase — "return one or two target permanent cards
+/// from your graveyard" (Trystan's Command mode 2). The targeted-action parser
+/// strips the count via `parse_target` but does not attach `MultiTargetSpec`.
+pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    for verb in MULTI_TARGET_VERBS {
+        let Ok((after_verb, _)) =
+            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
+        else {
+            continue;
+        };
+        for (prefix, min, max) in [
+            ("one or two ", 1usize, 2usize),
+            ("one, two, or three ", 1, 3),
+        ] {
+            if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(after_verb) {
+                if tag::<_, _, OracleError<'_>>("target ")
+                    .parse(after_prefix)
+                    .is_ok()
+                {
+                    return Some(MultiTargetSpec::fixed(min, max));
+                }
+            }
+        }
     }
     None
 }
@@ -4875,7 +4906,7 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }

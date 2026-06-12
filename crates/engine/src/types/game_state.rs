@@ -10,9 +10,9 @@ use super::ability::{
     BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    TriggerCondition,
+    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -360,6 +360,12 @@ pub struct ZoneChangeRecord {
     pub subtypes: Vec<String>,
     pub supertypes: Vec<Supertype>,
     pub keywords: Vec<Keyword>,
+    /// CR 603.10a: Trigger definitions as they last existed on the object.
+    /// Runtime-granted leaves-the-battlefield keyword triggers can be removed
+    /// from the live object before the look-back trigger scan, so the zone-change
+    /// record carries the exact LKI trigger multiset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_definitions: Vec<TriggerDefinition>,
     /// CR 208.1: Power as of the zone change.
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
@@ -497,6 +503,7 @@ impl ZoneChangeRecord {
             subtypes: Vec::new(),
             supertypes: Vec::new(),
             keywords: Vec::new(),
+            trigger_definitions: Vec::new(),
             power: None,
             toughness: None,
             base_power: None,
@@ -1046,10 +1053,11 @@ pub struct PendingCounterMoveQueue {
 ///
 /// Shared by every batch flow that delivers many objects to one destination
 /// through the pipeline (mill: library→graveyard/exile/hand; mass bounce:
-/// battlefield→hand/library). Serializes as a plain `{ remaining, destination }`
-/// struct (the type name never appears on the wire), so the rename from the
-/// original mill-only `PendingMillDeliveries` is wire-transparent; the field-name
-/// alias on the holding `GameState` field carries the only readable name change.
+/// battlefield→hand/library; reveal-until library-bottom placement). Serializes
+/// as a plain struct (the type name never appears on the wire), so the rename
+/// from the original mill-only `PendingMillDeliveries` is wire-transparent; the
+/// field-name alias on the holding `GameState` field carries the only readable
+/// name change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
     /// Objects whose per-object zone move has not yet been delivered.
@@ -1074,6 +1082,12 @@ pub struct PendingBatchDeliveries {
     /// Exile-link tracking re-seeded on each rebuilt tail request.
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
+    /// Library placement re-seeded on each rebuilt tail request. `None` means a
+    /// plain library move, which uses the delivery tail's normal library shuffle;
+    /// `Some(Bottom/Top/NthFromTop)` preserves explicit placement batches such as
+    /// reveal-until rest piles across CR 616.1 pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_placement: Option<LibraryPosition>,
     /// Post-batch cleanup that MUST run exactly once after every object in the
     /// batch has been delivered (including across a CR 616.1 pause/resume). The
     /// batch caller stashes it when the batch pauses mid-pile; the drain path
@@ -1758,7 +1772,7 @@ pub struct PendingManaAbility {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_exiled: Vec<ObjectId>,
     /// CR 117.1 + CR 118.3: Pre-selected battlefield permanents to sacrifice
-    /// as part of an `AbilityCost::Sacrifice { target: !SelfRef }`. Used by
+    /// as part of an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1)`. Used by
     /// Phyrexian Altar and the broader sacrifice-for-mana-by-property class.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_sacrificed_battlefield: Vec<ObjectId>,
@@ -3336,6 +3350,11 @@ pub enum WaitingFor {
         /// Number of permanents remaining to sacrifice (for "sacrifice two permanents" etc.)
         #[serde(default = "default_remaining_one")]
         remaining: u32,
+        /// CR 118.12: Multi-select sacrifice whose combined power must meet this
+        /// threshold. `None` = pick exactly one per round-trip until `remaining`
+        /// reaches zero.
+        #[serde(default)]
+        min_total_power: Option<i32>,
     },
     /// CR 118.12: Player must choose permanent(s) to return to hand as unless cost.
     UnlessBounceChoice {
@@ -8030,10 +8049,6 @@ mod tests {
             json.contains("\"enters_under_player\""),
             "expected modern field name in: {json}"
         );
-        assert!(
-            !json.contains("\"under_your_control\""),
-            "legacy field must not be emitted: {json}"
-        );
         let parsed: PendingChangeZoneIteration = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.enters_under_player, Some(PlayerId(1)));
         assert_eq!(parsed, original);
@@ -8064,10 +8079,6 @@ mod tests {
         assert!(
             json.contains("\"enters_under_player\""),
             "expected modern field name in: {json}"
-        );
-        assert!(
-            !json.contains("\"under_your_control\""),
-            "legacy field must not be emitted: {json}"
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);

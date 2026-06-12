@@ -673,6 +673,7 @@ pub fn check_static_ability(
                     context.attack_target.as_ref(),
                     defended,
                     obj.controller,
+                    obj.owner,
                 ) {
                     continue;
                 }

@@ -243,7 +243,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
-        ManaProduction, QuantityExpr, TargetFilter, TypedFilter,
+        ManaProduction, QuantityExpr, SacrificeCost, TargetFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -269,10 +269,7 @@ mod tests {
         ability.cost = Some(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(

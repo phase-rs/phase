@@ -2,9 +2,9 @@ use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, CardPlayMode, CastTimingPermission, CastingPermission, ChoiceType,
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
-    Duration, Effect, GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
-    StaticDefinition, TargetFilter, TargetRef,
+    Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
+    PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -2019,6 +2019,42 @@ fn graveyard_permission_source(
         })
 }
 
+fn filter_has_keyword_kind_constraint(filter: &TargetFilter, kind: KeywordKind) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::HasKeywordKind { value } if *value == kind)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|inner| filter_has_keyword_kind_constraint(inner, kind)),
+        _ => false,
+    }
+}
+
+fn has_graveyard_cast_permission_without_keyword_constraint(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> bool {
+    graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
+        .into_iter()
+        .any(|source| {
+            !filter_has_keyword_kind_constraint(source.filter, kind)
+                && frequency_slot_available(state, source.source_id, object_id, source.frequency)
+                && super::filter::matches_target_filter(
+                    state,
+                    object_id,
+                    source.filter,
+                    &super::filter::FilterContext::from_source_with_controller(
+                        source.source_id,
+                        player,
+                    ),
+                )
+        })
+}
+
 /// CR 401.5 + CR 118.9 + CR 601.2a: Find the (single) top card of `player`'s
 /// library if a battlefield static grants `TopOfLibraryCastPermission` whose
 /// `affected` filter matches it. Returns `(top_card_id, source_id, alt_cost)`.
@@ -3353,22 +3389,35 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
-    // CR 702.103a: When the caller explicitly opted into Bestow (via
+    // CR 702.103a + CR 118.9: When the caller explicitly opted into Bestow (via
     // `variant_override = Some(CastingVariant::Bestow)`), substitute the bestow
-    // mana cost taken from the hand object's `Keyword::Bestow(cost)` payload.
-    // Mirrors the Evoke / Overload cost-selection pattern. The type-changing
-    // mutation (CR 702.103b: gain Aura subtype, gain `enchant creature`, lose
-    // Creature type) is applied separately by `handle_bestow_cost_choice`
-    // because it requires a `&mut GameState` handle and needs to outlive
-    // `prepare_spell_cast_with_variant_override` (which holds an immutable
-    // borrow).
-    let bestow_cost = if casting_variant == CastingVariant::Bestow {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Bestow(cost) => Some(cost.clone()),
-            _ => None,
-        })
+    // mana sub-cost taken from the object's `Keyword::Bestow(cost)` payload.
+    // Mirrors the Evoke cost-selection split: a compound bestow cost
+    // ("Bestow—{R}, Collect evidence 6." on Detective's Phoenix) has its mana
+    // sub-cost substituted here and the residual non-mana sub-cost (Collect
+    // evidence) paid via the additional-cost path (CR 601.2h). Read from
+    // effective keywords so a graveyard-cast bestow (where the keyword may be
+    // granted) resolves the same as a printed-keyword hand bestow.
+    // The type-changing mutation (CR 702.103b: gain Aura subtype, gain `enchant
+    // creature`, lose Creature type) is applied separately by
+    // `handle_bestow_cost_choice` because it requires a `&mut GameState` handle
+    // and needs to outlive `prepare_spell_cast_with_variant_override` (which
+    // holds an immutable borrow).
+    let (bestow_cost, bestow_non_mana_cost) = if casting_variant == CastingVariant::Bestow {
+        let split = effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Bestow(cost) => {
+                    Some(split_bestow_cost_components(cost))
+                }
+                _ => None,
+            });
+        match split {
+            Some((mana, non_mana)) => (mana, non_mana),
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
     // CR 702.140a: When the caller explicitly opted into Mutate (via
     // `variant_override = Some(CastingVariant::Mutate)`), substitute the mutate
@@ -3570,6 +3619,15 @@ fn prepare_spell_cast_with_variant_override_inner(
     let pure_non_mana_evoke = casting_variant == CastingVariant::Evoke
         && evoke_non_mana_cost.is_some()
         && evoke_cost.is_none();
+    // CR 702.103a + CR 601.2h: Mirror of `pure_non_mana_evoke` for Bestow. A
+    // bestow card whose entire bestow cost is non-mana would zero the mana cost
+    // so the residual is routed through the additional-cost path. Detective's
+    // Phoenix pairs {R} with Collect evidence, so `bestow_cost` is `Some` and
+    // this stays `false`; the axis is kept symmetric with the other compound
+    // alternative costs for forward compatibility.
+    let pure_non_mana_bestow = casting_variant == CastingVariant::Bestow
+        && bestow_non_mana_cost.is_some()
+        && bestow_cost.is_none();
     // CR 702.170d: Plot casts are always free — the Plotted permission encodes
     // "without paying its mana cost". Zero the mana cost at preparation time,
     // mirroring the hand-free / flashback-non-mana paths above.
@@ -3631,6 +3689,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         || exile_alt_cost_free
         || pure_non_mana_flashback
         || pure_non_mana_evoke
+        || pure_non_mana_bestow
         || casting_variant == CastingVariant::Plot
     {
         crate::types::mana::ManaCost::NoCost
@@ -6810,6 +6869,7 @@ pub(super) fn initiate_cast_during_resolution(
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
                 duration: None,
+                exile_instead_of_graveyard_on_resolve: false,
             });
     }
     let mut prepared = prepare_spell_cast_with_variant_override(state, player, hit_card, None)?;
@@ -7469,43 +7529,80 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 702.103a: Bestow — when a hand card has `Keyword::Bestow(cost)` and
-    // both the printed creature cost AND the bestow cost are affordable AND
+    // CR 702.103a: Bestow — when a card being cast has `Keyword::Bestow(cost)`
+    // and both the printed creature cost AND the bestow cost are affordable AND
     // there is at least one legal creature to enchant, present the choice.
     // Auto-skip when only one path is viable (normal-only or bestow-only).
     // Mirrors the Evoke / Overload opt-in flow: bestow is opt-in via
     // `variant_override` so a fall-through proceeds as a normal creature cast.
     //
-    // Per CR 702.103a, bestow is a static ability functioning in any zone the
-    // card can be played from — for now that's only Hand (no card with bestow
-    // also has flashback/escape/etc.). Gating on `Zone::Hand` matches that
-    // class and mirrors the other alt-cost prompts.
+    // CR 702.103a: "Bestow represents a static ability that functions in any zone
+    // from which you could play the card it's on." That means the bestow option
+    // is offered from the HAND (the default castable zone) and from the GRAVEYARD
+    // whenever a permission lets the card be cast from there (Detective's Phoenix:
+    // "You may cast this card from your graveyard using its bestow ability.").
+    // CR 702.103a + CR 118.9: a compound bestow cost ("{R}, Collect evidence 6")
+    // splits into a mana sub-cost (substituted as the alternative mana cost) and
+    // a residual non-mana sub-cost (Collect evidence) carried as the additional
+    // cost, paid via `pay_additional_cost` — mirrors the Evoke non-mana split.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand {
-            if let Some(bestow_cost) = obj.keywords.iter().find_map(|k| match k {
-                crate::types::keywords::Keyword::Bestow(cost) => Some(cost.clone()),
-                _ => None,
-            }) {
+        let bestow_zone_ok = obj.zone == Zone::Hand
+            || (obj.zone == Zone::Graveyard
+                && graveyard_permission_source(state, player, object_id).is_some());
+        if bestow_zone_ok {
+            // CR 702.103a + CR 604.1: read bestow from effective keywords so a
+            // bestow cost granted by a static is honored, not just printed bestow.
+            if let Some(bestow_cost) = effective_spell_keywords(state, player, object_id)
+                .iter()
+                .find_map(|k| match k {
+                    crate::types::keywords::Keyword::Bestow(cost) => Some(cost.clone()),
+                    _ => None,
+                })
+            {
                 // CR 702.103a + CR 303.4a: bestow turns the spell into an Aura
                 // requiring a legal target. If no creature is legally enchantable,
-                // bestow can't be chosen — the only legal cast is the creature
-                // path, so fall through without offering the prompt.
+                // bestow can't be chosen — fall through (to the creature cast from
+                // hand, or to the graveyard-permission creature cast).
                 let creature_filter =
                     TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
                 let has_legal_creature_target =
                     !targeting::find_legal_targets(state, &creature_filter, player, object_id)
                         .is_empty();
-                // CR 601.2f + CR 118.9d: affordability and the displayed costs
-                // must reflect active cost modifiers — applied to BOTH the printed
-                // cost and the bestow alternative cost (CR 118.9d).
-                let (normal_cost, normal_affordable) =
-                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
-                let bestow_cost_eff =
-                    apply_cost_modifiers_to_base(state, player, object_id, bestow_cost.clone())
-                        .unwrap_or_else(|| bestow_cost.clone());
-                let bestow_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &bestow_cost_eff);
-                if has_legal_creature_target && normal_affordable && bestow_affordable {
+                // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow
+                // cost into its mana sub-cost and Collect-evidence residual, then
+                // apply active cost modifiers to the mana sub-cost.
+                let (bestow_mana_part, bestow_non_mana_part) =
+                    split_bestow_cost_components(&bestow_cost);
+                let bestow_mana_eff = bestow_mana_part.as_ref().map(|m| {
+                    apply_cost_modifiers_to_base(state, player, object_id, m.clone())
+                        .unwrap_or_else(|| m.clone())
+                });
+                let bestow_mana_affordable = match &bestow_mana_eff {
+                    Some(m) => can_pay_cost_after_auto_tap(state, player, object_id, m),
+                    // CR 118.3: a zero mana cost is always payable.
+                    None => true,
+                };
+                // CR 118.3 + CR 601.2h: the non-mana residual (Collect evidence)
+                // must be independently payable for the bestow option to surface.
+                let bestow_non_mana_affordable = match &bestow_non_mana_part {
+                    Some(ab_cost) => ab_cost.is_payable(state, player, object_id),
+                    None => true,
+                };
+                let bestow_affordable = bestow_mana_affordable && bestow_non_mana_affordable;
+                // CR 601.2a: from the graveyard the "normal" creature cast is the
+                // graveyard-permission cast (handled by the variant pipeline). From
+                // the hand it's the printed creature cost. Compute the printed-cost
+                // affordability only when casting from hand — a graveyard bestow
+                // always routes through the bestow path (the permission grants the
+                // cast; there is no separate hand-cost branch to compare against).
+                let from_hand = obj.zone == Zone::Hand;
+                let (normal_cost, normal_affordable) = if from_hand {
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj)
+                } else {
+                    (obj.mana_cost.clone(), false)
+                };
+                if from_hand && has_legal_creature_target && normal_affordable && bestow_affordable
+                {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
@@ -7513,12 +7610,14 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
                         normal_cost,
-                        alternative_cost: Some(bestow_cost_eff),
-                        alternative_additional_cost: None,
+                        alternative_cost: bestow_mana_eff,
+                        alternative_additional_cost: bestow_non_mana_part,
                     });
                 }
-                if has_legal_creature_target && !normal_affordable && bestow_affordable {
-                    // Only bestow is payable — proceed via the bestow path.
+                if has_legal_creature_target && bestow_affordable {
+                    // Bestow is the only viable path here: from hand the printed
+                    // cost is unaffordable; from the graveyard the permission only
+                    // grants the bestow cast. Proceed via the bestow path.
                     return handle_bestow_cost_choice_with_payment_mode(
                         state,
                         player,
@@ -7529,8 +7628,22 @@ pub fn handle_cast_spell_with_payment_mode(
                         events,
                     );
                 }
-                // Otherwise (normal-only / no legal target / neither affordable):
-                // fall through to the normal cast path.
+                if !from_hand
+                    && !has_graveyard_cast_permission_without_keyword_constraint(
+                        state,
+                        player,
+                        object_id,
+                        KeywordKind::Bestow,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(
+                        "No legal bestow cast from graveyard".to_string(),
+                    ));
+                }
+                // Otherwise (no legal target / unaffordable bestow): fall through
+                // to the normal / graveyard-permission cast path. The graveyard
+                // case is only legal when a separate permission grants a normal
+                // cast, not merely a "using bestow" rider.
             }
         }
     }
@@ -9871,7 +9984,7 @@ pub(super) fn pay_effect_mana_cost(
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (_spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
+    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
         &mut player_data.mana_pool,
         cost,
         None,
@@ -9881,6 +9994,9 @@ pub(super) fn pay_effect_mana_cost(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    if !spent_units.is_empty() {
+        state.layers_dirty.mark_full();
+    }
 
     for payment in &life_payments {
         let amount = u32::try_from(payment.amount).unwrap_or(0);
@@ -9986,6 +10102,9 @@ fn auto_tap_and_pay_cost_excluding(
         permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    if !spent_units.is_empty() {
+        state.layers_dirty.mark_full();
+    }
 
     // CR 107.4f + CR 118.3b + CR 119.4 + CR 119.8: Each Phyrexian shard paid
     // with life routes through the single-authority life-cost helper so the
@@ -10135,9 +10254,10 @@ fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
 /// ("Sacrifice two creatures:") are modeled correctly.
 pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     match cost {
-        AbilityCost::Sacrifice { target, count } if !matches!(target, TargetFilter::SelfRef) => {
-            Some((*count, target))
-        }
+        AbilityCost::Sacrifice(cost) if !matches!(cost.target, TargetFilter::SelfRef) => cost
+            .requirement
+            .fixed_count()
+            .map(|count| (count, &cost.target)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice_cost),
         _ => None,
     }
@@ -10501,6 +10621,22 @@ pub(super) fn split_evoke_cost_components(
     match evoke {
         EvokeCost::Mana(mana) => (Some(mana.clone()), None),
         EvokeCost::NonMana(ab) => split_alt_cost_components(ab),
+    }
+}
+
+/// CR 702.103a + CR 601.2f-h: Bestow twin of `split_evoke_cost_components`.
+/// `BestowCost::Mana` mirrors `EvokeCost::Mana`; `BestowCost::NonMana(...)`
+/// (e.g. Detective's Phoenix's "{R}, Collect evidence 6" stored as a Composite)
+/// delegates to the shared `split_alt_cost_components` walker, which extracts the
+/// `{R}` mana sub-cost for the normal mana flow (CR 601.2g) and returns the
+/// Collect-evidence residual for `pay_additional_cost` (CR 601.2h).
+pub(super) fn split_bestow_cost_components(
+    bestow: &crate::types::keywords::BestowCost,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    use crate::types::keywords::BestowCost;
+    match bestow {
+        BestowCost::Mana(mana) => (Some(mana.clone()), None),
+        BestowCost::NonMana(ab) => split_alt_cost_components(ab),
     }
 }
 
@@ -12177,8 +12313,8 @@ mod tests {
         ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
         ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        SacrificeCost, SacrificeRequirement, SearchSelectionConstraint, StaticCondition,
+        StaticDefinition, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -12756,6 +12892,8 @@ mod tests {
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
+
+                exile_instead_of_graveyard_on_resolve: false,
             });
         let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
         assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
@@ -14340,10 +14478,7 @@ mod tests {
                     cost: colorless_activation_mana_cost(),
                 },
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         };
         let source = create_colorless_tap_activated_source(
@@ -14440,12 +14575,12 @@ mod tests {
                             },
                         },
                         AbilityCost::Tap,
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::Typed(
+                        AbilityCost::Sacrifice(SacrificeCost::count(
+                            TargetFilter::Typed(
                                 TypedFilter::permanent().properties(vec![FilterProp::Token]),
                             ),
-                            count: 1,
-                        },
+                            1,
+                        )),
                     ],
                 }),
             );
@@ -15382,14 +15517,16 @@ mod tests {
                 },
             }));
             Arc::make_mut(&mut obj.abilities).push(ability);
-            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Creature],
-                    controller: Some(ControllerRef::You),
-                    ..Default::default()
-                }),
-                count: u32::MAX,
-            }));
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice(
+                SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::You),
+                        ..Default::default()
+                    }),
+                    u32::MAX,
+                ),
+            )));
         }
 
         apply_as_current(
@@ -16648,10 +16785,7 @@ mod tests {
                             selection: crate::types::ability::CardSelectionMode::Chosen,
                             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                         },
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
                 }),
             );
@@ -17868,10 +18002,7 @@ mod tests {
                 )
                 .cost(AbilityCost::Composite {
                     costs: vec![
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                         AbilityCost::Mana {
                             cost: ManaCost::Cost {
                                 shards: vec![ManaCostShard::X, ManaCostShard::Green],
@@ -17907,13 +18038,14 @@ mod tests {
         // activation_cost should hold the deferred Sacrifice sub-cost.
         let pending = state.pending_cast.as_ref().expect("pending cast present");
         assert!(
-            matches!(
-                pending.activation_cost,
-                Some(AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1
-                })
-            ),
+            {
+                if let Some(AbilityCost::Sacrifice(sc)) = &pending.activation_cost {
+                    matches!(sc.target, TargetFilter::SelfRef)
+                        && sc.requirement == SacrificeRequirement::count(1)
+                } else {
+                    false
+                }
+            },
             "activation_cost must hold the deferred Sacrifice sub-cost, got {:?}",
             pending.activation_cost
         );
@@ -18459,10 +18591,7 @@ mod tests {
                             cost: ManaCost::generic(2),
                         },
                         AbilityCost::Tap,
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
                 }),
             );
@@ -19725,10 +19854,9 @@ mod tests {
                 shards: vec![ManaCostShard::Green],
                 generic: 2,
             };
-            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
-                count: 1,
-            }));
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)), 1),
+            )));
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Draw {
@@ -20116,10 +20244,9 @@ mod tests {
         {
             let obj = state.objects.get_mut(&spell).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::permanent()),
-                count: 1,
-            }));
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::Typed(TypedFilter::permanent()), 1),
+            )));
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Draw {
@@ -23465,6 +23592,91 @@ mod tests {
         ));
     }
 
+    /// Issue #2937 — Torrential Gearhulk / Toshiro class: `CastFromZone` with an
+    /// "exile it instead" rider must exile the granted cast on resolution.
+    #[test]
+    fn cast_from_zone_exile_rider_exiles_graveyard_cast_on_resolution() {
+        use crate::game::effects::cast_from_zone;
+        use crate::game::stack;
+        use crate::types::ability::{
+            CardPlayMode, CastFromZoneDriver, Effect, ResolvedAbility, TargetRef,
+        };
+
+        let mut state = setup_game_at_main_phase();
+        let instant = create_object(
+            &mut state,
+            CardId(2937),
+            PlayerId(0),
+            "Graveyard Draw".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&instant).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::zero();
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+            },
+            vec![TargetRef::Object(instant)],
+            ObjectId(9001),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(9001),
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        cast_from_zone::resolve(&mut state, &ability, &mut events).unwrap();
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), instant)
+            .expect("graveyard instant must be castable under the grant");
+        continue_with_prepared(&mut state, PlayerId(0), prepared, &mut events).unwrap();
+
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&instant].zone,
+            Zone::Exile,
+            "the exile rider must redirect the resolved spell to exile"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&instant),
+            "the spell must not return to the graveyard"
+        );
+    }
+
     /// Issue #2027 — Emry, Lurker in the Loch: targeted graveyard artifact may
     /// be cast this turn via `CastFromZone` without exiling first.
     #[test]
@@ -23538,6 +23750,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
         }
 
@@ -23583,6 +23797,8 @@ mod tests {
             granted_to: Some(PlayerId(0)),
             resolution_cleanup: None,
             duration: None,
+
+            exile_instead_of_graveyard_on_resolve: false,
         }
     }
 
@@ -23620,6 +23836,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
         }
 
@@ -27754,14 +27972,14 @@ mod tests {
             assert_eq!(obj.toughness, Some(1));
             assert!(
                 obj.abilities.iter().any(|ability| {
-                    matches!(*ability.effect, Effect::Mana { .. })
-                        && matches!(
-                            ability.cost,
-                            Some(AbilityCost::Sacrifice {
-                                target: TargetFilter::SelfRef,
-                                count: 1
-                            })
-                        )
+                    matches!(*ability.effect, Effect::Mana { .. }) && {
+                        if let Some(AbilityCost::Sacrifice(sc)) = &ability.cost {
+                            matches!(sc.target, TargetFilter::SelfRef)
+                                && sc.requirement == SacrificeRequirement::count(1)
+                        } else {
+                            false
+                        }
+                    }
                 }),
                 "each Eldrazi Spawn must carry 'Sacrifice this token: Add {{C}}'"
             );
@@ -28533,10 +28751,10 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            count: 1,
-        };
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        ));
         assert!(can_pay_ability_cost_now(&state, PlayerId(0), source, &cost));
     }
 
@@ -28553,10 +28771,10 @@ mod tests {
             Zone::Battlefield,
         );
         // No other creatures on the battlefield
-        let cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            count: 1,
-        };
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        ));
         assert!(!can_pay_ability_cost_now(
             &state,
             PlayerId(0),
@@ -29519,6 +29737,8 @@ mod tests {
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
+
+                exile_instead_of_graveyard_on_resolve: false,
             });
 
         assert!(is_blocked_by_cast_only_from_zones(
@@ -31997,6 +32217,8 @@ mod tests {
                     granted_to: None,
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 },
             );
         }
@@ -32742,10 +32964,7 @@ mod tests {
                 AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         };
         let life_before = state.players[0].life;
@@ -37465,7 +37684,9 @@ mod tests {
                     assert!(
                         matches!(
                             alternative_additional_cost,
-                            Some(AbilityCost::Sacrifice { count: 1, .. })
+                            Some(AbilityCost::Sacrifice(cost))
+                                if cost.requirement
+                                    == crate::types::ability::SacrificeRequirement::count(1)
                         ),
                         "Emerge prompt must surface the required sacrifice cost"
                     );
@@ -38846,8 +39067,14 @@ mod tests {
         obj.toughness = Some(2);
         obj.base_power = Some(2);
         obj.base_toughness = Some(2);
-        obj.keywords.push(Keyword::Bestow(bestow_cost.clone()));
-        obj.base_keywords.push(Keyword::Bestow(bestow_cost));
+        obj.keywords
+            .push(Keyword::Bestow(crate::types::keywords::BestowCost::Mana(
+                bestow_cost.clone(),
+            )));
+        obj.base_keywords
+            .push(Keyword::Bestow(crate::types::keywords::BestowCost::Mana(
+                bestow_cost,
+            )));
         obj.base_characteristics_initialized = true;
         obj_id
     }

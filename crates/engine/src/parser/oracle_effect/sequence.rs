@@ -378,12 +378,23 @@ fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
 }
 
 fn parse_becomes_plotted_continuation(lower: &str) -> bool {
-    let text = lower.trim().trim_end_matches('.').trim(); // allow-noncombinator: punctuation cleanup before all_consuming
-    all_consuming(alt((
-        value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
-        value((), tag("that card becomes plotted")),
-        value((), tag("they become plotted")),
-    )))
+    // allow-noncombinator: punctuation cleanup before all_consuming
+    let text = lower.trim().trim_end_matches('.').trim();
+    // CR 702.170c-d: Accept an optional "if you do," gate. The Plot-grant
+    // cards read "You may exile a card. If you do, it becomes plotted." The
+    // continuation already attaches after the optional exile instruction, so
+    // the prefix is part of the same plotted-card continuation grammar.
+    all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag::<_, _, OracleError<'_>>("if you do "),
+        ))),
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
+            value((), tag("that card becomes plotted")),
+            value((), tag("they become plotted")),
+        )),
+    ))
     .parse(text)
     .is_ok()
 }
@@ -3252,6 +3263,7 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
                 toughness,
                 extra_core_types,
                 subtypes,
+                ward: None,
             });
         }
         // Extra core type word (Creature excluded — always implicit).
@@ -3329,6 +3341,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3: turning the exiled card face up is its own resolving effect,
+        // not a Dig-lookback-transparent clause.
+        Effect::TurnFaceUp { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
@@ -3474,6 +3489,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }

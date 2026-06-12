@@ -26,7 +26,7 @@ use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr,
-    TargetFilter, TypeFilter, TypedFilter,
+    SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -70,10 +70,10 @@ fn add_kci(state: &mut GameState, player: PlayerId) -> ObjectId {
                 target: None,
             },
         )
-        .cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-            count: 1,
-        }),
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            1,
+        ))),
     );
     id
 }

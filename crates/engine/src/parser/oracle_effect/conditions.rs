@@ -19,8 +19,8 @@ use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
-    CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    CountScope, Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1576,6 +1576,32 @@ pub(crate) fn condition_text_is_rehomeable(condition_text: &str) -> bool {
         .any(|prefix| condition_text.starts_with(prefix))
 }
 
+/// CR 707.10c: When a suffix condition is immediately followed by a copy-retarget
+/// rider (", and you may choose new targets for the copy"), peel the rider off so
+/// the condition parser sees only the predicate (Shiko and Narset, Unified).
+fn peel_copy_retarget_tail_from_condition_text(condition_text: &str) -> (&str, Option<&str>) {
+    let Ok((tail, prefix)) =
+        terminated(take_until(", and "), tag::<_, _, OracleError<'_>>(", and "))
+            .parse(condition_text)
+    else {
+        return (condition_text, None);
+    };
+    if super::sequence::recognize_copy_retarget_clause(tail) {
+        (prefix.trim(), Some(tail.trim()))
+    } else {
+        (condition_text, None)
+    }
+}
+
+fn parse_triggering_spell_targets_filter_ability_condition(text: &str) -> Option<AbilityCondition> {
+    match crate::parser::oracle_condition::parse_spell_targets_filter(text)? {
+        ParsedCondition::SpellTargetsFilter { filter } => {
+            Some(AbilityCondition::TriggeringSpellTargetsFilter { filter })
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
@@ -1590,16 +1616,24 @@ pub(super) fn strip_suffix_conditional(
         return (None, text.to_string());
     }
 
-    if let Some(cond) = parse_its_a_type_condition(condition_text) {
-        let effect_text = text[..if_pos].trim().to_string();
+    let (condition_core, copy_retarget_tail) =
+        peel_copy_retarget_tail_from_condition_text(condition_text);
+    let effect_prefix = text[..if_pos].trim();
+    let effect_text = if let Some(tail) = copy_retarget_tail {
+        format!("{effect_prefix}, and {tail}")
+    } else {
+        effect_prefix.to_string()
+    };
+
+    if let Some(cond) = parse_its_a_type_condition(condition_core) {
         return (Some(cond), effect_text);
     }
 
-    if let Some(condition) = try_nom_condition_as_ability_condition(condition_text, ctx)
-        .or_else(|| parse_condition_text(condition_text))
-        .or_else(|| parse_control_count_as_ability_condition(condition_text))
+    if let Some(condition) = parse_triggering_spell_targets_filter_ability_condition(condition_core)
+        .or_else(|| try_nom_condition_as_ability_condition(condition_core, ctx))
+        .or_else(|| parse_condition_text(condition_core))
+        .or_else(|| parse_control_count_as_ability_condition(condition_core))
     {
-        let effect_text = text[..if_pos].trim().to_string();
         return (Some(condition), effect_text);
     }
 
@@ -2278,6 +2312,7 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::DayNightIs { state: *state })
         }
         StaticCondition::SourceEnteredThisTurn => None,
+        StaticCondition::WasCast { .. } => None,
         StaticCondition::IsPresent { filter } => {
             let filter = match filter {
                 Some(f) => f.clone(),
@@ -2536,6 +2571,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }

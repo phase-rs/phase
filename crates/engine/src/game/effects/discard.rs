@@ -186,6 +186,7 @@ pub fn resolve(
                 player_id,
                 object_id: obj_id,
                 source_id: Some(ability.source_id),
+                caused_by_effect: true,
                 applied: HashSet::new(),
             };
 
@@ -292,13 +293,15 @@ pub fn resolve(
                 }
                 let index = state.rng.random_range(0..remaining.len());
                 let obj_id = remaining.swap_remove(index);
-                if let DiscardOutcome::NeedsReplacementChoice(player) = discard_as_cost_with_source(
-                    state,
-                    obj_id,
-                    discard_player,
-                    Some(ability.source_id),
-                    events,
-                ) {
+                if let DiscardOutcome::NeedsReplacementChoice(player) =
+                    discard_caused_by_effect_with_source(
+                        state,
+                        obj_id,
+                        discard_player,
+                        Some(ability.source_id),
+                        events,
+                    )
+                {
                     state.waiting_for =
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     return Ok(());
@@ -310,13 +313,15 @@ pub fn resolve(
             // Forced discard — no choice needed, discard all eligible cards.
             // When up_to=true, always present the choice (player may discard fewer).
             for obj_id in &hand_cards {
-                if let DiscardOutcome::NeedsReplacementChoice(player) = discard_as_cost_with_source(
-                    state,
-                    *obj_id,
-                    discard_player,
-                    Some(ability.source_id),
-                    events,
-                ) {
+                if let DiscardOutcome::NeedsReplacementChoice(player) =
+                    discard_caused_by_effect_with_source(
+                        state,
+                        *obj_id,
+                        discard_player,
+                        Some(ability.source_id),
+                        events,
+                    )
+                {
                     state.waiting_for =
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     // Known limitation: EffectResolved is not emitted when replacement
@@ -366,10 +371,35 @@ pub(crate) fn discard_as_cost_with_source(
     source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> DiscardOutcome {
+    route_discard(state, object_id, player, source_id, false, events)
+}
+
+/// CR 701.9a + CR 614.1a: Discard caused by resolving a spell or ability effect
+/// (not cost payment or cleanup). Routes through the replacement pipeline with
+/// `caused_by_effect: true` so Library-of-Leng-class replacements can gate.
+pub(crate) fn discard_caused_by_effect_with_source(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> DiscardOutcome {
+    route_discard(state, object_id, player, source_id, true, events)
+}
+
+fn route_discard(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    caused_by_effect: bool,
+    events: &mut Vec<GameEvent>,
+) -> DiscardOutcome {
     let proposed = ProposedEvent::Discard {
         player_id: player,
         object_id,
         source_id,
+        caused_by_effect,
         applied: HashSet::new(),
     };
     match replacement::replace_event(state, proposed, events) {
@@ -431,7 +461,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, EffectOutcomeSignal,
-        QuantityExpr, ReplacementCondition, ReplacementDefinition, SubAbilityLink, TargetFilter,
+        LibraryPosition, QuantityExpr, ReplacementCondition, ReplacementDefinition,
+        ReplacementMode, SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -439,6 +470,23 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+
+    fn library_of_leng_discard_replacement() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Discard)
+            .mode(ReplacementMode::Optional { decline: None })
+            .condition(ReplacementCondition::EffectCausedDiscard)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutAtLibraryPosition {
+                    target: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
+                },
+            ))
+    }
 
     fn discard_to_battlefield_with_two_counters_replacement() -> ReplacementDefinition {
         let mut replacement = ReplacementDefinition::new(ReplacementEvent::Discard);
@@ -805,6 +853,86 @@ mod tests {
         assert!(!state.objects[&card]
             .counters
             .contains_key(&CounterType::Plus1Plus1));
+    }
+
+    #[test]
+    fn library_of_leng_does_not_apply_to_discard_cost() {
+        let mut state = GameState::new_two_player(42);
+        let leng = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Library of Leng".to_string(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&leng)
+            .unwrap()
+            .replacement_definitions
+            .push(library_of_leng_discard_replacement());
+
+        let mut events = Vec::new();
+        let outcome = discard_as_cost(&mut state, card, PlayerId(0), &mut events);
+
+        assert!(matches!(outcome, DiscardOutcome::Complete));
+        assert!(state.players[0].graveyard.contains(&card));
+        assert!(!state.players[0].library.contains(&card));
+    }
+
+    #[test]
+    fn library_of_leng_offers_replacement_for_effect_caused_discard() {
+        let mut state = GameState::new_two_player(42);
+        let leng = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Library of Leng".to_string(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Traumatic Critique".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&leng)
+            .unwrap()
+            .replacement_definitions
+            .push(library_of_leng_discard_replacement());
+
+        let mut events = Vec::new();
+        let outcome = discard_caused_by_effect_with_source(
+            &mut state,
+            card,
+            PlayerId(0),
+            Some(source),
+            &mut events,
+        );
+
+        assert!(matches!(
+            outcome,
+            DiscardOutcome::NeedsReplacementChoice(PlayerId(0))
+        ));
+        assert!(state.players[0].hand.contains(&card));
+        assert!(!state.players[0].graveyard.contains(&card));
     }
 
     #[test]

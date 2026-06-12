@@ -104,6 +104,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: Default::default(),
+            trigger_definitions: Vec::new(),
             co_departed: Vec::new(),
         }),
     });

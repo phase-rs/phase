@@ -952,6 +952,7 @@ impl GameObject {
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
+            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same

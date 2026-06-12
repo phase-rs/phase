@@ -125,7 +125,7 @@ pub fn resolve_give(
     }) {
         pid
     } else {
-        unique_recipient_from_filter(state, recipient, ability.controller)?
+        unique_recipient_from_filter(state, recipient, ability)?
     };
 
     let object_ids = give_control_object_targets(state, ability, target);
@@ -185,8 +185,16 @@ fn give_control_object_targets(
 fn unique_recipient_from_filter(
     state: &GameState,
     filter: &TargetFilter,
-    source_controller: PlayerId,
+    ability: &ResolvedAbility,
 ) -> Result<PlayerId, EffectError> {
+    if let TargetFilter::ScopedPlayer = filter {
+        return ability
+            .scoped_player
+            .ok_or_else(|| EffectError::MissingParam("GiveControl scoped recipient".to_string()));
+    }
+
+    let source_controller = ability.controller;
+
     if let TargetFilter::SpecificPlayer { id } = filter {
         return state
             .players
@@ -578,6 +586,40 @@ mod tests {
             state.objects.get(&artifact).unwrap().controller,
             PlayerId(2),
             "player to your right = previous seat (P2), not next seat (P1)"
+        );
+    }
+
+    /// Issue #2915: upkeep "that player gains control" binds `ScopedPlayer` to the
+    /// active player; `GiveControl` must read `ability.scoped_player`.
+    #[test]
+    fn give_control_scoped_player_uses_active_player_binding() {
+        let mut state = GameState::new_two_player(42);
+        let alexios = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Alexios, Deimos of Kosmos".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::ScopedPlayer,
+            },
+            vec![TargetRef::Object(alexios)],
+            alexios,
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&alexios).unwrap().controller,
+            PlayerId(1),
+            "ScopedPlayer recipient must resolve to the bound active player"
         );
     }
 
