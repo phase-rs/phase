@@ -141,7 +141,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
 /// owner's library (CR 401.4); every other zone uses the standard cross-zone
 /// mover. Extracted from the Dig rest-move block so the search-partition handler
 /// reuses the exact same routing.
-fn route_rest_partition(
+pub(crate) fn route_rest_partition(
     state: &mut GameState,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
