@@ -1,7 +1,7 @@
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     BounceSelection, ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
@@ -138,6 +138,30 @@ pub fn resolve(
             }
         })
         .collect();
+
+    // CR 115.6 + CR 601.2c + CR 608.2b: "Return up to one target ... " (Wrenn
+    // and Six +1, and every "up to N target" bounce). Such a bounce *requires
+    // targets* but allows zero to be chosen at stack time; per CR 115.6 it is
+    // targeted only if one or more targets were chosen. When the controller
+    // declined (chose zero), `targets` is empty by the player's choice — the
+    // effect resolves doing nothing. Without this guard the empty-target set
+    // falls through to the resolution-time zone-scan branches below, which
+    // re-prompt for a graveyard/battlefield card the player already declined.
+    // Mirrors the `ChangeZone` short-circuit in `change_zone.rs` (same CR 115.6
+    // class). `target_choice_timing == Resolution` is the genuinely-untargeted
+    // case (Skullwinder-class "that player returns a card"): targets are empty
+    // because no choice has been made *yet*, so it must reach the zone-scan.
+    if targets.is_empty()
+        && !non_targeting
+        && ability.targeting_is_optional()
+        && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
 
     // CR 115.1 + Whitemane Lion ruling (issue #563): Non-targeted
     // controller-scoped *battlefield* bounce. Oracle text like "return a
@@ -1378,6 +1402,151 @@ mod tests {
         // one via EffectZoneChoice.
         assert!(state.battlefield.contains(&own_bear));
         assert!(state.battlefield.contains(&own_dragon));
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Battlefield,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert_eq!(*min_count, 1);
+                assert!(cards.contains(&own_bear));
+                assert!(cards.contains(&own_dragon));
+            }
+            other => panic!("expected EffectZoneChoice for non-targeted bounce, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 601.2c (issue #2389): A *targeted* "up to one target ...
+    /// from your graveyard" bounce (Wrenn and Six +1) whose controller chose
+    /// ZERO targets at stack time resolves doing nothing — it must NOT fall
+    /// through to the resolution-time graveyard zone-scan and re-prompt the
+    /// player who already declined. The discriminator vs the genuinely
+    /// non-targeted Skullwinder-class branch (which still prompts) is
+    /// `targeting_is_optional()`: true here (`multi_target.min == 0`), false for
+    /// Skullwinder's mandatory "target player" form.
+    #[test]
+    fn targeted_up_to_one_graveyard_bounce_declined_resolves_to_nothing() {
+        use crate::types::ability::{FilterProp, MultiTargetSpec, QuantityExpr, TypeFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Land],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        // Targeted "up to one target land card from your graveyard" with an
+        // empty target list — the controller declined during target selection.
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Land)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        assert!(
+            ability.targeting_is_optional(),
+            "up-to-one targeting must be optional"
+        );
+        let mut events = Vec::new();
+
+        let waiting_before = state.waiting_for.clone();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // No re-prompt: waiting_for is unchanged by the resolver.
+        assert_eq!(
+            state.waiting_for, waiting_before,
+            "declining the up-to-one target must NOT surface an EffectZoneChoice"
+        );
+        // The land stays in the graveyard — nothing was returned.
+        assert_eq!(
+            state.objects.get(&land).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "no card returned when zero targets were chosen"
+        );
+        assert!(!state.players[0].hand.contains(&land));
+    }
+
+    /// CR 115.1 + CR 608.2c: the zero-target short-circuit is only for
+    /// targeted "up to N target ..." bounce. Non-targeted at-resolution bounce
+    /// must still enumerate legal permanents even if it happens to carry
+    /// optional multi-target metadata.
+    #[test]
+    fn non_targeted_optional_bounce_still_prompts_at_resolution() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, TypeFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let own_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let own_dragon = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_bear, own_dragon] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
         match &state.waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,

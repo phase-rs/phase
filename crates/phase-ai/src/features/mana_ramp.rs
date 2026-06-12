@@ -296,7 +296,7 @@ mod tests {
     use super::*;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
-        ManaProduction, QuantityExpr, TargetFilter, TypedFilter,
+        ManaProduction, QuantityExpr, SacrificeCost, TargetFilter, TypedFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -584,10 +584,7 @@ mod tests {
         fetch_ability.cost = Some(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         fetch_ability.sub_ability = Some(Box::new(AbilityDefinition::new(

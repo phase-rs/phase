@@ -6,8 +6,9 @@ use super::support::*;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, ObjectProperty, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-    SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -282,9 +283,9 @@ fn cant_attack_static_splits_self_reference() {
 }
 
 /// CR 508.1c: The terminal-phrase guard must NOT mis-split scoped attack
-/// restrictions. "can't attack alone" (Sightless Brawler) and the Vow cycle's
-/// "can't attack you or planeswalkers you control" are different restrictions
-/// owned by other branches — the plain-`CantAttack` splitter must decline.
+/// restrictions. "can't attack alone" (Sightless Brawler) is owned by a
+/// different branch; the Vow cycle's "can't attack you or planeswalkers you
+/// control" must be parsed as a defended-scope `CantAttack`, not a blanket one.
 #[test]
 fn cant_attack_split_declines_scoped_restrictions() {
     let alone = parse_static_line_multi("Enchanted creature gets +3/+2 and can't attack alone.");
@@ -297,10 +298,14 @@ fn cant_attack_split_declines_scoped_restrictions() {
     let scoped = parse_static_line_multi(
         "Enchanted creature gets +2/+2, has vigilance, and can't attack you or planeswalkers you control.",
     );
-    assert!(
-        !scoped.iter().any(|d| d.mode == StaticMode::CantAttack),
-        "scoped \"can't attack you …\" must not become a plain CantAttack, got {:?}",
-        scoped.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    let scoped_lockout = scoped
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .unwrap_or_else(|| panic!("expected scoped CantAttack, got {:?}", scoped));
+    assert_eq!(
+        scoped_lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "scoped \"can't attack you ...\" must not become a blanket CantAttack"
     );
 }
 
@@ -374,6 +379,79 @@ fn cant_attack_or_block_split_does_not_suppress_siblings() {
             .iter()
             .any(|d| d.mode == StaticMode::CantAttackOrBlock),
         "bare can't-block split must NOT produce CantAttackOrBlock"
+    );
+}
+
+/// CR 508.1b + CR 508.1c: Vow of Lightning — "Enchanted creature gets +2/+2, has first
+/// strike, and can't attack you or planeswalkers you control." must produce the
+/// +2/+2 and first-strike grant AND a companion `CantAttack` scoped to
+/// `PlayerOrPlaneswalker`. Previously the attack restriction was silently
+/// dropped, so the enchanted creature could freely attack the Aura controller.
+#[test]
+fn cant_attack_scoped_splits_from_pt_and_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2, has first strike, and can't attack you or planeswalkers you control.",
+    );
+    let lockout = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .unwrap_or_else(|| panic!("expected a CantAttack companion, got {:?}", defs));
+    assert_eq!(
+        lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "companion must be scoped to PlayerOrPlaneswalker, got {:?}",
+        lockout.attack_defended
+    );
+    assert!(
+        lockout.affected.is_some(),
+        "CantAttack companion must carry an affected filter"
+    );
+    // The leading grant must also be preserved.
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous),
+        "leading +2/+2 and first-strike grant must be preserved"
+    );
+}
+
+/// CR 508.1b + CR 508.1c: "and can't attack you" (Player scope only, without
+/// planeswalkers) also splits into a `CantAttack` with `defended = Player`.
+#[test]
+fn cant_attack_scoped_player_only_variant() {
+    let defs = parse_static_line_multi("Enchanted creature gets +0/+3 and can't attack you.");
+    let lockout = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack companion for 'can't attack you'");
+    assert_eq!(
+        lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Player),
+        "companion must be scoped to Player, got {:?}",
+        lockout.attack_defended
+    );
+}
+
+/// CR 508.1b + CR 508.1c: The scoped-attack splitter must not suppress the
+/// existing bare-attack and cant-attack-or-block splitters.
+#[test]
+fn cant_attack_scoped_split_does_not_suppress_siblings() {
+    // Bare "can't attack" must still route to plain CantAttack with no defended scope.
+    let bare = parse_static_line_multi("Enchanted creature gets +2/+2 and can't attack.");
+    let bare_lockout = bare
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("bare cant-attack splitter must still produce CantAttack");
+    assert_eq!(
+        bare_lockout.attack_defended, None,
+        "bare CantAttack must have no defended scope"
+    );
+
+    // "can't attack or block" must still route to CantAttackOrBlock.
+    let aob = parse_static_line_multi(
+        "Enchanted creature loses all abilities and can't attack or block.",
+    );
+    assert!(
+        aob.iter().any(|d| d.mode == StaticMode::CantAttackOrBlock),
+        "cant-attack-or-block splitter must still produce CantAttackOrBlock"
     );
 }
 
@@ -1665,17 +1743,29 @@ fn static_cant_block() {
 
 #[test]
 fn static_cant_attack_alone() {
-    // CR 506.5 + CR 508.1a: "can't attack alone" must NOT be swallowed by the
+    // CR 506.5 + CR 508.1c: "can't attack alone" must NOT be swallowed by the
     // generic "can't attack" arm (which would blanket-prohibit attacking).
     let def = parse_static_line("Bonded Construct can't attack alone.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantAttackAlone);
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
 #[test]
 fn static_cant_block_alone() {
     let def = parse_static_line("~ can't block alone.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantBlockAlone);
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
@@ -1684,8 +1774,59 @@ fn static_cant_attack_or_block_alone_emits_both() {
     // CR 506.5: Mogg Flunkies — both restrictions from one clause.
     let defs = parse_static_line_multi("Mogg Flunkies can't attack or block alone.");
     assert_eq!(defs.len(), 2);
-    assert!(defs.iter().any(|d| d.mode == StaticMode::CantAttackAlone));
-    assert!(defs.iter().any(|d| d.mode == StaticMode::CantBlockAlone));
+    assert!(defs.iter().any(|d| {
+        d.mode
+            == (StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            })
+    }));
+    assert!(defs.iter().any(|d| {
+        d.mode
+            == (StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            })
+    }));
+}
+
+#[test]
+fn static_can_only_attack_alone_parses() {
+    // CR 508.1c: Master of Cruelties — "can only attack alone" means the
+    // creature may not be declared alongside other attackers.
+    let def =
+        parse_static_line("~ can only attack alone.").expect("can only attack alone should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_can_only_attack_alone_not_swallowed_by_cant_attack_alone() {
+    // Guard: the positive ("can only attack alone") must not be confused
+    // with the negative ("can't attack alone") which means the opposite.
+    let def_only = parse_static_line("~ can only attack alone.").unwrap();
+    let def_cant = parse_static_line("~ can't attack alone.").unwrap();
+    assert_eq!(
+        def_only.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        }
+    );
+    assert_eq!(
+        def_cant.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
+    assert_ne!(def_only.mode, def_cant.mode);
 }
 
 /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
@@ -1976,7 +2117,10 @@ fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
         StaticMode::ModifyCost {
             mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
-            dynamic_count: Some(QuantityRef::AttackedThisTurn { filter: None }),
+            dynamic_count: Some(QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }),
             ..
         }
     ));
@@ -2835,6 +2979,80 @@ fn static_cost_floor_canonical_form_no_condition() {
     );
 }
 
+/// CR 601.2f + CR 107.3 + CR 122.1a: Zimone, Infinite Analyst's per-counter
+/// cost reduction — "The first spell you cast with {X} in its mana cost each
+/// turn costs {1} less to cast for each +1/+1 counter on ~." This regressed
+/// (issue #1359): the static dropped both the `{X}`-cost spell filter and the
+/// "first spell each turn" gate, so the reduction applied to every spell, every
+/// time. Asserts all three load-bearing axes are present:
+///   1. `spell_filter` carries `HasXInManaCost` (CR 107.3) — only {X}-spells.
+///   2. `condition` gates on `SpellsCastThisTurn(HasXInManaCost) == 0` — only
+///      the FIRST such spell each turn. "each turn" carries NO `DuringYourTurn`,
+///      so the first {X}-spell qualifies on any player's turn.
+///   3. `dynamic_count` is `CountersOn { Source, Plus1Plus1 }` — reduces by K
+///      for K +1/+1 counters on the source (CR 122.1a).
+#[test]
+fn static_zimone_first_x_spell_each_turn_reduces_per_plus1_counter() {
+    let def = parse_static_line(
+        "The first spell you cast with {X} in its mana cost each turn costs {1} less to cast for each +1/+1 counter on ~.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ref dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    // Axis 1: only spells with {X} in their mana cost are reduced.
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected {X}-cost spell filter");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed spell filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::HasXInManaCost),
+        "reduction must be gated on HasXInManaCost, got {tf:?}"
+    );
+
+    // Axis 3: per-+1/+1-counter dynamic quantity on the source.
+    assert!(
+        matches!(
+            dynamic_count,
+            Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Plus1Plus1),
+            })
+        ),
+        "reduction amount must be per +1/+1 counter on the source, got {dynamic_count:?}"
+    );
+
+    // Axis 2: only the FIRST {X}-spell each turn — no DuringYourTurn for the
+    // "each turn" timing (any player's turn qualifies).
+    let condition = def.condition.expect("expected first-spell-each-turn gate");
+    assert!(
+        matches!(
+            &condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(inner),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } if matches!(inner, TargetFilter::Typed(itf) if itf.properties.contains(&FilterProp::HasXInManaCost))
+        ),
+        "expected SpellsCastThisTurn(HasXInManaCost) == 0 with no DuringYourTurn, got {condition:?}"
+    );
+}
+
 #[test]
 fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
     let def = parse_static_line(
@@ -2886,6 +3104,115 @@ fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
                 rhs: QuantityExpr::Fixed { value: 0 },
             } if inner == spell_filter.as_ref().unwrap()
         )));
+}
+
+#[test]
+fn static_first_qualified_spell_costs_more_handles_each_opponent_casts() {
+    let def = parse_static_line(
+        "The first noncreature spell each opponent casts each turn costs {1} more to cast.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected RaiseCost, got {:?}", def.mode);
+    };
+
+    let filter = spell_filter.as_ref().expect("expected spell filter");
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf
+                .type_filters
+                .iter()
+                .any(|entry| matches!(entry, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)))
+    ));
+
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::Opponent)
+        ))
+    );
+
+    let condition = def.condition.expect("expected first-spell condition");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if matches!(
+            inner,
+            TargetFilter::Typed(tf)
+                if tf
+                    .type_filters
+                    .iter()
+                    .any(|entry| matches!(entry, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)))
+        )
+    ));
+}
+
+#[test]
+fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
+    let def =
+        parse_static_line("The first spell you cast each turn costs {1} less to cast.").unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(
+        spell_filter,
+        &Some(TargetFilter::Typed(TypedFilter::card()))
+    );
+
+    let condition = def.condition.expect("expected first-spell condition");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if inner == spell_filter.as_ref().unwrap()
+    ));
+}
+
+/// CR 601.2f + CR 702.33d: "The first kicked spell you cast each turn costs {1}
+/// less to cast." (Vine Gecko). The "kicked" qualifier — whether the spell's
+/// kicker additional cost was paid — is not a representable spell-cost filter,
+/// so the parser must DECLINE the cost static rather than emit a filterless,
+/// conditionless reducer. A broad reducer would silently drop both the printed
+/// "first … each turn" once-per-turn gate and the "kicked" qualifier, reducing
+/// every spell the controller casts (the bug this guards against).
+#[test]
+fn static_first_kicked_spell_does_not_emit_broad_reducer() {
+    let parsed =
+        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.");
+
+    assert!(
+        parsed.is_none(),
+        "kicked-spell cost reducer must be declined until paid-kicker state is representable; got {parsed:?}"
+    );
 }
 
 #[test]
@@ -4202,6 +4529,10 @@ fn static_comma_rule_statics_share_subject() {
         StaticMode::Other("CantBeSacrificed".to_string())
     );
     assert_eq!(defs[2].mode, StaticMode::CantAttack);
+    assert_eq!(
+        defs[2].attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Owner)
+    );
     assert!(defs
         .iter()
         .all(|def| def.affected == Some(TargetFilter::SelfRef)));
@@ -4221,6 +4552,17 @@ fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
         .contains(&ContinuousModification::AddToughness { value: 3 }));
     assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
     assert_eq!(defs[1].affected, defs[0].affected);
+}
+
+#[test]
+fn parse_continuous_modifications_are_goaded_emits_goaded_static_mode() {
+    let mods = parse_continuous_modifications("are goaded for the rest of the game");
+    assert!(mods.iter().any(|m| matches!(
+        m,
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded
+        }
+    )));
 }
 
 #[test]
@@ -7022,6 +7364,39 @@ fn static_parse_for_each_clause_other_creature() {
 }
 
 #[test]
+fn static_rampant_frogantua_lost_game_multiplier() {
+    let def =
+        parse_static_line("This creature gets +10/+10 for each player who has lost the game.")
+            .expect("Rampant Frogantua lost-game static should parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddDynamicPower { value, .. }
+                    | ContinuousModification::AddDynamicToughness { value, .. }
+                    if matches!(
+                        value,
+                        QuantityExpr::Multiply {
+                            factor: 10,
+                            inner,
+                        } if matches!(
+                            inner.as_ref(),
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::PlayerCount {
+                                    filter: PlayerFilter::HasLostTheGame,
+                                },
+                            }
+                        )
+                    )
+            )
+        }),
+        "expected +10/+10 keyed on HasLostTheGame, got {:?}",
+        def.modifications
+    );
+}
+
+#[test]
 fn static_self_gets_dynamic_power_for_each_creature() {
     // CR 613.4c: "~ gets +1/+0 for each other creature you control"
     let result = parse_static_line("~ gets +1/+0 for each other creature you control.");
@@ -7041,6 +7416,63 @@ fn static_self_gets_dynamic_power_for_each_creature() {
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
         "Should not have AddDynamicToughness for +0"
+    );
+}
+
+#[test]
+fn static_self_gets_dynamic_pt_for_each_unspent_green_mana() {
+    // CR 106.4 + CR 613.4c: Omnath, Locus of Mana — "~ gets +1/+1 for each
+    // unspent green mana you have." The per-mana multiplier was dropped (frozen
+    // at +1/+1); now both P/T modifications scale dynamically with the floating
+    // green mana in the controller's pool via `QuantityRef::UnspentMana`.
+    use crate::types::ability::QuantityRef;
+    let def = parse_static_line("~ gets +1/+1 for each unspent green mana you have.")
+        .expect("Omnath dynamic P/T static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::UnspentMana {
+            color: Some(ManaColor::Green),
+        },
+    };
+    let dynamic_power = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected AddDynamicPower");
+    assert_eq!(
+        dynamic_power, &expected,
+        "power scales with unspent green mana"
+    );
+    let dynamic_toughness = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicToughness { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected AddDynamicToughness");
+    assert_eq!(dynamic_toughness, &expected, "toughness scales too");
+}
+
+#[test]
+fn for_each_clause_unspent_mana() {
+    // Building-block: the for-each quantity parser maps "unspent <color> mana
+    // you have" to UnspentMana{color}, and the colorless "unspent mana you have"
+    // to UnspentMana{None} (all colors).
+    use crate::types::ability::QuantityRef;
+    assert_eq!(
+        crate::parser::oracle_quantity::parse_for_each_clause("unspent green mana you have"),
+        Some(QuantityRef::UnspentMana {
+            color: Some(ManaColor::Green),
+        }),
+    );
+    assert_eq!(
+        crate::parser::oracle_quantity::parse_for_each_clause("unspent mana you have"),
+        Some(QuantityRef::UnspentMana { color: None }),
     );
 }
 
@@ -10305,6 +10737,28 @@ fn cant_cast_spells_with_chosen_name() {
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
+}
+
+#[test]
+fn passive_spells_with_chosen_name_cant_be_cast() {
+    // CR 101.2 + CR 201.2: passive-voice name-lock — Meddling Mage, Nevermore,
+    // Voidstone Gargoyle. "All players" scope (no subject). The active-voice
+    // form ("[subject] can't cast spells with the chosen name") is covered above.
+    for text in [
+        "Spells with the chosen name can't be cast.",
+        "Spells with the chosen name can't be cast",
+    ] {
+        let def = parse_static_line(text)
+            .unwrap_or_else(|| panic!("should parse passive name-lock: {text:?}"));
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: ProhibitionScope::AllPlayers,
+            },
+            "{text:?}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::HasChosenName), "{text:?}");
+    }
 }
 
 #[test]
@@ -14920,4 +15374,275 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
         "anthem form must propagate via AddStaticMode, got {:?}",
         defs[0].modifications
     );
+}
+
+/// CR 611.3 + CR 613.1 + CR 205.4a: A multi-sentence static ability whose
+/// sentences are independent continuous effects (the dual-subject anthem class)
+/// must emit one `StaticDefinition` per sentence, each carrying its own affected
+/// filter and modifications. Regression for Flowering of the White Tree, whose
+/// first-sentence parse previously swallowed the period, mangled the ward cost,
+/// and dropped the entire second sentence.
+///
+/// Discriminating: the legendary half gets +2/+1 AND `ward {1}` (generic 1, NOT
+/// the empty `ward {0}` the swallowed-period bug produced); the nonlegendary
+/// half gets +1/+1 with NO keyword; both halves are restricted to `You`-
+/// controlled creatures so an opponent's legendary creature is unaffected.
+#[test]
+fn multi_sentence_dual_subject_anthem_emits_both_statics() {
+    use crate::types::keywords::WardCost;
+    use crate::types::mana::ManaCost;
+
+    let defs = parse_static_line_multi(
+        "Legendary creatures you control get +2/+1 and have ward {1}. \
+         Nonlegendary creatures you control get +1/+1.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "dual-subject anthem must emit both sentences as separate statics, got {defs:?}"
+    );
+
+    // Legendary half: +2/+1, ward {1}, controller=You, supertype=Legendary.
+    let legendary = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &d.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    })
+            )
+        })
+        .expect("must emit a Legendary-supertype static");
+    assert_eq!(legendary.mode, StaticMode::Continuous);
+    assert!(matches!(
+        &legendary.affected,
+        Some(TargetFilter::Typed(tf))
+            if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters.contains(&TypeFilter::Creature)
+    ));
+    assert!(legendary
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(legendary
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    // Ward cost must be {1} — the swallowed-period bug produced an empty {0}.
+    let ward = legendary
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(WardCost::Mana(cost)),
+            } => Some(cost),
+            _ => None,
+        })
+        .expect("legendary half must grant a mana ward keyword");
+    assert_eq!(
+        ward.mana_value(),
+        1,
+        "ward cost must be {{1}}, got {ward:?}"
+    );
+    assert_ne!(*ward, ManaCost::zero(), "ward cost must not be empty {{0}}");
+
+    // Nonlegendary half: +1/+1, controller=You, NotSupertype(Legendary), no keyword.
+    let nonlegendary = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &d.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::NotSupertype {
+                        value: Supertype::Legendary,
+                    })
+            )
+        })
+        .expect("must emit a NotSupertype(Legendary) static");
+    assert_eq!(nonlegendary.mode, StaticMode::Continuous);
+    assert!(matches!(
+        &nonlegendary.affected,
+        Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::You)
+    ));
+    assert!(nonlegendary
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(nonlegendary
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(
+        !nonlegendary
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })),
+        "nonlegendary half must NOT grant a keyword, got {:?}",
+        nonlegendary.modifications
+    );
+}
+
+/// Regression guard for the multi-sentence splitter: a single-sentence anthem
+/// must still emit exactly ONE static (the splitter only fires for 2+ sentences
+/// that each parse as statics), and trailing non-static prose must not cause a
+/// partial emit.
+#[test]
+fn single_sentence_anthem_unaffected_by_multi_sentence_split() {
+    let defs = parse_static_line_multi("Creatures you control get +1/+1.");
+    assert_eq!(
+        defs.len(),
+        1,
+        "single-sentence anthem must remain one static, got {defs:?}"
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+}
+
+/// CR 611.3a + CR 613.1f: Compound static where the keyword-grant conjunct has
+/// a different subject ("creatures you control") than the P/T conjunct ("~").
+/// Angelic Field Marshal: "As long as you control your commander, ~ gets +2/+2
+/// and creatures you control have vigilance."
+/// Must decompose into TWO StaticDefinitions sharing the same condition:
+///   - def[0]: SelfRef subject, [AddPower(2), AddToughness(2)], condition present
+///   - def[1]: Typed(creatures you control) subject, [AddKeyword(Vigilance)], condition present
+#[test]
+fn compound_static_foreign_keyword_grant_splits_angelic_field_marshal() {
+    let defs = parse_static_line_multi(
+        "As long as you control your commander, ~ gets +2/+2 and creatures you control have vigilance.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected 2 StaticDefinitions (self P/T + foreign keyword), got {defs:?}"
+    );
+
+    // Primary def: self-ref P/T boost with condition.
+    let primary = &defs[0];
+    assert_eq!(primary.mode, StaticMode::Continuous);
+    assert!(
+        matches!(&primary.affected, Some(TargetFilter::SelfRef)),
+        "primary must target SelfRef, got {:?}",
+        primary.affected
+    );
+    assert!(
+        primary
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "primary must add +2 power, got {:?}",
+        primary.modifications
+    );
+    assert!(
+        primary
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "primary must add +2 toughness, got {:?}",
+        primary.modifications
+    );
+    assert!(
+        primary.condition.is_some(),
+        "primary must carry the as-long-as condition"
+    );
+
+    // Companion def: creatures you control get vigilance with same condition.
+    let companion = &defs[1];
+    assert_eq!(companion.mode, StaticMode::Continuous);
+    match &companion.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "companion must affect creatures you control, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("companion affected must be Typed(creatures you control), got {other:?}"),
+    }
+    assert!(
+        companion.modifications.iter().any(|m| matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Vigilance)),
+        "companion must add Vigilance, got {:?}",
+        companion.modifications
+    );
+    assert!(
+        companion.condition.is_some(),
+        "companion must carry the as-long-as condition"
+    );
+}
+
+/// CR 702 + CR 613.1f: Kaldra Compleat — keyword list preceding a quoted
+/// trigger ability must not drop the last bare keyword. `strip_quoted_segments`
+/// removes the `, and "Whenever..."` tail but leaves a trailing comma; all five
+/// keywords (first strike, trample, indestructible, haste, and the trigger)
+/// must survive.
+#[test]
+fn static_keyword_list_before_quoted_trigger_keeps_last_keyword() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +5/+5 and has first strike, trample, indestructible, haste, and \"Whenever this creature deals combat damage to a creature, exile that creature.\"",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    for kw in [
+        Keyword::FirstStrike,
+        Keyword::Trample,
+        Keyword::Indestructible,
+        Keyword::Haste,
+    ] {
+        assert!(
+            mods.iter().any(
+                |m| matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == kw)
+            ),
+            "keyword {kw:?} missing from mods: {mods:?}"
+        );
+    }
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "GrantTrigger missing: {mods:?}"
+    );
+}
+
+#[test]
+fn static_graveyard_cards_have_retrace_during_your_turn() {
+    // Six: "During your turn, nonland permanent cards in your graveyard have retrace."
+    // CR 702.81a: Retrace is a casting keyword granted to cards in a specific zone.
+    // Emits a Continuous static with AddKeyword so the off-zone keyword-grant
+    // path sees the grant and the card becomes castable from the graveyard.
+    let text = "During your turn, nonland permanent cards in your graveyard have retrace.";
+    assert!(
+        parse_spells_have_keyword_for_test(text).is_some(),
+        "parse_spells_have_keyword should handle graveyard-zone keyword grants (Six)"
+    );
+    let def = parse_static_line(text).unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Retrace,
+            }),
+        "Expected AddKeyword(Retrace), got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }),
+                "Expected InZone(Graveyard), got {:?}",
+                tf.properties
+            );
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "Expected Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                "Expected Non(Land) type filter, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
 }

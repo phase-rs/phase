@@ -10,9 +10,9 @@ use super::ability::{
     BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    TriggerCondition,
+    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -360,6 +360,12 @@ pub struct ZoneChangeRecord {
     pub subtypes: Vec<String>,
     pub supertypes: Vec<Supertype>,
     pub keywords: Vec<Keyword>,
+    /// CR 603.10a: Trigger definitions as they last existed on the object.
+    /// Runtime-granted leaves-the-battlefield keyword triggers can be removed
+    /// from the live object before the look-back trigger scan, so the zone-change
+    /// record carries the exact LKI trigger multiset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_definitions: Vec<TriggerDefinition>,
     /// CR 208.1: Power as of the zone change.
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
@@ -497,6 +503,7 @@ impl ZoneChangeRecord {
             subtypes: Vec::new(),
             supertypes: Vec::new(),
             keywords: Vec::new(),
+            trigger_definitions: Vec::new(),
             power: None,
             toughness: None,
             base_power: None,
@@ -941,19 +948,7 @@ pub struct PendingChangeZoneIteration {
     /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
     /// at resolver entry, so the carrier never re-evaluates a `ControllerRef`
     /// across an interactive pause.
-    ///
-    /// Legacy on-disk shape (boolean `under_your_control`) deserializes via
-    /// `deserialize_enters_under_player_compat` (best-effort: legacy `true`
-    /// is mapped to `None` because PlayerId cannot be reconstructed without
-    /// ability context at deser time; a `tracing::warn` flags the audit
-    /// trail). Emission is always the modern shape. The compat path is
-    /// guarded by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` (removed past 0.1.53).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "under_your_control",
-        deserialize_with = "crate::types::ability::deserialize_enters_under_player_compat"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_under_player: Option<PlayerId>,
     pub enters_attacking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -961,6 +956,11 @@ pub struct PendingChangeZoneIteration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
+    /// CR 608.2c: Optional mass-move count carried by `ChangeZoneAll` resume
+    /// paths so a paused Aura host choice still leaves "that many" chained
+    /// effects with the same count the uninterrupted mass path records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_count: Option<i32>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -1058,10 +1058,11 @@ pub struct PendingCounterMoveQueue {
 ///
 /// Shared by every batch flow that delivers many objects to one destination
 /// through the pipeline (mill: library→graveyard/exile/hand; mass bounce:
-/// battlefield→hand/library). Serializes as a plain `{ remaining, destination }`
-/// struct (the type name never appears on the wire), so the rename from the
-/// original mill-only `PendingMillDeliveries` is wire-transparent; the field-name
-/// alias on the holding `GameState` field carries the only readable name change.
+/// battlefield→hand/library; reveal-until library-bottom placement). Serializes
+/// as a plain struct (the type name never appears on the wire), so the rename
+/// from the original mill-only `PendingMillDeliveries` is wire-transparent; the
+/// field-name alias on the holding `GameState` field carries the only readable
+/// name change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
     /// Objects whose per-object zone move has not yet been delivered.
@@ -1086,6 +1087,12 @@ pub struct PendingBatchDeliveries {
     /// Exile-link tracking re-seeded on each rebuilt tail request.
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
+    /// Library placement re-seeded on each rebuilt tail request. `None` means a
+    /// plain library move, which uses the delivery tail's normal library shuffle;
+    /// `Some(Bottom/Top/NthFromTop)` preserves explicit placement batches such as
+    /// reveal-until rest piles across CR 616.1 pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_placement: Option<LibraryPosition>,
     /// Post-batch cleanup that MUST run exactly once after every object in the
     /// batch has been delivered (including across a CR 616.1 pause/resume). The
     /// batch caller stashes it when the batch pauses mid-pile; the drain path
@@ -1373,6 +1380,22 @@ pub enum ZoneDeliveryExileTracking {
 /// (instead of keeping two divergent delivery copies) lets the resume path
 /// route through the shared `deliver` machinery while its epilogue keeps
 /// exclusive ownership of the drain.
+/// CR 730.3e (second clause): the card-component routing override for a TOKEN
+/// merged permanent leaving the battlefield under a card-scoped (`NonToken`)
+/// `Moved` redirect. The token survivor and token components are put into
+/// `default_dest` (the pre-replacement appropriate zone); the card components
+/// are "moved by the replacement effect" to `card_dest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedCardComponentRoute {
+    /// Where the token survivor + token components go — the pre-replacement
+    /// appropriate zone (a card-scoped redirect did not match the token
+    /// survivor, so its own move is unredirected).
+    pub default_dest: Zone,
+    /// Where the card components go — the destination the card-scoped redirect
+    /// resolved to in the single component-aware consult.
+    pub card_dest: Zone,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PostReplacementDrainOwner {
     /// The shared delivery tail (`apply_zone_delivery_tail`) drains the
@@ -1754,7 +1777,7 @@ pub struct PendingManaAbility {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_exiled: Vec<ObjectId>,
     /// CR 117.1 + CR 118.3: Pre-selected battlefield permanents to sacrifice
-    /// as part of an `AbilityCost::Sacrifice { target: !SelfRef }`. Used by
+    /// as part of an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1)`. Used by
     /// Phyrexian Altar and the broader sacrifice-for-mana-by-property class.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_sacrificed_battlefield: Vec<ObjectId>,
@@ -2899,20 +2922,7 @@ pub enum WaitingFor {
         /// `EffectZoneChoice` round-trip. `Some(pid)` routes the chosen
         /// object(s) to `pid` on battlefield entry; `None` leaves them
         /// under their owner's control.
-        ///
-        /// Legacy on-disk shape (boolean `under_your_control`) deserializes
-        /// via `deserialize_enters_under_player_compat` (best-effort: legacy
-        /// `true` is mapped to `None` because PlayerId cannot be reconstructed
-        /// without ability context at deser time; a `tracing::warn` flags the
-        /// audit trail). Emission is always the modern shape. The compat path
-        /// is guarded by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` (removed past
-        /// 0.1.53).
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            alias = "under_your_control",
-            deserialize_with = "crate::types::ability::deserialize_enters_under_player_compat"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_under_player: Option<PlayerId>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enters_attacking: bool,
@@ -3345,6 +3355,11 @@ pub enum WaitingFor {
         /// Number of permanents remaining to sacrifice (for "sacrifice two permanents" etc.)
         #[serde(default = "default_remaining_one")]
         remaining: u32,
+        /// CR 118.12: Multi-select sacrifice whose combined power must meet this
+        /// threshold. `None` = pick exactly one per round-trip until `remaining`
+        /// reaches zero.
+        #[serde(default)]
+        min_total_power: Option<i32>,
     },
     /// CR 118.12: Player must choose permanent(s) to return to hand as unless cost.
     UnlessBounceChoice {
@@ -5602,6 +5617,17 @@ pub struct GameState {
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
     pub exile_play_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 603.7 + CR 611.2a: Tracks `single_use` `PlayFromExile`
+    /// grants whose one allowed cast has already been spent. Keyed by the
+    /// tracked set published by the effect (Chandra, Hope's Beacon +1: "you may
+    /// cast *a/an* [type] spell from among those exiled cards"). Distinct from
+    /// `exile_play_permissions_used`: that set is per-turn and cleared at every
+    /// turn boundary, whereas a single-use grant authorizes ONE cast across its
+    /// entire (possibly multi-turn) duration window, so this set is NOT cleared
+    /// per turn — it is pruned only when the grant itself expires
+    /// (`layers::prune_*_casting_permissions` clears stale tracked-set entries).
+    #[serde(default)]
+    pub exile_play_single_use_consumed: HashSet<TrackedSetId>,
     /// CR 601.2a + CR 113.6b: Tracks `OncePerTurn` `StaticMode::ExileCastPermission`
     /// sources that have already had a spell cast through them this turn
     /// (Maralen, Fae Ascendant — "Once each turn, you may cast …"). Keyed by
@@ -5851,6 +5877,23 @@ pub struct GameState {
     /// mid-prompt save keeps the constraint). Never broaden to skip `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+
+    /// CR 730.3e (second clause): routing override for the card components of a
+    /// TOKEN merged permanent leaving the battlefield under a card-scoped
+    /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
+    /// some of its components are cards, the merged permanent and its token
+    /// components are put into the appropriate [default] zone, and the
+    /// components that are cards are moved by the replacement effect."
+    ///
+    /// Set by `zone_pipeline::deliver_replaced_zone_change` from the single
+    /// component-aware consult immediately before the survivor's
+    /// `zones::move_to_zone`, read by `merge::split_merged_permanent_on_leave`
+    /// to route CARD components to `card_dest` while token components follow the
+    /// survivor's `default_dest`, then cleared. Purely synchronous (set →
+    /// `move_to_zone` split consumes → cleared in the same delivery), so it
+    /// never survives a pause; the serde guard is belt-and-suspenders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_card_component_route: Option<MergedCardComponentRoute>,
 
     /// CR 707.2 + CR 614.1a + CR 616.1: Pending `CopyTokenOf` source loop
     /// paused by an interactive token-creation replacement. Drained by
@@ -6284,6 +6327,14 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
+    /// CR 701.24a: the library placement requested by the original `move_object`
+    /// call whose replacement consult parked here (W3 library-placement arm only).
+    /// `Some` solely for a parked Library-targeting `ZoneChange`; the resume path
+    /// (`handle_replacement_choice`) threads it back into the delivery so the
+    /// object lands at the requested index instead of the tail auto-shuffling it
+    /// away. `None` for every other parked event (the common case).
+    #[serde(default)]
+    pub library_placement: Option<crate::types::ability::LibraryPosition>,
 }
 
 /// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending
@@ -6641,6 +6692,7 @@ impl GameState {
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
             exile_play_permissions_used: HashSet::new(),
+            exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
             cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
@@ -6685,6 +6737,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
             devour_eligible_snapshot: None,
+            merged_card_component_route: None,
             pending_copy_token_resolution: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
@@ -7058,6 +7111,7 @@ impl PartialEq for GameState {
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.exile_play_permissions_used == other.exile_play_permissions_used
+            && self.exile_play_single_use_consumed == other.exile_play_single_use_consumed
             && self.exile_cast_permissions_used == other.exile_cast_permissions_used
             && self.cards_exiled_with_source_this_turn == other.cards_exiled_with_source_this_turn
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
@@ -7986,51 +8040,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // CR 110.2a: serde-compat coverage for the resolved-once runtime carriers
+    // CR 110.2a: serde coverage for the resolved-once runtime carriers
     // (`PendingChangeZoneIteration` and `WaitingFor::EffectZoneChoice`).
-    // Modern shape is `Option<PlayerId>` on `enters_under_player`; the
-    // legacy on-disk shape is the boolean `under_your_control`. Routed via
-    // `#[serde(alias)]` + `deserialize_enters_under_player_compat`. Legacy
-    // `true` collapses to `None` (+ tracing::warn) because PlayerId cannot
-    // be reconstructed at deser time without ability context. See
-    // `LEGACY_DESER_ETB_CONTROLLER_2026Q2`.
     // ---------------------------------------------------------------------
-
-    /// Minimal JSON payload for a `PendingChangeZoneIteration` carrying a
-    /// custom `enters_under_player` slot (passed through verbatim).
-    fn pending_change_zone_iteration_json(enters_under_slot: &str) -> String {
-        format!(
-            r#"{{
-                "remaining": [],
-                "source_id": 7,
-                "controller": 0,
-                "origin": null,
-                "destination": "Battlefield",
-                "enter_transformed": false,
-                "enter_tapped": false,
-                {enters_under_slot}
-                "enters_attacking": false,
-                "track_exiled_by_source": false,
-                "effect_kind": "ChangeZone"
-            }}"#
-        )
-    }
-
-    #[test]
-    fn pending_change_zone_iteration_legacy_bool_true_deserializes_to_none() {
-        let json = pending_change_zone_iteration_json(r#""under_your_control": true,"#);
-        let parsed: PendingChangeZoneIteration =
-            serde_json::from_str(&json).expect("legacy true should deserialize");
-        assert_eq!(parsed.enters_under_player, None);
-    }
-
-    #[test]
-    fn pending_change_zone_iteration_legacy_bool_false_deserializes_to_none() {
-        let json = pending_change_zone_iteration_json(r#""under_your_control": false,"#);
-        let parsed: PendingChangeZoneIteration =
-            serde_json::from_str(&json).expect("legacy false should deserialize");
-        assert_eq!(parsed.enters_under_player, None);
-    }
 
     #[test]
     fn pending_change_zone_iteration_modern_shape_roundtrips() {
@@ -8047,6 +8059,7 @@ mod tests {
             enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
+            moved_count: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -8055,64 +8068,9 @@ mod tests {
             json.contains("\"enters_under_player\""),
             "expected modern field name in: {json}"
         );
-        assert!(
-            !json.contains("\"under_your_control\""),
-            "legacy field must not be emitted: {json}"
-        );
         let parsed: PendingChangeZoneIteration = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.enters_under_player, Some(PlayerId(1)));
         assert_eq!(parsed, original);
-    }
-
-    /// Minimal JSON payload for `WaitingFor::EffectZoneChoice` carrying a
-    /// custom `enters_under_player` slot (passed through verbatim).
-    /// `WaitingFor` uses `#[serde(tag = "type", content = "data")]`, so the
-    /// variant body is wrapped in `"data": { ... }`.
-    fn effect_zone_choice_json(enters_under_slot: &str) -> String {
-        format!(
-            r#"{{
-                "type": "EffectZoneChoice",
-                "data": {{
-                    "player": 0,
-                    "cards": [],
-                    "count": 1,
-                    "source_id": 10,
-                    "effect_kind": "ChangeZone",
-                    "zone": "Hand",
-                    "destination": "Battlefield",
-                    {enters_under_slot}
-                    "count_param": 0
-                }}
-            }}"#
-        )
-    }
-
-    #[test]
-    fn effect_zone_choice_legacy_bool_true_deserializes_to_none() {
-        let json = effect_zone_choice_json(r#""under_your_control": true,"#);
-        let parsed: WaitingFor =
-            serde_json::from_str(&json).expect("legacy true should deserialize");
-        match parsed {
-            WaitingFor::EffectZoneChoice {
-                enters_under_player,
-                ..
-            } => assert_eq!(enters_under_player, None),
-            other => panic!("expected EffectZoneChoice, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn effect_zone_choice_legacy_bool_false_deserializes_to_none() {
-        let json = effect_zone_choice_json(r#""under_your_control": false,"#);
-        let parsed: WaitingFor =
-            serde_json::from_str(&json).expect("legacy false should deserialize");
-        match parsed {
-            WaitingFor::EffectZoneChoice {
-                enters_under_player,
-                ..
-            } => assert_eq!(enters_under_player, None),
-            other => panic!("expected EffectZoneChoice, got {other:?}"),
-        }
     }
 
     #[test]
@@ -8140,10 +8098,6 @@ mod tests {
         assert!(
             json.contains("\"enters_under_player\""),
             "expected modern field name in: {json}"
-        );
-        assert!(
-            !json.contains("\"under_your_control\""),
-            "legacy field must not be emitted: {json}"
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);

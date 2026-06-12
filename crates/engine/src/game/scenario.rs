@@ -1036,21 +1036,11 @@ impl<'a> CardBuilder<'a> {
         let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
         let obj = self.state.objects.get_mut(&self.id).unwrap();
         apply_card_face_to_object(obj, &face);
-        // CR 603.6a: `create_object` registers the trigger index before Oracle
-        // text is applied. Re-index after `from_oracle_text` so scenario-seeded
-        // triggers (e.g. upkeep lines added via `add_creature_from_oracle`) fire.
+        // CR 603.6a: Scenario seeding uses `create_object` + `add_to_zone`, not
+        // `move_to_zone`, so ETB registration never runs. Re-index after Oracle
+        // text is applied so synthesized upkeep triggers are consultable.
         if zone == Zone::Battlefield {
-            let object_id = self.id;
-            let registration = self.state.objects.get(&object_id).map(|obj| {
-                let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
-                    obj.trigger_definitions.as_slice().iter().cloned().collect();
-                let synthetic = crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
-                (defs, synthetic)
-            });
-            if let Some((defs, synthetic)) = registration {
-                self.state.trigger_index.remove(object_id);
-                self.state.trigger_index.add(object_id, &defs, synthetic);
-            }
+            crate::game::trigger_index::reindex_object_triggers(self.state, self.id);
         }
         self
     }
@@ -1684,6 +1674,7 @@ pub struct SpellCast<'a> {
     target_players: Vec<PlayerId>,
     target_objects: Vec<ObjectId>,
     convoke_with: Vec<ObjectId>,
+    optional: OptionalPolicy,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1697,7 +1688,21 @@ impl<'a> SpellCast<'a> {
             target_players: Vec::new(),
             target_objects: Vec::new(),
             convoke_with: Vec::new(),
+            optional: OptionalPolicy::default(),
         }
+    }
+
+    /// Accept optional ("you may") effects/costs during resolution
+    /// (CR 609.3 / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
+        self
+    }
+
+    /// Decline optional ("you may") effects/costs during resolution.
+    pub fn decline_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Decline;
+        self
     }
 
     /// Declare the modal "choose N" mode indices for a modal spell (CR 700.2).
@@ -1769,6 +1774,7 @@ impl<'a> SpellCast<'a> {
             target_players,
             target_objects,
             convoke_with,
+            optional,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1936,6 +1942,7 @@ impl<'a> SpellCast<'a> {
             remaining_objects,
             declared_players,
             selected_casting_variant,
+            optional,
         }
     }
 
@@ -1958,6 +1965,7 @@ pub struct CastCommit<'a> {
     remaining_objects: Vec<ObjectId>,
     declared_players: Vec<PlayerId>,
     selected_casting_variant: Option<CastingVariantChoiceOption>,
+    optional: OptionalPolicy,
 }
 
 impl<'a> CastCommit<'a> {
@@ -1980,6 +1988,7 @@ impl<'a> CastCommit<'a> {
             life_before,
             remaining_objects,
             declared_players,
+            optional,
             ..
         } = self;
 
@@ -1994,6 +2003,7 @@ impl<'a> CastCommit<'a> {
         let policy = ResolutionPolicy {
             targets_objects: remaining_objects,
             targets_players: declared_players,
+            optional,
             ..ResolutionPolicy::default()
         };
         drive_resolution(runner, &policy);

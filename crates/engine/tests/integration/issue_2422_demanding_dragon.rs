@@ -127,7 +127,7 @@ fn demanding_dragon_parsed_etb_carries_unless_sacrifice_for_target_player() {
         .as_ref()
         .expect("ETB must carry unless_pay (#2422)");
     assert_eq!(unless_pay.payer, TargetFilter::Player);
-    assert!(matches!(unless_pay.cost, AbilityCost::Sacrifice { .. }));
+    assert!(matches!(unless_pay.cost, AbilityCost::Sacrifice(_)));
 }
 
 #[test]

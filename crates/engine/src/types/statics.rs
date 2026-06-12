@@ -582,6 +582,22 @@ pub enum CrewAction {
     Station,
 }
 
+/// Which combat action the `CombatAlone` restriction governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatAloneAction {
+    Attack,
+    Block,
+}
+
+/// The polarity of a `CombatAlone` static.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatAloneRequirement {
+    /// "can't X alone" — the creature must NOT be the sole attacker/blocker.
+    NeedsCompanion,
+    /// "can only X alone" — the creature must BE the sole attacker; companions are prohibited.
+    MustBeSole,
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1133,8 +1149,17 @@ pub enum StaticMode {
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
     Goaded,
-    CantAttackAlone,
-    CantBlockAlone,
+    /// CR 506.5 + CR 508.1c + CR 509.1b: Parameterized "alone" combat
+    /// restriction.  `action` selects whether it applies to attacking or
+    /// blocking; `requirement` selects the polarity:
+    /// - `NeedsCompanion` → "can't attack/block alone" (Bonded Construct,
+    ///   Mogg Flunkies) — the creature must NOT be the sole attacker/blocker.
+    /// - `MustBeSole` → "can only attack alone" (Master of Cruelties) — the
+    ///   creature must BE the sole attacker; no companions allowed.
+    CombatAlone {
+        action: CombatAloneAction,
+        requirement: CombatAloneRequirement,
+    },
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
     /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
@@ -1499,8 +1524,7 @@ impl StaticMode {
             | StaticMode::MustBeBlocked
             | StaticMode::MustBeBlockedByAll
             | StaticMode::Goaded
-            | StaticMode::CantAttackAlone
-            | StaticMode::CantBlockAlone
+            | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
             | StaticMode::CrewContribution { .. }
             | StaticMode::MayLookAtTopOfLibrary
@@ -1736,8 +1760,20 @@ impl fmt::Display for StaticMode {
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
-            StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
-            StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
+            StaticMode::CombatAlone {
+                action,
+                requirement,
+            } => {
+                let a = match action {
+                    CombatAloneAction::Attack => "Attack",
+                    CombatAloneAction::Block => "Block",
+                };
+                let r = match requirement {
+                    CombatAloneRequirement::NeedsCompanion => "NeedsCompanion",
+                    CombatAloneRequirement::MustBeSole => "MustBeSole",
+                };
+                write!(f, "CombatAlone({a},{r})")
+            }
             StaticMode::CantCrew => write!(f, "CantCrew"),
             // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
             StaticMode::CrewContribution { kind, actions } => {
@@ -2081,8 +2117,18 @@ impl FromStr for StaticMode {
             "MustBeBlocked" => StaticMode::MustBeBlocked,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
-            "CantAttackAlone" => StaticMode::CantAttackAlone,
-            "CantBlockAlone" => StaticMode::CantBlockAlone,
+            "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            "CombatAlone(Block,NeedsCompanion)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            "CombatAlone(Attack,MustBeSole)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            },
             "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             // Tier 3
@@ -2564,8 +2610,18 @@ mod tests {
             StaticMode::CantTap,
             StaticMode::CantUntap,
             StaticMode::MustBeBlocked,
-            StaticMode::CantAttackAlone,
-            StaticMode::CantBlockAlone,
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            },
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // Tier 3: parser-produced statics

@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::multispace1;
+use nom::character::complete::{multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -378,12 +378,23 @@ fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
 }
 
 fn parse_becomes_plotted_continuation(lower: &str) -> bool {
-    let text = lower.trim().trim_end_matches('.').trim(); // allow-noncombinator: punctuation cleanup before all_consuming
-    all_consuming(alt((
-        value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
-        value((), tag("that card becomes plotted")),
-        value((), tag("they become plotted")),
-    )))
+    // allow-noncombinator: punctuation cleanup before all_consuming
+    let text = lower.trim().trim_end_matches('.').trim();
+    // CR 702.170c-d: Accept an optional "if you do," gate. The Plot-grant
+    // cards read "You may exile a card. If you do, it becomes plotted." The
+    // continuation already attaches after the optional exile instruction, so
+    // the prefix is part of the same plotted-card continuation grammar.
+    all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag::<_, _, OracleError<'_>>("if you do "),
+        ))),
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
+            value((), tag("that card becomes plotted")),
+            value((), tag("they become plotted")),
+        )),
+    ))
     .parse(text)
     .is_ok()
 }
@@ -711,6 +722,21 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
                             .parse(remainder_trimmed)
                             .is_ok();
+                    // CR 705 + CR 707.10c: Comma splitting already keeps `if …`
+                    // prefix clauses intact (see `starts_prefix_clause` in
+                    // `split_comma_clause_boundary`), but a blocked comma leaves
+                    // `, and ` in the buffer — which then hits this bare-`and`
+                    // path and bisects the body anyway. Krark, the Thumbless:
+                    // "If you win the flip, copy that spell, and you may choose
+                    // new targets for the copy" must reach coin-flip branch
+                    // parsing as one chunk so the CopyMayRetarget continuation
+                    // absorbs the retarget grant. Only suppress when the ` and `
+                    // immediately follows a comma inside a prefix clause — bare
+                    // ` and ` without a comma (Chain cycle, many copies) must still
+                    // split so the retarget grant reaches followup absorption.
+                    let trimmed_before = before_lower.trim_end();
+                    let inside_prefix_comma_and_continuation = trimmed_before.ends_with(',')
+                        && starts_prefix_clause(trimmed_before.trim_end_matches(',').trim_end());
                     let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -724,7 +750,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_otherwise_body
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
-                        || roll_die_modifier_continuation;
+                        || roll_die_modifier_continuation
+                        || inside_prefix_comma_and_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -1816,20 +1843,23 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - singular/plural target ("a new target" / "new targets").
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
-fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    let clause = lower.trim().trim_end_matches('.').trim_end();
+pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
     value(
         (),
         (
-            opt(tag::<_, _, OracleError<'_>>("you ")),
+            multispace0,
+            opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
+            opt(tag("you ")),
             tag("may choose "),
             alt((tag("a new target "), tag("new targets "))),
             tag("for "),
             alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            opt(alt((tag("."), tag(",")))),
+            multispace0,
             eof,
         ),
     )
-    .parse(clause)
+    .parse(lower.trim())
     .is_ok()
 }
 
@@ -3233,6 +3263,7 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
                 toughness,
                 extra_core_types,
                 subtypes,
+                ward: None,
             });
         }
         // Extra core type word (Creature excluded — always implicit).
@@ -3310,6 +3341,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3: turning the exiled card face up is its own resolving effect,
+        // not a Dig-lookback-transparent clause.
+        Effect::TurnFaceUp { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
@@ -3338,6 +3372,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
@@ -3365,6 +3400,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::Encore
+        | Effect::Meld { .. }
         | Effect::ExileHaunting { .. }
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
@@ -3455,6 +3491,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
@@ -5019,6 +5056,39 @@ mod tests {
 
     // --- CR 707.10c: copy-retarget clause recognition ---
 
+    /// CR 707.10c: Bare ` and ` (no comma) inside an `if` clause must still split.
+    #[test]
+    fn if_clause_bare_and_copy_retarget_splits() {
+        let text = "if you win the flip, copy that spell and may choose new targets for the copy";
+        let chunks = clause_texts(text);
+        assert_eq!(
+            chunks,
+            vec![
+                "if you win the flip, copy that spell",
+                "may choose new targets for the copy"
+            ]
+        );
+    }
+
+    /// CR 705 + CR 707.10c: Krark, the Thumbless — coin-flip win branch must not
+    /// bare-`and` split off the copy-retarget grant.
+    #[test]
+    fn krark_coin_flip_win_branch_stays_single_chunk() {
+        let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+        let chunks = clause_texts(text);
+        assert_eq!(
+            chunks.len(),
+            3,
+            "expected three sentence chunks, got {chunks:?}"
+        );
+        assert!(
+            nom_primitives::scan_contains(&chunks[2].to_ascii_lowercase(), "choose new targets "),
+            "win chunk must include retarget clause: {:?}",
+            chunks[2]
+        );
+    }
+
     #[test]
     fn recognize_copy_retarget_clause_variants() {
         // Fork / Twincast — "You may choose new targets for the copy/copies."
@@ -5037,6 +5107,9 @@ mod tests {
             "you may choose a new target for that copy."
         ));
         // Negatives.
+        assert!(recognize_copy_retarget_clause(
+            "and you may choose new targets for the copy"
+        ));
         assert!(!recognize_copy_retarget_clause("copy that spell"));
         assert!(!recognize_copy_retarget_clause(
             "may choose a new target for the creature"

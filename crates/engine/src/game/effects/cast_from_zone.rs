@@ -257,6 +257,28 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 614.1a: Toshiro / Torrential Gearhulk class — the parser currently
+/// represents "If that spell would be put into a graveyard, exile it instead"
+/// as a sequential `ChangeZone` rider on `CastFromZone`. Runtime consumes that
+/// rider as permission metadata, not as an immediate zone move.
+pub(crate) fn is_graveyard_exile_rider_subability(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
+}
+
+fn cast_from_zone_has_graveyard_exile_rider(ability: &ResolvedAbility) -> bool {
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(is_graveyard_exile_rider_subability)
+}
+
 /// CR 118.9: Stamp `ExileWithAltCost` / `ExileWithAltAbilityCost` on resolved
 /// targets. Shared by the direct resolve path and the `EffectZoneChoice` resume
 /// path (Electrodominance hand pick).
@@ -284,6 +306,7 @@ pub(crate) fn grant_lingering_permissions(
             ),
             _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
         };
+    let exile_instead_of_graveyard_on_resolve = cast_from_zone_has_graveyard_exile_rider(ability);
 
     for &obj_id in target_ids {
         // CR 601.2a: Impulse-draw and similar grants move non-exile cards to
@@ -346,6 +369,7 @@ pub(crate) fn grant_lingering_permissions(
                     duration: duration.clone().or_else(|| {
                         (current_zone == Some(Zone::Graveyard)).then_some(Duration::UntilEndOfTurn)
                     }),
+                    exile_instead_of_graveyard_on_resolve,
                 }
             };
             if !obj.casting_permissions.contains(&permission) {
@@ -719,8 +743,13 @@ mod tests {
         );
 
         let mut events = vec![];
-        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
+        assert_eq!(
+            state.objects[&instant].zone,
+            Zone::Exile,
+            "linked exile cards stay in exile while the cast permission is stamped"
+        );
         assert!(state.objects[&instant]
             .casting_permissions
             .iter()
@@ -868,6 +897,65 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn graveyard_cast_exile_rider_stamps_permission_flag() {
+        let mut state = make_test_state();
+        let instant = {
+            let obj_id = add_card_to_graveyard(&mut state, PlayerId(0), CardId(2937));
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj_id
+        };
+
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+            },
+            vec![TargetRef::Object(instant)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        )));
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.objects[&instant]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    exile_instead_of_graveyard_on_resolve: true,
+                    ..
+                }
+            )));
     }
 
     #[test]

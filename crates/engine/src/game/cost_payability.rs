@@ -1,9 +1,13 @@
-//! CR 601.2b: Cost-payability pre-gate.
+//! CR 118.3 + CR 601.2h: Cost-payability pre-gate.
 //!
 //! A single predicate over `AbilityCost` that answers "can this cost be paid
-//! right now, given the current game state?" for cost variants where CR 601.2b
-//! applies — specifically, costs that require the player to *choose an object*
-//! and where no legal object exists.
+//! right now, given the current game state?" — CR 118.3 ("A player can't pay a
+//! cost without having the necessary resources to pay it fully") and CR 601.2h
+//! ("Partial payments are not allowed. Unpayable costs can't be paid"). It
+//! covers costs that require the player to *choose an object* where no legal
+//! object exists, and hard resource checks (life, energy, counters). (The prior
+//! attribution to CR 601.2b was wrong: 601.2b is modal/X *announcement*, not
+//! resource payability.)
 //!
 //! This is the authoritative gate consulted before:
 //!   - Offering an `OptionalCostChoice` prompt (if unpayable, the prompt is skipped).
@@ -64,6 +68,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
@@ -126,6 +131,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
@@ -205,9 +211,12 @@ impl AbilityCost {
         }
     }
 
-    /// CR 601.2b: Returns true if this cost can be paid given the current game
-    /// state. Returns false only when the cost requires a choice of object and
-    /// no legal object exists, or a hard resource check fails (e.g., life total).
+    /// CR 118.3 + CR 601.2h: Returns true if this cost can be paid given the
+    /// current game state. Returns false only when the cost requires a choice of
+    /// object and no legal object exists, or a hard resource check fails (e.g.,
+    /// life total) — CR 118.3 "necessary resources to pay it fully" / CR 601.2h
+    /// "unpayable costs can't be paid". (CR 601.2b is modal/X announcement, not
+    /// resource payability.)
     ///
     /// Mana affordability is NOT checked here; CR 601.2g handles the mana step
     /// separately through the mana-payment flow.
@@ -236,21 +245,49 @@ impl AbilityCost {
             }
             // CR 601.2b: Sacrifice requires a choice of permanent; self-sacrifice
             // is always payable so long as the source exists on the battlefield.
-            AbilityCost::Sacrifice { target, count } => {
-                if matches!(target, TargetFilter::SelfRef) {
-                    return state
-                        .objects
-                        .get(&source)
-                        .is_some_and(|o| o.zone == Zone::Battlefield)
-                        && !super::static_abilities::player_cant_sacrifice_as_cost(
-                            state, player, source,
-                        );
+            AbilityCost::Sacrifice(cost) => match &cost.requirement {
+                crate::types::ability::SacrificeRequirement::Count { count } => {
+                    if matches!(cost.target, TargetFilter::SelfRef) {
+                        return state
+                            .objects
+                            .get(&source)
+                            .is_some_and(|o| o.zone == Zone::Battlefield)
+                            && !super::static_abilities::player_cant_sacrifice_as_cost(
+                                state, player, source,
+                            );
+                    }
+                    let eligible = super::casting::find_eligible_sacrifice_targets(
+                        state,
+                        player,
+                        source,
+                        &cost.target,
+                    );
+                    let (min_count, _) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    eligible.len() >= min_count
                 }
-                let eligible =
-                    super::casting::find_eligible_sacrifice_targets(state, player, source, target);
-                let (min_count, _) = super::casting::sacrifice_cost_bounds(*count, eligible.len());
-                eligible.len() >= min_count
-            }
+                crate::types::ability::SacrificeRequirement::Aggregate {
+                    stat,
+                    comparator,
+                    value,
+                } => {
+                    let eligible = super::casting::find_eligible_sacrifice_targets(
+                        state,
+                        player,
+                        source,
+                        &cost.target,
+                    );
+                    let total_positive_power: i32 = match stat {
+                        crate::types::ability::SacrificeAggregateStat::TotalPower => eligible
+                            .iter()
+                            .filter_map(|id| state.objects.get(id))
+                            .map(|obj| obj.power.unwrap_or(0))
+                            .filter(|&p| p > 0)
+                            .sum(),
+                    };
+                    comparator.evaluate(total_positive_power, *value)
+                }
+            },
             // CR 119.4 + CR 119.8 + CR 903.4: Life cost is payable iff life >= amount
             // and "can't lose life" locks do not apply. `amount` is a QuantityExpr
             // so dynamic refs (e.g. commander color identity count) resolve at
@@ -749,7 +786,8 @@ mod tests {
     use super::*;
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
-        ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+        ControllerRef, FilterProp, QuantityExpr, SacrificeCost, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::mana::ManaCost;
 
@@ -952,10 +990,7 @@ mod tests {
     fn sacrifice_self_ref_requires_battlefield() {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Bear", 2, 2).id();
-        let cost = AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count: 1,
-        };
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
         assert!(cost.is_payable(&scenario.state, P0, src));
         // Move source off battlefield.
         scenario.state.objects.get_mut(&src).unwrap().zone = Zone::Graveyard;
@@ -966,18 +1001,16 @@ mod tests {
     fn sacrifice_non_self_requires_eligible_permanent() {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Source", 0, 1).id();
-        let cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            count: 1,
-        };
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        ));
         assert!(cost.is_payable(&scenario.state, P0, src));
 
-        let another_cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Another]),
-            ),
-            count: 1,
-        };
+        let another_cost = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another])),
+            1,
+        ));
         assert!(!another_cost.is_payable(&scenario.state, P0, src));
 
         scenario.add_creature(P0, "Bear", 2, 2);
@@ -989,10 +1022,10 @@ mod tests {
     fn variable_sacrifice_cost_is_payable_with_zero_or_more_matches() {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Chatterfang", 3, 3).id();
-        let cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Squirrel".into()))),
-            count: u32::MAX,
-        };
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Squirrel".into()))),
+            u32::MAX,
+        ));
 
         assert!(
             cost.is_payable(&scenario.state, P0, src),

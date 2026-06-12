@@ -4665,6 +4665,8 @@ fn apply_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                scope,
+                current_targets,
                 legal_new_targets,
                 ..
             },
@@ -4672,10 +4674,14 @@ fn apply_action(
         ) => apply_retarget(
             state,
             &mut events,
-            *player,
-            *stack_entry_index,
-            legal_new_targets,
-            new_targets,
+            RetargetSubmission {
+                player: *player,
+                stack_entry_index: *stack_entry_index,
+                scope,
+                current_targets,
+                legal_new_targets,
+                new_targets,
+            },
         )?,
         // CR 115.7: Retarget a single-target spell via a board click. The
         // universal `ChooseTarget` action — already consumed by every other
@@ -4687,6 +4693,7 @@ fn apply_action(
                 player,
                 stack_entry_index,
                 scope: RetargetScope::Single,
+                current_targets,
                 legal_new_targets,
                 ..
             },
@@ -4694,10 +4701,14 @@ fn apply_action(
         ) => apply_retarget(
             state,
             &mut events,
-            *player,
-            *stack_entry_index,
-            legal_new_targets,
-            vec![t],
+            RetargetSubmission {
+                player: *player,
+                stack_entry_index: *stack_entry_index,
+                scope: &RetargetScope::Single,
+                current_targets,
+                legal_new_targets,
+                new_targets: vec![t],
+            },
         )?,
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
@@ -4752,6 +4763,15 @@ fn apply_action(
     })
 }
 
+struct RetargetSubmission<'a> {
+    player: PlayerId,
+    stack_entry_index: usize,
+    scope: &'a RetargetScope,
+    current_targets: &'a [TargetRef],
+    legal_new_targets: &'a [TargetRef],
+    new_targets: Vec<TargetRef>,
+}
+
 /// CR 115.7d: Apply a validated retarget to the stack entry, then hand priority
 /// back to the retargeting player. Single authority for both retarget entry
 /// points — the board-click (`ChooseTarget`) and dialog (`RetargetSpell`) paths
@@ -4759,16 +4779,54 @@ fn apply_action(
 fn apply_retarget(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-    player: PlayerId,
-    stack_entry_index: usize,
-    legal_new_targets: &[TargetRef],
-    new_targets: Vec<TargetRef>,
+    submission: RetargetSubmission<'_>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 115.7d: Every submitted target must be in the legal set.
-    for t in &new_targets {
-        if !legal_new_targets.contains(t) {
+    let RetargetSubmission {
+        player,
+        stack_entry_index,
+        scope,
+        current_targets,
+        legal_new_targets,
+        new_targets,
+    } = submission;
+
+    match scope {
+        RetargetScope::Single => {
+            if new_targets.len() != 1 {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: single-target change requires exactly one target".to_string(),
+                ));
+            }
+            if !legal_new_targets.contains(&new_targets[0]) {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: chosen target not in legal alternatives".to_string(),
+                ));
+            }
+        }
+        RetargetScope::All => {
+            if new_targets.len() != current_targets.len() {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: choose-new-targets submission must preserve target count"
+                        .to_string(),
+                ));
+            }
+            // CR 115.7d: For "choose new targets", unchanged targets may remain
+            // unchanged even if they are no longer legal. Changed targets still
+            // must be legal alternatives.
+            for (idx, target) in new_targets.iter().enumerate() {
+                if current_targets.get(idx) == Some(target) {
+                    continue;
+                }
+                if !legal_new_targets.contains(target) {
+                    return Err(EngineError::InvalidAction(
+                        "Retarget: chosen target not in legal alternatives".to_string(),
+                    ));
+                }
+            }
+        }
+        RetargetScope::ForcedTo(_) => {
             return Err(EngineError::InvalidAction(
-                "Retarget: chosen target not in legal alternatives".to_string(),
+                "Retarget: forced retarget is not interactive".to_string(),
             ));
         }
     }
@@ -5270,6 +5328,8 @@ fn handle_play_land(
                         source_id: None,
                         exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                        // This resume delivery is not a library placement.
+                        library_placement: None,
                     },
                     events,
                 ) {
@@ -6637,6 +6697,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
@@ -6667,6 +6728,64 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    #[test]
+    fn choose_new_targets_all_allows_unchanged_illegal_target() {
+        let mut state = GameState::new_two_player(42);
+        let stack_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
+        let unchanged = TargetRef::Object(ObjectId(901));
+        let legal_alternative = TargetRef::Object(ObjectId(902));
+        let stack_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![unchanged.clone()],
+            stack_id,
+            PlayerId(1),
+        );
+        state.stack.push_back(StackEntry {
+            id: stack_id,
+            source_id: stack_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(stack_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.waiting_for = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: RetargetScope::All,
+            current_targets: vec![unchanged.clone()],
+            legal_new_targets: vec![legal_alternative],
+        };
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RetargetSpell {
+                new_targets: vec![unchanged.clone()],
+            },
+        )
+        .expect("unchanged targets do not need to be legal for choose-new-targets");
+
+        let targets = state
+            .stack
+            .front()
+            .and_then(|entry| entry.ability())
+            .map(|ability| ability.targets.clone())
+            .expect("spell remains on stack");
+        assert_eq!(targets, vec![unchanged]);
     }
 
     #[test]
@@ -8227,6 +8346,79 @@ mod tests {
             "issue #1581: Thriving Grove must ENTER TAPPED (enter_tapped replacement \
              applied), not just resolve the colour choice"
         );
+    }
+
+    /// Issue #2933: Black Dragon Gate must offer {B} and the as-enters chosen
+    /// color when tapped — not only the chosen color.
+    #[test]
+    fn black_dragon_gate_tap_offers_fixed_black_or_chosen_color() {
+        use crate::game::mana_sources::activatable_land_mana_options;
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::mana::ManaType;
+
+        let mut state = setup_game_at_main_phase();
+        let gate = create_object(
+            &mut state,
+            CardId(347),
+            PlayerId(0),
+            "Black Dragon Gate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&gate).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Gate".to_string());
+        }
+        apply_oracle_to_object(
+            &mut state,
+            gate,
+            "Black Dragon Gate",
+            "This land enters tapped.\nAs this land enters, choose a color other than black.\n{T}: Add {B} or one mana of the chosen color.",
+        );
+        state
+            .objects
+            .get_mut(&gate)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+
+        let options = activatable_land_mana_options(&state, gate, PlayerId(0));
+        let types: Vec<ManaType> = options.iter().map(|o| o.mana_type).collect();
+        assert!(
+            types.contains(&ManaType::Black),
+            "Black Dragon Gate must offer {{B}}, got {types:?}"
+        );
+        assert!(
+            types.contains(&ManaType::Red),
+            "Black Dragon Gate must offer chosen Red, got {types:?}"
+        );
+        assert_eq!(types.len(), 2);
+
+        let tap_black = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: gate,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(tap_black.waiting_for, WaitingFor::ChooseManaColor { .. }),
+            "two-color Gate must prompt before producing mana, got {:?}",
+            tap_black.waiting_for
+        );
+
+        let resolved = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Black),
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.objects[&gate].tapped);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
     }
 
     #[test]
@@ -19721,11 +19913,12 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     /// CR 702.24a: cumulative upkeep cost format is `[cost]` where `[cost]`
     /// may be any cost. Sacrifice-a-land is the canonical non-mana variant
     /// (Polar Kraken, Phyrexian Soulgorger).
+    use crate::types::ability::SacrificeCost;
+
     fn cumulative_upkeep_sacrifice_land_trigger() -> TriggerDefinition {
-        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::land()),
-            count: 1,
-        })
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice(
+            SacrificeCost::count(TargetFilter::Typed(TypedFilter::land()), 1),
+        ))
     }
 
     /// Construct a solo state with Polar Kraken on the battlefield (controller
@@ -19809,10 +20002,14 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             WaitingFor::UnlessPayment { player, cost, .. } => {
                 assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
                 match cost {
-                    AbilityCost::Sacrifice { target, count } => {
-                        assert_eq!(*count, 1, "1 age counter × base count 1 = 1");
+                    AbilityCost::Sacrifice(cost) => {
                         assert_eq!(
-                            *target,
+                            cost.requirement.fixed_count(),
+                            Some(1),
+                            "1 age counter × base count 1 = 1"
+                        );
+                        assert_eq!(
+                            cost.target,
                             TargetFilter::Typed(TypedFilter::land()),
                             "unless-cost target filter must remain Land"
                         );

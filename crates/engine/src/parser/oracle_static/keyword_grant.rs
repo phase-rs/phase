@@ -312,7 +312,25 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         }
         return Some(def);
     }
-
+    // Pattern 3: "[type] cards in/from [your zone] have [keyword]"
+    // CR 702.81a (Retrace): Grants a casting keyword to cards in a specific zone.
+    // Six grants retrace to nonland permanent cards in your graveyard.
+    // Emits a Continuous static with AddKeyword so the off-zone keyword-grant
+    // path (`effective_off_zone_keywords`) sees the grant and the card becomes
+    // castable from the graveyard.
+    {
+        let (base_filter, rest) = parse_type_phrase(subject);
+        if rest.trim().is_empty() && target_filter_is_your_graveyard(&base_filter) {
+            let mut def = StaticDefinition::continuous()
+                .affected(base_filter)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(text.to_string());
+            if let Some(condition) = condition.clone() {
+                def = def.condition(condition);
+            }
+            return Some(def);
+        }
+    }
     None
 }
 
@@ -576,6 +594,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         "assigns combat damage equal to its toughness rather than its power",
     ) {
         modifications.push(ContinuousModification::AssignDamageFromToughness);
+    }
+
+    // CR 701.15b: Positive goaded designation on token anaphors and compound
+    // statics ("The tokens are goaded for the rest of the game", Life of the
+    // Party; "Enchanted creature … is goaded").
+    if nom_primitives::scan_contains(unquoted_lower.as_str(), "is goaded")
+        || nom_primitives::scan_contains(unquoted_lower.as_str(), "are goaded")
+    {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        });
     }
 
     // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
@@ -888,7 +917,11 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
 
 /// CR 702: Split a keyword list like "flying and first strike" into individual keywords.
 pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
-    let text = text.trim().trim_end_matches('.');
+    // Strip both trailing periods and trailing commas. A comma tail arises when
+    // `strip_quoted_segments` removes `and "Whenever..."` from the end of a list
+    // like "has first strike, trample, haste, and \"Whenever...\""— the connector
+    // `, and` is dropped but the comma after the last bare keyword remains.
+    let text = text.trim().trim_end_matches(['.', ',']).trim();
     // Split on ", and/or ", ", and ", " and ", or ", " — longest-match-first
     // ordering prevents ", and " from consuming the prefix of ", and/or ".
     let mut parts: Vec<&str> = Vec::new();

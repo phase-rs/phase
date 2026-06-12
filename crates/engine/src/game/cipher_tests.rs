@@ -68,6 +68,66 @@ fn finish_encode_exiles_card_and_records_link() {
     assert_eq!(encoded_cards_on_creature(&state, host), vec![card]);
 }
 
+/// F-C (CR 702.99b + CR 614.1a): a `Moved` redirect that sends the cipher card
+/// somewhere other than exile must NOT record an encode link — the card is not
+/// encoded if it never lands in exile. Installs a SelfRef redirect on the card
+/// that turns its would-be exile into a graveyard move; the link must be absent.
+#[test]
+fn finish_encode_records_no_link_when_redirected_away_from_exile() {
+    use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::EtbTapState;
+
+    let mut state = GameState::new_two_player(1);
+    let host = creature(&mut state, 1, PlayerId(0), "Host", Zone::Battlefield);
+    let card = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Spell".to_string(),
+        Zone::Stack,
+    );
+    // SelfRef Moved redirect: when this card would be exiled, send it to the
+    // graveyard instead. `destination_zone(Exile)` gates the redirect to the
+    // cipher self-exile event.
+    state
+        .objects
+        .get_mut(&card)
+        .unwrap()
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Exile)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Graveyard,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                )),
+        );
+
+    finish_encode(&mut state, card, host, &mut Vec::new());
+
+    // The redirect sent the card to the graveyard, not exile, so it is not
+    // encoded — no link recorded.
+    assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+    assert!(
+        encoded_cards_on_creature(&state, host).is_empty(),
+        "no encode link may be recorded when the card was redirected away from exile"
+    );
+}
+
 /// CR 702.99c: the encode link drops when the card leaves exile.
 #[test]
 fn encode_link_drops_when_card_leaves_exile() {

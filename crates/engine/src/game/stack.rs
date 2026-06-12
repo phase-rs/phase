@@ -645,9 +645,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // face — read loyalty/defense from the back face directly so the
                 // replacement pipeline sees the correct counter count.
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
-                    (true, Some(back)) => {
-                        super::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
-                    }
+                    (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                        back.loyalty,
+                        back.defense,
+                        &back.card_types,
+                    ),
                     _ => super::printed_cards::intrinsic_etb_counters(obj),
                 };
                 if !intrinsic.is_empty() {
@@ -784,6 +786,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     exile_links: zone_pipeline::ExileLinkSpec::default(),
                                     drain:
                                         crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                                    // Spell resolution delivers to the battlefield
+                                    // or graveyard — never a library placement.
+                                    library_placement: None,
                                 },
                                 events,
                             ) {
@@ -1677,6 +1682,7 @@ fn zone_change_record_from_spec(
         subtypes: ch.subtypes.clone(),
         supertypes: ch.supertypes.clone(),
         keywords: ch.keywords.clone(),
+        trigger_definitions: Vec::new(),
         power: ch.power,
         toughness: ch.toughness,
         base_power: ch.power,
@@ -2988,6 +2994,8 @@ mod tests {
                     granted_to: None,
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
         }
 

@@ -70,8 +70,15 @@ pub fn apply_face_down_creature_characteristics(
     obj.base_card_types = obj.card_types.clone();
     obj.mana_cost = ManaCost::NoCost;
     obj.base_mana_cost = ManaCost::NoCost;
-    obj.keywords = Vec::new();
-    obj.base_keywords = Vec::new();
+    // CR 701.58a: A cloaked permanent enters with ward {2}; plain manifest/morph
+    // grants no keywords. The ward rides the face-down state and is replaced by
+    // the real card's keywords when the card is turned face up.
+    let face_down_keywords: Vec<Keyword> = match &profile.ward {
+        Some(cost) => vec![Keyword::Ward(cost.clone())],
+        None => Vec::new(),
+    };
+    obj.keywords = face_down_keywords.clone();
+    obj.base_keywords = face_down_keywords;
     obj.abilities = Arc::new(Vec::new());
     obj.base_abilities = Arc::new(Vec::new());
     obj.trigger_definitions = crate::types::definitions::Definitions::default();
@@ -239,6 +246,7 @@ pub fn manifest_card(
     state: &mut GameState,
     _player: PlayerId,
     object_id: ObjectId,
+    profile: crate::types::ability::FaceDownProfile,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if !state.objects.contains_key(&object_id) {
@@ -264,7 +272,7 @@ pub fn manifest_card(
     match super::zone_pipeline::move_object(
         state,
         super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
-            .face_down(crate::types::ability::FaceDownProfile::vanilla_2_2()),
+            .face_down(profile),
         events,
     ) {
         super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
@@ -273,28 +281,22 @@ pub fn manifest_card(
     }
 }
 
-/// CR 701.40a: Manifest puts the top card of library onto battlefield face down as a 2/2 creature.
-///
-/// If the manifested card is a creature, it can later be turned face up by paying its mana cost.
-pub fn manifest(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+/// Find the object id of the top card of `player`'s library, if any.
+fn top_library_object(state: &GameState, player: PlayerId) -> Result<ObjectId, EngineError> {
     let player_state = state
         .players
         .iter()
         .find(|p| p.id == player)
         .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
 
-    let top_card_id = player_state
+    let _top_card_id = player_state
         .library
         .front()
         .copied()
         .ok_or_else(|| EngineError::InvalidAction("Library is empty".to_string()))?;
 
     // Find the object that corresponds to this library entry
-    let object_id = state
+    state
         .objects
         .iter()
         .find(|(_, obj)| {
@@ -308,11 +310,43 @@ pub fn manifest(
                     .unwrap_or(false)
         })
         .map(|(id, _)| *id)
-        .ok_or_else(|| EngineError::InvalidAction("Top card object not found".to_string()))?;
+        .ok_or_else(|| EngineError::InvalidAction("Top card object not found".to_string()))
+}
 
-    let _ = top_card_id; // used for finding the object above
+/// CR 701.40a: Manifest puts the top card of library onto battlefield face down as a 2/2 creature.
+///
+/// If the manifested card is a creature, it can later be turned face up by paying its mana cost.
+pub fn manifest(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let object_id = top_library_object(state, player)?;
+    manifest_card(
+        state,
+        player,
+        object_id,
+        crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        events,
+    )
+}
 
-    manifest_card(state, player, object_id, events)
+/// CR 701.58a: Cloak puts the top card of library onto the battlefield face
+/// down as a 2/2 creature **with ward {2}**. Like manifest, a cloaked creature
+/// card can later be turned face up for its mana cost.
+pub fn cloak(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let object_id = top_library_object(state, player)?;
+    manifest_card(
+        state,
+        player,
+        object_id,
+        crate::types::ability::FaceDownProfile::cloaked_2_2(),
+        events,
+    )
 }
 
 #[cfg(test)]
@@ -712,6 +746,7 @@ mod tests {
             toughness: Some(2),
             extra_core_types: vec![CoreType::Artifact],
             subtypes: vec!["Cyberman".to_string()],
+            ward: None,
         };
         {
             let obj = state.objects.get_mut(&id).unwrap();

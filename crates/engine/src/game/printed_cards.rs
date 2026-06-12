@@ -5,7 +5,7 @@ use crate::types::ability::{
     TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -347,6 +347,31 @@ pub fn intrinsic_face_counters(
     counters
 }
 
+/// CR 714.3a: A Saga entering the battlefield puts a lore counter on it.
+fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u32)> {
+    if card_types.subtypes.iter().any(|s| s == "Saga") {
+        Some((CounterType::Lore, 1))
+    } else {
+        None
+    }
+}
+
+/// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
+/// permanent will have on entry — loyalty/defense from the entering face plus
+/// the Saga lore counter when the entering face is a Saga (CR 712.14a
+/// transformed entry reads the back face here before the physical swap).
+pub fn intrinsic_entry_counters_for_face(
+    loyalty: Option<u32>,
+    defense: Option<u32>,
+    card_types: &CardType,
+) -> Vec<(CounterType, u32)> {
+    let mut counters = intrinsic_face_counters(loyalty, defense);
+    if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
+        counters.push(lore);
+    }
+    counters
+}
+
 pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
     let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
@@ -379,6 +404,33 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
         replacement_definitions: Arc::clone(&obj.base_replacement_definitions),
         static_definitions: Arc::clone(&obj.base_static_definitions),
+    }
+}
+
+/// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent
+/// DIRECTLY from the `result` card's face. Meld is LAYER-ONLY: this converter
+/// feeds `install_merge_layer_effect`, so the melded permanent presents the
+/// combined back faces (the named result card) WITHOUT mutating the survivor's
+/// `base_*` — each component returns as its own front face on leave (CR 712.21).
+/// Parameterized over any result face (a building block, not a per-card path);
+/// mirrors `apply_card_face_to_object`'s field derivations without writing base.
+pub(crate) fn meld_copiable_values(result_face: &CardFace) -> CopiableValues {
+    CopiableValues {
+        name: result_face.name.clone(),
+        mana_cost: result_face.mana_cost.clone(),
+        color: printed_colors_from_face(result_face),
+        card_types: result_face.card_type.clone(),
+        power: parse_pt(&result_face.power),
+        toughness: parse_pt(&result_face.toughness),
+        loyalty: result_face
+            .loyalty
+            .as_ref()
+            .and_then(|value| value.parse::<u32>().ok()),
+        keywords: result_face.keywords.clone(),
+        abilities: Arc::new(result_face.abilities.clone()),
+        trigger_definitions: Arc::new(result_face.triggers.clone()),
+        replacement_definitions: Arc::new(result_face.replacements.clone()),
+        static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
 }
 
@@ -607,7 +659,7 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::PayLife { .. }
         | AbilityCost::Discard { .. }
         | AbilityCost::Exile { .. }
@@ -650,11 +702,19 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
                 }
             }
         }
+        // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
+        // card's characteristics, but `result` is an outside-the-game third card.
+        // Seed its name so `build_conjure_registry` preloads its `CardFace` into
+        // `card_face_registry`. `source` and `partner` are live battlefield
+        // objects the resolver finds by printed identity — they need no registry
+        // seeding.
+        Effect::Meld { result, .. } => out.push(result.clone()),
         // A spellbook draft conjures the chosen card, but the list lives on the
         // card face (`metadata.spellbook`), not in the effect — the registry
         // seed collects it directly from the face (see
         // `collect_conjure_names_from_face`), so nothing to gather here.
         Effect::DraftFromSpellbook { .. } => {}
+        Effect::TurnFaceUp { .. } => {}
         // Nested-ability carriers — descend.
         Effect::Vote {
             per_choice_effect, ..
@@ -766,6 +826,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
@@ -873,6 +934,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
@@ -1047,6 +1109,19 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
 }
 
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
+    rehydrate_card_db_metadata(state, db);
+    let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
+    repair_battlefield_trigger_index_after_face_reapply(state, changed_battlefield);
+
+    if changed_any || state.layers_dirty.is_dirty() {
+        bump_state_revision(state);
+        mark_public_state_all_dirty(state);
+        finalize_public_state(state);
+    }
+}
+
+/// Populate Conjure registry and card-name validation lists on first rehydrate.
+fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // Populate the Conjure card-face registry (used by the Conjure effect
     // handler). Scoped to exactly the faces reachable as Conjure targets so we
     // never clone the entire database into per-game state. Decks with no
@@ -1079,7 +1154,11 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
     if state.all_card_names.is_empty() {
         state.all_card_names = db.card_names().into();
     }
+}
 
+/// Re-apply printed faces from `db` to every object that carries a `printed_ref`.
+/// Does not finalize public state or flush layers.
+fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) -> (bool, bool) {
     let object_ids: Vec<_> = state.objects.keys().copied().collect();
     let mut changed_any = false;
     let mut changed_battlefield = false;
@@ -1203,14 +1282,19 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
         }
     }
 
+    (changed_any, changed_battlefield)
+}
+
+/// CR 603.6a: `apply_card_face_to_object` may replace `trigger_definitions`
+/// without touching the derived index. Rebuild so upkeep triggers (e.g. Mystic
+/// Remora cumulative upkeep) stay indexed before the next event consult.
+fn repair_battlefield_trigger_index_after_face_reapply(
+    state: &mut GameState,
+    changed_battlefield: bool,
+) {
     if changed_battlefield {
         crate::game::layers::mark_layers_full(state);
-    }
-
-    if changed_any || state.layers_dirty.is_dirty() {
-        bump_state_revision(state);
-        mark_public_state_all_dirty(state);
-        finalize_public_state(state);
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
     }
 }
 
@@ -2613,5 +2697,78 @@ mod tests {
                 "walker missed conjure name '{name}' in a nested carrier"
             );
         }
+    }
+
+    /// Issue #581: rehydration must repair a partially stale derived index before
+    /// `finalize_public_state` flushes layers (which would mask a missing repair).
+    #[test]
+    fn rehydrate_repairs_stale_trigger_index_before_layer_flush() {
+        use crate::game::trigger_index::{candidates_for_event, reindex_object_triggers};
+        use crate::types::events::GameEvent;
+        use crate::types::triggers::TriggerEventKey;
+
+        let mut face = test_face(
+            "Test Upkeep Enchantment",
+            "test-upkeep-enchantment-oracle-id",
+            vec![CoreType::Enchantment],
+            ManaCost::default(),
+        );
+        face.triggers
+            .push(TriggerDefinition::new(TriggerMode::PayCumulativeUpkeep));
+
+        let export = serde_json::json!({
+            "test upkeep enchantment": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object_from_card_face(&mut state, &face, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.zone = Zone::Battlefield;
+        }
+        state.battlefield.push_back(id);
+        reindex_object_triggers(&mut state, id);
+
+        let upkeep_key = TriggerEventKey::BeginningOfPhase(Phase::Upkeep);
+        if let Some(bucket) = state.trigger_index.by_key.get_mut(&upkeep_key) {
+            bucket.retain(|oid| *oid != id);
+            if bucket.is_empty() {
+                state.trigger_index.by_key.remove(&upkeep_key);
+            }
+        }
+        state.trigger_index.unclassified.retain(|oid| *oid != id);
+        state
+            .trigger_index
+            .by_key
+            .entry(TriggerEventKey::BeginningOfPhase(Phase::Draw))
+            .or_default()
+            .push(id);
+
+        let before = candidates_for_event(
+            &state,
+            &GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            },
+        );
+        assert!(
+            !before.contains(&id),
+            "precondition: stale index must omit the upkeep permanent"
+        );
+
+        let (_, changed_battlefield) = reapply_printed_faces_from_card_db(&mut state, &db);
+        repair_battlefield_trigger_index_after_face_reapply(&mut state, changed_battlefield);
+
+        let after = candidates_for_event(
+            &state,
+            &GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            },
+        );
+        assert!(
+            after.contains(&id),
+            "rehydrate must rebuild the derived index before layer flush (issue #581)"
+        );
     }
 }

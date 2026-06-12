@@ -392,13 +392,22 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         AbilityCost::Mana { cost } => format!("Pay {cost:?}"),
         AbilityCost::PayLife { amount } => format!("Pay {amount:?} life"),
         // CR 614.12a: Karoo self-ETB cost lands.
-        AbilityCost::Sacrifice { count, .. } => {
-            if *count == 1 {
-                "Sacrifice a permanent".to_string()
-            } else {
-                format!("Sacrifice {count} permanents")
+        AbilityCost::Sacrifice(cost) => match &cost.requirement {
+            crate::types::ability::SacrificeRequirement::Count { count } => {
+                if *count == 1 {
+                    "Sacrifice a permanent".to_string()
+                } else {
+                    format!("Sacrifice {count} permanents")
+                }
             }
-        }
+            crate::types::ability::SacrificeRequirement::Aggregate {
+                stat: crate::types::ability::SacrificeAggregateStat::TotalPower,
+                comparator,
+                value,
+            } => {
+                format!("Sacrifice creatures with total power {value} ({comparator:?} constraint)")
+            }
+        },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
         // CR 702.24a: Delegate the label to the base cost so a "for each
         // counter" wrapper inherits its base's prompt phrasing (e.g.,
@@ -3134,6 +3143,13 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TriggeringPlayer => false,
             }
         }
+        ReplacementCondition::EffectCausedDiscard => matches!(
+            event,
+            ProposedEvent::Discard {
+                caused_by_effect: true,
+                ..
+            }
+        ),
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
         // Checks the event's `is_extra_turn` flag directly; returns `false` for
         // any non-`BeginTurn` event so a misattached `OnlyExtraTurn` doesn't
@@ -4848,6 +4864,9 @@ fn pipeline_loop(
                     candidates,
                     depth,
                     is_optional: true,
+                    // CR 701.24a: set by the W3 library-placement arm after parking
+                    // (the pipeline doesn't know the caller's placement here).
+                    library_placement: None,
                 });
                 return ReplacementResult::NeedsChoice(affected);
             }
@@ -4875,6 +4894,8 @@ fn pipeline_loop(
                 candidates,
                 depth,
                 is_optional: false,
+                // CR 701.24a: set by the W3 library-placement arm after parking.
+                library_placement: None,
             });
             return ReplacementResult::NeedsChoice(affected);
         } else {
@@ -6266,6 +6287,7 @@ mod tests {
             }],
             depth: 0,
             is_optional: true,
+            library_placement: None,
         });
 
         let WaitingFor::ReplacementChoice {

@@ -15,9 +15,9 @@ use crate::types::ability::{
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
     DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
     KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
     SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
@@ -1369,8 +1369,8 @@ pub fn synthesize_bargain(face: &mut CardFace) {
     }
 
     face.additional_cost = Some(AdditionalCost::Optional {
-        cost: AbilityCost::Sacrifice {
-            target: TargetFilter::Or {
+        cost: AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Or {
                 filters: vec![
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
@@ -1379,8 +1379,8 @@ pub fn synthesize_bargain(face: &mut CardFace) {
                     ),
                 ],
             },
-            count: 1,
-        },
+            1,
+        )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     });
 }
@@ -1896,10 +1896,7 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
             let composite_cost = AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Mana { cost: cost.clone() },
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             };
             // CR 702.71a: "a creature card with the same mana value as this
@@ -2225,10 +2222,7 @@ pub fn synthesize_casualty(face: &mut CardFace) {
             },
         ]));
         face.additional_cost = Some(AdditionalCost::Optional {
-            cost: AbilityCost::Sacrifice {
-                target: sacrifice_filter,
-                count: 1,
-            },
+            cost: AbilityCost::Sacrifice(SacrificeCost::count(sacrifice_filter, 1)),
             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
     }
@@ -5645,9 +5639,8 @@ fn is_extort_trigger(t: &TriggerDefinition) -> bool {
                 && matches!(
                     &*a.effect,
                     Effect::PayCost {
-                        cost: PaymentCost::AbilityCost {
-                            cost: AbilityCost::Mana { cost },
-                        },
+                        cost: AbilityCost::Mana { cost },
+                        scale: None,
                         payer: TargetFilter::Controller,
                     } if is_extort_mana_cost(cost)
                 )
@@ -5789,11 +5782,10 @@ fn build_extort_trigger() -> TriggerDefinition {
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::Mana {
-                    cost: wb_mana.clone(),
-                },
+            cost: AbilityCost::Mana {
+                cost: wb_mana.clone(),
             },
+            scale: None,
             payer: TargetFilter::Controller,
         },
     )
@@ -8686,6 +8678,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // that fires from exile when the haunted creature dies. Runs after parser
     // triggers so the creature-form payoff can clone the parsed ETB effect.
     crate::database::haunt::synthesize_haunt(face);
+    // CR 701.42 / CR 712.4: Meld parity hook. The parser fully wires the meld
+    // instigator's gated ability + `Effect::Meld`; this hook exists for parity
+    // with sibling keyword synthesizers and as a future-proofing seam.
+    crate::database::meld::synthesize_meld(face);
     // CR 702.75a: Hideaway ETB look-and-exile-face-down — self-contained
     // building block (Dig + conceal continuation).
     crate::database::hideaway::synthesize_hideaway(face);
@@ -9870,10 +9866,7 @@ mod buyback_synthesis_tests {
     /// through the full AbilityCost pipeline as an optional additional cost.
     #[test]
     fn synthesize_buyback_non_mana_preserves_ability_cost() {
-        let sac_cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Any,
-            count: 1,
-        };
+        let sac_cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
         let mut face = CardFace {
             keywords: vec![Keyword::Buyback(BuybackCost::NonMana(sac_cost.clone()))],
             ..CardFace::default()
@@ -10013,12 +10006,18 @@ mod bargain_synthesis_tests {
 
         match face.additional_cost.expect("additional_cost set") {
             AdditionalCost::Optional {
-                cost: AbilityCost::Sacrifice { target, count },
+                cost: AbilityCost::Sacrifice(cost),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                assert_eq!(count, 1);
-                let TargetFilter::Or { filters } = target else {
-                    panic!("expected artifact/enchantment/token disjunction, got {target:?}");
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::count(1)
+                );
+                let TargetFilter::Or { filters } = cost.target else {
+                    panic!(
+                        "expected artifact/enchantment/token disjunction, got {0:?}",
+                        cost.target
+                    );
                 };
                 assert!(
                     filters.contains(&TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)))
@@ -10236,13 +10235,15 @@ mod transfigure_synthesis_tests {
         match &ability.cost {
             Some(AbilityCost::Composite { costs }) => {
                 assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
-                assert!(costs.iter().any(|c| matches!(
-                    c,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
+                assert!(costs.iter().any(|c| {
+                    if let AbilityCost::Sacrifice(cost) = c {
+                        matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("expected Composite cost, got {other:?}"),
         }
@@ -13992,11 +13993,9 @@ mod extort_synthesis_tests {
         };
         assert!(execute.optional, "extort must be optional (may pay)");
         let Effect::PayCost {
-            cost:
-                PaymentCost::AbilityCost {
-                    cost: AbilityCost::Mana { cost },
-                },
+            cost: AbilityCost::Mana { cost },
             payer,
+            ..
         } = &*execute.effect
         else {
             panic!("extort must pay W/B via PayCost before draining");
@@ -14120,11 +14119,10 @@ mod extort_synthesis_tests {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PayCost {
-                cost: PaymentCost::AbilityCost {
-                    cost: AbilityCost::Mana {
-                        cost: ManaCost::generic(1),
-                    },
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
         )
@@ -15567,10 +15565,10 @@ mod cumulative_upkeep_synthesis_tests {
             "PayLife base must install exactly one cumulative-upkeep trigger"
         );
 
-        let sacrifice_kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count: 1,
-        });
+        let sacrifice_kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        )));
         assert_eq!(
             KeywordTriggerInstaller::triggers_for(&sacrifice_kw).len(),
             1,

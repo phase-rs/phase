@@ -2,11 +2,11 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
-    ControllerRef, CounterSourceRider, Duration, Effect, FaceDownProfile, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
-    PaymentCost, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect,
+    FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -447,6 +447,20 @@ pub(crate) enum ImperativeFamilyAst {
     },
     /// CR 701.62a: Manifest dread.
     ManifestDread,
+    /// CR 701.58a: Cloak the top card(s) of a library — face-down 2/2 with
+    /// ward {2}, turnable face up for its mana cost if it's a creature card.
+    Cloak {
+        target: TargetFilter,
+        count: QuantityExpr,
+    },
+    /// CR 406.3 + CR 701.20a: Turn an exiled face-down card face up via a
+    /// resolving effect (not the morph special action). The Imprint "flip"
+    /// cards — Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation
+    /// of Avacyn — say "turn the exiled card(s) face up"; `target` references
+    /// the card(s) the source exiled.
+    TurnFaceUp {
+        target: TargetFilter,
+    },
     BecomeMonarch,
     /// CR 701.49: "venture into the dungeon"
     VentureIntoDungeon,
@@ -759,6 +773,9 @@ pub(crate) enum TargetedImperativeAst {
     },
     GainControl {
         target: TargetFilter,
+        /// True for the untargeted mass form ("gain control of all/each …"),
+        /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
+        all: bool,
     },
     ControlNextTurn {
         target: TargetFilter,
@@ -882,6 +899,8 @@ pub(crate) enum UtilityImperativeAst {
     },
     Copy {
         target: TargetFilter,
+        /// CR 707.10c: set when the imperative remainder is a copy-retarget grant.
+        retarget: CopyRetargetPermission,
     },
     Transform {
         target: TargetFilter,
@@ -1089,9 +1108,12 @@ pub(crate) enum CostResourceImperativeAst {
     /// in the CostResource AST (DamageSource, DamageEachPlayer, etc.).
     /// The Effect is already fully constructed by try_parse_damage.
     DamageEffect(Box<Effect>),
-    /// CR 118.1: "pay {cost}" as an effect verb (mana or life).
+    /// CR 118.1: "pay {cost}" as an effect verb (mana, life, energy, …).
+    /// Carries the unified `AbilityCost` taxonomy directly (lowered to
+    /// `Effect::PayCost { cost, scale: None, .. }`); this IR path never emits a
+    /// per-object scaled mana cost.
     Pay {
-        cost: PaymentCost,
+        cost: AbilityCost,
     },
 }
 

@@ -1292,6 +1292,94 @@ fn spell_targets_filter(
     })
 }
 
+fn target_filter_accepts_player(filter: &crate::types::ability::TargetFilter) -> bool {
+    use crate::types::ability::TargetFilter;
+    match filter {
+        TargetFilter::Player => true,
+        TargetFilter::Or { filters } => filters.iter().any(target_filter_accepts_player),
+        TargetFilter::And { filters } => filters.iter().all(target_filter_accepts_player),
+        TargetFilter::Not { filter } => !target_filter_accepts_player(filter),
+        _ => false,
+    }
+}
+
+fn target_ref_matches_spell_targets_filter(
+    state: &crate::types::game_state::GameState,
+    spell_id: crate::types::identifiers::ObjectId,
+    target: &crate::types::ability::TargetRef,
+    filter: &crate::types::ability::TargetFilter,
+) -> bool {
+    use crate::types::ability::{TargetFilter, TargetRef};
+    match target {
+        TargetRef::Player(_) => target_filter_accepts_player(filter),
+        TargetRef::Object(object_id) => {
+            let ctx = super::filter::FilterContext::from_source(state, spell_id);
+            match filter {
+                TargetFilter::Player => false,
+                TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
+                    TargetFilter::Player => false,
+                    branch => super::filter::matches_target_filter(state, *object_id, branch, &ctx),
+                }),
+                _ => super::filter::matches_target_filter(state, *object_id, filter, &ctx),
+            }
+        }
+    }
+}
+
+/// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
+/// triggering spell's committed targets at resolution time.
+pub(crate) fn triggering_spell_targets_filter(
+    state: &crate::types::game_state::GameState,
+    spell_id: crate::types::identifiers::ObjectId,
+    filter: &crate::types::ability::TargetFilter,
+) -> bool {
+    use crate::types::ability::TargetRef;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::StackEntryKind;
+
+    let targets: Option<Vec<TargetRef>> = state
+        .stack
+        .iter()
+        .rev()
+        .find(|entry| entry.id == spell_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(resolved),
+                ..
+            } => Some(super::ability_utils::flatten_targets_in_chain(resolved)),
+            _ => None,
+        })
+        .or_else(|| {
+            state
+                .current_trigger_event
+                .as_ref()
+                .and_then(|event| match event {
+                    GameEvent::SpellCast { object_id, .. } if *object_id == spell_id => state
+                        .stack
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.id == spell_id)
+                        .and_then(|entry| match &entry.kind {
+                            StackEntryKind::Spell {
+                                ability: Some(resolved),
+                                ..
+                            } => Some(super::ability_utils::flatten_targets_in_chain(resolved)),
+                            _ => None,
+                        }),
+                    _ => None,
+                })
+        });
+    let Some(targets) = targets else {
+        return false;
+    };
+    if targets.is_empty() {
+        return false;
+    }
+    targets
+        .iter()
+        .any(|target| target_ref_matches_spell_targets_filter(state, spell_id, target, filter))
+}
+
 /// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent
 /// flash permission on the cast object is satisfied by the chosen targets in
 /// `ability`. Returns `Ok(())` when each `AsThoughHadFlash` option whose
@@ -1734,6 +1822,7 @@ pub(crate) fn attack_target_matches_defended_scope(
     attack_target: Option<&crate::game::combat::AttackTarget>,
     filter: &crate::types::triggers::AttackTargetFilter,
     source_controller: PlayerId,
+    source_owner: PlayerId,
 ) -> bool {
     use crate::game::combat::AttackTarget;
     use crate::types::triggers::AttackTargetFilter;
@@ -1756,6 +1845,8 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
             permanent_controller(*b_id) == Some(source_controller)
         }
+        // CR 506.2: "can't attack its owner" — compare against the permanent's owner.
+        (AttackTargetFilter::Owner, AttackTarget::Player(p)) => *p == source_owner,
         _ => false,
     }
 }

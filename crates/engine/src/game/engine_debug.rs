@@ -653,6 +653,7 @@ pub fn route_debug_create_to_battlefield(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                None,
                 &mut events,
             ) {
                 super::effects::change_zone::ZoneDeliveryResult::Done => {}

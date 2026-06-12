@@ -16,7 +16,7 @@
 //!   .. }` is the recursion shape (`ability.rs:2271`). Recursion does not
 //!   correspond to a single CR keyword action — it's a generic zone-change
 //!   effect, so no specific CR annotation applies here.
-//! - `AbilityCost::Sacrifice { target: TargetFilter, .. }` at `ability.rs:1757`
+//! - `AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter, 1))` at `ability.rs:1757`
 //!   — after the `CostCategory::SacrificesPermanent` gate confirms the cost
 //!   type, the `target` field is inspected to verify creature-you-control scope.
 //!
@@ -205,9 +205,9 @@ fn cost_has_nonzero_mana(cost: Option<&AbilityCost>) -> bool {
 fn cost_sacrifices_creature(cost: Option<&AbilityCost>) -> bool {
     match cost {
         None => false,
-        Some(AbilityCost::Sacrifice { target, .. }) => {
-            matches!(target, TargetFilter::SelfRef)
-                || filter_references_creature_you_control(target)
+        Some(AbilityCost::Sacrifice(cost)) => {
+            matches!(cost.target, TargetFilter::SelfRef)
+                || filter_references_creature_you_control(&cost.target)
         }
         Some(AbilityCost::Composite { costs }) => {
             costs.iter().any(|c| cost_sacrifices_creature(Some(c)))
@@ -373,7 +373,7 @@ mod tests {
     use engine::game::DeckEntry;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, PtValue, QuantityExpr,
-        TargetFilter, TriggerDefinition, TypedFilter,
+        SacrificeCost, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -419,10 +419,10 @@ mod tests {
                 damage_source: None,
             },
         );
-        ability.cost = Some(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            count: 1,
-        });
+        ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            1,
+        )));
         ability
     }
 
@@ -443,12 +443,10 @@ mod tests {
                 AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    1,
+                )),
             ],
         });
         ability
@@ -467,12 +465,10 @@ mod tests {
         ability.cost = Some(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    1,
+                )),
             ],
         });
         ability
@@ -493,10 +489,7 @@ mod tests {
         ability.cost = Some(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -530,10 +523,10 @@ mod tests {
             source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
-        ability.cost = Some(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            count: 1,
-        });
+        ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            1,
+        )));
         // The chain has no ChangeZone to battlefield, so it shouldn't trigger
         // the fetchland gate — however `Effect::SearchLibrary` without a
         // battlefield ChangeZone won't match `ability_searches_library_for_land`.

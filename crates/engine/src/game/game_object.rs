@@ -75,6 +75,17 @@ pub struct BestowFormState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
 
+/// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
+/// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
+/// `merged_components.len()` alone cannot, since a two-creature mutate also
+/// has `len() == 2`. The transform guard (CR 712.4c) keys on
+/// `Some(MergeKind::Meld)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeKind {
+    Mutate,
+    Meld,
+}
+
 /// CR 702.160a: Prototype form marker — `Some(_)` means this object was cast
 /// prototyped and should use the secondary power, toughness, and mana cost
 /// characteristics while it is a spell or permanent on the battlefield.
@@ -608,11 +619,28 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_components: Vec<ObjectId>,
 
+    /// CR 712.4c / CR 730.2: Which merge keyword produced this merged permanent
+    /// (`Mutate` vs `Meld`), or `None` for a non-merged object. The transform
+    /// guard (CR 712.4c) keys on `Some(MergeKind::Meld)` to forbid transforming a
+    /// melded permanent WITHOUT also blocking a two-creature mutate pile (which
+    /// also has `merged_components.len() == 2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_kind: Option<MergeKind>,
+
     /// CR 730.2a + CR 702.140e: Stable id of the layer-1 copy effect that
     /// represents this merged permanent's topmost copiable values plus component
     /// ability union. `None` for non-merged objects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_layer_effect_id: Option<u64>,
+
+    /// CR 730.2d: A merged permanent is a token only if its TOPMOST component is a
+    /// token. The survivor keeps its own `ObjectId` (CR 730.2c) but adopts the
+    /// topmost component's token-ness while merged; this captures the survivor's
+    /// intrinsic `is_token` (once, on the first merge that overrides it) so
+    /// `merge::split_merged_permanent_on_leave` can restore it when the pile
+    /// leaves the battlefield. `None` when no override is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge_is_token: Option<bool>,
 
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
@@ -943,6 +971,7 @@ impl GameObject {
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
+            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
@@ -1101,6 +1130,8 @@ impl GameObject {
             prototype_form: None,
             mutate_form: None,
             merged_components: Vec::new(),
+            merge_kind: None,
+            pre_merge_is_token: None,
             merge_layer_effect_id: None,
             split_from_merge_survivor: None,
             cleave_form: None,
@@ -1355,6 +1386,15 @@ impl GameObject {
         // re-entering object is not stuck carrying stale component ids. `mutate_form`
         // (stack-only, paralleling `bestow_form`) is intentionally NOT cleared here.
         self.merged_components.clear();
+        // CR 712.4c / CR 730.2 + CR 400.7: the merge-kind discriminator is
+        // battlefield-scoped like the rest of the merge identity; clear it so a
+        // re-entering object is not stuck as a phantom Meld/Mutate survivor.
+        self.merge_kind = None;
+        // CR 730.2d + CR 400.7: the topmost-derived token-ness override is
+        // battlefield-scoped. `split_merged_permanent_on_leave` restores it before
+        // this reset runs; clear it defensively so a re-entering object never
+        // carries a stale override value.
+        self.pre_merge_is_token = None;
         // CR 730.3 + CR 400.7: merge copy effects are battlefield-scoped and are
         // pruned at the battlefield-exit seam before this reset. Clear the stored
         // id so a re-entering object cannot point at a stale transient effect.

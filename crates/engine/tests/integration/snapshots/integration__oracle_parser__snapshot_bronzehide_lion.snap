@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 662
 expression: result
 ---
 {
@@ -91,9 +92,38 @@ expression: result
                 "definition": {
                   "kind": "Activated",
                   "effect": {
-                    "type": "Unimplemented",
-                    "name": "gain",
-                    "description": "gain indestructible until end of turn,"
+                    "type": "GenericEffect",
+                    "static_abilities": [
+                      {
+                        "mode": "Continuous",
+                        "affected": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": null,
+                          "properties": [
+                            {
+                              "type": "EnchantedBy"
+                            }
+                          ]
+                        },
+                        "modifications": [
+                          {
+                            "type": "AddKeyword",
+                            "keyword": "Indestructible"
+                          }
+                        ],
+                        "condition": null,
+                        "affected_zone": null,
+                        "effect_zone": null,
+                        "active_zones": [],
+                        "characteristic_defining": false,
+                        "description": "gain indestructible until end of turn,"
+                      }
+                    ],
+                    "duration": null,
+                    "target": null
                   },
                   "cost": {
                     "type": "Mana",

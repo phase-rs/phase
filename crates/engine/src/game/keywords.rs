@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
 use crate::types::events::GameEvent;
@@ -519,7 +519,35 @@ pub fn activate_ninjutsu(
     .map_err(|e| e.to_string())?;
 
     // 1. Return creature to owner's hand
-    zones::move_to_zone(state, creature_to_return, Zone::Hand, events);
+    // CR 702.49a + CR 614.6: ninjutsu returns the unblocked attacker to its
+    // owner's hand. This return is part of the ninjutsu activation COST (CR
+    // 702.49a: "Return an unblocked attacking creature you control to its owner's
+    // hand" is one of the ability's costs), so the move is attributed via
+    // `ZoneMoveRequest::cost`, not `effect`.
+    //
+    // Route through the zone-change pipeline so a board-wide `Moved` "would leave
+    // the battlefield → ... instead" redirect is consulted. No DESTINATION-GATED
+    // (`destination_zone(Hand)`) Moved replacement exists in the current pool, but
+    // a `destination_zone: None` wildcard CAN match this battlefield→hand move:
+    // notably unearth (CR 702.84a, `database/unearth.rs`) installs a SelfRef
+    // "if it would leave the battlefield, exile it instead" redirect, so an
+    // unearthed attacker returned by ninjutsu is now correctly redirected to EXILE
+    // instead of hand (the raw mover this replaced silently violated CR 702.84a).
+    // The consult also future-proofs the site per the single-entry principle.
+    // Attributed to the ninja entering the battlefield. Hand destination has no
+    // counters, so a Hand-landing delivery cannot pause; a redirect to a
+    // non-pausing zone (exile) is likewise `Done`. Assert `Done` rather than
+    // discarding the result so a future reachable pause trips tests instead of
+    // silently executing past a parked prompt.
+    let return_result = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::cost(creature_to_return, Zone::Hand, ninjutsu_obj_id),
+        events,
+    );
+    debug_assert!(
+        matches!(return_result, zone_pipeline::ZoneMoveResult::Done),
+        "ninjutsu return must not pause (Hand has no counters; redirects land in non-pausing zones today)"
+    );
 
     // Remove the returned creature from combat state if it was an attacker
     if let Some(combat) = state.combat.as_mut() {
@@ -1469,6 +1497,62 @@ mod tests {
             attacker.zone,
             crate::types::zones::Zone::Hand,
             "Attacker should be returned to hand"
+        );
+    }
+
+    /// CR 702.84a + CR 702.49a + CR 614.6 (discriminating): an unearthed attacker
+    /// returned by ninjutsu must be redirected to EXILE, not hand. Unearth installs
+    /// a SelfRef "if it would leave the battlefield, exile it instead of putting it
+    /// anywhere else" `Moved` replacement (`destination_zone: None` wildcard) — the
+    /// ninjutsu return (battlefield → hand) is a battlefield-exit, so the consult
+    /// fires and the attacker lands in exile. This pins the rules fix that
+    /// routing the ninjutsu return through `move_object`'s replacement consult
+    /// enables (the prior raw mover dropped to hand, silently violating CR 702.84a).
+    #[test]
+    fn unearthed_attacker_returned_by_ninjutsu_is_exiled_not_returned_to_hand() {
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::zones::EtbTapState;
+
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+
+        // Install the unearth leaves-battlefield redirect on the attacker
+        // (mirrors `database/unearth.rs::leaves_battlefield_exile_step`): a
+        // SelfRef-bound `Moved` replacement with NO `destination_zone` gate, so it
+        // matches any battlefield-exit including this battlefield → hand return.
+        {
+            let attacker = state.objects.get_mut(&attacker_id).unwrap();
+            attacker.replacement_definitions =
+                vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Battlefield),
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            face_down_profile: None,
+                        },
+                    ))]
+                .into();
+        }
+
+        let mut events = Vec::new();
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
+
+        let attacker = state.objects.get(&attacker_id).unwrap();
+        assert_eq!(
+            attacker.zone,
+            Zone::Exile,
+            "CR 702.84a: the unearth redirect must send the returned attacker to exile, not hand"
         );
     }
 

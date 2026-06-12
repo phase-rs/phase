@@ -12,8 +12,8 @@
 
 use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter, ProtectionTarget,
-    WardCost,
+    BestowCost, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
+    ProtectionTarget, WardCost,
 };
 use engine::types::mana::ManaColor;
 use engine::types::Keyword;
@@ -148,22 +148,18 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
 
         // === Phase 4b: ManaCost-payload keywords (Cost::PayMana only) ===
         // CR 702.103a: Bestow [cost] — alternative casting cost. The engine
-        // `Keyword::Bestow(ManaCost)` carries the alt cost; the cast-as-Aura
-        // type-changing on the stack (CR 702.103b) and the unattach exception
-        // (CR 702.103f vs CR 704.5n) are not yet wired to runtime. The keyword
-        // is preserved for display/coverage so the card surfaces in card-data
-        // export with its bestow cost; the alt-cost cast lane (which would
-        // require a `CastingVariant::Bestow` arm parallel to Evoke/Madness)
-        // remains a deferred Phase 2. The card is still playable for its
-        // printed mana cost as a vanilla creature spell.
-        Rule::Bestow(c) => Keyword::Bestow(pure_mana(c, "Rule::Bestow", path)?),
+        // `Keyword::Bestow(BestowCost::Mana(_))` carries the alt cost used by
+        // the bestow casting lane; cast-as-Aura type-changing happens at runtime
+        // (CR 702.103b), with the unattach exception covered by CR 702.103f /
+        // CR 704.5m.
+        Rule::Bestow(c) => Keyword::Bestow(BestowCost::Mana(pure_mana(c, "Rule::Bestow", path)?)),
         // CR 702.103a + CR 107.3a: BestowX is the X-cost variant — cost
         // contains an `{X}` shard. `pure_mana` accepts ManaCostX shards via
         // `cost_conv::as_pure_mana`, producing a `ManaCost` with `shards`
         // including `ManaCostShard::X`. The X-coupling between the cast and
         // any "enters with X +1/+1 counters" replacement is wired by the
         // replacement converter (see `convert/replacement.rs`).
-        Rule::BestowX(c) => Keyword::Bestow(pure_mana(c, "Rule::BestowX", path)?),
+        Rule::BestowX(c) => Keyword::Bestow(BestowCost::Mana(pure_mana(c, "Rule::BestowX", path)?)),
         Rule::Blitz(c) => Keyword::Blitz(pure_mana(c, "Rule::Blitz", path)?),
         Rule::Dash(c) => Keyword::Dash(pure_mana(c, "Rule::Dash", path)?),
         Rule::Disturb(c) => Keyword::Disturb(pure_mana(c, "Rule::Disturb", path)?),
@@ -922,7 +918,7 @@ mod tests {
     }
 
     /// CR 702.103a: `Rule::Bestow(Cost::PayMana(...))` lowers to
-    /// `Keyword::Bestow(ManaCost)` carrying the alt mana cost.
+    /// `Keyword::Bestow(BestowCost::Mana(_))` carrying the alt mana cost.
     #[test]
     fn bestow_with_pure_mana_cost_lowers_to_keyword() {
         use crate::schema::types::{Cost, ManaSymbol};
@@ -934,7 +930,7 @@ mod tests {
             .expect("conversion should succeed")
             .expect("rule should be recognized as a keyword");
         match keyword {
-            Keyword::Bestow(mc) => {
+            Keyword::Bestow(BestowCost::Mana(mc)) => {
                 use engine::types::mana::ManaCostShard;
                 use engine::types::ManaCost;
                 assert_eq!(
@@ -968,7 +964,7 @@ mod tests {
             .expect("conversion should succeed")
             .expect("rule should be recognized as a keyword");
         match keyword {
-            Keyword::Bestow(mc) => {
+            Keyword::Bestow(BestowCost::Mana(mc)) => {
                 use engine::types::mana::ManaCostShard;
                 use engine::types::ManaCost;
                 assert_eq!(

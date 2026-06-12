@@ -1484,7 +1484,9 @@
     "scopeMulti": "Wybierz nowe cele dla czaru",
     "subtitle": "{{scope}}. Obecnie: {{current}}",
     "confirm": "Potwierdź",
-    "badgeNewTarget": "Nowy cel"
+    "badgeNewTarget": "Nowy cel",
+    "slotLabel": "Cel {{index}}: {{current}} → {{chosen}}",
+    "unselected": "bez zmian"
   },
   "separatePiles": {
     "chooserName": "Gracz {{number}}",

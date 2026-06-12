@@ -4,7 +4,8 @@ use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
     CounterCostSelection, Effect, KickerVariant, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ResolvedAbility, SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
+    ResolvedAbility, SacrificeCost, SacrificeRequirement, SpellCastingOptionKind, StaticCondition,
+    TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -1888,7 +1889,7 @@ pub(super) fn push_activated_ability_to_stack(
             // CR 602.2b + CR 601.2f + CR 122.1: Once X is announced for an
             // activation cost, the symbolic counter-removal cost becomes a
             // concrete count before payment removes counters.
-            concretized_cost = concretize_x_counter_removal_cost(cost, chosen_x);
+            concretized_cost = concretize_chosen_x_cost(cost, chosen_x);
             &concretized_cost
         } else {
             cost
@@ -1994,7 +1995,7 @@ pub(super) fn push_activated_ability_to_stack(
     push_ability_entry(state, player, source_id, ability_index, resolved, events)
 }
 
-fn concretize_x_counter_removal_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
+fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
     match cost {
         AbilityCost::RemoveCounter {
             count,
@@ -2007,10 +2008,19 @@ fn concretize_x_counter_removal_cost(cost: &AbilityCost, chosen_x: u32) -> Abili
             target: target.clone(),
             selection: *selection,
         },
+        AbilityCost::Exile {
+            count: EXILE_COST_X,
+            zone: Some(Zone::Graveyard),
+            filter,
+        } => AbilityCost::Exile {
+            count: chosen_x,
+            zone: Some(Zone::Graveyard),
+            filter: filter.clone(),
+        },
         AbilityCost::Composite { costs } => AbilityCost::Composite {
             costs: costs
                 .iter()
-                .map(|cost| concretize_x_counter_removal_cost(cost, chosen_x))
+                .map(|cost| concretize_chosen_x_cost(cost, chosen_x))
                 .collect(),
         },
         _ => cost.clone(),
@@ -2836,6 +2846,33 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     }
 
+    // CR 702.103a + CR 118.9 + CR 601.2h: Bestow twin of the Evoke branch above.
+    // A compound bestow cost ("Bestow—{R}, Collect evidence 6." on Detective's
+    // Phoenix) routes its residual non-mana sub-cost (Collect evidence) through
+    // `pay_additional_cost`; the mana sub-cost ({R}) was already substituted as
+    // the spell's mana cost in `prepare_spell_cast` and is paid through the
+    // normal mana-payment flow inside `pay_additional_cost`'s fall-through.
+    if casting_variant == CastingVariant::Bestow {
+        let bestow_split = super::casting::effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Bestow(bc) => {
+                    Some(super::casting::split_bestow_cost_components(bc))
+                }
+                _ => None,
+            });
+        if let Some((_mana, Some(non_mana_cost))) = bestow_split {
+            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+            pending.base_cost = base_cost.clone();
+            pending.casting_variant = casting_variant;
+            pending.cast_timing_permission = cast_timing_permission;
+            pending.distribute = distribute;
+            pending.origin_zone = origin_zone;
+            pending.payment_mode = payment_mode;
+            return pay_additional_cost(state, player, non_mana_cost, pending, events);
+        }
+    }
+
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
     if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {
@@ -3108,6 +3145,12 @@ fn pay_additional_cost_with_source(
         }
     }
 
+    let cost = if let Some(chosen_x) = pending.ability.chosen_x {
+        concretize_chosen_x_cost(&cost, chosen_x)
+    } else {
+        cost
+    };
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -3223,7 +3266,13 @@ fn pay_additional_cost_with_source(
                 events,
             );
         }
-        AbilityCost::Sacrifice { ref target, count } => {
+        AbilityCost::Sacrifice(cost) => {
+            let target = &cost.target;
+            let SacrificeRequirement::Count { count } = cost.requirement else {
+                return Err(EngineError::ActionNotAllowed(
+                    "Unsupported sacrifice cost requirement for spell payment".into(),
+                ));
+            };
             if matches!(target, crate::types::ability::TargetFilter::SelfRef) {
                 if super::static_abilities::player_cant_sacrifice_as_cost(
                     state,
@@ -3263,10 +3312,10 @@ fn pay_additional_cost_with_source(
                     min_count,
                     resume: CostResume::SpellCost {
                         spell: Box::new(pending),
-                        cost: Box::new(AbilityCost::Sacrifice {
-                            target: target.clone(),
+                        cost: Box::new(AbilityCost::Sacrifice(SacrificeCost::count(
+                            target.clone(),
                             count,
-                        }),
+                        ))),
                         source: cost_source,
                     },
                 });
@@ -3529,8 +3578,9 @@ fn is_offering_sacrifice_cost(
     };
     matches!(
         cost,
-        AbilityCost::Sacrifice { target, count: 1 }
-            if *target == offering_quality_filter(&quality)
+        AbilityCost::Sacrifice(cost)
+            if cost.requirement == SacrificeRequirement::count(1)
+                && cost.target == offering_quality_filter(&quality)
     )
 }
 
@@ -3541,7 +3591,9 @@ fn emerge_sacrifice_filter() -> TargetFilter {
 fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
     matches!(
         cost,
-        AbilityCost::Sacrifice { target, count: 1 } if *target == emerge_sacrifice_filter()
+        AbilityCost::Sacrifice(cost)
+            if cost.requirement == SacrificeRequirement::count(1)
+                && cost.target == emerge_sacrifice_filter()
     )
 }
 
@@ -3550,10 +3602,7 @@ fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
 /// reduction by `handle_sacrifice_for_cost` while the creature is still on the
 /// battlefield.
 pub(super) fn emerge_sacrifice_cost() -> AbilityCost {
-    AbilityCost::Sacrifice {
-        target: emerge_sacrifice_filter(),
-        count: 1,
-    }
+    AbilityCost::Sacrifice(SacrificeCost::count(emerge_sacrifice_filter(), 1))
 }
 
 /// CR 702.119a-c: Emerge can be paid only if a legal creature can be
@@ -3593,13 +3642,41 @@ fn additional_cost_x_max(
         AbilityCost::PayLife { amount } if amount.contains_x() => {
             Some(max_pay_life_x(state, player))
         }
-        AbilityCost::Sacrifice { target, count } if *count == u32::MAX => {
+        AbilityCost::Sacrifice(cost)
+            if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
+        {
             // CR 601.2b: X in an additional sacrifice cost is announced before later target choices.
             Some(
-                super::casting::find_eligible_sacrifice_targets(state, player, source_id, target)
-                    .len()
-                    .try_into()
-                    .unwrap_or(u32::MAX),
+                super::casting::find_eligible_sacrifice_targets(
+                    state,
+                    player,
+                    source_id,
+                    &cost.target,
+                )
+                .len()
+                .try_into()
+                .unwrap_or(u32::MAX),
+            )
+        }
+        AbilityCost::Exile {
+            count: EXILE_COST_X,
+            zone: Some(Zone::Graveyard),
+            filter,
+            ..
+        } => {
+            // CR 601.2b: X in an additional graveyard-exile cost is announced
+            // before the exile payment (Harvest Pyre).
+            Some(
+                super::casting::find_eligible_exile_for_cost_targets(
+                    state,
+                    player,
+                    source_id,
+                    ExileCostSourceZone::Graveyard,
+                    filter.as_ref(),
+                )
+                .len()
+                .try_into()
+                .unwrap_or(u32::MAX),
             )
         }
         AbilityCost::RemoveCounter {
@@ -3721,8 +3798,8 @@ pub(super) fn effective_casualty_additional_cost(
             _ => None,
         })?;
     Some(AdditionalCost::Optional {
-        cost: AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+        cost: AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 crate::types::ability::FilterProp::PtComparison {
                     stat: crate::types::ability::PtStat::Power,
                     scope: crate::types::ability::PtValueScope::Current,
@@ -3732,8 +3809,8 @@ pub(super) fn effective_casualty_additional_cost(
                     },
                 },
             ])),
-            count: 1,
-        },
+            1,
+        )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     })
 }
@@ -3802,10 +3879,7 @@ fn offering_quality_filter(quality: &str) -> TargetFilter {
 }
 
 pub(super) fn offering_sacrifice_cost(quality: &str) -> AbilityCost {
-    AbilityCost::Sacrifice {
-        target: offering_quality_filter(quality),
-        count: 1,
-    }
+    AbilityCost::Sacrifice(SacrificeCost::count(offering_quality_filter(quality), 1))
 }
 
 /// CR 702.48a: Returns `true` when the controller has at least one permanent
@@ -4586,6 +4660,20 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     } else {
         None
     };
+    // CR 601.2a + CR 603.7 + CR 611.2a: Capture the tracked-set group of a
+    // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
+    // leaves exile for the stack.
+    // Consumed after the move (see below) so the grant's one allowed cast is
+    // spent and every sibling exiled card becomes uncastable (Chandra, Hope's
+    // Beacon +1).
+    let single_use_exile_play_group = if source_zone == Zone::Exile {
+        state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| super::casting::single_use_play_from_exile_group(state, obj, player))
+    } else {
+        None
+    };
 
     // CR 601.2a + CR 601.2i: The spell was announced onto the stack earlier,
     // but the object's `zone` field stayed at its origin through cost payment
@@ -4604,6 +4692,23 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     let stack_req =
         crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id);
     crate::game::zone_pipeline::move_object(state, stack_req, events);
+
+    // CR 614.1a: `CastFromZone` grants with an "exile it instead" rider stamp the
+    // synthetic self-scoped graveyard redirect when the granted cast finalizes.
+    if state.objects.get(&object_id).is_some_and(|obj| {
+        obj.casting_permissions.iter().any(|p| {
+            matches!(
+                p,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    exile_instead_of_graveyard_on_resolve: true,
+                    ..
+                }
+            )
+        })
+    }) {
+        apply_exile_instead_of_graveyard_rider(state, object_id);
+    }
+
     if casting_variant == CastingVariant::Foretell {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((
@@ -4758,6 +4863,14 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         exile_play_permission_source
     {
         state.exile_play_permissions_used.insert(source);
+    }
+    // CR 601.2a + CR 603.7 + CR 611.2a: A single-use exile-cast grant is spent
+    // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
+    // every other card still in the tracked set so the remaining exiled cards
+    // can no longer be cast (Chandra, Hope's Beacon +1: "an instant or sorcery
+    // spell" — one total).
+    if let Some(group) = single_use_exile_play_group {
+        super::casting::consume_single_use_play_from_exile(state, group);
     }
 
     let obj = state
@@ -5025,7 +5138,7 @@ fn handle_resolution_cast_success(
 /// graveyard moves are rare and re-casting mints a new object per CR 400.7),
 /// but a `Duration` field on `ReplacementDefinition` is the eventual fix for
 /// the rider's "this turn" scope.
-fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
+pub(crate) fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&cast_object) {
         obj.replacement_definitions
             .push(exile_instead_of_graveyard_replacement());
@@ -6169,7 +6282,7 @@ pub fn enter_payment_step(
                 .map(|cost| (pending.as_ref().clone(), cost, chosen_x))
         });
         if let Some((mut pending, cost, chosen_x)) = targeted_counter_resume {
-            let concretized_cost = concretize_x_counter_removal_cost(&cost, chosen_x);
+            let concretized_cost = concretize_chosen_x_cost(&cost, chosen_x);
             let prompt_cost = targeted_remove_counter_choice_cost(&concretized_cost)
                 .unwrap_or_else(|| concretized_cost.clone());
             pending.activation_cost = Some(concretized_cost);
@@ -6293,6 +6406,7 @@ pub(super) fn apply_committed_assist(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
+        state.layers_dirty.mark_full();
     }
     Ok(())
 }
@@ -7192,6 +7306,114 @@ mod tests {
     }
 
     #[test]
+    fn graveyard_exile_additional_cost_x_max_is_eligible_graveyard_size() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_100),
+            PlayerId(0),
+            "Harvest Pyre".to_string(),
+            Zone::Hand,
+        );
+        for idx in 0..4 {
+            create_object(
+                &mut state,
+                CardId(9_110 + idx),
+                PlayerId(0),
+                format!("Graveyard filler {idx}"),
+                Zone::Graveyard,
+            );
+        }
+        let cost = AbilityCost::Exile {
+            count: EXILE_COST_X,
+            zone: Some(Zone::Graveyard),
+            filter: None,
+        };
+        assert_eq!(
+            additional_cost_x_max(&state, PlayerId(0), source, &cost),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn graveyard_exile_additional_cost_concretizes_after_x_is_chosen() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(9_200),
+            caster,
+            "Harvest Pyre".to_string(),
+            Zone::Hand,
+        );
+        let gy_cards: Vec<ObjectId> = (0..5)
+            .map(|idx| {
+                create_object(
+                    &mut state,
+                    CardId(9_210 + idx),
+                    caster,
+                    format!("Graveyard filler {idx}"),
+                    Zone::Graveyard,
+                )
+            })
+            .collect();
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+            },
+            Vec::new(),
+            source,
+            caster,
+        );
+        ability.chosen_x = Some(3);
+        let pending = PendingCast::new(
+            source,
+            CardId(9_200),
+            ability,
+            ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            },
+        );
+        let mut events = Vec::new();
+        let waiting = pay_additional_cost(
+            &mut state,
+            caster,
+            AbilityCost::Exile {
+                count: EXILE_COST_X,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            },
+            pending,
+            &mut events,
+        )
+        .expect("chosen X should route to graveyard exile payment");
+        match waiting {
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Graveyard,
+                    },
+                choices,
+                count,
+                ..
+            } => {
+                assert_eq!(count, 3);
+                for card in gy_cards {
+                    assert!(choices.contains(&card));
+                }
+            }
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn remove_counter_additional_cost_x_max_counts_counters_not_targets() {
         use crate::types::ability::REMOVE_COUNTER_COST_X;
         use crate::types::counter::{CounterMatch, CounterType};
@@ -7995,11 +8217,11 @@ mod tests {
         match waiting {
             WaitingFor::OptionalCostChoice { cost, .. } => match cost {
                 AdditionalCost::Optional {
-                    cost: AbilityCost::Sacrifice { target, count },
+                    cost: AbilityCost::Sacrifice(cost),
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 } => {
-                    assert_eq!(count, 1);
-                    match target {
+                    assert_eq!(cost.requirement, SacrificeRequirement::count(1));
+                    match cost.target {
                         TargetFilter::Typed(tf) => {
                             assert!(tf.type_filters.contains(&TypeFilter::Creature));
                             assert!(tf.properties.contains(&FilterProp::PtComparison {
@@ -9587,10 +9809,7 @@ mod tests {
                 .cost(AbilityCost::Composite {
                     costs: vec![
                         AbilityCost::Tap,
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
                 }),
             );
@@ -9729,10 +9948,7 @@ mod tests {
                 .cost(AbilityCost::Composite {
                     costs: vec![
                         AbilityCost::Tap,
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
                 }),
             );
@@ -10457,6 +10673,8 @@ mod tests {
                         success_action: ResolutionCastSuccessAction::BottomMisses,
                     }),
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -10556,6 +10774,8 @@ mod tests {
                         },
                     }),
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -10619,6 +10839,8 @@ mod tests {
                         },
                     }),
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -10660,6 +10882,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -10712,6 +10936,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             hit_obj
                 .casting_permissions
@@ -10722,6 +10948,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -10766,6 +10994,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -10829,6 +11059,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             hit_obj
                 .casting_permissions
@@ -10846,6 +11078,8 @@ mod tests {
                         success_action: ResolutionCastSuccessAction::BottomMisses,
                     }),
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -10898,6 +11132,8 @@ mod tests {
                         success_action: ResolutionCastSuccessAction::BottomMisses,
                     }),
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             hit_obj
                 .casting_permissions
@@ -10908,6 +11144,8 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
                     duration: None,
+
+                    exile_instead_of_graveyard_on_resolve: false,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -11685,10 +11923,7 @@ mod tests {
             .cost(AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             });
             let obj = state.objects.get_mut(&treasure).unwrap();
@@ -11780,10 +12015,10 @@ mod tests {
                         target: None,
                     },
                 )
-                .cost(AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                    count: 1,
-                }),
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    1,
+                ))),
             );
         }
 
@@ -13290,9 +13525,9 @@ its replicate cost was paid.)\nDraw a card.";
                     matches!(
                         cost,
                         AdditionalCost::Optional {
-                            cost: AbilityCost::Sacrifice { count: 1, .. },
+                            cost: AbilityCost::Sacrifice(c),
                             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-                        }
+                        } if c.requirement == SacrificeRequirement::count(1)
                     ),
                     "expected optional Spirit sacrifice, got {cost:?}"
                 );
@@ -13811,10 +14046,8 @@ its replicate cost was paid.)\nDraw a card.";
             &mut events,
         );
 
-        let non_offering_cost = AbilityCost::Sacrifice {
-            target: offering_quality_filter("Spirit"),
-            count: 1,
-        };
+        let non_offering_cost =
+            AbilityCost::Sacrifice(SacrificeCost::count(offering_quality_filter("Spirit"), 1));
         let waiting = handle_sacrifice_for_cost(
             &mut state,
             caster,

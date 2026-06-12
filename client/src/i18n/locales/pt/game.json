@@ -1484,7 +1484,9 @@
     "scopeMulti": "Escolha novos alvos para a mágica",
     "subtitle": "{{scope}}. Atual: {{current}}",
     "confirm": "Confirmar",
-    "badgeNewTarget": "Novo alvo"
+    "badgeNewTarget": "Novo alvo",
+    "slotLabel": "Alvo {{index}}: {{current}} → {{chosen}}",
+    "unselected": "inalterado"
   },
   "separatePiles": {
     "chooserName": "Jogador {{number}}",

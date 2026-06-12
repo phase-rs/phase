@@ -601,6 +601,11 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
+    if scan_contains(lower, "an effect causes you to discard a card")
+        && scan_contains(lower, "instead of into your graveyard")
+    {
+        return true;
+    }
     false
 }
 

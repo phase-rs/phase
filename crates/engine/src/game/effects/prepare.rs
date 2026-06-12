@@ -257,6 +257,7 @@ fn synthesize_prepared_copy_object(
             granted_to: Some(controller),
             resolution_cleanup: None,
             duration: None,
+            exile_instead_of_graveyard_on_resolve: false,
         });
     state.objects.insert(copy_id, copy_obj);
 

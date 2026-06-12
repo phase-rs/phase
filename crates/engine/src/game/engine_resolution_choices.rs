@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, PaymentCost, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetRef,
+    AbilityCost, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, LibraryPosition,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -162,16 +162,29 @@ fn route_rest_partition(
             // DigChoice) and the reveal-until rest pile (effects::reveal_until::
             // move_rest_then) ARE migrated; this shared partition helper is not,
             // because it has three callers — two synchronous (search-split at
-            // :279, dig at the kept block) and ONE inside `run_batch_completion`'s
-            // RevealRestPile arm. Routing it through `move_objects_simultaneously`
-            // makes a CR 616.1 pause possible from inside a completion, which
-            // requires a re-pause-from-completion contract (the completion returns
-            // `()` and cannot signal a fresh park to its caller) plus pause
-            // handling threaded through both synchronous callers. That is a
-            // cross-cutting state-machine change; tracked for a follow-up so it
-            // lands as one reviewable unit rather than a partial migration here.
-            // (Practical exposure: a graveyard-redirect on a dig REST pile — the
-            // non-kept cards — with RIP/Leyline on the battlefield.)
+            // `apply_search_partition`, dig at the kept block) and ONE inside
+            // `run_batch_completion`'s RevealRestPile arm.
+            //
+            // RE-PAUSE CONTRACT STATUS (updated): the "pause from inside a
+            // completion" blocker named here previously is RESOLVED — the
+            // re-pause contract documented on
+            // `zone_pipeline::drain_pending_batch_deliveries` now covers a fresh
+            // park raised FROM a completion (the drain `.take()`s the old record
+            // BEFORE invoking the completion, so a completion that re-enters the
+            // batch machinery installs a clean record; see the
+            // `AttractionOpenRemainder` arm, which already pauses + re-defers
+            // through this exact path). The ONLY remaining work to migrate this
+            // helper onto `move_objects_simultaneously` is threading the
+            // `BatchMoveResult::NeedsChoice` return through the two SYNCHRONOUS
+            // callers (`apply_search_partition` and the dig kept-block), each of
+            // which currently returns `Result<(), _>` / `()` and would need to
+            // surface a parked prompt the same way the migrated DigChoice
+            // unkept-loop does (`defer_completion_on_pause` + early return). That
+            // is a cross-cutting signature change across both callers; tracked for
+            // a follow-up so it lands as one reviewable unit rather than a partial
+            // migration here. (Practical exposure: a graveyard-redirect on a dig
+            // REST pile — the non-kept cards — with RIP/Leyline on the
+            // battlefield.)
             for &obj_id in rest_ids {
                 zones::move_to_zone(state, obj_id, zone, events);
             }
@@ -395,8 +408,14 @@ pub(super) fn handle_resolution_choice(
                 .copied()
                 .collect();
 
-            crate::game::morph::manifest_card(state, player, manifest_id, events)
-                .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
+            crate::game::morph::manifest_card(
+                state,
+                player,
+                manifest_id,
+                crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                events,
+            )
+            .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
 
             // CR 614.6 + CR 701.17a class: route the non-manifested cards to the
             // graveyard through the simultaneous-move batch so each card's own
@@ -845,7 +864,9 @@ pub(super) fn handle_resolution_choice(
                         ));
                     }
                     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                        effects::discard::discard_as_cost(state, card_id, player, events)
+                        effects::discard::discard_caused_by_effect_with_source(
+                            state, card_id, player, None, events,
+                        )
                     {
                         let draw = ResolvedAbility::new(
                             crate::types::ability::Effect::Draw {
@@ -2234,7 +2255,7 @@ pub(super) fn handle_resolution_choice(
             let events_before_effect = events.len();
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                    effects::discard::discard_as_cost_with_source(
+                    effects::discard::discard_caused_by_effect_with_source(
                         state,
                         card_id,
                         player,
@@ -2488,6 +2509,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        moved_count: None,
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -2515,6 +2537,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        moved_count: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3296,11 +3319,12 @@ fn route_kept_card_or_defer(
         .get(&hit_card)
         .map(|obj| obj.controller)
         .unwrap_or(state.active_player);
-    match crate::game::zone_pipeline::move_object(
-        state,
-        crate::game::zone_pipeline::ZoneMoveRequest::effect(hit_card, destination, source_id),
-        events,
-    ) {
+    let mut req =
+        crate::game::zone_pipeline::ZoneMoveRequest::effect(hit_card, destination, source_id);
+    if destination == Zone::Library {
+        req = req.at_library_position(LibraryPosition::Bottom);
+    }
+    match crate::game::zone_pipeline::move_object(state, req, events) {
         crate::game::zone_pipeline::ZoneMoveResult::Done => None,
         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -3327,11 +3351,12 @@ fn route_kept_card_or_defer(
 fn starts_with_pay_amount_prompt(ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PayCost {
-            cost: PaymentCost::Mana { cost },
+            cost: AbilityCost::Mana { cost },
+            scale: None,
             ..
         } => casting_costs::cost_has_x(cost),
         Effect::PayCost {
-            cost: PaymentCost::Energy { amount },
+            cost: AbilityCost::PayEnergy { amount },
             ..
         } => matches!(
             amount,
@@ -3406,13 +3431,35 @@ pub(crate) fn run_batch_completion(
         } => {
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
             // through `route_rest_partition` (ordered library bottom); the
-            // reveal-until path routes through `move_rest` (CR 701.20a — "on the
-            // bottom of your library in a random order" shuffles). Dispatch on the
+            // reveal-until path routes through `move_rest_then`, including
+            // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
             if publish_tracked_set.is_some() {
                 route_rest_partition(state, &rest_cards, rest_destination, events);
-            } else {
-                effects::reveal_until::move_rest(state, &rest_cards, rest_destination, events);
+            } else if !rest_cards.is_empty() {
+                // CR 701.20a + CR 616.1: Reveal-until rest piles are fully
+                // pipeline-owned, including Library-bottom placement. If a
+                // Library-destination `Moved` replacement pauses here, re-stash
+                // this completion as cleanup-only so reveal markers and
+                // continuation drain run after the pile actually lands.
+                let cleanup = BatchCompletion::RevealRestPile {
+                    player,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved,
+                };
+                match effects::reveal_until::move_rest_then(
+                    state,
+                    &rest_cards,
+                    rest_destination,
+                    Some(cleanup),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done
+                    | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => return,
+                }
             }
             for card_id in &clear_markers {
                 state.revealed_cards.remove(card_id);

@@ -282,6 +282,9 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             tap_state: ManaTapState::from_tap(tapped_for_mana),
         });
     }
+    if final_count > 0 {
+        state.layers_dirty.mark_full();
+    }
 }
 
 /// Check if the mana pool can pay the given cost (CR 202.1a).

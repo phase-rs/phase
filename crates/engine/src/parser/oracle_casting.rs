@@ -1045,10 +1045,7 @@ mod tests {
         let raw = "As an additional cost to cast this spell, sacrifice a creature or pay {2}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Sacrifice { .. },
-                AbilityCost::Mana { .. },
-            )) => {}
+            Some(AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })) => {}
             other => panic!("Expected Choice(Sacrifice, Mana), got {:?}", other),
         }
     }
@@ -1062,10 +1059,12 @@ mod tests {
         let raw = "As an additional cost to cast this spell, sacrifice an artifact or creature.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Required(AbilityCost::Sacrifice { target, count: 1 })) => {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(ref sac))) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
                 assert!(
-                    matches!(target, TargetFilter::Or { .. }),
-                    "Expected Or filter, got {target:?}"
+                    matches!(&sac.target, TargetFilter::Or { .. }),
+                    "Expected Or filter, got {:?}",
+                    sac.target
                 );
             }
             other => panic!("Expected Required(Sacrifice {{ Or, 1 }}), got {:?}", other),
@@ -1078,7 +1077,8 @@ mod tests {
         let raw = "As an additional cost to cast this spell, sacrifice a creature.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Required(AbilityCost::Sacrifice { count: 1, .. })) => {}
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)))
+                if sac.requirement.fixed_count() == Some(1) => {}
             other => panic!("Expected Required(Sacrifice), got {:?}", other),
         }
     }
@@ -1128,15 +1128,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_additional_cost_exile_x_cards_from_graveyard() {
+        let lower = "as an additional cost to cast this spell, exile x cards from your graveyard.";
+        let raw = "As an additional cost to cast this spell, exile X cards from your graveyard.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Required(AbilityCost::Exile {
+                count: crate::types::ability::EXILE_COST_X,
+                zone: Some(crate::types::zones::Zone::Graveyard),
+                filter: None,
+            }))
+        );
+    }
+
+    #[test]
     fn parse_additional_cost_optional_sacrifice() {
         let lower = "as an additional cost to cast this spell, you may sacrifice an artifact.";
         let raw = "As an additional cost to cast this spell, you may sacrifice an artifact.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
             Some(AdditionalCost::Optional {
-                cost: AbilityCost::Sacrifice { count: 1, .. },
+                cost: AbilityCost::Sacrifice(ref sac),
                 repeatability: AdditionalCostRepeatability::Once,
-            }) => {}
+            }) if sac.requirement.fixed_count() == Some(1) => {}
             other => panic!("Expected Optional(Sacrifice), got {:?}", other),
         }
     }
@@ -1150,12 +1165,9 @@ mod tests {
         let result = parse_additional_cost_line(lower, raw);
         match result {
             Some(AdditionalCost::Optional {
-                cost:
-                    AbilityCost::Sacrifice {
-                        count: u32::MAX, ..
-                    },
+                cost: AbilityCost::Sacrifice(ref sac),
                 repeatability: AdditionalCostRepeatability::Once,
-            }) => {}
+            }) if sac.requirement.fixed_count() == Some(u32::MAX) => {}
             other => panic!("Expected Optional(Sacrifice any number), got {:?}", other),
         }
     }
@@ -1217,7 +1229,8 @@ mod tests {
         let raw = "As an additional cost to cast this spell, sacrifice a land.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Required(AbilityCost::Sacrifice { count: 1, .. })) => {}
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)))
+                if sac.requirement.fixed_count() == Some(1) => {}
             other => panic!("Expected Required(Sacrifice), got {:?}", other),
         }
     }
@@ -1285,9 +1298,9 @@ mod tests {
         match option {
             SpellCastingOption {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
-                cost: Some(AbilityCost::Sacrifice { count: 2, .. }),
+                cost: Some(AbilityCost::Sacrifice(ref sac)),
                 condition: None,
-            } => {}
+            } if sac.requirement.fixed_count() == Some(2) => {}
             other => panic!("expected Sacrifice(count=2) alt-cost, got {other:?}"),
         }
     }
@@ -1303,9 +1316,9 @@ mod tests {
         match option {
             SpellCastingOption {
                 kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
-                cost: Some(AbilityCost::Sacrifice { count: 3, .. }),
+                cost: Some(AbilityCost::Sacrifice(ref sac)),
                 condition: None,
-            } => {}
+            } if sac.requirement.fixed_count() == Some(3) => {}
             other => panic!("expected Sacrifice(count=3) alt-cost, got {other:?}"),
         }
     }

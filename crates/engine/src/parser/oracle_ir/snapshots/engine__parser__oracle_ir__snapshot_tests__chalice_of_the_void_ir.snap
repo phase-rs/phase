@@ -12,7 +12,7 @@ expression: "&ir"
           "effect": {
             "type": "Counter",
             "target": {
-              "type": "ParentTarget"
+              "type": "TriggeringSource"
             }
           },
           "cost": null,

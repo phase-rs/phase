@@ -162,6 +162,11 @@ pub(crate) fn handle_choice(
     }
 
     for &id in chosen {
+        // Phase E tranche 2: collect-evidence exile is a COST payment
+        // (CR 701.59a) routed via `handle_choice`, which has no source object in
+        // scope (the paying spell/ability lives nested in `resume`). Migrating it
+        // needs `Cause::Cost` with the source extracted from the resume — left for
+        // the cost-payment tranche.
         super::super::zones::move_to_zone(state, id, Zone::Exile, events);
     }
 

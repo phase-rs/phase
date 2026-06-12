@@ -1484,7 +1484,9 @@
     "scopeMulti": "Elige nuevos objetivos para el hechizo",
     "subtitle": "{{scope}}. Actual: {{current}}",
     "confirm": "Confirmar",
-    "badgeNewTarget": "Nuevo objetivo"
+    "badgeNewTarget": "Nuevo objetivo",
+    "slotLabel": "Objetivo {{index}}: {{current}} → {{chosen}}",
+    "unselected": "sin cambios"
   },
   "separatePiles": {
     "chooserName": "Jugador {{number}}",

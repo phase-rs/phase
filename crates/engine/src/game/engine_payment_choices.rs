@@ -2,7 +2,7 @@ use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
-    TapStateChange, TargetFilter, TargetRef,
+    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -15,7 +15,6 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
-use super::casting;
 use super::costs::{self, PaymentOutcome};
 use super::effects;
 use super::engine::{
@@ -436,6 +435,9 @@ fn pay_top_library_exile_cost(
                 source_id,
                 exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                 drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                // Cost-payment exile/sacrifice deliveries are never library
+                // placements.
+                library_placement: None,
             },
             events,
         ) {
@@ -618,44 +620,69 @@ pub(super) fn handle_unless_payment(
             }
             // CR 118.12 + CR 701.21: Unless-sacrifice — collect eligible
             // permanents and surface the choice via `WardSacrificeChoice`.
-            AbilityCost::Sacrifice {
-                count,
-                target: ref filter,
-            } => {
-                let sac_source = pending_effect.source_id;
-                let ctx = crate::game::filter::FilterContext::from_source_with_controller(
-                    sac_source, player,
-                );
-                let eligible: Vec<ObjectId> = state
-                    .battlefield
-                    .iter()
-                    .filter(|id| {
-                        state
-                            .objects
-                            .get(id)
-                            .map(|obj| {
-                                obj.controller == player
-                                    && !obj.is_emblem
-                                    && crate::game::filter::matches_target_filter(
-                                        state, **id, filter, &ctx,
-                                    )
-                            })
-                            .unwrap_or(false)
-                    })
-                    .copied()
-                    .collect();
-                if eligible.len() < count as usize {
-                    payment_failed = true;
-                } else {
-                    state.waiting_for = WaitingFor::WardSacrificeChoice {
+            AbilityCost::Sacrifice(cost) => match &cost.requirement {
+                SacrificeRequirement::Count { count } => {
+                    let filter = &cost.target;
+                    let eligible = eligible_unless_sacrifice_permanents(
+                        state,
                         player,
-                        permanents: eligible,
-                        pending_effect: pending_effect.clone(),
-                        remaining: count,
-                    };
-                    return Ok(action_result(events, state.waiting_for.clone()));
+                        pending_effect.source_id,
+                        filter,
+                    );
+                    if eligible.len() < *count as usize {
+                        payment_failed = true;
+                    } else {
+                        state.waiting_for = WaitingFor::WardSacrificeChoice {
+                            player,
+                            permanents: eligible,
+                            pending_effect: pending_effect.clone(),
+                            remaining: *count,
+                            min_total_power: None,
+                        };
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
                 }
-            }
+                SacrificeRequirement::Aggregate {
+                    stat,
+                    comparator,
+                    value,
+                } => {
+                    // CR 118.12a + CR 701.21: Unless-sacrifice with an aggregate
+                    // constraint fails automatically when the pool cannot satisfy it.
+                    let filter = &cost.target;
+                    let eligible = eligible_unless_sacrifice_permanents(
+                        state,
+                        player,
+                        pending_effect.source_id,
+                        filter,
+                    );
+                    if !sacrifice_pool_meets_aggregate_constraint(
+                        state,
+                        &eligible,
+                        *stat,
+                        *comparator,
+                        *value,
+                    ) {
+                        payment_failed = true;
+                    } else {
+                        state.waiting_for = WaitingFor::WardSacrificeChoice {
+                            player,
+                            permanents: eligible,
+                            pending_effect: pending_effect.clone(),
+                            remaining: 0,
+                            min_total_power: matches!(
+                                (stat, comparator),
+                                (
+                                    crate::types::ability::SacrificeAggregateStat::TotalPower,
+                                    crate::types::ability::Comparator::GE
+                                )
+                            )
+                            .then_some(*value),
+                        };
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+            },
             // CR 702.24a + CR 701.13: Thought Lash-style cumulative upkeep
             // pays by exiling the top N cards of the payer's library. This is
             // deterministic, so it does not need an object-selection prompt.
@@ -766,8 +793,9 @@ pub(super) fn handle_unless_payment(
             // cumulative-upkeep expansion (e.g., Jötun Owl Keeper at N age
             // counters chooses `{W}` or `{U}` for each, yielding `Composite[
             // Mana{...}, Mana{...}, ...]`). Sum the inner mana costs via
-            // `ManaCost::plus` and pay as a single combined mana cost — the
-            // same aggregation used by combat-tax `scaled()` payment.
+            // `ManaCost::plus` and pay as a single combined mana cost through
+            // the same authority/failure mapping as the single-Mana unless
+            // arm above.
             // "Then either the entire set of costs is paid, or none of them
             // is paid. Partial payments aren't allowed."
             //
@@ -782,7 +810,22 @@ pub(super) fn handle_unless_payment(
                     AbilityCost::Mana { cost } => acc.plus(cost),
                     _ => unreachable!("guard ensures all Mana"),
                 });
-                casting::pay_unless_cost(state, player, &combined, events)?;
+                let combined_cost = AbilityCost::Mana { cost: combined };
+                // CR 118.12: Pay the accumulated unless cost as a single
+                // combined mana cost, with unaffordable payment mapped to
+                // declining the unless payment.
+                match super::costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &combined_cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
+                        payment_failed = true;
+                    }
+                }
             }
             AbilityCost::Composite { .. } => {
                 // CR 702.24a + CR 118.12: A non-all-Mana `Composite`
@@ -858,6 +901,57 @@ pub(super) fn handle_unless_payment(
                     events,
                     &trigger_event,
                 )?);
+            } else if let Some(sub) = pending_effect
+                .sub_ability
+                .as_ref()
+                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+            {
+                // CR 700.2d + CR 608.2c: A `SequentialSibling` sub is the NEXT
+                // INDEPENDENT instruction "in the order written" — not a
+                // continuation of the unless-modified instruction, so it must
+                // resolve regardless of whether the unless cost was paid. The
+                // canonical case is choosing the same modal mode more than once
+                // (Mystic Confluence's "Counter target spell unless its
+                // controller pays {3}" picked twice → two independent counter
+                // instructions, each demanding its own {3}; issue #2925). The
+                // primary instruction's effect was suppressed above (its unless
+                // cost was paid), but the sibling chain is a separate instruction
+                // and is resumed here. The decline path resolves the whole
+                // `pending_effect` chain (which already follows the sibling); the
+                // pay path suppresses the head, so it must hand off only the
+                // sibling sub-chain — `resolve_ability_chain` then surfaces the
+                // sibling's OWN `unless_pay` prompt and follows its own chain.
+                let mut sub_resolved = sub.as_ref().clone();
+                if sub_resolved.targets.is_empty() {
+                    sub_resolved.targets = pending_effect.targets.clone();
+                }
+                sub_resolved.context = pending_effect.context.clone();
+                let event_start = resolve_ability_chain_for_unless_payment(
+                    state,
+                    &sub_resolved,
+                    events,
+                    &trigger_event,
+                )?;
+                // CR 608.2c: If the sibling instruction itself paused for input
+                // (e.g. its OWN unless-pay prompt — the second {3} of a
+                // double-counter), that fresh `WaitingFor` is the next state and
+                // MUST be preserved. The shared post-payment tail below would
+                // overwrite an open `UnlessPayment` with active-player priority
+                // (`set_active_priority`), collapsing the second prompt; run the
+                // trigger/SBA pipeline now and return so it survives.
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    let default_wf = state.waiting_for.clone();
+                    let wf = engine_priority::run_post_action_pipeline_from(
+                        state,
+                        events,
+                        event_start,
+                        &default_wf,
+                        false,
+                    )?;
+                    state.waiting_for = wf;
+                    return Ok(action_result(events, state.waiting_for.clone()));
+                }
+                post_action_event_start = Some(event_start);
             }
         }
     }
@@ -895,7 +989,10 @@ pub(super) fn handle_unless_payment(
         )?);
     }
 
-    if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
+    if matches!(
+        state.waiting_for,
+        WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. }
+    ) {
         set_active_priority(state);
     }
     resume_pending_continuation_if_priority(state, events)?;
@@ -1144,6 +1241,58 @@ pub(super) fn handle_ward_discard_choice(
     Ok(state.waiting_for.clone())
 }
 
+fn eligible_unless_sacrifice_permanents(
+    state: &GameState,
+    player: PlayerId,
+    sac_source: ObjectId,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(sac_source, player);
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| {
+                    obj.controller == player
+                        && !obj.is_emblem
+                        && crate::game::filter::matches_target_filter(state, **id, filter, &ctx)
+                })
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect()
+}
+
+fn sacrifice_pool_meets_aggregate_constraint(
+    state: &GameState,
+    eligible: &[ObjectId],
+    stat: crate::types::ability::SacrificeAggregateStat,
+    comparator: crate::types::ability::Comparator,
+    value: i32,
+) -> bool {
+    // CR 701.21: The maximum power obtainable from any subset is the sum of all positive powers.
+    let total_positive_power: i32 = match stat {
+        crate::types::ability::SacrificeAggregateStat::TotalPower => eligible
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .map(|obj| obj.power.unwrap_or(0))
+            .filter(|&p| p > 0)
+            .sum(),
+    };
+    comparator.evaluate(total_positive_power, value)
+}
+
+fn selected_sacrifice_total_power(state: &GameState, chosen: &[ObjectId]) -> i32 {
+    chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| obj.power.unwrap_or(0))
+        .sum()
+}
+
 pub(super) fn handle_ward_sacrifice_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -1155,6 +1304,7 @@ pub(super) fn handle_ward_sacrifice_choice(
         permanents,
         pending_effect,
         remaining,
+        min_total_power,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -1162,34 +1312,62 @@ pub(super) fn handle_ward_sacrifice_choice(
         ));
     };
 
-    if chosen.len() != 1 || !permanents.contains(&chosen[0]) {
-        return Err(EngineError::InvalidAction(
-            "Must select exactly one permanent to sacrifice".to_string(),
-        ));
-    }
+    if let Some(threshold) = min_total_power {
+        // CR 118.12a: Validate that the chosen permanents are unique and meet the aggregate constraint.
+        if chosen.is_empty() || chosen.iter().any(|id| !permanents.contains(id)) {
+            return Err(EngineError::InvalidAction(
+                "Must select one or more eligible permanents to sacrifice".to_string(),
+            ));
+        }
+        if chosen.len()
+            != chosen
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        {
+            return Err(EngineError::InvalidAction(
+                "Duplicate selections are not allowed".to_string(),
+            ));
+        }
+        if selected_sacrifice_total_power(state, &chosen) < threshold {
+            return Err(EngineError::InvalidAction(format!(
+                "Selected permanents' total power must be at least {threshold}"
+            )));
+        }
+        for id in &chosen {
+            crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)?;
+        }
+    } else {
+        if chosen.len() != 1 || !permanents.contains(&chosen[0]) {
+            return Err(EngineError::InvalidAction(
+                "Must select exactly one permanent to sacrifice".to_string(),
+            ));
+        }
 
-    // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
-    // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
-    // (one permanent per round-trip, re-prompting for `remaining - 1`), so the
-    // permanents paying one Ward cost are never stamped as a simultaneous departure
-    // group; the `handle_sacrifice_for_cost` co-departed stamp does not apply here.
-    // A co-departing observer therefore under-observes. Closing this would batch all
-    // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
-    crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
+        // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
+        // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
+        // (one permanent per round-trip, re-prompting for `remaining - 1`), so the
+        // permanents paying one Ward cost are never stamped as a simultaneous departure
+        // group; the `handle_sacrifice_for_cost` co-departed stamp does not apply here.
+        // A co-departing observer therefore under-observes. Closing this would batch all
+        // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
+        crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
 
-    // If more sacrifices remain, re-prompt with updated eligible permanents
-    if remaining > 1 {
-        let eligible: Vec<ObjectId> = permanents
-            .into_iter()
-            .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
-            .collect();
-        state.waiting_for = WaitingFor::WardSacrificeChoice {
-            player,
-            permanents: eligible,
-            pending_effect,
-            remaining: remaining - 1,
-        };
-        return Ok(state.waiting_for.clone());
+        // If more sacrifices remain, re-prompt with updated eligible permanents
+        if remaining > 1 {
+            let eligible: Vec<ObjectId> = permanents
+                .into_iter()
+                .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
+                .collect();
+            state.waiting_for = WaitingFor::WardSacrificeChoice {
+                player,
+                permanents: eligible,
+                pending_effect,
+                remaining: remaining - 1,
+                min_total_power: None,
+            };
+            return Ok(state.waiting_for.clone());
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -1273,7 +1451,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, ControllerRef, QuantityExpr, ResolvedAbility, SubAbilityLink, TypedFilter,
+        AbilityCondition, ControllerRef, QuantityExpr, ResolvedAbility, SacrificeCost,
+        SubAbilityLink, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
@@ -1565,10 +1744,10 @@ mod tests {
         let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(1),
-            cost: AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-                count: 1,
-            },
+            cost: AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                1,
+            )),
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
@@ -2088,6 +2267,70 @@ mod tests {
         );
     }
 
+    /// CR 118.12 + CR 702.24a: if the accumulated all-mana composite unless
+    /// cost is unpayable, the pay attempt is accepted as "can't pay" and the
+    /// unpaid effect happens. This mirrors the single-Mana unless arm's
+    /// authority-backed failure mapping.
+    #[test]
+    fn unless_payment_composite_of_one_ofs_unpayable_runs_effect() {
+        let oneof_wu = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::White],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+        ];
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: oneof_wu.clone(),
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining_choices: vec![oneof_wu],
+            chosen: vec![],
+        };
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("first choose-cost prompt should accumulate, not pay");
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("unpayable combined mana cost should resolve as not paid");
+
+        assert_eq!(
+            state.players[0].life, 27,
+            "unpayable combined unless-cost must run the pending effect"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "unpayable combined cost must not leave the unless prompt stuck"
+        );
+    }
+
     /// CR 118.12 (M1 fold + Harvest Wurm shape): An unless ReturnToHand cost
     /// with `from_zone: Some(Zone::Graveyard)` collects eligible cards from
     /// the graveyard zone (not battlefield).
@@ -2192,10 +2435,7 @@ mod tests {
             deserialize_ability_cost_compat(&mut de).expect("legacy Sacrifice deserialize");
         assert_eq!(
             cost,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::Any,
-                count: 2,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 2))
         );
     }
 

@@ -5,7 +5,8 @@
 //! cover the overwhelming majority of activated ability costs.
 
 use engine::types::ability::{
-    AbilityCost, CounterCostSelection, QuantityExpr, TargetFilter, REMOVE_COUNTER_COST_ALL,
+    AbilityCost, CounterCostSelection, QuantityExpr, SacrificeCost, TargetFilter,
+    REMOVE_COUNTER_COST_ALL,
 };
 use engine::types::ManaCost;
 use engine::types::Zone;
@@ -59,27 +60,9 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             count: 1,
             filter: convert_permanents(filter)?,
         },
-        Cost::SacrificeAPermanent(filter) => AbilityCost::Sacrifice {
-            target: convert_permanents(filter)?,
-            count: 1,
-        },
-        Cost::SacrificePermanent(p) => AbilityCost::Sacrifice {
-            target: convert_permanent(p)?,
-            count: 1,
-        },
-        // CR 701.21: Sacrifice N permanents matching a filter. Engine
-        // `Sacrifice.count` is `u32`; X-bound and other dynamic counts
-        // strict-fail with a precise extension request rather than a
-        // generic `MalformedIdiom`, since the converter is correct —
-        // the engine slot is too narrow to express the cost.
-        Cost::SacrificeNumberPermanents(n, filter) => AbilityCost::Sacrifice {
-            target: convert_permanents(filter)?,
-            count: fixed_count_or_engine_gap(
-                n,
-                "AbilityCost::Sacrifice",
-                "count: QuantityExpr (X-bound / dynamic count)",
-            )?,
-        },
+        Cost::SacrificeAPermanent(filter) => {
+            AbilityCost::Sacrifice(SacrificeCost::count(convert_permanents(filter)?, 1))
+        }
         Cost::PayLife(n) => AbilityCost::PayLife {
             amount: quantity::convert(n)?,
         },

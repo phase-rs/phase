@@ -1683,7 +1683,7 @@ pub(crate) fn deterministic_choice(
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
             engine::types::ability::AdditionalCost::Optional {
-                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                cost: engine::types::ability::AbilityCost::Sacrifice(_),
                 ..
             } => false, // Conservative: don't sacrifice unless search says so
             engine::types::ability::AdditionalCost::Optional {

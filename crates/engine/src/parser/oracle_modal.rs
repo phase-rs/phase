@@ -948,9 +948,28 @@ fn lower_mode_abilities_with_subject(
     subject: Option<TargetFilter>,
     host_self_reference: Option<TargetFilter>,
 ) -> Vec<AbilityDefinition> {
+    lower_mode_abilities_with_scope(modes, kind, subject, None, host_self_reference)
+}
+
+/// Variant of `lower_mode_abilities_with_subject` that additionally seeds
+/// `relative_player_scope` on the parse context so mode-body "that player"
+/// anaphora resolve to the correct player scope established by the trigger
+/// condition (e.g. `TriggeringPlayer` for DamageDone triggers).
+///
+/// CR 603.7c: For DamageDone triggers the damaged player is the triggering
+/// player; "that player" in each modal branch must resolve to them, not the
+/// caster or `ParentTargetController`.
+pub(crate) fn lower_mode_abilities_with_scope(
+    modes: &[ModeAst],
+    kind: AbilityKind,
+    subject: Option<TargetFilter>,
+    relative_player_scope: Option<crate::types::ability::ControllerRef>,
+    host_self_reference: Option<TargetFilter>,
+) -> Vec<AbilityDefinition> {
     let mut ctx = ParseContext {
         subject,
         host_self_reference,
+        relative_player_scope,
         ..Default::default()
     };
     modes
@@ -960,6 +979,63 @@ fn lower_mode_abilities_with_subject(
             guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
         })
         .collect()
+}
+
+/// CR 700.2 + CR 608.2d: Try to parse an inline modal trigger body of the form
+/// `"choose one — <mode1>; or <mode2>[; or <modeN>]"` that appears as a single
+/// sentence (semicolon-separated modes, no bullet lines).
+///
+/// This handles cards like Grenzo, Havoc Raiser where the entire trigger
+/// including modal choices fits on one Oracle text line. Returns `None` if the
+/// text does not start with a recognised modal header or contains no `; or `
+/// separator.
+///
+/// The `relative_player_scope` from the trigger condition (e.g.
+/// `TriggeringPlayer` for DamageDone triggers) is propagated into every mode
+/// body so "that player" anaphora resolve to the correct player.
+pub(crate) fn try_parse_inline_modal(
+    effect_body: &str,
+    relative_player_scope: Option<crate::types::ability::ControllerRef>,
+) -> Option<AbilityDefinition> {
+    let em_dash_pos = effect_body.find('\u{2014}')?;
+    let header_text = effect_body[..em_dash_pos].trim();
+    let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
+
+    let header = parse_modal_header_ast(header_text)?;
+
+    let raw_modes: Vec<&str> = modes_text
+        .split("; or ") // allow-noncombinator: structural delimiter split for modal modes
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if raw_modes.len() < 2 {
+        return None;
+    }
+
+    let modes: Vec<ModeAst> = raw_modes
+        .iter()
+        .map(|body| {
+            let body = body.trim_end_matches('.');
+            ModeAst {
+                raw: body.to_string(),
+                label: None,
+                body: body.to_string(),
+                mode_cost: None,
+            }
+        })
+        .collect();
+
+    let mode_abilities = lower_mode_abilities_with_scope(
+        &modes,
+        AbilityKind::Spell,
+        None,
+        relative_player_scope,
+        None,
+    );
+    Some(
+        AbilityDefinition::new(AbilityKind::Spell, modal_marker_effect(&header))
+            .with_modal(build_modal_choice(&header, &modes), mode_abilities),
+    )
 }
 
 /// Replace a parsed mode ability with `Effect::Unimplemented` when the mode body

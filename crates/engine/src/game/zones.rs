@@ -507,6 +507,13 @@ pub fn move_to_zone(
     }
     zone_change_record.combat_status = capture_combat_status(state, object_id);
 
+    // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
+    // temporarily changed the survivor's token-ness, the ZoneChanged record above
+    // must retain the merged permanent's event-time token-ness. Restore the
+    // survivor only after that snapshot so the moved token component can cease to
+    // exist without corrupting leave-trigger filters.
+    super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
+
     apply_zone_exit_cleanup(state, object_id, from, to);
 
     remove_from_zone(state, object_id, from, owner);
@@ -587,15 +594,7 @@ pub fn move_to_zone(
     // above, guaranteeing a post-layer rebuild on the next
     // `collect_pending_triggers` consult.
     if to == Zone::Battlefield {
-        let registration = state.objects.get(&object_id).map(|obj| {
-            let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
-                obj.trigger_definitions.as_slice().iter().cloned().collect();
-            let synthetic = super::trigger_index::has_synthetic_keyword_trigger_for(obj);
-            (defs, synthetic)
-        });
-        if let Some((defs, synthetic)) = registration {
-            state.trigger_index.add(object_id, &defs, synthetic);
-        }
+        super::trigger_index::reindex_object_triggers(state, object_id);
     }
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());

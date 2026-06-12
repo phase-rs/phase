@@ -7,6 +7,7 @@ use super::blight_value::BlightValuePolicy;
 use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
+use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::context::PolicyContext;
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
@@ -99,6 +100,7 @@ pub enum PolicyId {
     XValue,
     LandAnimation,
     MillTargeting,
+    ChaliceAvoidance,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -231,6 +233,7 @@ impl Default for PolicyRegistry {
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
+            Box::new(ChaliceAvoidancePolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

@@ -491,6 +491,15 @@ pub fn resolved_targets(
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
+    // CR 701.20e: "it" / "that card" after a look-at or reveal instruction.
+    if matches!(target_filter, TargetFilter::LastRevealed) {
+        return state
+            .last_revealed_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+    }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
@@ -519,12 +528,29 @@ pub fn resolved_targets(
     if !ability.targets.is_empty()
         && matches!(
             target_filter,
-            TargetFilter::ParentTarget
-                | TargetFilter::ParentTargetSlot { .. }
-                | TargetFilter::StackSpell
+            TargetFilter::ParentTarget | TargetFilter::StackSpell
         )
     {
         return ability.targets.clone();
+    }
+    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the entire
+    // chain, not just the current ability's targets. During normal resolution
+    // the root stack entry has already been popped and is exposed through
+    // `resolving_stack_entry`; the live stack lookup covers target resolution
+    // before the entry is popped.
+    if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
+        let root = state
+            .resolving_stack_entry
+            .as_ref()
+            .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+            .or_else(|| {
+                state.stack.iter().find(|entry| {
+                    entry.id == ability.source_id || entry.source_id == ability.source_id
+                })
+            })
+            .and_then(|entry| entry.ability())
+            .unwrap_or(ability);
+        return super::ability_utils::flatten_targets_in_chain(root);
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
@@ -627,6 +653,7 @@ pub(crate) fn resolved_object_ids_for_filter(
             .into_iter()
             .collect(),
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
+        TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))
@@ -3613,6 +3640,63 @@ mod tests {
             vec![TargetRef::Object(c1)],
             "Should fall through to ability.targets when no other tier applies"
         );
+    }
+
+    /// CR 608.2c: ParentTargetSlot indexes the targets announced for the whole
+    /// resolving ability, not only the nearest chained TargetOnly node.
+    #[test]
+    fn resolved_targets_parent_target_slot_uses_resolving_stack_entry_root_chain() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let first = TargetRef::Object(ObjectId(1));
+        let second = TargetRef::Object(ObjectId(2));
+        let body = ResolvedAbility::new(
+            crate::types::ability::Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTargetSlot { index: 1 },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![second.clone()],
+            source,
+            PlayerId(0),
+        );
+        let root = ResolvedAbility::new(
+            crate::types::ability::Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![first.clone()],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            crate::types::ability::Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![second.clone()],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: root,
+            },
+        });
+
+        let result = resolved_targets(&body, &TargetFilter::ParentTargetSlot { index: 1 }, &state);
+
+        assert_eq!(result, vec![first, second]);
     }
 
     /// CR 706.2: a die roll's result is the amount `EventContextAmount`

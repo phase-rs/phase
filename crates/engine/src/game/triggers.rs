@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
-    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, TargetFilter,
-    TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, SacrificeCost,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -147,10 +149,9 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
-        WardCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
-            target: filter.clone(),
-            count: *count,
-        },
+        WardCost::Sacrifice { count, filter } => {
+            AbilityCost::Sacrifice(SacrificeCost::count(filter.clone(), *count))
+        }
         // CR 702.21a + CR 701.67: Waterbend ward cost maps to mana payment.
         // Full tap-to-help semantics deferred to waterbend cost integration.
         WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
@@ -289,6 +290,64 @@ fn contextual_batched_trigger_event(
     })
 }
 
+fn synthesize_granted_keyword_triggers<'a>(
+    source_obj: &GameObject,
+    keywords: impl IntoIterator<Item = &'a Keyword>,
+) -> Vec<(KeywordKind, TriggerDefinition)> {
+    let mut base_keywords = source_obj.base_keywords.clone();
+    let mut granted_keywords = Vec::new();
+    for kw in keywords {
+        if let Some(pos) = base_keywords.iter().position(|base| base == kw) {
+            base_keywords.remove(pos);
+        } else {
+            granted_keywords.push(kw);
+        }
+    }
+
+    granted_keywords
+        .into_iter()
+        .flat_map(|kw| {
+            KeywordTriggerInstaller::triggers_for(kw)
+                .into_iter()
+                .map(move |trig| (kw.kind(), trig))
+        })
+        .collect()
+}
+
+fn keyword_kind_for_trigger(
+    keywords: &[Keyword],
+    trigger: &TriggerDefinition,
+) -> Option<KeywordKind> {
+    keywords
+        .iter()
+        .find(|keyword| KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword))
+        .map(Keyword::kind)
+}
+
+fn runtime_granted_lki_keyword_triggers(
+    source_obj: &GameObject,
+    record: &crate::types::game_state::ZoneChangeRecord,
+) -> Vec<(KeywordKind, TriggerDefinition)> {
+    let mut base_triggers: Vec<TriggerDefinition> = source_obj
+        .base_trigger_definitions
+        .iter()
+        .cloned()
+        .collect();
+    record
+        .trigger_definitions
+        .iter()
+        .filter_map(|trigger| {
+            if let Some(pos) = base_triggers.iter().position(|base| base == trigger) {
+                base_triggers.remove(pos);
+                None
+            } else {
+                keyword_kind_for_trigger(&record.keywords, trigger)
+                    .map(|kind| (kind, trigger.clone()))
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -313,26 +372,34 @@ fn collect_matching_triggers(
     // the off-zone trigger scan sees them, mirroring how `off_zone_characteristics`
     // synthesizes the keyword itself. The printed-keyword path is unaffected:
     // printed Suspend already carries these triggers in `base_trigger_definitions`.
-    let granted_off_zone_triggers: Vec<(crate::types::keywords::KeywordKind, TriggerDefinition)> =
-        if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
-            let base_keyword_kinds: Vec<_> =
-                source_obj.base_keywords.iter().map(|k| k.kind()).collect();
-            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id)
-                .iter()
-                // Only synthesize for keywords that were *granted* (absent from
-                // the printed/base set) — printed keywords already carry their
-                // companion triggers via synthesis at database-build time.
-                .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
-                .flat_map(|kw| {
-                    let kind = kw.kind();
-                    crate::database::synthesis::KeywordTriggerInstaller::triggers_for(kw)
-                        .into_iter()
-                        .map(move |trig| (kind, trig))
-                })
-                .collect()
+    //
+    // CR 603.10a: The same keyword-origin treatment applies when a battlefield
+    // object just left the battlefield. Runtime-granted keyword triggers such
+    // as Undying/Persist may be cleaned from the live object before the LTB
+    // trigger scan, but the ZoneChangeRecord preserves the LKI keyword set.
+    let granted_keyword_triggers = if zone_filter.is_some_and(|z| z != Zone::Battlefield) {
+        let off_zone_keywords =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, obj_id);
+        synthesize_granted_keyword_triggers(source_obj, off_zone_keywords.iter())
+    } else if matches!(zone_filter, Some(Zone::Battlefield)) {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if *object_id == obj_id {
+                runtime_granted_lki_keyword_triggers(source_obj, record)
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
-        };
+        }
+    } else {
+        Vec::new()
+    };
 
     let source_phase_out_event = matches!(
         event,
@@ -348,9 +415,9 @@ fn collect_matching_triggers(
     // after the status flip, so this one event must read only PhaseOut definitions
     // directly from the source while leaving all other phased-out abilities inert.
     //
-    // Synthesized off-zone granted-keyword triggers are appended after the
-    // printed set with indices offset past `obj.trigger_definitions.len()` so
-    // the `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
+    // Synthesized granted-keyword triggers are appended after the printed set
+    // with indices offset past `obj.trigger_definitions.len()` so the
+    // `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
     let printed_trigger_count = source_obj.trigger_definitions.len();
     let printed_triggers: Vec<(
         usize,
@@ -372,16 +439,16 @@ fn collect_matching_triggers(
             .collect()
     };
     let all_triggers = printed_triggers.into_iter().chain(
-        granted_off_zone_triggers
+        granted_keyword_triggers
             .iter()
             .enumerate()
             .map(|(i, (kind, def))| (printed_trigger_count + i, def, Some(*kind))),
     );
     for (trig_idx, trig_def, granted_keyword_kind) in all_triggers {
-        // Synthesized granted-keyword companion triggers (off-zone Suspend
-        // grant) carry a keyword-keyed `MayTriggerOrigin` — the synthetic
-        // `trig_idx` points past `trigger_definitions` and must not be used as
-        // a `Printed` index. Printed triggers keep their stable index.
+        // Synthesized granted-keyword companion triggers carry a keyword-keyed
+        // `MayTriggerOrigin` — the synthetic `trig_idx` points past
+        // `trigger_definitions` and must not be used as a `Printed` index.
+        // Printed triggers keep their stable index.
         // Zone guard: only fire a trigger if its declared zones include the zone being scanned.
         // Empty trigger_zones defaults to battlefield-only (engine-internal triggers like
         // prowess/ward). Parser-created non-battlefield triggers set trigger_zones explicitly.
@@ -424,13 +491,19 @@ fn collect_matching_triggers(
             }
             if !trig_def.batched {
                 if let Some(ref condition) = trig_def.condition {
-                    if !check_trigger_condition(
-                        state,
-                        condition,
-                        controller,
-                        Some(obj_id),
-                        Some(event),
-                    ) {
+                    // CR 508.5 + CR 603.4: Attacks triggers with intervening-if
+                    // clauses read the defending player from each expanded attack
+                    // event — the batch-level event is the wrong context.
+                    let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks);
+                    if !skip_early_condition
+                        && !check_trigger_condition(
+                            state,
+                            condition,
+                            controller,
+                            Some(obj_id),
+                            Some(event),
+                        )
+                    {
                         continue;
                     }
                 }
@@ -479,8 +552,7 @@ fn collect_matching_triggers(
                     continue;
                 }
                 vec![trigger_events]
-            } else if matches!(trig_def.mode, TriggerMode::Attacks) && trig_def.condition.is_none()
-            {
+            } else if matches!(trig_def.mode, TriggerMode::Attacks) {
                 super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
@@ -515,6 +587,17 @@ fn collect_matching_triggers(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
+                if let Some(ref condition) = trig_def.condition {
+                    if !check_trigger_condition(
+                        state,
+                        condition,
+                        controller,
+                        Some(obj_id),
+                        Some(&trigger_event),
+                    ) {
+                        continue;
+                    }
+                }
                 // CR 603.2c: For batched triggers, stash the filtered subject
                 // count so the resolved ability's `EventContextAmount` reads
                 // "that many" as the number of matching subjects (Dragons that
@@ -4412,6 +4495,7 @@ pub(crate) fn check_trigger_condition(
             PlayerFilter::DefendingPlayer
             | PlayerFilter::OpponentLostLife
             | PlayerFilter::OpponentGainedLife
+            | PlayerFilter::HasLostTheGame
             // CR 120.1 + CR 510.1: a set-valued combat-damaged-this-turn
             // predicate has no single-player "whose turn" semantic.
             | PlayerFilter::OpponentDealtCombatDamage { .. }
@@ -5168,8 +5252,8 @@ pub mod tests {
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
         DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp, KickerVariant,
-        MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
+        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
         SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
         TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
@@ -5767,18 +5851,17 @@ pub mod tests {
         let pay_then_draw = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PayCost {
-                cost: PaymentCost::AbilityCost {
-                    cost: AbilityCost::Composite {
-                        costs: vec![
-                            AbilityCost::Mana {
-                                cost: ManaCost::generic(1),
-                            },
-                            AbilityCost::PayLife {
-                                amount: QuantityExpr::Fixed { value: 1 },
-                            },
-                        ],
-                    },
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
         )
@@ -9854,7 +9937,9 @@ pub mod tests {
             filter: TargetFilter::Any,
         };
         let result = ward_cost_to_ability_cost(&sacrifice);
-        assert!(matches!(result, AbilityCost::Sacrifice { count: 1, .. }));
+        assert!(
+            matches!(result, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1))
+        );
 
         // Waterbend
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
@@ -14144,10 +14229,10 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Instant);
             obj.cast_from_zone = Some(Zone::Hand);
             obj.additional_cost = Some(AdditionalCost::Optional {
-                cost: AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: 1,
-                },
+                cost: AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    1,
+                )),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             obj.keywords.push(Keyword::Casualty(2));
@@ -18147,6 +18232,7 @@ pub mod tests {
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    None,
                     events,
                 );
             }
@@ -20483,6 +20569,124 @@ mod dedup_regression_tests {
     }
 
     #[test]
+    fn breena_triggers_when_defending_opponent_has_more_life_than_another_opponent() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let breena_controller = PlayerId(0);
+        let attacking_player = PlayerId(1);
+        let defending_player = PlayerId(2);
+
+        state.players[0].life = 40;
+        state.players[1].life = 30;
+        state.players[2].life = 35;
+
+        let breena = create_object(
+            &mut state,
+            CardId(1),
+            breena_controller,
+            "Breena, the Demagogue".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&breena).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            let trig_def = crate::parser::oracle_trigger::parse_trigger_line(
+                "Whenever a player attacks one of your opponents, if that opponent has more life than another of your opponents, that attacking player draws a card and you put two +1/+1 counters on a creature you control.",
+                "Breena, the Demagogue",
+            );
+            obj.trigger_definitions.push(trig_def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+        }
+
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            attacking_player,
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            attacking_player,
+            "Second Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second_attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker, second_attacker],
+                defending_player,
+                attacks: vec![
+                    (attacker, AttackTarget::Player(defending_player)),
+                    (second_attacker, AttackTarget::Player(defending_player)),
+                ],
+            }],
+        );
+
+        let breena_trigger_count = state
+            .stack
+            .iter()
+            .filter(|entry| {
+                entry.source_id == breena
+                    && entry.controller == breena_controller
+                    && matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility { ability, .. }
+                            if matches!(ability.effect, Effect::Draw { .. })
+                    )
+            })
+            .count();
+        assert_eq!(
+            breena_trigger_count, 1,
+            "Breena must trigger when a player attacks an opponent with more life than another opponent"
+        );
+
+        state.stack.clear();
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == defending_player)
+            .unwrap()
+            .life = 25;
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker, second_attacker],
+                defending_player,
+                attacks: vec![
+                    (attacker, AttackTarget::Player(defending_player)),
+                    (second_attacker, AttackTarget::Player(defending_player)),
+                ],
+            }],
+        );
+
+        assert!(
+            state.stack.is_empty(),
+            "Breena must not trigger when the defending opponent fails the intervening-if"
+        );
+    }
+
+    #[test]
     fn defending_player_life_quantity_reads_attack_event_player_target() {
         use crate::game::combat::AttackTarget;
         use crate::types::ability::{
@@ -21446,7 +21650,7 @@ mod push_first_contract_tests {
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, Effect, PaymentCost,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
         QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::actions::GameAction;
@@ -21730,9 +21934,10 @@ mod push_first_contract_tests {
         // Parent: pay {E}{E}{E}. On success the reflexive `WhenYouDo` fires.
         let parent = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],

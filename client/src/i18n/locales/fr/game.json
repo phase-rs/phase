@@ -1484,7 +1484,9 @@
     "scopeMulti": "Choisissez de nouvelles cibles pour le sort",
     "subtitle": "{{scope}}. Actuelle : {{current}}",
     "confirm": "Confirmer",
-    "badgeNewTarget": "Nouvelle cible"
+    "badgeNewTarget": "Nouvelle cible",
+    "slotLabel": "Cible {{index}} : {{current}} → {{chosen}}",
+    "unselected": "inchangée"
   },
   "separatePiles": {
     "chooserName": "Joueur {{number}}",

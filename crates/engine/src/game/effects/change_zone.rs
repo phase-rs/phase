@@ -597,6 +597,7 @@ pub fn resolve(
                         enter_with_counters: ctx.enter_with_counters.clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        moved_count: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -621,6 +622,7 @@ pub fn resolve(
                         enter_with_counters: ctx.enter_with_counters.clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        moved_count: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -1042,16 +1044,43 @@ pub fn resolve_all(
                         enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        moved_count: Some(moved_count),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                // CR 614.13a: this terminal early-exit ends the mass-entry event
-                // (no stash/resume), so the pre-entry Devour snapshot's lifetime is
-                // over — clear it so it can't leak into a later sacrifice.
-                let _ = state.devour_eligible_snapshot.take();
+                // CR 303.4f + CR 614.13a: returning an Aura to the battlefield
+                // surfaces a host-choice prompt (the `ReturnAsAuraTarget`
+                // WaitingFor is already installed by `execute_zone_move`). Stash
+                // the unprocessed members so `drain_pending_change_zone_iteration`
+                // resumes the mass move after the host is chosen — without the
+                // stash, every member after the Aura was silently dropped, so a
+                // "return all … from your graveyard" with an Aura among the cards
+                // returned only the cards before it (issue #2858: Archangel
+                // Elspeth's −6 "returned only one"). Mirrors the targeted
+                // multi-object loop above; no `park_waiting_for` (the Aura prompt
+                // is the pending WaitingFor) and the Devour snapshot is NOT
+                // cleared — the mass-entry event is no longer terminal here and
+                // the resumed members may still consume it.
+                state.pending_change_zone_iteration =
+                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                        remaining: matching[i + 1..].to_vec(),
+                        source_id: ability.source_id,
+                        controller: ability.controller,
+                        origin: None,
+                        destination: dest_zone,
+                        enter_transformed: false,
+                        enter_tapped,
+                        enters_under_player,
+                        enters_attacking: false,
+                        enter_with_counters: vec![],
+                        duration: ability.duration.clone(),
+                        track_exiled_by_source,
+                        moved_count: Some(moved_count + 1),
+                        effect_kind: EffectKind::from(&ability.effect),
+                    });
                 return Ok(());
             }
         }
@@ -1806,6 +1835,128 @@ mod tests {
             })
             .count();
         assert_eq!(change_zone_resolutions, 1);
+    }
+
+    /// Issue #2858 (Archangel Elspeth −6): "Return all nonland permanent cards …
+    /// from your graveyard to the battlefield" must return EVERY qualifying card,
+    /// even when an Aura among them surfaces a host-attachment prompt. The mass
+    /// `resolve_all` loop must stash the unprocessed members on
+    /// `NeedsAuraAttachmentChoice` (mirroring the targeted loop) so the drain
+    /// resumes them after the host is chosen — pre-fix it returned early, so
+    /// every member after the Aura was silently dropped ("returned only one").
+    #[test]
+    fn change_zone_all_resumes_remaining_members_after_aura_host_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        // An Aura (enchant creature) plus three creature cards in P0's graveyard.
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Graveyard Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+        let mut creature_ids = Vec::new();
+        for i in 0..3u64 {
+            let id = create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(0),
+                format!("Grave Beast {i}"),
+                Zone::Graveyard,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            creature_ids.push(id);
+        }
+
+        // A creature host on the battlefield for the Aura to attach to.
+        let host = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::None,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // The mass move paused on the Aura's host choice and stashed the
+        // unprocessed members for resume (pre-fix this stash never happened).
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReturnAsAuraTarget { .. }
+        ));
+        assert!(
+            state.pending_change_zone_iteration.is_some(),
+            "remaining members must be stashed so the mass move can resume"
+        );
+
+        // Choosing the host resumes the move — every creature must reach the
+        // battlefield, not just the ones before the Aura in iteration order.
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(host)),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&aura_id]
+                .attached_to
+                .and_then(|target| target.as_object()),
+            Some(host)
+        );
+        for id in &creature_ids {
+            assert_eq!(
+                state.objects[id].zone,
+                Zone::Battlefield,
+                "every returned creature must reach the battlefield"
+            );
+        }
+        assert!(state.pending_change_zone_iteration.is_none());
+        assert_eq!(
+            state.last_effect_count,
+            Some(4),
+            "paused ChangeZoneAll must preserve the moved-object count for chained 'that many' effects"
+        );
     }
 
     #[test]
@@ -5320,6 +5471,7 @@ mod tests {
                     toughness: Some(2),
                     extra_core_types: vec![CoreType::Artifact],
                     subtypes: vec!["Cyberman".to_string()],
+                    ward: None,
                 }),
             },
             vec![],
