@@ -8,8 +8,11 @@
 //!   - CR 726.2 / CR 726.3: taking and holding the initiative.
 
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::dungeon::DungeonId;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 const VENTURE_TRIGGER: &str =
@@ -87,15 +90,93 @@ fn takes_initiative_trigger_resolves_on_initiative_taken() {
         .id();
 
     let mut runner = scenario.build();
-    let hand_before = runner.state().players[0].hand.len();
+    let outcome = runner.cast(seasoned).search_first_legal().resolve();
+
+    assert_eq!(
+        outcome.hand_drawn(P0),
+        1,
+        "issue #1297: take-the-initiative trigger must resolve and draw one card; \
+         waiting_for={:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Branch-room regression: choosing Undercity Forge opens a room-trigger target
+/// prompt and also emits `RoomEntered`. The room prompt must not be overwritten
+/// by the resolution-choice finisher, and the parked "Whenever you venture"
+/// observer must drain after the targeted room trigger resolves.
+#[test]
+fn branch_room_trigger_and_venture_observer_both_resolve_after_room_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Plains");
+    scenario.add_card_to_library_top(P0, "Forest");
+
+    scenario
+        .add_creature_from_oracle(P0, "Acererak Probe", 5, 5, VENTURE_TRIGGER)
+        .id();
+    let target = scenario.add_creature(P0, "Forge Target", 2, 2).id();
+    let seasoned = scenario
+        .add_creature_to_hand_from_oracle(P0, "Seasoned Dungeoneer", 3, 4, TAKE_INITIATIVE_ETB)
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.initiative = Some(P0);
+        let progress = state.dungeon_progress.entry(P0).or_default();
+        progress.current_dungeon = Some(DungeonId::Undercity);
+        progress.current_room = 0;
+    }
+
+    let tokens_before = zombie_giant_tokens(runner.state());
+    let counters_before = plus_one_counters(&runner, target);
 
     runner.cast(seasoned).search_first_legal().resolve();
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseDungeonRoom {
+            dungeon, options, ..
+        } => {
+            assert_eq!(*dungeon, DungeonId::Undercity);
+            assert_eq!(options.as_slice(), &[1, 2]);
+        }
+        other => panic!("expected Undercity branch choice, got {other:?}"),
+    }
 
-    let hand_after = runner.state().players[0].hand.len();
+    runner
+        .act(GameAction::ChooseDungeonRoom { room_index: 1 })
+        .expect("choose Forge room");
+    match &runner.state().waiting_for {
+        WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(target)),
+                "Forge room trigger must offer the creature target; legal_targets={:?}",
+                target_slots[0].legal_targets
+            );
+        }
+        other => panic!("Forge room trigger must open target selection, got {other:?}"),
+    }
+
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("target Forge room trigger");
+    drain_to_priority(&mut runner);
+
+    assert_eq!(
+        plus_one_counters(&runner, target),
+        counters_before + 2,
+        "Forge room trigger must put two +1/+1 counters on its target"
+    );
+
+    let tokens_after = zombie_giant_tokens(runner.state());
     assert!(
-        hand_after > hand_before,
-        "issue #1297: take-the-initiative trigger must resolve (draw); \
-         hand before={hand_before} after={hand_after}, waiting_for={:?}",
+        tokens_after > tokens_before,
+        "RoomEntered observer trigger must drain after the targeted room trigger; \
+         before={tokens_before} after={tokens_after}, waiting_for={:?}",
         runner.state().waiting_for
     );
 }
@@ -103,7 +184,7 @@ fn takes_initiative_trigger_resolves_on_initiative_taken() {
 #[test]
 fn initiative_attack_trigger_skips_without_initiative() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+    scenario.at_phase(Phase::DeclareAttackers);
 
     let attacker = scenario
         .add_creature_from_oracle(P0, "Initiative Attacker", 3, 3, INITIATIVE_ATTACK)
@@ -111,9 +192,13 @@ fn initiative_attack_trigger_skips_without_initiative() {
 
     let mut runner = scenario.build();
     runner.state_mut().initiative = None;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P1)],
+    };
     let hand_before = runner.state().players[0].hand.len();
 
-    runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
@@ -133,7 +218,7 @@ fn initiative_attack_trigger_skips_without_initiative() {
 #[test]
 fn initiative_attack_trigger_draws_with_initiative() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+    scenario.at_phase(Phase::DeclareAttackers);
     scenario.add_card_to_library_top(P0, "Island");
 
     let attacker = scenario
@@ -142,9 +227,13 @@ fn initiative_attack_trigger_draws_with_initiative() {
 
     let mut runner = scenario.build();
     runner.state_mut().initiative = Some(P0);
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P1)],
+    };
     let hand_before = runner.state().players[0].hand.len();
 
-    runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
@@ -161,15 +250,27 @@ fn initiative_attack_trigger_draws_with_initiative() {
     );
 }
 
-fn drain_to_priority(runner: &mut engine::game::scenario::GameRunner) {
+fn drain_to_priority(runner: &mut GameRunner) {
     for _ in 0..200 {
-        match &runner.state().waiting_for {
+        match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::SearchChoice { cards, count, .. } => {
-                let pick: Vec<_> = cards.iter().take(*count).copied().collect();
+                let pick: Vec<_> = cards.iter().take(count).copied().collect();
                 runner
                     .act(GameAction::SelectCards { cards: pick })
                     .expect("search choice");
+            }
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                let target = target_slots[0]
+                    .legal_targets
+                    .first()
+                    .cloned()
+                    .expect("trigger target selection must have a legal target");
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![target],
+                    })
+                    .expect("trigger target selection");
             }
             _ => {
                 runner
@@ -178,4 +279,13 @@ fn drain_to_priority(runner: &mut engine::game::scenario::GameRunner) {
             }
         }
     }
+}
+
+fn plus_one_counters(runner: &GameRunner, id: engine::types::identifiers::ObjectId) -> u32 {
+    runner
+        .state()
+        .objects
+        .get(&id)
+        .and_then(|obj| obj.counters.get(&CounterType::Plus1Plus1).copied())
+        .unwrap_or(0)
 }

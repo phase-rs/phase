@@ -17,7 +17,3 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"
-# Pin: time 0.3.47's HourBase modifier triggers E0119 coherence conflicts with
-# tauri-utils' blanket `impl<T: Into<Number>> From<T> for Value`. Remove once
-# tauri-utils or time resolves the overlap (phase-tauri has no workspace lockfile).
-time = "=0.3.46"
