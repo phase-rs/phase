@@ -5127,6 +5127,17 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
+    /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
+    /// "discard a land card" with multiple eligible lands). It re-parks the
+    /// pending replacement (`may_cost_paid: true`, plus any `may_cost_remaining`)
+    /// and leaves `waiting_for` on the live sub-choice prompt.
+    /// `handle_replacement_choice` reads this flag to surface that prompt instead
+    /// of re-applying the replacement, and the sub-choice's resolution resumes
+    /// the accept once the cost is settled.
+    /// Cleared the moment it is observed. Transient — never serialized.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replacement_may_cost_paused: bool,
     /// CR 614.12a + CR 615.5: Continuation effect to resolve after a
     /// replacement's modifications complete. The two binding states (Template
     /// AST vs. Resolved with captured targets) share one slot via
@@ -5224,12 +5235,10 @@ pub struct GameState {
     /// (their truth is per-recipient; `source_condition_gate_passes` is only an
     /// over-approximation for them) and always escalate. Refreshed wholesale
     /// every full eval (`refresh_static_gate_truth`). `#[serde(skip)]` derived
-    /// state, like `layers_dirty`/`trigger_index`. NOTE: a plain
-    /// `std::collections::HashMap` (not `im`-backed), so it deep-clones on every
-    /// `GameState::clone()` — kept small by storing only source-level-gated
-    /// continuous statics (a small fraction of the board).
+    /// state, like `layers_dirty`/`trigger_index`. `im::HashMap` keeps
+    /// clone-per-candidate legality probes from deep-copying this derived cache.
     #[serde(skip)]
-    pub static_gate_truth: std::collections::HashMap<StaticGateKey, bool>,
+    pub static_gate_truth: im::HashMap<StaticGateKey, bool>,
     /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
     /// lazily after deserialize via a sentinel check at the top of the consult
     /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
@@ -6335,6 +6344,22 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
+    /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
+    /// "discard a land card" with more than one eligible land surfaces a
+    /// `WaitingFor::DiscardChoice`). The pending record is re-parked so the
+    /// post-choice resume re-enters `continue_replacement` with the accept
+    /// index; this flag tells that resume to continue MayCost payment from
+    /// `may_cost_remaining` instead of restarting the whole cost. `false` for
+    /// every other parked event.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub may_cost_paid: bool,
+    /// CR 614.12a + CR 118.12: unpaid suffix of a composite `MayCost` after an
+    /// interactive sub-choice paused payment. `None` means the sub-choice was
+    /// the final cost component; `Some(cost)` is paid on the post-choice resume
+    /// before the replacement is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_cost_remaining: Option<AbilityCost>,
 }
 
 /// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending
@@ -6378,6 +6403,8 @@ pub struct PendingSpellResolution {
     pub controller: PlayerId,
     pub casting_variant: CastingVariant,
     pub cast_from_zone: Option<crate::types::zones::Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     pub spell_targets: Vec<crate::types::ability::TargetRef>,
@@ -6616,6 +6643,7 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            replacement_may_cost_paused: false,
             post_replacement_continuation: None,
             legacy_post_replacement_effect: None,
             legacy_post_replacement_resolved_effect: None,
@@ -6626,7 +6654,7 @@ impl GameState {
             pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
-            static_gate_truth: std::collections::HashMap::new(),
+            static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
             static_source_index: StaticSourceIndex::default(),
             next_timestamp: 1,

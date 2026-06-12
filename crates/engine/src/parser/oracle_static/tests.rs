@@ -15646,3 +15646,41 @@ fn static_graveyard_cards_have_retrace_during_your_turn() {
         other => panic!("Expected Some(Typed filter), got {other:?}"),
     }
 }
+
+#[test]
+fn continuous_gets_for_each_counter_on_source_equipment() {
+    // CR 122.1: "Equipped creature gets +1/+1 for each counter on this Equipment."
+    // (Gavel of the Righteous). The "for each counter on this Equipment" quantity
+    // must produce AddDynamicPower/AddDynamicToughness — not a flat AddPower/AddToughness.
+    let def = parse_static_line("Equipped creature gets +1/+1 for each counter on this Equipment.")
+        .expect("should parse Gavel static");
+    let mods = &def.modifications;
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
+                },
+            }
+        )),
+        "expected AddDynamicPower(CountersOn{{Source, None}}), got {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
+                },
+            }
+        )),
+        "expected AddDynamicToughness(CountersOn{{Source, None}}), got {mods:?}"
+    );
+}

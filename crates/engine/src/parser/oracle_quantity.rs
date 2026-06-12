@@ -2302,6 +2302,14 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
+    // Delegate to the nom for-each clause parser for patterns it covers
+    // (e.g. "counter on this equipment" — any-counter source form).
+    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref.parse(clause) {
+        if rest.is_empty() {
+            return Some(qty);
+        }
+    }
+
     // Compose with parse_quantity_ref for named quantity patterns like
     // "card in your hand" (→ HandSize), "life you gained this turn", etc.
     // "for each" strips the quantifier, so the clause may be singular or have
@@ -2739,6 +2747,32 @@ mod tests {
                 } => {}
                 other => panic!("Expected CountersOn{{Target, any}} for {phrase}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn for_each_any_counter_on_self_type_phrase() {
+        // CR 122.1: "counter on this [type]" — untyped, source-scoped.
+        // Gavel of the Righteous: "gets +1/+1 for each counter on this Equipment."
+        for phrase in [
+            "counter on this equipment",
+            "counter on this artifact",
+            "counter on this permanent",
+            "counter on ~",
+            "counter on it",
+            "counters on this equipment",
+        ] {
+            let qty = parse_for_each_clause(phrase);
+            assert!(
+                matches!(
+                    qty,
+                    Some(QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    })
+                ),
+                "expected CountersOn{{Source, None}} for {phrase:?}, got {qty:?}"
+            );
         }
     }
 

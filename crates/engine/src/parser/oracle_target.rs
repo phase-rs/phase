@@ -2117,7 +2117,36 @@ pub fn parse_type_phrase_with_ctx<'a>(
         .parse(remaining)
         .is_ok()
     {
-        properties.push(FilterProp::IsChosenCreatureType);
+        // CR 205.2a: Disambiguate which "chosen type" axis this refers to by the
+        // base type, mirroring the static cost-mod path in
+        // `oracle_static/static_helpers.rs`. The default is a chosen CREATURE
+        // subtype — the overwhelmingly common case ("creature ... of the chosen
+        // type", Cavern of Souls; "token ... of the chosen type", tribal
+        // companions) where a "choose a creature type" was made. Flip to a
+        // chosen CARD type ONLY when the base is an explicit *card-type* filter
+        // ("cards of the chosen type", Winding Way's "Choose creature or land";
+        // "land of the chosen type"), where the chosen value is a card type.
+        // Emitting `IsChosenCreatureType` for a card-typed base never matches at
+        // runtime, so the filtered move would resolve to nothing.
+        let is_card_typed_base = matches!(
+            &card_type,
+            Some(
+                TypeFilter::Card
+                    | TypeFilter::Land
+                    | TypeFilter::Artifact
+                    | TypeFilter::Enchantment
+                    | TypeFilter::Instant
+                    | TypeFilter::Sorcery
+                    | TypeFilter::Planeswalker
+                    | TypeFilter::Battle
+            )
+        );
+        let chosen_prop = if is_card_typed_base {
+            FilterProp::IsChosenCardType
+        } else {
+            FilterProp::IsChosenCreatureType
+        };
+        properties.push(chosen_prop);
         pos += remaining_offset + "of the chosen type".len();
     }
 

@@ -789,7 +789,7 @@ pub(crate) fn begin_deferred_target_selection(
     // CR 601.2b + CR 601.2c: modes/X are announced (601.2b) before targets are
     // chosen (601.2c), since target legality (e.g. "mana value X or less") can
     // depend on the chosen X.
-    let (target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
+    let (mut target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
         (build_target_slots(state, &pending.ability)?, Vec::new())
     } else {
         let obj = state.objects.get(&pending.object_id).ok_or_else(|| {
@@ -836,6 +836,16 @@ pub(crate) fn begin_deferred_target_selection(
             pending.ability.chosen_x,
         )?
     };
+    // CR 601.2c + CR 601.2d: X is now known (deferred selection runs after the
+    // ChooseXValue round-trip), so a divided spell's slot count can be clamped to
+    // its divisible pool — each target needs ≥1, so picking more targets than the
+    // pool can never be legally divided (Shatterskull Smashing X=1, issue #2856).
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &pending.ability,
+        pending.distribute.as_ref(),
+        &mut target_slots,
+    );
     if target_slots.is_empty() {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
@@ -1884,6 +1894,9 @@ pub(super) fn push_activated_ability_to_stack(
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // CR 606.3 + CR 606.5: Capture the symbolic `[−X]` loyalty shape before
+        // chosen-X concretization turns it into a fixed counter-removal count.
+        let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
         let concretized_cost;
         let cost = if let Some(chosen_x) = resolved.chosen_x {
             // CR 602.2b + CR 601.2f + CR 122.1: Once X is announced for an
@@ -1909,12 +1922,30 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
             ));
         }
+        // CR 606.3: A `[−X]` loyalty ability is modeled as a chosen-X removal of
+        // loyalty counters, so it finalizes through this X-cost path rather than
+        // `handle_activate_loyalty`. Capture whether it is a loyalty activation
+        // (before payment mutates loyalty) so the once-per-turn activation can be
+        // recorded after a successful payment — mirroring the post-target path in
+        // `pay_activation_costs_after_target_selection`.
         super::casting::stamp_self_ref_discard_cost_paid_object(
             state,
             source_id,
             &mut resolved,
             cost,
         );
+        if should_record_loyalty
+            && !super::planeswalker::can_activate_loyalty_ability(
+                state,
+                source_id,
+                player,
+                ability_index,
+            )
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot activate loyalty ability".to_string(),
+            ));
+        }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
         {
@@ -1923,6 +1954,9 @@ pub(super) fn push_activated_ability_to_stack(
             pending.activation_ability_index = Some(ability_index);
             state.pending_cast = Some(Box::new(pending));
             return Ok(state.waiting_for.clone());
+        }
+        if should_record_loyalty {
+            super::planeswalker::record_loyalty_activation(state, source_id, player);
         }
     }
 
@@ -4566,6 +4600,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // evaluate conditions like "if you cast it from your hand".
     let mut ability = ability;
     ability.context.cast_from_zone = Some(source_zone);
+    ability.context.cast_controller = Some(player);
     ability.context.cast_phase = Some(state.phase);
     stamp_controller_controlled_as_cast(state, &mut ability, player, object_id);
 
@@ -4612,6 +4647,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         // directly on the object since there's no ability context to carry it.
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_from_zone = Some(source_zone);
+            obj.cast_controller = Some(player);
         }
         None
     };

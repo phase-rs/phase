@@ -197,6 +197,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::AttackerBlockedByCreature
         | TriggerMode::AttackerUnblocked
         | TriggerMode::AttackerUnblockedOnce
+        | TriggerMode::YouAttackUnblocked
         | TriggerMode::Blocks
         | TriggerMode::BlockersDeclared
         | TriggerMode::BecomesBlocked => {

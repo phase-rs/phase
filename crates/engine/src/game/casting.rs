@@ -536,46 +536,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         })
     }));
 
-    // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180: Cards in
-    // graveyard with graveyard-cast keywords. Escape and Retrace must have
-    // enough eligible non-mana additional-cost material available.
-    objects.extend(player_data.graveyard.iter().copied().filter(|&obj_id| {
-        state.objects.get(&obj_id).is_some_and(|obj| {
-            obj.owner == player
-                && has_effective_graveyard_cast_keyword(state, obj_id, obj)
-                && (has_harmonize_keyword(obj)
-                    || has_flashback_keyword(state, obj_id)
-                    || has_aftermath_keyword(state, obj_id)
-                    || has_disturb_keyword(state, obj_id)
-                    || retrace_has_discardable_land(state, player, obj_id)
-                    || jumpstart_has_discardable_card(state, player, obj_id)
-                    || graveyard_has_enough_for_escape(state, player, obj_id)
-                    // CR 702.187b: Mayhem is eligible only while the card was
-                    // discarded this turn.
-                    || (was_discarded_this_turn(state, obj_id)
-                        && super::keywords::effective_mayhem_cost(state, obj_id).is_some()))
-        })
-    }));
-
-    // CR 601.2a + CR 604.3: Cards in graveyard castable via static permission
-    // from a battlefield permanent (Lurrus, Karador, etc.).
-    // CR 117.1c: "Each of your turns" — only during controller's turn.
-    if state.active_player == player {
-        let permission_ids: HashSet<ObjectId> =
-            graveyard_objects_castable_by_permission(state, player)
-                .iter()
-                .map(|(obj_id, _source_id)| *obj_id)
-                .collect();
-        objects.extend(permission_ids);
-    }
-
-    // CR 601.2a + CR 611.2a: Graveyard objects with a timed `ExileWithAltCost`
-    // grant from `CastFromZone` (Emry class).
-    objects.extend(player_data.graveyard.iter().copied().filter(|&obj_id| {
-        state.objects.get(&obj_id).is_some_and(|obj| {
-            obj.owner == player && has_graveyard_timed_alt_cost_permission(state, obj, player)
-        })
-    }));
+    objects.extend(graveyard_spell_objects_available_to_cast(
+        state,
+        player,
+        &player_data.graveyard,
+    ));
 
     // CR 601.2a + CR 113.6b + CR 118.9: Cards in exile castable via a
     // `StaticMode::ExileCastPermission` static from a battlefield permanent
@@ -622,6 +587,100 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             })
         })
         .collect()
+}
+
+fn graveyard_spell_objects_available_to_cast(
+    state: &GameState,
+    player: PlayerId,
+    graveyard: &im::Vector<ObjectId>,
+) -> Vec<ObjectId> {
+    let permission_sources = if state.active_player == player {
+        graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
+    } else {
+        Vec::new()
+    };
+    let mut keyword_objects = Vec::new();
+    let mut permission_objects = Vec::new();
+    let mut timed_permission_objects = Vec::new();
+
+    for &obj_id in graveyard {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        if obj.owner != player {
+            continue;
+        }
+
+        // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180:
+        // Cards in graveyard with graveyard-cast keywords. Escape and Retrace
+        // must have enough eligible non-mana additional-cost material available.
+        if has_effective_graveyard_cast_keyword(state, obj_id, obj)
+            && (has_harmonize_keyword(obj)
+                || has_flashback_keyword(state, obj_id)
+                || has_aftermath_keyword(state, obj_id)
+                || has_disturb_keyword(state, obj_id)
+                || retrace_has_discardable_land(state, player, obj_id)
+                || jumpstart_has_discardable_card(state, player, obj_id)
+                || graveyard_has_enough_for_escape(state, player, obj_id)
+                // CR 702.187b: Mayhem is eligible only while the card was
+                // discarded this turn.
+                || (was_discarded_this_turn(state, obj_id)
+                    && super::keywords::effective_mayhem_cost(state, obj_id).is_some()))
+        {
+            keyword_objects.push(obj_id);
+        }
+
+        // CR 601.2a + CR 604.3: Cards in graveyard castable via static
+        // permission from a battlefield permanent (Lurrus, Karador, etc.).
+        // CR 117.1c: "Each of your turns" — only during controller's turn.
+        if graveyard_object_castable_by_permission_sources(
+            state,
+            player,
+            obj_id,
+            obj,
+            &permission_sources,
+        ) {
+            permission_objects.push(obj_id);
+        }
+
+        // CR 601.2a + CR 611.2a: Graveyard objects with a timed
+        // `ExileWithAltCost` grant from `CastFromZone` (Emry class).
+        if has_graveyard_timed_alt_cost_permission(state, obj, player) {
+            timed_permission_objects.push(obj_id);
+        }
+    }
+
+    let mut objects = keyword_objects;
+    objects.extend(permission_objects);
+    objects.extend(timed_permission_objects);
+    objects
+}
+
+fn graveyard_object_castable_by_permission_sources(
+    state: &GameState,
+    player: PlayerId,
+    obj_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
+    sources: &[GraveyardPermissionSource<'_>],
+) -> bool {
+    if obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return false;
+    }
+
+    sources.iter().any(|source| {
+        // CR 604.2 + CR 110.4: Per-source frequency slot check; for
+        // `OncePerTurnPerPermanentType` this is per-(source, permanent-type),
+        // so the per-object check must happen inside the object loop.
+        frequency_slot_available(state, source.source_id, obj_id, source.frequency) && {
+            let ctx =
+                super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+            super::filter::matches_target_filter(state, obj_id, source.filter, &ctx)
+        }
+    })
 }
 
 /// CR 702.138: Check that the player's graveyard has enough OTHER cards to pay escape's exile cost.
@@ -1648,46 +1707,6 @@ fn has_during_resolution_alt_cost_permission(
             }
         ) && exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
     })
-}
-
-/// CR 604.3 + CR 601.2a: Find graveyard objects castable via static permission
-/// from functioning static abilities (Lurrus, Karador, Gravecrawler, etc.).
-/// Returns (graveyard_object_id, source_permanent_id) pairs.
-/// CR 117.1c: Only during the controller's own turn.
-fn graveyard_objects_castable_by_permission(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<(ObjectId, ObjectId)> {
-    let mut results = Vec::new();
-    let player_data = match state.players.iter().find(|p| p.id == player) {
-        Some(p) => p,
-        None => return results,
-    };
-
-    let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
-    for source in &sources {
-        let ctx =
-            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
-        for &gy_obj_id in &player_data.graveyard {
-            if state.objects.get(&gy_obj_id).is_some_and(|obj| {
-                obj.card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-            }) {
-                continue;
-            }
-            // CR 604.2 + CR 110.4: Per-source frequency slot check; for
-            // `OncePerTurnPerPermanentType` this is per-(source, permanent-type),
-            // so the per-object check must happen inside the inner loop.
-            if !frequency_slot_available(state, source.source_id, gy_obj_id, source.frequency) {
-                continue;
-            }
-            if super::filter::matches_target_filter(state, gy_obj_id, source.filter, &ctx) {
-                results.push((gy_obj_id, source.source_id));
-            }
-        }
-    }
-    results
 }
 
 #[derive(Clone, Copy)]
@@ -8390,8 +8409,13 @@ fn continue_with_prepared(
 
     // CR 601.2b/c/f: When target cardinality depends on an announced X, defer
     // target selection until that X is chosen from the spell's required
-    // additional cost or mana cost.
-    if ability_target_legality_needs_chosen_x(&resolved) {
+    // additional cost or mana cost. CR 601.2d: a divided pool's target count is
+    // also X-bounded (issue #2856), so the distribute flag participates.
+    let prepared_distribute = prepared
+        .ability_def
+        .as_ref()
+        .and_then(|a| a.distribute.clone());
+    if ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref()) {
         if let Some(required_cost) =
             casting_costs::required_additional_cost_can_declare_x(state, player, prepared.object_id)
         {
@@ -8443,7 +8467,16 @@ fn continue_with_prepared(
         }
     }
 
-    let target_slots = build_target_slots(state, &resolved)?;
+    let mut target_slots = build_target_slots(state, &resolved)?;
+    // CR 601.2c + CR 601.2d: A fixed-amount divided spell (no X to announce, e.g.
+    // "2 damage divided among up to three targets") must likewise offer at most
+    // one slot per divisible unit — each chosen target needs ≥1 (issue #2856).
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &resolved,
+        prepared_distribute.as_ref(),
+        &mut target_slots,
+    );
     if !target_slots.is_empty() {
         let target_constraints = prepared
             .ability_def
@@ -8836,7 +8869,7 @@ pub fn spell_has_legal_targets(
             }
         }
         Err(_) => {
-            ability_target_legality_needs_chosen_x(&resolved)
+            ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
                 && (casting_costs::required_additional_cost_can_declare_x(
                     &simulated, player, obj.id,
                 )
@@ -10921,7 +10954,10 @@ pub fn can_activate_ability_now(
     // `OnlyOnceEachTurn` activation restriction tracks per `(source_id, ability_index)`,
     // which is the wrong granularity — it would let each loyalty ability fire once.
     // Defer to `can_activate_loyalty`, the single authority for the per-permanent gate.
-    if matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. }))
+    if ability_def
+        .cost
+        .as_ref()
+        .is_some_and(crate::types::ability::is_loyalty_ability_cost)
         && !super::planeswalker::can_activate_loyalty_ability(
             state,
             source_id,
@@ -10976,7 +11012,7 @@ pub fn can_activate_ability_now(
                 )
         }
         Err(_) => {
-            ability_target_legality_needs_chosen_x(&resolved)
+            ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
                 && ability_def.cost.as_ref().is_some_and(|cost| {
                     casting_costs::extract_x_mana_cost(cost).is_some()
                         || find_non_self_sacrifice_cost(cost)
@@ -11199,7 +11235,7 @@ pub fn handle_activate_ability(
                 let resolved = build_resolved_from_def(mode, source_id, player);
                 (casting_costs::extract_x_mana_cost(cost).is_some()
                     || casting_costs::activation_cost_needs_x_choice(&resolved, cost))
-                    && ability_target_legality_needs_chosen_x(&resolved)
+                    && ability_target_legality_needs_chosen_x(&resolved, mode.distribute.as_ref())
             })
         });
         // CR 602.2b + CR 601.2b/c: When modal activated ability target legality
@@ -11261,6 +11297,22 @@ pub fn handle_activate_ability(
     // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
     // before any cost payment, regardless of whether targets were auto-selected.
     if let Some(ref cost) = ability_def.cost {
+        // CR 606.3: `can_activate_ability_now` gates legal-action generation,
+        // but direct `GameAction::ActivateAbility` submissions must be rejected
+        // here before the chosen-X detour can announce/pay a `[−X]` loyalty cost.
+        if crate::types::ability::is_loyalty_ability_cost(cost)
+            && !super::planeswalker::can_activate_loyalty_ability(
+                state,
+                source_id,
+                player,
+                ability_index,
+            )
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot activate loyalty ability".to_string(),
+            ));
+        }
+
         if casting_costs::activation_cost_needs_x_choice(&resolved, cost) {
             // CR 602.2b + CR 601.2f: A non-mana activation cost that removes
             // X counters still needs the same X announcement step before any

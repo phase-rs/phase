@@ -2150,6 +2150,11 @@ fn parse_for_each_clause_ref_with_they_controller(
         // before the generic `<type> you control` arm so the leading "kind"
         // token does not commit to it.
         parse_for_each_distinct_counter_kinds_among,
+        // CR 122.1: "counter(s) on [self-ref]" — any counter type on the source
+        // permanent (Gavel of the Righteous: "for each counter on this Equipment").
+        // Placed before `parse_for_each_controlled_type` so the bare "counter" token
+        // does not commit to a type-phrase fallback.
+        parse_for_each_any_counters_on_source,
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -2159,6 +2164,48 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_qualified_controlled_type,
     )))
     .parse(input)
+}
+
+/// CR 122.1: Parse "counter(s) on [self-ref]" in a "for each" context —
+/// any counter type, source-scoped. Covers the untyped form found in cards
+/// like Gavel of the Righteous ("gets +1/+1 for each counter on this
+/// Equipment"). The typed form ("[type] counter on ~") is already handled
+/// in the legacy `parse_for_each_clause_with_they_controller` path.
+fn parse_for_each_any_counters_on_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("counters"), tag("counter"))).parse(input)?;
+    let (rest, _) = tag(" on ").parse(rest)?;
+    let (rest, _) = parse_source_self_ref(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CountersOn {
+            scope: ObjectScope::Source,
+            counter_type: None,
+        },
+    ))
+}
+
+/// CR 122.1: Match a source self-reference phrase: "~", "it", or any shared
+/// self-reference type phrase from Oracle text.
+fn parse_source_self_ref(input: &str) -> OracleResult<'_, ()> {
+    if let Ok(result) = alt((
+        value((), tag::<_, _, OracleError<'_>>("~")),
+        value((), tag("it")),
+    ))
+    .parse(input)
+    {
+        return Ok(result);
+    }
+
+    for phrase in crate::parser::oracle_util::SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+
+    Err(nom::Err::Error(OracleError::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// CR 400.7: Parse "[type] that entered (the battlefield) this turn" into

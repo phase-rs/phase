@@ -31,10 +31,12 @@ use engine::types::ability::{
     TypedFilter,
 };
 use engine::types::card::CardFace;
+use engine::types::card_type::CoreType;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 use crate::features::landfall::ability_searches_library_for_land;
 
 /// CR 701.21 + CR 603.6c + CR 111.1: per-deck aristocrats classification.
@@ -82,9 +84,13 @@ pub fn detect(deck: &[DeckEntry]) -> AristocratsFeature {
     let mut fodder_source_count = 0u32;
     let mut outlet_names: BTreeSet<String> = BTreeSet::new();
     let mut death_trigger_names: BTreeSet<String> = BTreeSet::new();
+    let mut total_nonland = 0u32;
 
     for entry in deck {
         let face = &entry.card;
+        if !face.card_type.core_types.contains(&CoreType::Land) {
+            total_nonland = total_nonland.saturating_add(entry.count);
+        }
         // Per-axis bool sentinels: a face contributes at most once per axis
         // even if multiple abilities match the same category.
         let is_outlet = face.abilities.iter().any(ability_is_sacrifice_outlet);
@@ -111,9 +117,9 @@ pub fn detect(deck: &[DeckEntry]) -> AristocratsFeature {
     // CR 701.21 + CR 603.6c + CR 111.1: aristocrats requires three pillars —
     // outlets to sacrifice, dies-triggers to gain value, and fodder to feed.
     // A geometric mean enforces synergy: missing any pillar zeros commitment.
-    let o = (outlet_count as f32 / 3.0).min(1.0); // saturates at 3
-    let t = (death_trigger_count as f32 / 3.0).min(1.0);
-    let f = (fodder_source_count as f32 / 5.0).min(1.0); // fodder typically denser
+    let o = (commitment::density_per_60(outlet_count, total_nonland) / 3.0).min(1.0);
+    let t = (commitment::density_per_60(death_trigger_count, total_nonland) / 3.0).min(1.0);
+    let f = (commitment::density_per_60(fodder_source_count, total_nonland) / 5.0).min(1.0);
     let free_bonus = (0.05 * free_outlet_count as f32).min(0.2);
 
     // If ANY pillar is 0, commitment collapses to free_bonus only (cap 0.2)
@@ -121,7 +127,7 @@ pub fn detect(deck: &[DeckEntry]) -> AristocratsFeature {
     let commitment = if outlet_count == 0 || death_trigger_count == 0 || fodder_source_count == 0 {
         free_bonus
     } else {
-        ((o * t * f).powf(1.0 / 3.0) + free_bonus).min(1.0)
+        (commitment::geometric_mean(&[o, t, f]) + free_bonus).min(1.0)
     };
 
     AristocratsFeature {

@@ -283,6 +283,23 @@ fn unique_recipient_from_filter(
         ));
     }
 
+    // CR 603.7c + CR 608.2c: "that player" on triggered abilities lowers to
+    // `TargetFilter::TriggeringPlayer`. The stateless player matcher cannot
+    // resolve event-context refs, so bind the recipient from the active trigger
+    // event (Coveted Jewel: the attacking opponent).
+    if matches!(filter, TargetFilter::TriggeringPlayer) {
+        return crate::game::targeting::resolve_event_context_target(
+            state,
+            filter,
+            ability.source_id,
+        )
+        .and_then(|target| match target {
+            TargetRef::Player(player_id) => Some(player_id),
+            _ => None,
+        })
+        .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
+    }
+
     let mut matching = state
         .players
         .iter()
@@ -560,6 +577,54 @@ mod tests {
             state.objects.get(&target_id).unwrap().controller,
             recipient,
             "target should now be controlled by the recipient, not the caster or source.controller"
+        );
+    }
+
+    /// CR 603.7c + CR 608.2c: `GiveControl` with `recipient: TriggeringPlayer`
+    /// must resolve from the active trigger event, not the stateless player
+    /// matcher (Coveted Jewel — "that player gains control of this artifact").
+    #[test]
+    fn give_control_triggering_player_recipient_resolves_from_event() {
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let jewel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coveted Jewel".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Raider".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            jewel,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&jewel).unwrap().controller,
+            PlayerId(1),
+            "TriggeringPlayer recipient must be the attacking opponent"
         );
     }
 

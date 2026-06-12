@@ -38,6 +38,7 @@ use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 
 /// Maximum mana value to qualify as "low curve" — CR 202.3.
 pub const LOW_CURVE_CAP: u32 = 2;
@@ -145,15 +146,31 @@ pub fn detect(deck: &[DeckEntry]) -> AggroPressureFeature {
 
     let nonland_denom = total_nonland.max(1) as f32;
     let low = low_curve_creature_count as f32 / nonland_denom;
-    let hasty = hasty_creature_count as f32 / nonland_denom;
-    let evasion = evasion_creature_count as f32 / nonland_denom;
-    let burn = burn_spell_count as f32 / nonland_denom;
-    let pump = combat_pump_count as f32 / nonland_denom;
 
     // Weighted sum: low-curve density is the primary axis; evasion/hasty add
     // tempo value; burn and pump contribute pressure at lower weights.
-    let raw = 2.0 * low + 1.0 * hasty + 0.8 * evasion + 0.6 * burn + 0.4 * pump;
-    let commitment = raw.clamp(0.0, 1.0);
+    let commitment = commitment::weighted_sum(&[
+        (
+            2.0 / 60.0,
+            commitment::density_per_60(low_curve_creature_count, total_nonland),
+        ),
+        (
+            1.0 / 60.0,
+            commitment::density_per_60(hasty_creature_count, total_nonland),
+        ),
+        (
+            0.8 / 60.0,
+            commitment::density_per_60(evasion_creature_count, total_nonland),
+        ),
+        (
+            0.6 / 60.0,
+            commitment::density_per_60(burn_spell_count, total_nonland),
+        ),
+        (
+            0.4 / 60.0,
+            commitment::density_per_60(combat_pump_count, total_nonland),
+        ),
+    ]);
 
     AggroPressureFeature {
         low_curve_creature_count,

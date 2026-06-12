@@ -6,9 +6,12 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::log::GameLogEntry;
 use engine::types::player::PlayerId;
+use rand::Rng;
+use std::sync::Arc;
 
 use crate::config::AiConfig;
-use crate::search::choose_action;
+use crate::search::choose_action_with_session;
+use crate::session::AiSession;
 
 /// Maximum AI actions before forcing a stop (safety invariant — not CR-derived).
 /// Typical AI sequences (mulligans + full turn) are 30–50 actions.
@@ -38,9 +41,10 @@ pub fn run_ai_actions(
     state: &mut GameState,
     ai_players: &HashSet<PlayerId>,
     ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
 ) -> Vec<AiActionResult> {
     let mut results = Vec::new();
-    let mut rng = rand::rng();
 
     for _ in 0..MAX_AI_ACTIONS_PER_SEQUENCE {
         // CR 103.5: For simultaneous mulligan states, `acting_player()` returns
@@ -69,7 +73,7 @@ pub fn run_ai_actions(
             }
         };
 
-        let action = match choose_action(state, actor, config, &mut rng) {
+        let action = match choose_action_with_session(state, actor, config, rng, session) {
             Some(a) => a,
             None => {
                 tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");

@@ -5,8 +5,8 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 use engine::types::ability::{
-    AbilityCost, Effect, EffectScope, QuantityExpr, ReplacementMode, TapStateChange, TargetFilter,
-    TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectScope,
+    QuantityExpr, ReplacementMode, TapStateChange, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -16,6 +16,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::cast_facts::collect_definition_effects;
@@ -33,7 +34,9 @@ use super::effect_classify::{
     extract_target_filter, is_spell_beneficial, targeted_object_impact, targeted_player_impact,
     targets_creatures, targets_creatures_only, EffectPolarity,
 };
-use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::registry::{
+    DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
+};
 use crate::features::DeckFeatures;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
@@ -41,6 +44,10 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
 pub struct AntiSelfHarmPolicy;
+
+// `turn_only` can scale early-game verdicts by 1.3; cap the raw verdict so
+// registry-scaled anti-self-harm penalties stay within the critical band.
+const ANTI_SELF_HARM_RAW_CRITICAL_CEILING: f64 = CRITICAL_MAX / 1.3;
 
 impl AntiSelfHarmPolicy {
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
@@ -86,10 +93,164 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("anti_self_harm_score"),
+        if let Some(reason) = reject_reason(ctx) {
+            return PolicyVerdict::reject(reason);
         }
+
+        PolicyVerdict::score(
+            self.score(ctx).clamp(
+                -ANTI_SELF_HARM_RAW_CRITICAL_CEILING,
+                ANTI_SELF_HARM_RAW_CRITICAL_CEILING,
+            ),
+            PolicyReason::new("anti_self_harm_score"),
+        )
+    }
+}
+
+fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
+    match &ctx.candidate.action {
+        GameAction::CastSpell { .. } if cast_has_unpayable_self_etb_may_cost(ctx) => {
+            Some(PolicyReason::new("anti_self_harm_unpayable_etb_may_cost"))
+        }
+        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+            if grants_extra_turn_then_self_loss(ctx) =>
+        {
+            Some(PolicyReason::new("anti_self_harm_extra_turn_self_loss"))
+        }
+        GameAction::DecideOptionalEffect { accept: true }
+            if optional_effect_life_cost_is_lethal(ctx) =>
+        {
+            Some(PolicyReason::new("anti_self_harm_lethal_life_cost"))
+        }
+        GameAction::ChooseTarget { target } => target
+            .as_ref()
+            .and_then(|target| target_reject_reason(ctx, target)),
+        GameAction::SelectTargets { targets } => targets
+            .iter()
+            .find_map(|target| target_reject_reason(ctx, target)),
+        _ => None,
+    }
+}
+
+fn cast_has_unpayable_self_etb_may_cost(ctx: &PolicyContext<'_>) -> bool {
+    let GameAction::CastSpell { .. } = &ctx.candidate.action else {
+        return false;
+    };
+    let Some(source) = ctx.source_object() else {
+        return false;
+    };
+
+    source
+        .replacement_definitions
+        .iter_unchecked()
+        .any(|replacement| {
+            if replacement.event != ReplacementEvent::Moved {
+                return false;
+            }
+            let ReplacementMode::MayCost { cost, decline } = &replacement.mode else {
+                return false;
+            };
+            decline
+                .as_deref()
+                .is_some_and(decline_moves_self_to_graveyard)
+                && !cost.is_payable(ctx.state, ctx.ai_player, source.id)
+        })
+}
+
+fn decline_moves_self_to_graveyard(decline: &AbilityDefinition) -> bool {
+    ability_tree_any(decline, |effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Graveyard,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        )
+    })
+}
+
+fn grants_extra_turn_then_self_loss(ctx: &PolicyContext<'_>) -> bool {
+    action_ability_definitions(ctx).into_iter().any(|ability| {
+        ability_tree_any(ability, effect_grants_ai_extra_turn)
+            && ability_tree_any(ability, effect_loses_game_for_controller)
+    })
+}
+
+fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a AbilityDefinition> {
+    match &ctx.candidate.action {
+        GameAction::CastSpell { .. } => ctx
+            .source_object()
+            .into_iter()
+            .flat_map(|object| object.abilities.iter())
+            .filter(|ability| ability.kind == AbilityKind::Spell)
+            .collect(),
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => ctx
+            .state
+            .objects
+            .get(source_id)
+            .and_then(|object| object.abilities.get(*ability_index))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn ability_tree_any(
+    ability: &AbilityDefinition,
+    mut predicate: impl FnMut(&Effect) -> bool,
+) -> bool {
+    ability_tree_any_impl(ability, &mut predicate)
+}
+
+fn ability_tree_any_impl(
+    ability: &AbilityDefinition,
+    predicate: &mut impl FnMut(&Effect) -> bool,
+) -> bool {
+    predicate(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| ability_tree_any_impl(sub, predicate))
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(|sub| ability_tree_any_impl(sub, predicate))
+        || ability
+            .mode_abilities
+            .iter()
+            .any(|mode| ability_tree_any_impl(mode, predicate))
+}
+
+fn effect_grants_ai_extra_turn(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller
+        }
+    )
+}
+
+fn effect_loses_game_for_controller(effect: &Effect) -> bool {
+    match effect {
+        Effect::LoseTheGame { target } => target
+            .as_ref()
+            .is_none_or(|target| matches!(target, TargetFilter::Controller)),
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            matches!(
+                condition,
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    ..
+                } | DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+            ) && ability_tree_any(effect, effect_loses_game_for_controller)
+        }
+        _ => false,
     }
 }
 
@@ -241,22 +402,22 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
 /// Penalise accepting an optional effect when the life cost would be lethal or near-lethal.
 /// Applies to ETB replacements like Multiversal Passage ("pay 2 life or enter tapped").
-fn score_optional_effect_accept(ctx: &PolicyContext<'_>) -> f64 {
+fn score_optional_effect_accept(_ctx: &PolicyContext<'_>) -> f64 {
+    0.0
+}
+
+fn optional_effect_life_cost_is_lethal(ctx: &PolicyContext<'_>) -> bool {
     let WaitingFor::OptionalEffectChoice {
         player, source_id, ..
     } = &ctx.state.waiting_for
     else {
-        return 0.0;
+        return false;
     };
     let life = ctx.state.players[player.0 as usize].life;
     let Some(cost) = optional_effect_life_cost(ctx, *source_id) else {
-        return 0.0;
+        return false;
     };
-    if life <= cost {
-        -100.0
-    } else {
-        0.0
-    }
+    life <= cost
 }
 
 /// Worst-case life payment across every reachable branch of a source object's optional
@@ -382,7 +543,44 @@ fn is_hostile_or_neutral_bounce(effect: &&Effect) -> bool {
     )
 }
 
+fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<PolicyReason> {
+    match target {
+        TargetRef::Player(player_id) => {
+            let beneficial = is_spell_beneficial(ctx);
+            let is_self = *player_id == ctx.ai_player;
+
+            if !is_self && !beneficial {
+                if let Some(damage) = extract_damage_amount(&ctx.effects()) {
+                    let opponent_life = ctx.state.players[player_id.0 as usize].life;
+                    if damage >= opponent_life {
+                        return None;
+                    }
+                }
+            }
+
+            let player_impact = targeted_player_impact(ctx, *player_id)
+                .unwrap_or_else(|| aggregate_player_impact(ctx));
+            let prefers_self = if player_impact > 0.25 {
+                true
+            } else if player_impact < -0.25 {
+                false
+            } else {
+                beneficial
+            };
+
+            (prefers_self != is_self)
+                .then(|| PolicyReason::new("anti_self_harm_wrong_player_target"))
+        }
+        TargetRef::Object(object_id) => target_is_sacrificed_source(ctx, *object_id)
+            .then(|| PolicyReason::new("anti_self_harm_sacrificed_source_target")),
+    }
+}
+
 fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
+    if target_reject_reason(ctx, target).is_some() {
+        return 0.0;
+    }
+
     let beneficial = is_spell_beneficial(ctx);
     match target {
         TargetRef::Player(player_id) => {
@@ -421,21 +619,7 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
                 }
             }
 
-            let player_impact = targeted_player_impact(ctx, *player_id)
-                .unwrap_or_else(|| aggregate_player_impact(ctx));
-            let prefers_self = if player_impact > 0.25 {
-                true
-            } else if player_impact < -0.25 {
-                false
-            } else {
-                beneficial
-            };
-            // Beneficial spells → target self; harmful → target opponent
-            if prefers_self == is_self {
-                4.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 8.0
-            } else {
-                -100.0
-            }
+            4.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 8.0
         }
         TargetRef::Object(object_id) => {
             let object_beneficial =
@@ -455,7 +639,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     // resolution). Applies to patterns like Mogg Fanatic ("Sacrifice ~: ~ deals 1 damage
     // to any target") where the AI must not target the source it's about to sacrifice.
     if target_is_sacrificed_source(ctx, object_id) {
-        return -100.0;
+        return 0.0;
     }
 
     let effects = ctx.effects();
@@ -540,12 +724,6 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 }
             }
 
-            // Penalize casting Destroy at indestructible creatures (does nothing)
-            let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
-            if is_destroy && object.has_keyword(&Keyword::Indestructible) {
-                score += ctx.penalties().indestructible_destroy_penalty;
-            }
-
             // CR 702.16b + CR 702.16e: Protection prevents targeting and damage
             // from sources with the protected quality. Targeting a creature with
             // protection from the spell's qualities wastes the spell entirely.
@@ -610,25 +788,6 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
                 if !is_lethal_burn && !is_destroy {
                     score -= 5.0;
-                }
-            }
-        }
-
-        // Penalize pumping own tapped creatures — they can't attack or block,
-        // so the +N/+N expires at cleanup with no combat impact.
-        // Exception: tapped creatures actively participating in combat (as attacker
-        // or blocker) benefit from the pump during damage resolution.
-        if beneficial && object.tapped && object.controller == ctx.ai_player {
-            let has_pump = effects
-                .iter()
-                .any(|e| matches!(e, Effect::Pump { .. } | Effect::DoublePT { .. }));
-            if has_pump {
-                let in_combat_as_participant = ctx.state.combat.as_ref().is_some_and(|combat| {
-                    combat.attackers.iter().any(|a| a.object_id == object_id)
-                        || combat.blocker_to_attacker.contains_key(&object_id)
-                });
-                if !in_combat_as_participant {
-                    score -= 6.0;
                 }
             }
         }
@@ -840,15 +999,17 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification,
-        ControllerRef, FilterProp, PtValue, QuantityRef, ResolvedAbility, SacrificeCost,
-        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
+        ContinuousModification, ControllerRef, DiscardSelfScope, FilterProp, PtValue, QuantityRef,
+        ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
+    use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::StaticMode;
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
@@ -2790,51 +2951,6 @@ mod tests {
         );
     }
 
-    /// Fix 3: Pumping a tapped creature during combat should still be penalized
-    /// if the creature is not participating in combat (not an attacker or blocker).
-    #[test]
-    fn penalizes_pump_on_tapped_non_combatant_during_combat() {
-        use engine::game::combat::CombatState;
-
-        let mut state = make_state();
-        state.phase = Phase::DeclareBlockers;
-        state.combat = Some(CombatState::default());
-
-        // AI has a tapped creature NOT in combat
-        let creature_id = add_creature(&mut state, PlayerId(0), "Tapped Dork", 1, 1);
-        let creature = state.objects.get_mut(&creature_id).unwrap();
-        creature.tapped = true;
-
-        let config = AiConfig::default();
-        let effect = Effect::Pump {
-            power: PtValue::Fixed(3),
-            toughness: PtValue::Fixed(3),
-            target: TargetFilter::Any,
-        };
-        let (decision, candidate) = make_target_selection_ctx(
-            &state,
-            effect,
-            vec![TargetRef::Object(creature_id)],
-            Some(TargetRef::Object(creature_id)),
-        );
-        let ctx = PolicyContext {
-            state: &state,
-            decision: &decision,
-            candidate: &candidate,
-            ai_player: PlayerId(0),
-            config: &config,
-            context: &crate::context::AiContext::empty(&config.weights),
-            cast_facts: None,
-        };
-
-        let score = AntiSelfHarmPolicy.score(&ctx);
-        // Base targeting score for own 1/1 creature is ~+3.0, minus the -6.0 penalty = ~-3.0
-        assert!(
-            score < -2.0,
-            "Should penalize pump on tapped non-combatant during DeclareBlockers, got {score}"
-        );
-    }
-
     /// Fix 3 counterpart: pumping a tapped creature that IS an attacker is fine.
     #[test]
     fn allows_pump_on_tapped_attacker_during_combat() {
@@ -3169,7 +3285,7 @@ mod tests {
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
         };
-        let score_self = AntiSelfHarmPolicy.score(&ctx_self);
+        let verdict_self = AntiSelfHarmPolicy.verdict(&ctx_self);
 
         // Score targeting opponent creature
         let candidate_opp = CandidateAction {
@@ -3213,17 +3329,18 @@ mod tests {
         };
         let score_player = AntiSelfHarmPolicy.score(&ctx_player);
 
+        assert!(matches!(
+            verdict_self,
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_sacrificed_source_target"
+        ));
         assert!(
-            score_self < -50.0,
-            "Targeting sacrificed source should be heavily penalized, got {score_self}"
+            score_opp > 0.0,
+            "Opponent creature should remain a viable target: opp={score_opp}"
         );
         assert!(
-            score_opp > score_self,
-            "Opponent creature should score higher than sacrificed source: opp={score_opp}, self={score_self}"
-        );
-        assert!(
-            score_player > score_self,
-            "Opponent player should score higher than sacrificed source: player={score_player}, self={score_self}"
+            score_player > 0.0,
+            "Opponent player should remain a viable target: player={score_player}"
         );
     }
 
@@ -3566,6 +3683,197 @@ mod tests {
         AntiSelfHarmPolicy.score(&ctx)
     }
 
+    fn pre_cast_verdict_for_spell(state: &GameState, spell_id: ObjectId) -> PolicyVerdict {
+        let config = AiConfig::default();
+        let (decision, candidate) = make_cast_spell_decision(state, spell_id);
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        AntiSelfHarmPolicy.verdict(&ctx)
+    }
+
+    fn extra_turn_spell(state: &mut GameState, self_loss: bool) -> ObjectId {
+        extra_turn_spell_with_self_loss_phase(
+            state,
+            self_loss.then_some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: PlayerId(0),
+            }),
+        )
+    }
+
+    fn extra_turn_spell_with_self_loss_phase(
+        state: &mut GameState,
+        self_loss_condition: Option<DelayedTriggerCondition>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Extra Turn Test".to_string(),
+            Zone::Hand,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+            },
+        );
+        if let Some(condition) = self_loss_condition {
+            ability = ability.sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition,
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::LoseTheGame { target: None },
+                    )),
+                    uses_tracked_set: false,
+                },
+            ));
+        }
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.abilities = Arc::new(vec![ability]);
+        id
+    }
+
+    fn mox_diamond_like_spell(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Mox Diamond Test".to_string(),
+            Zone::Hand,
+        );
+        let decline = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+            },
+        );
+        let mut land_filter = TypedFilter::new(TypeFilter::Land);
+        land_filter
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Hand });
+        let cost = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: Some(TargetFilter::Typed(land_filter)),
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.replacement_definitions
+            .push(ReplacementDefinition::new(ReplacementEvent::Moved).mode(
+                ReplacementMode::MayCost {
+                    cost,
+                    decline: Some(Box::new(decline)),
+                },
+            ));
+        id
+    }
+
+    fn hand_land(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Discardable Land".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        id
+    }
+
+    #[test]
+    fn rejects_unpayable_self_etb_may_cost_spell() {
+        let mut state = make_state();
+        let spell_id = mox_diamond_like_spell(&mut state);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_unpayable_etb_may_cost"
+        ));
+    }
+
+    #[test]
+    fn allows_self_etb_may_cost_spell_when_cost_is_payable() {
+        let mut state = make_state();
+        let spell_id = mox_diamond_like_spell(&mut state);
+        hand_land(&mut state);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_extra_turn_spell_with_delayed_self_loss() {
+        let mut state = make_state();
+        state.players[0].life = 38;
+        let spell_id = extra_turn_spell(&mut state, true);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_extra_turn_self_loss"
+        ));
+    }
+
+    #[test]
+    fn allows_extra_turn_spell_without_self_loss() {
+        let mut state = make_state();
+        let spell_id = extra_turn_spell(&mut state, false);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn allows_extra_turn_spell_with_non_end_step_delayed_self_loss() {
+        let mut state = make_state();
+        let spell_id = extra_turn_spell_with_self_loss_phase(
+            &mut state,
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::Upkeep,
+                player: PlayerId(0),
+            }),
+        );
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
     /// CR 702.16b: An opponent creature with protection from white is not a
     /// legal target for a white removal spell, so casting it would fizzle.
     /// The engine-backed legality check must surface the no-target penalty —
@@ -3637,9 +3945,6 @@ mod tests {
 
     // --- Optional-effect life-cost self-harm guard ---------------------------
 
-    use engine::types::ability::ReplacementDefinition;
-    use engine::types::replacements::ReplacementEvent;
-
     /// Build an object on the battlefield carrying an Optional replacement whose
     /// life payment lives in the given branch of the execute ability tree.
     fn make_optional_lose_life_source(
@@ -3700,7 +4005,7 @@ mod tests {
         Modal,
     }
 
-    fn optional_effect_accept_score(state: &GameState) -> f64 {
+    fn optional_effect_accept_verdict(state: &GameState) -> PolicyVerdict {
         let config = AiConfig::default();
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority {
@@ -3725,7 +4030,7 @@ mod tests {
             context: &context,
             cast_facts: None,
         };
-        AntiSelfHarmPolicy.score(&ctx)
+        AntiSelfHarmPolicy.verdict(&ctx)
     }
 
     /// `OptionalEffectChoice` routes through `DecisionKind::ActivateAbility`, so
@@ -3771,18 +4076,18 @@ mod tests {
         };
 
         let verdicts = crate::policies::registry::PolicyRegistry::shared().verdicts(&ctx);
-        let anti_self_harm_delta = verdicts
-            .into_iter()
-            .find_map(|(id, verdict)| match verdict {
-                PolicyVerdict::Score { delta, reason: _ } if id == PolicyId::AntiSelfHarm => {
-                    Some(delta)
-                }
-                _ => None,
-            });
+        let anti_self_harm_reject = verdicts.into_iter().any(|(id, verdict)| {
+            id == PolicyId::AntiSelfHarm
+                && matches!(
+                    verdict,
+                    PolicyVerdict::Reject { reason }
+                        if reason.kind == "anti_self_harm_lethal_life_cost"
+                )
+        });
 
         assert!(
-            anti_self_harm_delta.is_some_and(|delta| delta <= -100.0),
-            "OptionalEffectChoice accept must be routed through AntiSelfHarmPolicy"
+            anti_self_harm_reject,
+            "OptionalEffectChoice accept must be rejected by AntiSelfHarmPolicy"
         );
     }
 
@@ -3804,11 +4109,11 @@ mod tests {
             description: None,
             may_trigger_key: None,
         };
-        let score = optional_effect_accept_score(&state);
-        assert!(
-            score <= -100.0,
-            "Lethal life payment in else branch must hit the self-loss penalty, got {score}"
-        );
+        assert!(matches!(
+            optional_effect_accept_verdict(&state),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_lethal_life_cost"
+        ));
     }
 
     #[test]
@@ -3826,11 +4131,11 @@ mod tests {
             description: None,
             may_trigger_key: None,
         };
-        let score = optional_effect_accept_score(&state);
-        assert!(
-            score <= -100.0,
-            "Lethal life payment in modal branch must hit the self-loss penalty, got {score}"
-        );
+        assert!(matches!(
+            optional_effect_accept_verdict(&state),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_lethal_life_cost"
+        ));
     }
 
     #[test]
@@ -3848,11 +4153,10 @@ mod tests {
             description: None,
             may_trigger_key: None,
         };
-        let score = optional_effect_accept_score(&state);
-        assert_eq!(
-            score, 0.0,
-            "Paying 2 life at 20 life is safe -- accept should not be penalised, got {score}"
-        );
+        assert!(matches!(
+            optional_effect_accept_verdict(&state),
+            PolicyVerdict::Score { delta, .. } if delta == 0.0
+        ));
     }
 
     /// Non-`Fixed` amount: "lose life equal to the number of creatures you control".
@@ -3882,10 +4186,10 @@ mod tests {
             description: None,
             may_trigger_key: None,
         };
-        let score = optional_effect_accept_score(&state);
-        assert!(
-            score <= -100.0,
-            "Dynamic life payment (3 creatures = 3 life) at 3 life must penalise accept, got {score}"
-        );
+        assert!(matches!(
+            optional_effect_accept_verdict(&state),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_lethal_life_cost"
+        ));
     }
 }

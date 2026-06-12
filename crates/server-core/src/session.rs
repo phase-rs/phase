@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
@@ -18,6 +19,7 @@ use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
+use phase_ai::session::AiSession;
 use rand::{Rng, SeedableRng};
 use seat_reducer::types::{DeckChoice, SeatDelta, SeatKind, SeatState};
 use tracing::{debug, info, warn};
@@ -102,6 +104,9 @@ pub struct GameSession {
     pub ai_seats: HashSet<PlayerId>,
     /// Per-AI-player configuration (difficulty, search params, etc.).
     pub ai_configs: HashMap<PlayerId, AiConfig>,
+    /// Runtime-only per-game AI cache. Rebuilt from `state.deck_pools` on
+    /// start/restore, not persisted.
+    pub ai_session: Option<Arc<AiSession>>,
     /// Lobby metadata for games waiting for players. Set at creation, cleared when game fills.
     /// Stored here so it's available during shutdown flush without querying the LobbyManager.
     pub lobby_meta: Option<PersistedLobbyMeta>,
@@ -472,6 +477,7 @@ impl GameSession {
         let result = start_game(&mut self.state);
         self.start_events = result.events;
         self.game_started = true;
+        self.ai_session = Some(AiSession::arc_from_game(&self.state));
         self.lobby_meta = None;
         Ok(())
     }
@@ -486,8 +492,17 @@ impl GameSession {
             return vec![];
         }
 
-        let ai_results =
-            phase_ai::auto_play::run_ai_actions(&mut self.state, &self.ai_seats, &self.ai_configs);
+        let mut rng = rand::rng();
+        let ai_session = self
+            .ai_session
+            .get_or_insert_with(|| AiSession::arc_from_game(&self.state));
+        let ai_results = phase_ai::auto_play::run_ai_actions(
+            &mut self.state,
+            &self.ai_seats,
+            &self.ai_configs,
+            &mut rng,
+            ai_session,
+        );
 
         if !ai_results.is_empty() {
             debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
@@ -574,6 +589,11 @@ impl GameSession {
             .collect();
 
         let pc = ps.player_count as usize;
+        let ai_session = if ps.game_started {
+            Some(AiSession::arc_from_game(&state))
+        } else {
+            None
+        };
 
         GameSession {
             game_code: ps.game_code,
@@ -587,6 +607,7 @@ impl GameSession {
             player_count: ps.player_count,
             ai_seats,
             ai_configs,
+            ai_session,
             lobby_meta: ps.lobby_meta,
             game_started: ps.game_started,
             start_when_full: ps.start_when_full,
@@ -695,6 +716,7 @@ impl SessionManager {
             player_count,
             ai_seats: HashSet::new(),
             ai_configs: HashMap::new(),
+            ai_session: None,
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
@@ -1965,6 +1987,7 @@ mod tests {
             player_count: pc as u8,
             ai_seats: [ai_pid].into_iter().collect(),
             ai_configs: [(ai_pid, cedh_config)].into_iter().collect(),
+            ai_session: None,
             lobby_meta: None,
             game_started: false,
             start_when_full: true,

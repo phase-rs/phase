@@ -26,7 +26,7 @@
     "crates/engine/src/types/card_type.rs"
   ],
   "enum_count": 282,
-  "variant_count": 3047,
+  "variant_count": 3048,
   "smell_summary": [
     {
       "enum_name": "AbilityCondition",
@@ -30642,6 +30642,19 @@
           "cr_refs": [
             "CR 603.4",
             "CR 611.2b"
+          ]
+        },
+        {
+          "name": "EventDamageSourceMatchesFilter",
+          "line": 11586,
+          "kind": "struct",
+          "field_names": [
+            "filter"
+          ],
+          "doc": "CR 603.4 + CR 120.1: Intervening-if predicate whose subject is the set of objects that dealt the triggering combat damage (\"if any of that damage was dealt by a Warrior\"). True when ANY damage source in the triggering event matches `filter`. Extends the source-vs-event-object split of `SourceMatchesFilter` / `ZoneChangeObjectMatchesFilter` to the event's damage sources.",
+          "cr_refs": [
+            "CR 120.1",
+            "CR 603.4"
           ]
         },
         {

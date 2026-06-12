@@ -1035,6 +1035,15 @@ pub(crate) enum PutImperativeAst {
         target: TargetFilter,
         enters_under: Option<ControllerRef>,
         enter_tapped: bool,
+        /// CR 608.2c: "and the rest into <zone>" complement for a tracked-set
+        /// partition ("Put all <filter> revealed this way into your hand and
+        /// the rest into your graveyard" — Winding Way). The primary move sends
+        /// the chosen subset to `destination`; the lowering emits a sibling
+        /// `ChangeZoneAll { target: TrackedSet, destination: rest }` so the
+        /// still-tracked cards left in the producer's zone (the rest) move to
+        /// the rest zone. `None` for non-partition forms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_destination: Option<Zone>,
     },
     TopOfLibrary,
     BottomOfLibrary,

@@ -730,6 +730,11 @@ This is the inverse of the `fully_parsed` hard rule: `fully_parsed` never proves
 ### AI bugs (area:ai)
 1. Check `crates/phase-ai/` for the relevant evaluation/action-generation logic
 2. AI bugs are rarely caught by parser coverage — they need gameplay testing
+3. If the report includes a saved game-state zip, convert it before the fix
+   lands: download the zip to `crates/phase-ai/fixtures/scenarios/`, add a
+   `community-scenarios.json` assertion with the Discord thread id and expected
+   action shape, then verify `crates/phase-ai/tests/community_scenarios.rs`
+   exercises it in measurement mode.
 
 ## Triage Data Files
 

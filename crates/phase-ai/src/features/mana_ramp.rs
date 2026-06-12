@@ -33,6 +33,7 @@ use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 
 /// CR 106.1 + CR 605.1a: per-deck mana ramp classification.
 ///
@@ -70,9 +71,13 @@ pub fn detect(deck: &[DeckEntry]) -> ManaRampFeature {
     let mut land_fetch_count = 0u32;
     let mut ritual_count = 0u32;
     let mut extra_landdrop_count = 0u32;
+    let mut total_nonland = 0u32;
 
     for entry in deck {
         let face = &entry.card;
+        if !face.card_type.core_types.contains(&CoreType::Land) {
+            total_nonland = total_nonland.saturating_add(entry.count);
+        }
         // Each axis is independent — a card may match multiple axes (e.g., Azusa
         // is both an extra-landdrop enabler and a creature). Count each axis
         // separately via a per-axis bool sentinel to avoid double-counting within
@@ -94,13 +99,21 @@ pub fn detect(deck: &[DeckEntry]) -> ManaRampFeature {
 
     // CR 106.1 + CR 605.1a: ramp accelerates mana availability. Payoff weight
     // mirrors landfall — dorks and fetches dominate; statics multiply actions.
-    let commitment = f32::min(
-        1.0,
-        0.12 * dork_count as f32
-            + 0.10 * land_fetch_count as f32
-            + 0.08 * ritual_count as f32
-            + 0.20 * extra_landdrop_count as f32,
-    );
+    let commitment = commitment::weighted_sum(&[
+        (0.12, commitment::density_per_60(dork_count, total_nonland)),
+        (
+            0.10,
+            commitment::density_per_60(land_fetch_count, total_nonland),
+        ),
+        (
+            0.08,
+            commitment::density_per_60(ritual_count, total_nonland),
+        ),
+        (
+            0.20,
+            commitment::density_per_60(extra_landdrop_count, total_nonland),
+        ),
+    ]);
 
     ManaRampFeature {
         dork_count,

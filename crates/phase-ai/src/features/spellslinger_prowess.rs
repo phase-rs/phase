@@ -37,6 +37,7 @@ use engine::types::keywords::Keyword;
 use engine::types::triggers::TriggerMode;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 use crate::features::control::is_card_draw_parts;
 
 /// Maximum mana value to qualify as "low curve". CR 202.3b.
@@ -204,13 +205,23 @@ fn compute_commitment(
     copy_effect_count: u32,
     total_nonland: u32,
 ) -> f32 {
-    let denom = total_nonland.max(1) as f32;
-    let payoff_density =
-        (prowess_count as f32 + cast_payoff_count as f32 + 2.0 * nth_spell_payoff_count as f32)
-            / denom;
-    let spell_density = low_curve_spell_count as f32 / denom;
-    let copy_density = copy_effect_count as f32 / denom;
-    (1.6 * payoff_density + 1.0 * spell_density + 0.5 * copy_density).clamp(0.0, 1.0)
+    let payoff_count = prowess_count
+        .saturating_add(cast_payoff_count)
+        .saturating_add(nth_spell_payoff_count.saturating_mul(2));
+    commitment::weighted_sum(&[
+        (
+            1.6 / 60.0,
+            commitment::density_per_60(payoff_count, total_nonland),
+        ),
+        (
+            1.0 / 60.0,
+            commitment::density_per_60(low_curve_spell_count, total_nonland),
+        ),
+        (
+            0.5 / 60.0,
+            commitment::density_per_60(copy_effect_count, total_nonland),
+        ),
+    ])
 }
 
 // ─── Parts predicates ────────────────────────────────────────────────────────
