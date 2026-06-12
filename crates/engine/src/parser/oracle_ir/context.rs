@@ -106,6 +106,15 @@ pub(crate) struct ParseContext {
     /// `ExileFromTopUntil` referent (Territorial Bruntar) that
     /// `parent_target_available` would otherwise include.
     pub parent_target_is_chosen: bool,
+    /// CR 701.42a: The partner card name extracted from a meld instigator's
+    /// own/control gate ("if you both own and control [self] and a [type] named
+    /// [partner], exile them, then meld them into [result]"). The gate is parsed
+    /// as the trigger's intervening-if condition (carrying [partner] inside its
+    /// `ControlCount` conjunct), but the meld EFFECT clause ("exile them, then
+    /// meld them into [result]") must also stamp [partner] onto `Effect::Meld`.
+    /// Set when the meld gate is recognized; consumed by the meld effect
+    /// combinator. `None` for non-meld faces.
+    pub pending_meld_partner: Option<String>,
 }
 
 impl ParseContext {

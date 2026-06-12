@@ -1980,6 +1980,7 @@ pub fn resolve_effect(
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),
+        Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)

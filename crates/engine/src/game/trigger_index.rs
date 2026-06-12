@@ -711,6 +711,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
         | EffectKind::Encore
+        | EffectKind::Meld
         | EffectKind::ExileHaunting
         | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy

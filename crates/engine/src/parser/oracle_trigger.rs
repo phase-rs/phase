@@ -768,9 +768,24 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let condition_text: &str = &condition_text_stripped;
 
     let effect_lower = effect_text.to_lowercase();
-    // Extract intervening-if condition from effect text first — a leading
-    // "if X, " can hide the "you may " optional marker behind the if-clause.
-    let (effect_without_if, if_condition) = extract_if_condition(&effect_text);
+    // CR 701.42b: A meld instigator's effect text opens with the own/control
+    // gate ("if you both own and control ~ and a [type] named [partner], exile
+    // them, then meld them into [result]"). Recognize it as a unit: the gate
+    // becomes the trigger's intervening-if condition, the partner name is staged
+    // for the meld effect combinator, and the residual ("exile them, then meld
+    // them into [result]") is parsed as the effect body. Falls through to the
+    // generic `extract_if_condition` for every non-meld trigger.
+    let (effect_without_if, if_condition, meld_partner) =
+        match crate::parser::oracle_effect::meld::parse_meld_gate(&effect_text) {
+            Some((gate, partner, residual)) => (residual, Some(gate), Some(partner)),
+            None => {
+                // Extract intervening-if condition from effect text first — a
+                // leading "if X, " can hide the "you may " optional marker behind
+                // the if-clause.
+                let (without_if, cond) = extract_if_condition(&effect_text);
+                (without_if, cond, None)
+            }
+        };
 
     // CR 608.2c (resolution-order instructions): "You may" at the start of
     // the effect text makes the triggered effect optional at resolution.
@@ -817,6 +832,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // needs it to remap a `"that creature"` copy-token anaphor to the
         // enchanted host (Springheart Nantuko's landfall trigger).
         host_self_reference: ctx.host_self_reference.clone(),
+        // CR 701.42a: stage the meld partner so the effect-clause combinator can
+        // stamp `Effect::Meld { source, partner, .. }` (the context carries the
+        // source name; the gate carried the partner name).
+        pending_meld_partner: meld_partner,
         ..Default::default()
     };
 
@@ -11564,9 +11583,9 @@ mod tests {
         BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute, Comparator,
         ContinuousModification, ControllerRef, CountScope, DamageModification, DamageSource,
         DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-        ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SharedQuality, TapStateChange, TargetFilter, TypeFilter,
-        TypedFilter,
+        ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+        PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TapStateChange,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::WaitingFor;
@@ -22741,6 +22760,56 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::PreCombatMain));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    /// Issue #2900: Blinkmoth Urn — "that player adds {C} for each artifact they
+    /// control" must route mana to `ScopedPlayer` and count the scoped player's
+    /// artifacts, not the source controller's.
+    #[test]
+    fn phase_trigger_blinkmoth_urn_that_player_adds_mana_for_their_artifacts() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's first main phase, if this artifact is untapped, that player adds {C} for each artifact they control.",
+            "Blinkmoth Urn",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::PreCombatMain));
+        assert_eq!(def.constraint, None);
+        let exec = def
+            .execute
+            .as_ref()
+            .expect("Blinkmoth Urn must have execute");
+        match exec.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    Some(TargetFilter::ScopedPlayer),
+                    "mana recipient must be the active player (ScopedPlayer)"
+                );
+                let QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } = count
+                else {
+                    panic!("expected ObjectCount artifact filter, got {count:?}");
+                };
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Artifact),
+                    "count must be artifacts"
+                );
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::ScopedPlayer),
+                    "\"they control\" must bind to the scoped player"
+                );
+            }
+            other => panic!("expected Effect::Mana, got {other:?}"),
+        }
     }
 
     #[test]

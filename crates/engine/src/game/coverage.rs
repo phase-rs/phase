@@ -2573,6 +2573,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::SwitchPT { .. }
         | Effect::Myriad
         | Effect::Encore
+        | Effect::Meld { .. }
         | Effect::ExileHaunting { .. }
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
