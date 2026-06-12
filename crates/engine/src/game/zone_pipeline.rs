@@ -17,8 +17,8 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    CastTimingPermission, Duration, Effect, KickerVariant, LibraryPosition, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef,
+    AdditionalCostInstancePayment, CastTimingPermission, Duration, Effect, KickerVariant,
+    LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -486,6 +486,7 @@ struct CastLinkSnapshot {
     cast_timing_permission: Option<CastTimingPermission>,
     kickers_paid: Vec<KickerVariant>,
     additional_cost_payment_count: u32,
+    additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
 }
 
@@ -1557,6 +1558,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cast_timing_permission: obj.cast_timing_permission.map(|(p, _)| p),
                     kickers_paid: obj.kickers_paid.clone(),
                     additional_cost_payment_count: obj.additional_cost_payment_count,
+                    additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
                 })
             })
@@ -1625,6 +1627,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 }
                 obj.kickers_paid = link.kickers_paid;
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
+                obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;
             }
         }

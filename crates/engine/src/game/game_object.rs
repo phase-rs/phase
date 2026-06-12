@@ -4,9 +4,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastTimingPermission, CastVariantPaid,
-    CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
+    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
+    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
+    ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -582,6 +584,12 @@ pub struct GameObject {
     /// Kicker semantics.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub additional_cost_payment_count: u32,
+    /// CR 607.2g + CR 702.157b/702.175b: Per-instance non-kicker
+    /// additional-cost payments that produced this permanent, copied from
+    /// `SpellContext.additional_cost_payments` at cast resolution for linked
+    /// ETB triggers such as Squad and Offspring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
     /// produced this object. Stored as object ids so future convoke-reference
     /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
@@ -958,6 +966,22 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
+        additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
+    }
+
+    pub fn instance_payment_count_for_ordinal(
+        &self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+    ) -> u32 {
+        additional_cost_instance_payment_count_for_ordinal(
+            &self.additional_cost_payments,
+            origin,
+            origin_ordinal,
+        )
+    }
+
     /// Oathbreaker RC: true for the command-zone signature spell role.
     pub fn is_signature_spell(&self) -> bool {
         self.signature_spell.is_some()
@@ -1145,6 +1169,7 @@ impl GameObject {
             cost_x_paid: None,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
+            additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
             bestow_form: None,
             prototype_form: None,
@@ -1304,6 +1329,7 @@ impl GameObject {
         self.cast_controller = None;
         self.kickers_paid.clear();
         self.additional_cost_payment_count = 0;
+        self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
         // spell-resolution event that created this object. A re-entering
         // permanent has no memory of a prior convoke payment.

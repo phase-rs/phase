@@ -5445,15 +5445,31 @@ pub(crate) fn evaluate_condition(
         // resolved-ability context for ETB triggers).
         AbilityCondition::AdditionalCostPaid {
             source,
+            origin,
+            origin_ordinal,
             variant,
             kicker_cost,
             min_count,
-        } => ability.context.additional_cost_paid_matches(
-            *source,
-            *variant,
-            kicker_cost.as_ref(),
-            *min_count,
-        ),
+        } => {
+            if let Some(origin) = origin {
+                let count = origin_ordinal.map_or_else(
+                    || ability.context.instance_payment_count(*origin),
+                    |ordinal| {
+                        ability
+                            .context
+                            .instance_payment_count_for_ordinal(*origin, ordinal)
+                    },
+                );
+                count >= (*min_count).max(1)
+            } else {
+                ability.context.additional_cost_paid_matches(
+                    *source,
+                    *variant,
+                    kicker_cost.as_ref(),
+                    *min_count,
+                )
+            }
+        }
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::OptionalEffectPerformed,

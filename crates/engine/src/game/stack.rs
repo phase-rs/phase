@@ -727,6 +727,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     obj.kickers_paid = ability.context.kickers_paid.clone();
                     obj.additional_cost_payment_count =
                         ability.context.additional_cost_payment_count;
+                    obj.additional_cost_payments = ability.context.additional_cost_payments.clone();
                     if let Some(cast_from_zone) = ability.context.cast_from_zone {
                         obj.cast_from_zone = Some(cast_from_zone);
                     }
@@ -962,6 +963,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 .map(|o| o.additional_cost_payment_count)
                                 .unwrap_or_default()
                         });
+                    let additional_cost_payments = ability
+                        .as_ref()
+                        .map(|a| a.context.additional_cost_payments.clone())
+                        .unwrap_or_else(|| {
+                            state
+                                .objects
+                                .get(&entry.id)
+                                .map(|o| o.additional_cost_payments.clone())
+                                .unwrap_or_default()
+                        });
                     state.pending_spell_resolution =
                         Some(crate::types::game_state::PendingSpellResolution {
                             object_id: entry.id,
@@ -974,6 +985,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             actual_mana_spent,
                             kickers_paid,
                             additional_cost_payment_count,
+                            additional_cost_payments,
                             convoked_creatures,
                         });
                     state.waiting_for =
@@ -1183,6 +1195,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // `trigger_definitions` after the zone change buffers.
                     crate::database::synthesis::ensure_evoke_etb_sac_trigger(obj);
                 }
+            }
+            if let Some(obj) = state.objects.get_mut(&entry.id) {
+                crate::database::synthesis::ensure_paid_offspring_etb_copy_triggers(obj);
             }
 
             // CR 702.103a + CR 702.103b: Bestow-cast permanent gets the

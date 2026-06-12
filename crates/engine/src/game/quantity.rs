@@ -318,6 +318,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
@@ -489,6 +490,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
@@ -2219,6 +2221,20 @@ fn resolve_ref(
             .objects
             .get(&ctx.self_object())
             .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
+            .unwrap_or(0),
+        QuantityRef::AdditionalCostPaymentCountFor {
+            origin,
+            origin_ordinal,
+        } => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| {
+                let count = origin_ordinal.map_or_else(
+                    || obj.instance_payment_count(*origin),
+                    |ordinal| obj.instance_payment_count_for_ordinal(*origin, ordinal),
+                );
+                u32_to_i32_saturating(count)
+            })
             .unwrap_or(0),
         QuantityRef::ConvokedCreatureCount => state
             .objects

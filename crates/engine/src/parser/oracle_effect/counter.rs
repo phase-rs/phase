@@ -744,18 +744,27 @@ pub(super) fn try_parse_move_counters<'a>(
 ) -> Option<(Effect, &'a str)> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
-    // Detect "its counters" / "this creature's counters" / "those counters"
-    let ((), after_possessive) = nom_on_lower(after_put, after_put, |i| {
-        value(
-            (),
-            alt((
-                tag("its counter"),
-                tag("this creature's counter"),
-                tag("those counter"),
-            )),
-        )
-        .parse(i)
-    })?;
+    // Detect "its counters" / "~'s counters" / "this creature's counters" /
+    // "those counters".
+    let (source, after_possessive) = if let Some(((), rest)) =
+        nom_on_lower(after_put, after_put, |i| {
+            value((), tag("~'s counter")).parse(i)
+        }) {
+        (TargetFilter::SelfRef, rest)
+    } else {
+        let ((), rest) = nom_on_lower(after_put, after_put, |i| {
+            value(
+                (),
+                alt((
+                    tag("its counter"),
+                    tag("this creature's counter"),
+                    tag("those counter"),
+                )),
+            )
+            .parse(i)
+        })?;
+        (resolve_it_pronoun(ctx), rest)
+    };
     // Skip past optional "s" (counter vs counters) then expect " on "
     let after_counters = nom_on_lower(after_possessive, after_possessive, |i| {
         value((), tag("s")).parse(i)
@@ -777,7 +786,7 @@ pub(super) fn try_parse_move_counters<'a>(
             // object had are placed on the destination — read from the leaving
             // object's last-known information (CR 400.7), so the source must be
             // the triggering object, not the ability source.
-            source: resolve_it_pronoun(ctx),
+            source,
             counter_type: None,
             count: None,
             mode: CounterTransferMode::Put,
@@ -1886,6 +1895,34 @@ mod tests {
             "\"other\" must map to FilterProp::Another, got {:?}",
             tf.properties
         );
+    }
+
+    /// CR 122.8 + CR 400.7: "~'s counters" in a self-sacrifice activated
+    /// ability (Zack Fair) — source is the ability's ~, not the parent target.
+    #[test]
+    fn move_counters_self_possessive_counters() {
+        let lower = "put ~'s counters on that creature";
+        let result = try_parse_move_counters(lower, lower, &mut default_ctx());
+        let Some((
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                count,
+                mode,
+                selection: _,
+                target,
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert!(matches!(source, TargetFilter::SelfRef));
+        assert_eq!(counter_type, None);
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert!(matches!(target, TargetFilter::ParentTarget));
+        assert!(rem.is_empty());
     }
 
     /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric

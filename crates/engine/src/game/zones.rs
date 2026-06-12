@@ -23,7 +23,7 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
 /// "for each Aura you controlled that was attached to it" (Hateful Eidolon)
 /// can resolve their quantity after SBA has already unattached the Auras.
-fn capture_attachment_snapshot(
+pub(crate) fn capture_attachment_snapshot(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<crate::types::game_state::AttachmentSnapshot> {

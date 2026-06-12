@@ -540,15 +540,27 @@ fn modal_selection_condition_matches(
         }
         ModalSelectionCondition::AdditionalCostPaid {
             source,
+            origin,
+            origin_ordinal,
             variant,
             kicker_cost,
             min_count,
-        } => context.additional_cost_paid_matches(
-            *source,
-            *variant,
-            kicker_cost.as_ref(),
-            *min_count,
-        ),
+        } => {
+            if let Some(origin) = origin {
+                let count = origin_ordinal.map_or_else(
+                    || context.instance_payment_count(*origin),
+                    |ordinal| context.instance_payment_count_for_ordinal(*origin, ordinal),
+                );
+                count >= (*min_count).max(1)
+            } else {
+                context.additional_cost_paid_matches(
+                    *source,
+                    *variant,
+                    kicker_cost.as_ref(),
+                    *min_count,
+                )
+            }
+        }
     }
 }
 
@@ -1138,20 +1150,28 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             })
             .collect()
     } else if let Effect::Attach { attachment, target } = &validated.effect {
-        [attachment, target]
-            .iter()
-            .filter(|filter| attach_filter_needs_target_slot(filter))
-            .zip(validated.targets.iter())
-            .filter_map(|(filter, target_ref)| {
-                let legal = targeting::validate_targets_for_ability(
-                    state,
-                    std::slice::from_ref(target_ref),
-                    filter,
-                    &validated,
-                );
-                legal.into_iter().next()
-            })
-            .collect()
+        let mut kept = Vec::new();
+        let mut target_iter = validated.targets.iter();
+        for (is_attachment, filter) in [(true, attachment), (false, target)] {
+            if !attach_side_needs_target_slot(filter, is_attachment) {
+                continue;
+            }
+            let Some(target_ref) = target_iter.next() else {
+                continue;
+            };
+            if let Some(legal) = targeting::validate_targets_for_ability(
+                state,
+                std::slice::from_ref(target_ref),
+                filter,
+                &validated,
+            )
+            .into_iter()
+            .next()
+            {
+                kept.push(legal);
+            }
+        }
+        kept
     } else if let Some(src_leaf) = prevent_damage_source_slot_filter(&validated.effect).cloned() {
         // CR 608.2b + CR 609.7a: A source-scoped `PreventDamage` carries its
         // chosen source spell in `targets[0]`. `extract_target_filter_from_effect`
@@ -1347,8 +1367,8 @@ fn collect_target_slots(
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        for filter in [attachment, target] {
-            if !attach_filter_needs_target_slot(filter) {
+        for (is_attachment, filter) in [(true, attachment), (false, target)] {
+            if !attach_side_needs_target_slot(filter, is_attachment) {
                 continue;
             }
             let legal_targets =
@@ -1957,12 +1977,39 @@ pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilte
     }
 }
 
-fn attach_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+/// Whether the attachment operand of `Effect::Attach` consumes an explicit
+/// player-chosen target. Scan-based filters (e.g. "Equipment attached to ~")
+/// resolve from the battlefield/LKI and must not steal `ParentTarget` slots.
+fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(tf) => !tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::AttachedToSource)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(attach_attachment_filter_needs_target_slot),
+        TargetFilter::Not { filter } => attach_attachment_filter_needs_target_slot(filter),
+        _ => false,
+    }
+}
+
+/// Whether the host operand of `Effect::Attach` consumes an explicit target.
+fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     !filter.is_context_ref()
         && !matches!(
             filter,
             TargetFilter::LastCreated | TargetFilter::LastRevealed
         )
+}
+
+fn attach_side_needs_target_slot(filter: &TargetFilter, is_attachment: bool) -> bool {
+    if is_attachment {
+        attach_attachment_filter_needs_target_slot(filter)
+    } else {
+        attach_host_filter_needs_target_slot(filter)
+    }
 }
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
@@ -2359,8 +2406,8 @@ fn collect_target_slot_specs(
             }
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        for filter in [attachment, target] {
-            if attach_filter_needs_target_slot(filter) {
+        for (is_attachment, filter) in [(true, attachment), (false, target)] {
+            if attach_side_needs_target_slot(filter, is_attachment) {
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
@@ -3746,8 +3793,8 @@ fn assign_targets_recursive(
     }
 
     if let Effect::Attach { attachment, target } = &ability.effect {
-        for filter in [attachment, target] {
-            if attach_filter_needs_target_slot(filter) {
+        for (is_attachment, filter) in [(true, attachment), (false, target)] {
+            if attach_side_needs_target_slot(filter, is_attachment) {
                 if let Some(target) = targets.get(*next_target) {
                     ability.targets.push(target.clone());
                     *next_target += 1;
@@ -3957,8 +4004,8 @@ fn assign_selected_slots_recursive(
     }
 
     if let Effect::Attach { attachment, target } = &ability.effect {
-        for filter in [attachment, target] {
-            if attach_filter_needs_target_slot(filter) {
+        for (is_attachment, filter) in [(true, attachment), (false, target)] {
+            if attach_side_needs_target_slot(filter, is_attachment) {
                 let Some(selected_slot) = selected_slots.get(*next_slot) else {
                     return Err(EngineError::InvalidAction(
                         "Missing target selection".to_string(),
@@ -4305,9 +4352,8 @@ fn validate_target_constraints(
 
 fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
     if let Effect::Attach { attachment, target } = &ability.effect {
-        if [attachment, target]
-            .iter()
-            .any(|filter| attach_filter_needs_target_slot(filter))
+        if attach_side_needs_target_slot(attachment, true)
+            || attach_side_needs_target_slot(target, false)
         {
             return true;
         }
@@ -4374,10 +4420,8 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
         if ability.optional_targeting {
             0
         } else {
-            [attachment, target]
-                .iter()
-                .filter(|filter| attach_filter_needs_target_slot(filter))
-                .count()
+            usize::from(attach_side_needs_target_slot(attachment, true))
+                + usize::from(attach_side_needs_target_slot(target, false))
         }
     } else {
         0

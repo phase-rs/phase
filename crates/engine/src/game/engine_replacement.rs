@@ -1067,7 +1067,10 @@ fn apply_pending_spell_resolution(
         }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
         obj.additional_cost_payment_count = ctx.additional_cost_payment_count;
+        obj.additional_cost_payments
+            .clone_from(&ctx.additional_cost_payments);
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
+        crate::database::synthesis::ensure_paid_offspring_etb_copy_triggers(obj);
     }
 
     // CR 303.4f: Aura resolving to battlefield attaches to its target.
@@ -1567,6 +1570,7 @@ mod tests {
             actual_mana_spent: 0,
             kickers_paid: vec![],
             additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
             convoked_creatures: vec![],
         });
 

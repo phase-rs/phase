@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
-    CounterCostSelection, Effect, KickerVariant, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ResolvedAbility, SacrificeCost, SacrificeRequirement, SpellCastingOptionKind, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
+    AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, BeholdCostAction,
+    CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect, KickerVariant,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SpellCastingOptionKind, StaticCondition, TargetFilter, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -116,6 +117,22 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if pending
+        .additional_cost_queue
+        .first()
+        .is_some_and(|instance| {
+            matches!(
+                instance.cost,
+                AdditionalCost::Optional {
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                    ..
+                }
+            )
+        })
+    {
+        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+    }
+
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
         (Some(AdditionalCost::Kicker { .. }), _) => {
             return handle_decide_kicker_cost(state, player, pending, pay, events);
@@ -149,6 +166,7 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     let cost_source = pending.additional_cost_source;
+    let current_instance = pending.additional_cost_queue.first().cloned();
     let mut ability = pending.ability;
 
     // CR 702.166a: Track whether this decision paid an optional additional cost
@@ -164,8 +182,17 @@ pub(crate) fn handle_decide_additional_cost(
             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         } => {
             if pay {
-                ability.context.additional_cost_paid = true;
-                ability.context.additional_cost_payment_count = 1;
+                if let Some(instance) = current_instance.as_ref() {
+                    ability.context.record_additional_cost_instance_payment(
+                        instance.origin,
+                        instance.origin_ordinal,
+                        1,
+                    );
+                } else {
+                    ability
+                        .context
+                        .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+                }
                 optional_cost_paid = true;
                 Some(cost.clone())
             } else {
@@ -190,8 +217,9 @@ pub(crate) fn handle_decide_additional_cost(
                     .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)));
                 if is_card_additional_cost_choice {
                     // CR 601.2b: Optional/additional `Choice` costs (e.g. casualty).
-                    ability.context.additional_cost_paid = true;
-                    ability.context.additional_cost_payment_count = 1;
+                    ability
+                        .context
+                        .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
                 } else if matches!(preferred, AbilityCost::Mana { .. }) {
                     // CR 118.9: Spellcasting-option alternative mana costs are not
                     // additional costs; gate riders via `alternative_mana_cost_paid`.
@@ -205,13 +233,28 @@ pub(crate) fn handle_decide_additional_cost(
         AdditionalCost::Required(cost) => {
             // Required costs are always paid — the choice prompt should not be reached,
             // but handle defensively by always paying.
-            ability.context.additional_cost_paid = true;
-            ability.context.additional_cost_payment_count = 1;
+            if let Some(instance) = current_instance.as_ref() {
+                ability.context.record_additional_cost_instance_payment(
+                    instance.origin,
+                    instance.origin_ordinal,
+                    1,
+                );
+            } else {
+                ability
+                    .context
+                    .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+            }
             Some(cost.clone())
         }
     };
 
     let mut updated_pending = PendingCast { ability, ..pending };
+    if current_instance.is_some() {
+        updated_pending.additional_cost_queue.remove(0);
+        if updated_pending.additional_cost_queue.is_empty() {
+            updated_pending.additional_cost_decided = true;
+        }
+    }
     updated_pending.additional_cost_source = SpellCostSource::Other;
 
     // CR 601.2b: When an optional additional cost (e.g. Casualty) was declared
@@ -489,22 +532,40 @@ fn handle_decide_repeatable_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let queued_instance = pending.additional_cost_queue.first().cloned();
+    let queued_origin = queued_instance.as_ref().map(|instance| instance.origin);
+    let queued_origin_ordinal = queued_instance
+        .as_ref()
+        .map(|instance| instance.origin_ordinal);
     let Some(cost) = next_repeatable_additional_cost(state, player, &pending) else {
-        pending.additional_cost_flow = None;
+        if queued_origin.is_some() {
+            pending.additional_cost_queue.remove(0);
+        } else {
+            pending.additional_cost_flow = None;
+        }
         return finish_pending_cost_or_cast(state, player, pending, events);
     };
 
     if !pay {
-        pending.additional_cost_flow = None;
+        if queued_origin.is_some() {
+            pending.additional_cost_queue.remove(0);
+        } else {
+            pending.additional_cost_flow = None;
+        }
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
-    pending.ability.context.additional_cost_paid = true;
-    pending.ability.context.additional_cost_payment_count = pending
-        .ability
-        .context
-        .additional_cost_payment_count
-        .saturating_add(1);
+    if let (Some(origin), Some(origin_ordinal)) = (queued_origin, queued_origin_ordinal) {
+        pending
+            .ability
+            .context
+            .record_additional_cost_instance_payment(origin, origin_ordinal, 1);
+    } else {
+        pending
+            .ability
+            .context
+            .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+    }
     pay_additional_cost(state, player, cost, pending, events)
 }
 
@@ -513,6 +574,20 @@ fn next_repeatable_additional_cost(
     player: PlayerId,
     pending: &PendingCast,
 ) -> Option<AbilityCost> {
+    if let Some(AdditionalCostInstance {
+        cost:
+            AdditionalCost::Optional {
+                cost,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            },
+        ..
+    }) = pending.additional_cost_queue.first()
+    {
+        return cost
+            .is_payable(state, player, pending.object_id)
+            .then_some(cost.clone());
+    }
+
     let Some(AdditionalCost::Optional {
         cost,
         repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
@@ -531,6 +606,67 @@ fn finish_pending_cost_or_cast(
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let Some(instance) = pending.additional_cost_queue.first().cloned() {
+        match instance.cost {
+            AdditionalCost::Required(cost) => {
+                pending.additional_cost_queue.remove(0);
+                return pay_additional_cost_with_source(
+                    state,
+                    player,
+                    cost,
+                    SpellCostSource::Other,
+                    pending,
+                    events,
+                );
+            }
+            AdditionalCost::Optional {
+                cost,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            } => {
+                if !cost.is_payable(state, player, pending.object_id) {
+                    pending.additional_cost_queue.remove(0);
+                    return finish_pending_cost_or_cast(state, player, pending, events);
+                }
+                return Ok(WaitingFor::OptionalCostChoice {
+                    player,
+                    cost: AdditionalCost::Optional {
+                        cost,
+                        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                    },
+                    times_kicked: 0,
+                    pending_cast: Box::new(pending),
+                });
+            }
+            AdditionalCost::Optional {
+                cost,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            } => {
+                if cost.is_payable(state, player, pending.object_id) {
+                    let times_kicked = pending.ability.context.instance_payment_count_for_ordinal(
+                        instance.origin,
+                        instance.origin_ordinal,
+                    );
+                    return Ok(WaitingFor::OptionalCostChoice {
+                        player,
+                        cost: AdditionalCost::Optional {
+                            cost,
+                            repeatability:
+                                crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                        },
+                        times_kicked,
+                        pending_cast: Box::new(pending),
+                    });
+                }
+                pending.additional_cost_queue.remove(0);
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
+            AdditionalCost::Kicker { .. } | AdditionalCost::Choice(_, _) => {
+                pending.additional_cost_queue.remove(0);
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
+        }
+    }
+
     if matches!(
         pending.additional_cost_flow,
         Some(AdditionalCost::Required(_))
@@ -2183,7 +2319,10 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     // deferred-target-selection flow, skip re-detection — the player already made
     // their choice. Without this guard, check_additional_cost_or_pay_with_distribute
     // would re-find the cost on obj.additional_cost and prompt for a second sacrifice.
-    if pending.additional_cost_flow.is_some() || pending.additional_cost_decided {
+    if pending.additional_cost_flow.is_some()
+        || !pending.additional_cost_queue.is_empty()
+        || pending.additional_cost_decided
+    {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     let object_id = pending.object_id;
@@ -2556,50 +2695,65 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     let imposed_required_cost =
         combined_imposed_additional_cast_cost(state, player, object_id, &ability);
 
-    // CR 601.2b: Optional costs (Casualty/Replicate) must be declared before
-    // required additional costs. When obj.additional_cost is Required and the
-    // spell also has a granted optional cost (e.g., Village Rites gaining
-    // Casualty via a static effect), offer the optional cost first and stash the
-    // Required cost in additional_cost_flow for processing after it resolves.
-    let casualty_additional = effective_casualty_additional_cost(state, player, object_id);
-    let replicate_additional = effective_replicate_additional_cost(state, player, object_id);
-    let granted_optional_additional = casualty_additional
-        .clone()
-        .or_else(|| replicate_additional.clone());
+    // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
+    // independently functioning instances are announced through a queue. This
+    // preserves one payment record per Casualty/Offspring/Squad/Replicate
+    // instance while leaving Kicker on its existing `kickers_paid` path.
+    let mut additional_cost_queue = Vec::new();
+    additional_cost_queue.extend(effective_casualty_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_offspring_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_squad_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_replicate_additional_cost_instances(
+        state, player, object_id,
+    ));
+    let obj_additional_matches_instance = obj_additional.as_ref().is_some_and(|cost| {
+        additional_cost_queue
+            .iter()
+            .any(|instance| instance.cost == *cost)
+    });
+    let legacy_obj_additional = if obj_additional_matches_instance {
+        None
+    } else {
+        obj_additional.clone()
+    };
     let offering_additional = effective_offering_additional_cost(state, player, object_id);
     let conspire_additional = effective_conspire_additional_cost(state, player, object_id);
 
     let (additional, deferred_required, additional_cost_source) =
-        if let Some(AdditionalCost::Required(ref req)) = obj_additional {
-            if let Some(granted_optional) = granted_optional_additional {
+        if let Some(AdditionalCost::Required(ref req)) = legacy_obj_additional {
+            if !additional_cost_queue.is_empty() {
                 if !req.is_payable(state, player, object_id) {
                     return Err(EngineError::ActionNotAllowed(
                         "Cannot pay required additional cost".to_string(),
                     ));
                 }
-                let deferred =
-                    merge_required_additional_cost(obj_additional, imposed_required_cost.clone());
-                (Some(granted_optional), deferred, SpellCostSource::Other)
+                let deferred = merge_required_additional_cost(
+                    legacy_obj_additional,
+                    imposed_required_cost.clone(),
+                );
+                (None, deferred, SpellCostSource::Other)
             } else {
-                let additional =
-                    merge_required_additional_cost(obj_additional, imposed_required_cost.clone());
+                let additional = merge_required_additional_cost(
+                    legacy_obj_additional,
+                    imposed_required_cost.clone(),
+                );
                 (additional, None, SpellCostSource::Other)
             }
-        } else if obj_additional.is_some() {
+        } else if legacy_obj_additional.is_some() {
             (
-                obj_additional,
+                legacy_obj_additional,
                 imposed_required_cost.clone().map(AdditionalCost::Required),
                 SpellCostSource::Other,
             )
-        } else if let Some(casualty) = casualty_additional {
+        } else if !additional_cost_queue.is_empty() {
             (
-                Some(casualty),
-                imposed_required_cost.clone().map(AdditionalCost::Required),
-                SpellCostSource::Other,
-            )
-        } else if let Some(replicate) = replicate_additional {
-            (
-                Some(replicate),
+                None,
                 imposed_required_cost.clone().map(AdditionalCost::Required),
                 SpellCostSource::Other,
             )
@@ -2673,6 +2827,20 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending_cast: Box::new(pending),
             });
         }
+    }
+
+    if !additional_cost_queue.is_empty() {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute.clone();
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        pending.additional_cost_queue = additional_cost_queue;
+        pending.additional_cost_flow = additional.clone().or(deferred_required);
+        pending.additional_cost_source = additional_cost_source;
+        return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
     if let Some(additional_cost) = additional {
@@ -3964,28 +4132,47 @@ pub(super) fn effective_casualty_additional_cost(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<AdditionalCost> {
-    let threshold = super::casting::effective_spell_keywords(state, player, object_id)
+    effective_casualty_additional_cost_instances(state, player, object_id)
         .into_iter()
-        .find_map(|keyword| match keyword {
-            Keyword::Casualty(n) => Some(n),
+        .next()
+        .map(|instance| instance.cost)
+}
+
+pub(super) fn effective_casualty_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Casualty(threshold) => Some(threshold),
             _ => None,
-        })?;
-    Some(AdditionalCost::Optional {
-        cost: AbilityCost::Sacrifice(SacrificeCost::count(
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                crate::types::ability::FilterProp::PtComparison {
-                    stat: crate::types::ability::PtStat::Power,
-                    scope: crate::types::ability::PtValueScope::Current,
-                    comparator: crate::types::ability::Comparator::GE,
-                    value: QuantityExpr::Fixed {
-                        value: threshold as i32,
-                    },
+        })
+        .enumerate()
+        .map(|(ordinal, threshold)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Casualty,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Sacrifice(SacrificeCost::count(
+                        TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            crate::types::ability::FilterProp::PtComparison {
+                                stat: crate::types::ability::PtStat::Power,
+                                scope: crate::types::ability::PtValueScope::Current,
+                                comparator: crate::types::ability::Comparator::GE,
+                                value: QuantityExpr::Fixed {
+                                    value: threshold as i32,
+                                },
+                            },
+                        ])),
+                        1,
+                    )),
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 },
-            ])),
-            1,
-        )),
-        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    })
+            )
+        })
+        .collect()
 }
 
 /// CR 702.78a: Optional "tap two color-sharing creatures" additional cost from a
@@ -4016,16 +4203,85 @@ pub(super) fn effective_replicate_additional_cost(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<AdditionalCost> {
-    let cost = super::casting::effective_spell_keywords(state, player, object_id)
+    effective_replicate_additional_cost_instances(state, player, object_id)
         .into_iter()
-        .find_map(|keyword| match keyword {
+        .next()
+        .map(|instance| instance.cost)
+}
+
+pub(super) fn effective_offspring_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Offspring(cost) => Some(cost),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(ordinal, cost)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Offspring,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Mana { cost },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                },
+            )
+        })
+        .collect()
+}
+
+pub(super) fn effective_squad_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Squad(cost) => Some(cost),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(ordinal, cost)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Squad,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Mana { cost },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                },
+            )
+        })
+        .collect()
+}
+
+pub(super) fn effective_replicate_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter_map(|keyword| match keyword {
             Keyword::Replicate(cost) => Some(cost),
             _ => None,
-        })?;
-    Some(AdditionalCost::Optional {
-        cost: AbilityCost::Mana { cost },
-        repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
-    })
+        })
+        .enumerate()
+        .map(|(ordinal, cost)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Replicate,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Mana { cost },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                },
+            )
+        })
+        .collect()
 }
 
 /// CR 702.48a: Return the quality (creature subtype) string from a spell's
@@ -4777,6 +5033,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     let kickers_paid = ability.context.kickers_paid.clone();
     let additional_cost_paid = ability.context.additional_cost_paid;
     let additional_cost_payment_count = ability.context.additional_cost_payment_count;
+    let additional_cost_payments = ability.context.additional_cost_payments.clone();
     let convoked_creatures = state
         .pending_cast
         .as_ref()
@@ -4835,6 +5092,8 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     if additional_cost_payment_count > 0 {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.additional_cost_payment_count = additional_cost_payment_count;
+            obj.additional_cost_payments
+                .clone_from(&additional_cost_payments);
         }
     }
     if let Some(permission) = cast_timing_permission {
@@ -4972,6 +5231,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             distinct_colors_spent,
             kickers_paid: kickers_paid.len(),
             additional_cost_payment_count,
+            additional_cost_payments: additional_cost_payments.clone(),
             additional_cost_paid,
             casting_variant,
             cast_transformed,
@@ -7461,6 +7721,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11571,6 +11832,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11694,6 +11956,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11786,6 +12049,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11867,6 +12131,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11981,6 +12246,7 @@ mod tests {
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
             deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -12987,6 +13253,81 @@ many tokens that are copies of it.)";
         assert_eq!(
             assault_permanents, 3,
             "original permanent plus two squad copy tokens should be on the battlefield"
+        );
+    }
+
+    /// CR 702.175a-b: Offspring granted only while a spell is being cast still
+    /// installs the linked ETB copy trigger on the resolving permanent.
+    #[test]
+    fn granted_offspring_paid_creates_copy_token_on_etb() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::keywords::Keyword;
+        use crate::types::GameAction;
+
+        let offspring_cost = ManaCost::generic(1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        scenario
+            .add_creature(PlayerId(0), "Offspring Grantor", 1, 1)
+            .with_static_definition(
+                StaticDefinition::new(StaticMode::CastWithKeyword {
+                    keyword: Keyword::Offspring(offspring_cost.clone()),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+
+        let mut builder =
+            scenario.add_creature_to_hand(PlayerId(0), "Granted Offspring Bear", 2, 2);
+        builder.with_mana_cost(ManaCost::generic(0));
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let mut runner = scenario.build();
+        fund_colorless(&mut runner, 1);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting granted-Offspring creature must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { cost, .. } => assert!(matches!(
+                cost,
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Mana { .. },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                }
+            )),
+            other => panic!("expected granted Offspring prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("granted Offspring payment must be accepted");
+        runner.advance_until_stack_empty();
+
+        let offspring_bears: Vec<_> = runner
+            .state()
+            .battlefield
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .filter(|obj| obj.name == "Granted Offspring Bear")
+            .collect();
+        assert_eq!(
+            offspring_bears.len(),
+            2,
+            "original granted-Offspring permanent plus one copy token should be on the battlefield"
+        );
+        assert!(
+            offspring_bears
+                .iter()
+                .any(|obj| obj.power == Some(1) && obj.toughness == Some(1)),
+            "the granted-Offspring copy must be 1/1"
         );
     }
 
