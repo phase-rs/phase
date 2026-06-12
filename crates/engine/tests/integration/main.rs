@@ -143,6 +143,7 @@ mod issue_2431_ultima_tap_land_for_c;
 mod issue_2435_traumatic_critique;
 mod issue_2439_wayta_trigger_doubling;
 mod issue_2856_shatterskull_divide_softlock;
+mod issue_2881_infamous_cruelclaw;
 mod issue_2888_unbreathing_horde_self_prevention;
 mod issue_2894_spymasters_vault_connive;
 mod issue_2897_nexus_of_fate;

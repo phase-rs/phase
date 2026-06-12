@@ -12112,7 +12112,9 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
-            alt_ability_cost: None,
+            // CR 118.9 + CR 119.4: "cast that card by discarding a card rather
+            // than paying its mana cost" (The Infamous Cruelclaw).
+            alt_ability_cost: parse_alt_ability_cost_rider(lower),
             constraint,
             duration,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
@@ -12305,19 +12307,60 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     Some(CastPermissionConstraint::ManaValue { comparator, value })
 }
 
+/// CR 118.9 + CR 119.4: Parse `<ability-cost> rather than paying its mana cost`
+/// from Oracle text that carries an alternative-casting-cost rider. Shared by
+/// standalone rider clauses and inline `CastFromZone` anaphor arms (The Infamous
+/// Cruelclaw, Nashi, Moon Sage's Scion).
+fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::AbilityCost> {
+    if !nom_primitives::scan_contains(lower, "rather than paying its mana cost")
+        && !nom_primitives::scan_contains(lower, "rather than pay its mana cost")
+    {
+        return None;
+    }
+    // CR 119.4 + CR 701.16a: "by discarding a card" — Cruelclaw's Heist /
+    // The Infamous Cruelclaw class. Word-scan rather than start-anchored `tag`
+    // so inline "cast that card by discarding ..." arms match too.
+    if nom_primitives::scan_contains(lower, "by discarding a card")
+        || nom_primitives::scan_contains(lower, "by discarding one card")
+    {
+        return Some(crate::types::ability::AbilityCost::Discard {
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    // CR 119.4: "pay life equal to its mana value" (Nashi, Moon Sage's Scion).
+    if nom_primitives::scan_contains(lower, "pay life equal to its mana value") {
+        return Some(crate::types::ability::AbilityCost::PayLife {
+            amount: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::SelfManaValue,
+            },
+        });
+    }
+    None
+}
+
 /// CR 118.9 + CR 119.4: Recognise an "alternative-cost rider" — text of the
 /// form "[If you cast a spell this way,] pay <ability-cost> rather than
 /// paying its mana cost". The body parses to an `AbilityCost` that the
 /// runtime pays in lieu of the spell's mana cost when casting via a granted
 /// `ExileWithAltAbilityCost` permission. Returns `Some(cost)` when the rider
-/// shape is recognised; `None` otherwise. Currently handles the "pay life
-/// equal to its mana value" form (Nashi, Moon Sage's Scion); the cost
-/// parser will accept other `AbilityCost` shapes naturally as they are
-/// added.
+/// shape is recognised; `None` otherwise.
 pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::ability::AbilityCost> {
     type Vbe<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let trimmed_lower = lower.trim_end_matches('.').trim();
+    // CR 118.9: Combined "you may cast/play that card ... rather than paying"
+    // clauses are a single `CastFromZone` with inline `alt_ability_cost`, not a
+    // standalone rider folded onto a prior `CastFromZone` (The Infamous Cruelclaw).
+    if nom_primitives::scan_contains(trimmed_lower, "cast that card")
+        || nom_primitives::scan_contains(trimmed_lower, "play that card")
+        || nom_primitives::scan_contains(trimmed_lower, "cast it ")
+        || nom_primitives::scan_contains(trimmed_lower, "play it ")
+    {
+        return None;
+    }
     // Accept the rider with or without an "if you cast a spell this way,"
     // conditional prefix (the conditional is folded into the runtime check
     // by the casting pipeline — the permission only fires for spells cast
@@ -12332,26 +12375,7 @@ pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::abili
     } else {
         trimmed_lower
     };
-    // Confirm the rider's tail. Without this guard, "pay life equal to its
-    // mana value" alone (without the "rather than" clause) would also match —
-    // but that form is a normal payment effect, not an alt-cost grant.
-    if !nom_primitives::scan_contains(after_prefix, "rather than paying its mana cost")
-        && !nom_primitives::scan_contains(after_prefix, "rather than pay its mana cost")
-    {
-        return None;
-    }
-    // CR 119.4: "pay life equal to its mana value" — the only currently-
-    // supported rider body. Detect via nom prefix match; emit
-    // `AbilityCost::PayLife { amount: SelfManaValue }` (CR 202.3 — "its mana
-    // value" resolves against the spell-being-cast at cost-payment time).
-    if let Ok((_, _)) = tag::<_, _, Vbe>("pay life equal to its mana value").parse(after_prefix) {
-        return Some(crate::types::ability::AbilityCost::PayLife {
-            amount: crate::types::ability::QuantityExpr::Ref {
-                qty: crate::types::ability::QuantityRef::SelfManaValue,
-            },
-        });
-    }
-    None
+    parse_alt_ability_cost_rider(after_prefix)
 }
 
 /// CR 106.4 + CR 514.2: Recognise mana-retention riders that modify the mana
@@ -42393,6 +42417,45 @@ mod tests {
                 other => panic!("expected ChangeZone redirect, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn infamous_cruelclaw_exile_until_chains_discard_alt_cast() {
+        let def = parse_effect_chain(
+            "Exile cards from the top of your library until you exile a nonland card. \
+             You may cast that card by discarding a card rather than paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        let Effect::ExileFromTopUntil { until, .. } = &*def.effect else {
+            panic!("expected ExileFromTopUntil, got {:?}", def.effect);
+        };
+        assert!(matches!(until, UntilCondition::NextMatches { .. }));
+        let cast = def
+            .sub_ability
+            .as_ref()
+            .expect("cast sub-ability must chain after exile-until");
+        assert!(cast.optional);
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            alt_ability_cost,
+            ..
+        } = &*cast.effect
+        else {
+            panic!("expected CastFromZone sub-ability, got {:?}", cast.effect);
+        };
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert!(!*without_paying_mana_cost);
+        assert!(
+            matches!(
+                alt_ability_cost,
+                Some(AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                })
+            ),
+            "expected discard alt cost, got {alt_ability_cost:?}"
+        );
     }
 
     /// CR 701.57a + CR 702.85a: `Effect::ExileFromTopUntil` must accept the
