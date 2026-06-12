@@ -21309,7 +21309,7 @@ mod tests {
         );
     }
 
-    /// CR 603.2 + CR 119.3: Kederekt Parasite — "Whenever an opponent draws a
+    /// CR 603.2 + CR 608.2c + CR 115.10a: Kederekt Parasite — "Whenever an opponent draws a
     /// card, ... you may have this creature deal 1 damage to that player." The
     /// optional "you may have ~ deal N damage to that player" causative frame
     /// must bind "that player" to the triggering (drawing) player, not to a

@@ -3060,7 +3060,7 @@ fn try_parse_have_causative(
                     .trim_end_matches('.')
                     .trim_end_matches(',')
                     .trim();
-                // CR 608.2k + CR 120.1: "that player" is an untargeted anaphoric
+                // CR 608.2c + CR 115.10a + CR 120.1: "that player" is an untargeted anaphoric
                 // reference to the player named by the trigger condition (the
                 // drawing opponent in "Whenever an opponent draws a card, ... you
                 // may have ~ deal N damage to that player" — Kederekt Parasite).
