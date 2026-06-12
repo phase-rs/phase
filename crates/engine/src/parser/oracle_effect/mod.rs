@@ -17397,7 +17397,7 @@ fn try_parse_put_zone_change_parts(
             // tapped and put all creature cards revealed this way into your
             // hand", and Mind Roots: "Put up to one land card discarded this
             // way onto the battlefield tapped under your control."
-            let target = if from_among_anaphor.is_some()
+            let is_tracked_anaphor = from_among_anaphor.is_some()
                 || [
                     "revealed this way",
                     "discarded this way",
@@ -17407,14 +17407,27 @@ fn try_parse_put_zone_change_parts(
                     "destroyed this way",
                 ]
                 .iter()
-                .any(|phrase| scan_contains_phrase(before.lower, phrase))
-            {
+                .any(|phrase| scan_contains_phrase(before.lower, phrase));
+            let target = if is_tracked_anaphor {
                 TargetFilter::TrackedSetFiltered {
                     id: crate::types::identifiers::TrackedSetId(0),
                     filter: Box::new(target),
                 }
             } else {
                 target
+            };
+            // CR 608.2c: A tracked-set anaphor ("<filter> revealed/milled/…
+            // this way", "from among them") already names the exact objects;
+            // their origin zone is wherever the producing effect left them (the
+            // library for a reveal — CR 701.20b). Inferring the origin from the
+            // clause text misreads the *destination* phrase ("into your
+            // graveyard") as a graveyard origin (Winding Way), so the move scans
+            // the wrong zone and touches nothing. Leave `origin: None` and let
+            // the resolver derive the scan zone from the tracked set's members.
+            let origin = if is_tracked_anaphor {
+                None
+            } else {
+                infer_origin_zone(after_put_tp.lower)
             };
             // CR 110.2a: "under your control" overrides the entering object's controller.
             let enters_under = scan_contains_phrase(after_put_tp.lower, "under your control")
@@ -17450,7 +17463,7 @@ fn try_parse_put_zone_change_parts(
                 // real card needs corresponding ChangeZoneAll fields.
                 return Some((
                     Effect::ChangeZoneAll {
-                        origin: infer_origin_zone(after_put_tp.lower),
+                        origin,
                         destination,
                         target,
                         enters_under,
@@ -17464,7 +17477,7 @@ fn try_parse_put_zone_change_parts(
             }
             return Some((
                 Effect::ChangeZone {
-                    origin: infer_origin_zone(after_put_tp.lower),
+                    origin,
                     destination,
                     target,
                     owner_library: false,
@@ -18043,6 +18056,45 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
                 scope: crate::types::ability::ObjectScope::Source,
             },
         })
+    } else {
+        None
+    }
+}
+
+/// CR 608.2c: Parse the destination of a trailing "[and] the rest into <zone>"
+/// complement clause on a tracked-set partition ("Put all <filter> revealed this
+/// way into your hand and the rest into your graveyard" — Winding Way). Returns
+/// the rest zone only when a "the rest" subject is present, so a plain
+/// "put all <filter> revealed this way into your hand" (no complement) yields
+/// `None`. Recognizes the graveyard / library-bottom / exile destinations used
+/// by the reveal-and-partition class.
+fn parse_put_rest_destination(lower: &str) -> Option<Zone> {
+    // The complement subject must be present — otherwise there is no rest move.
+    // `take_until` yields the slice STARTING at "the rest"; scope the
+    // destination scan to that tail so the primary clause's "into your hand"
+    // (which precedes "the rest") is never mistaken for the rest's zone.
+    let (after_rest, _) = take_until::<_, _, OracleError<'_>>("the rest")
+        .parse(lower)
+        .ok()?;
+    if scan_contains_phrase(after_rest, "into your graveyard")
+        || scan_contains_phrase(after_rest, "into their graveyard")
+        || scan_contains_phrase(after_rest, "into its owner's graveyard")
+        || scan_contains_phrase(after_rest, "into their owners' graveyards")
+    {
+        Some(Zone::Graveyard)
+    } else if scan_contains_phrase(after_rest, "into exile") {
+        Some(Zone::Exile)
+    } else if scan_contains_phrase(after_rest, "into your hand")
+        || scan_contains_phrase(after_rest, "into their hand")
+    {
+        Some(Zone::Hand)
+    } else if scan_contains_phrase(after_rest, "on the bottom")
+        || scan_contains_phrase(after_rest, "on top")
+        || scan_contains_phrase(after_rest, "into your library")
+        || scan_contains_phrase(after_rest, "into their library")
+    {
+        // CR 401.x: "on the bottom/top of ... library" / "into ... library".
+        Some(Zone::Library)
     } else {
         None
     }
@@ -28217,6 +28269,115 @@ mod tests {
         }
     }
 
+    /// SHAPE — Winding Way (issue #2931): "Choose creature or land. Reveal the
+    /// top four cards of your library. Put all cards of the chosen type revealed
+    /// this way into your hand and the rest into your graveyard."
+    ///
+    /// The reveal-and-partition chain must lower to:
+    /// - `Choose` (creature/land card-type choice) → `RevealTop { count: 4 }`
+    ///   → `ChangeZoneAll { origin: None, TrackedSetFiltered(IsChosenCardType) →
+    ///   Hand }` → `ChangeZoneAll { origin: None, TrackedSet → Graveyard }`.
+    ///
+    /// Three regressions are guarded here (CR 205.2a / CR 608.2c / CR 701.20b):
+    /// 1. The chosen-type filter is `IsChosenCardType` (a card-typed base, not
+    ///    `IsChosenCreatureType`) so it can match the chosen Creature/Land type.
+    /// 2. The chosen-type move's `origin` is `None` — a tracked-set anaphor names
+    ///    the revealed cards regardless of zone; inferring Graveyard from the
+    ///    "into your graveyard" rest phrase made the move scan the wrong zone.
+    /// 3. The "and the rest into your graveyard" complement is materialized as a
+    ///    sibling `ChangeZoneAll { TrackedSetFiltered(Not(chosen)) → Graveyard }`
+    ///    (it had been dropped). Negating the chosen filter keeps the complement
+    ///    zone- and order-independent — it never re-moves the chosen cards.
+    #[test]
+    fn winding_way_reveal_partition_full_parse_tree() {
+        let def = parse_effect_chain(
+            "Choose creature or land. Reveal the top four cards of your library. Put all cards of the chosen type revealed this way into your hand and the rest into your graveyard.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::Choose { .. }),
+            "top-level must be the creature/land Choose, got {:?}",
+            def.effect
+        );
+
+        let reveal = def
+            .sub_ability
+            .as_ref()
+            .expect("Choose must chain to RevealTop");
+        let Effect::RevealTop { count, .. } = &*reveal.effect else {
+            panic!("expected RevealTop, got {:?}", reveal.effect);
+        };
+        assert_eq!(*count, 4, "reveal the top four cards");
+
+        // Chosen-type move: TrackedSetFiltered(IsChosenCardType) → Hand, origin None.
+        let chosen = reveal
+            .sub_ability
+            .as_ref()
+            .expect("RevealTop must chain to the chosen-type move");
+        let Effect::ChangeZoneAll {
+            origin: chosen_origin,
+            destination: chosen_dest,
+            target: chosen_target,
+            ..
+        } = &*chosen.effect
+        else {
+            panic!(
+                "expected ChangeZoneAll for the chosen-type move, got {:?}",
+                chosen.effect
+            );
+        };
+        assert_eq!(
+            *chosen_origin, None,
+            "tracked-set anaphor move must leave origin unset (derived from members)"
+        );
+        assert_eq!(*chosen_dest, crate::types::zones::Zone::Hand);
+        match chosen_target {
+            TargetFilter::TrackedSetFiltered { filter, .. } => match filter.as_ref() {
+                TargetFilter::Typed(tf) => assert!(
+                    tf.properties.contains(&FilterProp::IsChosenCardType),
+                    "chosen-type filter must be IsChosenCardType (card-typed base), got {:?}",
+                    tf.properties
+                ),
+                other => panic!("expected Typed filter inside TrackedSetFiltered, got {other:?}"),
+            },
+            other => panic!("expected TrackedSetFiltered target, got {other:?}"),
+        }
+
+        // Rest complement: TrackedSet → Graveyard, origin None.
+        let rest = chosen
+            .sub_ability
+            .as_ref()
+            .expect("chosen-type move must chain the rest complement");
+        let Effect::ChangeZoneAll {
+            origin: rest_origin,
+            destination: rest_dest,
+            target: rest_target,
+            ..
+        } = &*rest.effect
+        else {
+            panic!(
+                "expected ChangeZoneAll for the rest complement, got {:?}",
+                rest.effect
+            );
+        };
+        assert_eq!(*rest_origin, None);
+        assert_eq!(
+            *rest_dest,
+            crate::types::zones::Zone::Graveyard,
+            "the rest move to the graveyard"
+        );
+        // The complement excludes the chosen subset by predicate (Not(chosen)),
+        // so it never re-moves a card already routed to hand.
+        match rest_target {
+            TargetFilter::TrackedSetFiltered { filter, .. } => assert!(
+                matches!(filter.as_ref(), TargetFilter::Not { .. }),
+                "rest complement must negate the chosen filter, got {filter:?}"
+            ),
+            other => panic!("expected TrackedSetFiltered(Not(..)) for the rest, got {other:?}"),
+        }
+    }
+
     #[test]
     fn put_discarded_card_this_way_uses_tracked_set_filter() {
         let def = parse_effect_chain(
@@ -33260,9 +33421,12 @@ mod tests {
             "Secretly choose land or nonland. Seek a card of the chosen kind.",
             AbilityKind::Spell,
         );
+        // CR 205.2a / CR 614.12c: A Labeled card-type/anchor choice now persists
+        // so later "of the chosen type" / "of the chosen kind" / `ChosenLabelIs`
+        // references can read it back from the source's `chosen_attributes`.
         let Effect::Choose {
             choice_type: ChoiceType::Labeled { options },
-            persist: false,
+            persist: true,
         } = *def.effect
         else {
             panic!("Expected Choose land/nonland, got {:?}", def.effect);
