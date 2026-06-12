@@ -445,8 +445,12 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
-            FilterProp::Attacking => parts.push("attacking".into()),
-            FilterProp::AttackingController => parts.push("attacking you".into()),
+            FilterProp::Attacking { defender } => match defender {
+                None => parts.push("attacking".into()),
+                Some(ControllerRef::You) => parts.push("attacking you".into()),
+                Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
+                Some(_) => parts.push("attacking scoped player".into()),
+            },
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
@@ -5337,6 +5341,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. } => {
+            ("TargetSharesNameWithOtherExiledThisWay", Handled)
+        }
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),

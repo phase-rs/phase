@@ -2708,7 +2708,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 702.171b: "saddled [type]" adjective prefix.
             | FilterProp::IsSaddled
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
-            | FilterProp::Attacking
+            | FilterProp::Attacking { defender: None }
             | FilterProp::Blocking
             | FilterProp::Unblocked
             // CR 105.1 + CR 205.2: color / supertype adjectives.
@@ -3067,7 +3067,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
         if matches!(
             prop,
             FilterProp::Unblocked
-                | FilterProp::Attacking
+                | FilterProp::Attacking { defender: None }
                 | FilterProp::Blocking
                 | FilterProp::Tapped
                 | FilterProp::Untapped
@@ -5867,7 +5867,9 @@ mod tests {
             panic!("expected typed filter");
         };
         assert!(tf.properties.contains(&FilterProp::Another));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
         assert!(tf.properties.iter().any(|p| matches!(
             p,
             FilterProp::SharesQuality {
@@ -5886,7 +5888,7 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking])
+                    .properties(vec![FilterProp::Attacking { defender: None }])
             )
         );
         assert_eq!(rest, "");
@@ -9519,7 +9521,10 @@ mod tests {
         assert_eq!(result, Some((FilterProp::Unblocked, 10)));
         // Second call on remainder should get Attacking
         let result2 = parse_combat_status_prefix("attacking creatures");
-        assert_eq!(result2, Some((FilterProp::Attacking, 10)));
+        assert_eq!(
+            result2,
+            Some((FilterProp::Attacking { defender: None }, 10))
+        );
     }
 
     #[test]
@@ -9528,7 +9533,9 @@ mod tests {
         assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
         if let TargetFilter::Typed(tf) = &filter {
             assert!(tf.properties.contains(&FilterProp::Unblocked));
-            assert!(tf.properties.contains(&FilterProp::Attacking));
+            assert!(tf
+                .properties
+                .contains(&FilterProp::Attacking { defender: None }));
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
@@ -9547,7 +9554,9 @@ mod tests {
         let second = typed_leg(&filters[1]).expect("second branch should be typed");
         assert!(first.type_filters.contains(&TypeFilter::Creature));
         assert!(second.type_filters.contains(&TypeFilter::Creature));
-        assert!(first.properties.contains(&FilterProp::Attacking));
+        assert!(first
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
         assert!(second.properties.contains(&FilterProp::Blocking));
     }
 
@@ -9561,8 +9570,8 @@ mod tests {
         };
         assert_eq!(filters.len(), 4);
         let expected = [
-            (FilterProp::Attacking, Keyword::Flying),
-            (FilterProp::Attacking, Keyword::Vigilance),
+            (FilterProp::Attacking { defender: None }, Keyword::Flying),
+            (FilterProp::Attacking { defender: None }, Keyword::Vigilance),
             (FilterProp::Blocking, Keyword::Flying),
             (FilterProp::Blocking, Keyword::Vigilance),
         ];
@@ -11157,7 +11166,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking)),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
                     "expected Attacking property, got {:?}",
                     tf.properties
                 );

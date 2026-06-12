@@ -1098,8 +1098,10 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
     match p {
         FilterProp::Tapped => Some("Tapped"),
         FilterProp::Untapped => Some("Untapped"),
-        FilterProp::Attacking => Some("Attacking"),
-        FilterProp::AttackingController => Some("AttackingController"),
+        FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+        } => Some("AttackingController"),
+        FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
         FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),

@@ -7019,7 +7019,7 @@ mod tests {
                 TypedFilter::new(TypeFilter::Artifact)
                     .with_type(TypeFilter::Creature)
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking])
+                    .properties(vec![FilterProp::Attacking { defender: None }])
             ))
         );
         assert!(def.damage_target_filter.is_none());

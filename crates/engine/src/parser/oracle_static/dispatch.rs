@@ -516,9 +516,27 @@ pub(crate) fn parse_static_line_inner(
     // and leave "attacking you <predicate>" as input to `parse_continuous_gets_has`,
     // which expects a verb ("gets"/"has"/"is"), not a subject continuation.
     if let Some(rest) = nom_tag_tp(&tp, "all creatures attacking you ") {
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-        );
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                }]),
+            );
+        if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
+            return Some(def);
+        }
+    }
+
+    // CR 508.1b: "Creatures attacking your opponents have double strike." —
+    // attackers whose defending player is an opponent of the source's controller
+    // (Blast-Furnace Hellkite).
+    if let Some(rest) = nom_tag_tp(&tp, "creatures attacking your opponents ") {
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                }]),
+            );
         if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
             return Some(def);
         }

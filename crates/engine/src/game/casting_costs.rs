@@ -5,7 +5,7 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
     CounterCostSelection, Effect, KickerVariant, QuantityExpr, QuantityRef, ReplacementDefinition,
     ResolvedAbility, SacrificeCost, SacrificeRequirement, SpellCastingOptionKind, StaticCondition,
-    TargetFilter, TypedFilter, EXILE_COST_X,
+    TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -3906,10 +3906,25 @@ pub(super) fn effective_offering_quality(
 }
 
 /// CR 702.48a: Build a `TargetFilter` that matches any permanent on the
-/// battlefield whose type line includes `quality` (e.g. "Spirit").
-/// The filter matches any permanent type that has `quality` as a subtype.
+/// battlefield whose type line includes `quality` (e.g. "Spirit", "Artifact").
+/// Creature subtypes use `Subtype`; card types like Artifact use `TypeFilter`.
 fn offering_quality_filter(quality: &str) -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::permanent().subtype(quality.to_string()))
+    let card_type = match quality {
+        "Artifact" => Some(TypeFilter::Artifact),
+        "Creature" => Some(TypeFilter::Creature),
+        "Enchantment" => Some(TypeFilter::Enchantment),
+        "Land" => Some(TypeFilter::Land),
+        "Instant" => Some(TypeFilter::Instant),
+        "Sorcery" => Some(TypeFilter::Sorcery),
+        "Planeswalker" => Some(TypeFilter::Planeswalker),
+        "Battle" => Some(TypeFilter::Battle),
+        _ => None,
+    };
+    if let Some(tf) = card_type {
+        TargetFilter::Typed(TypedFilter::new(tf))
+    } else {
+        TargetFilter::Typed(TypedFilter::permanent().subtype(quality.to_string()))
+    }
 }
 
 pub(super) fn offering_sacrifice_cost(quality: &str) -> AbilityCost {
@@ -13807,6 +13822,98 @@ its replicate cost was paid.)\nDraw a card.";
         assert!(
             choices.contains(&spirit),
             "spirit must be in eligible sacrifice list"
+        );
+    }
+
+    /// CR 702.48a: Artifact offering matches card type Artifact, not subtype.
+    #[test]
+    fn accepting_artifact_offering_prompts_artifact_sacrifice() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let artifact = create_object(
+            &mut state,
+            CardId(220),
+            caster,
+            "Jeweled Bird".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&artifact).unwrap();
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(221),
+            caster,
+            "Blast-Furnace Hellkite".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Artifact".to_string()));
+            obj.mana_cost = ManaCost::NoCost;
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(221),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("Artifact offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice for Artifact Offering, got {waiting:?}");
+        };
+
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            *pending_box.clone(),
+            offering_cost,
+            true,
+            &mut events,
+        )
+        .expect("accepting Artifact offering must succeed");
+
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ref choices,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost(Sacrifice) for Artifact Offering, got {waiting:?}");
+        };
+        assert!(
+            choices.contains(&artifact),
+            "artifact must be in eligible sacrifice list, got {choices:?}"
         );
     }
 

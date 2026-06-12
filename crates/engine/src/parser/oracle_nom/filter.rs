@@ -97,7 +97,7 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::Untapped, tag("untapped")),
         // CR 702.171b: "saddled Mount/creature" selector.
         value(FilterProp::IsSaddled, tag("saddled")),
-        value(FilterProp::Attacking, tag("attacking")),
+        value(FilterProp::Attacking { defender: None }, tag("attacking")),
         value(FilterProp::Blocking, tag("blocking")),
         value(FilterProp::Token, tag("token")),
         value(FilterProp::NonToken, tag("nontoken")),
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn test_parse_property_filter_attacking() {
         let (rest, p) = parse_property_filter("attacking").unwrap();
-        assert_eq!(p, FilterProp::Attacking);
+        assert_eq!(p, FilterProp::Attacking { defender: None });
         assert_eq!(rest, "");
     }
 

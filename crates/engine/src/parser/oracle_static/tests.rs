@@ -5117,8 +5117,27 @@ fn static_attacking_creatures_you_control_have_double_strike() {
         Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Attacking]),
+                .properties(vec![FilterProp::Attacking { defender: None }]),
         ))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike,
+        }));
+}
+
+#[test]
+fn static_creatures_attacking_your_opponents_have_double_strike() {
+    let def = parse_static_line("Creatures attacking your opponents have double strike.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent)
+            }]
+        ),))
     );
     assert!(def
         .modifications
@@ -7269,7 +7288,9 @@ fn static_unblocked_attacking_ninjas_you_control_have_lifelink() {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Unblocked));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
     } else {
         panic!(
             "Expected Typed filter with Ninja subtype, got {:?}",
@@ -7290,7 +7311,9 @@ fn static_attacking_ninjas_you_control_have_deathtouch() {
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
         assert!(!tf.properties.contains(&FilterProp::Unblocked));
     } else {
         panic!(

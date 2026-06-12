@@ -15182,7 +15182,7 @@ pub mod tests {
                     target: TargetFilter::Typed(
                         TypedFilter::new(TypeFilter::Subtype("Goblin".to_string()))
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::Attacking]),
+                            .properties(vec![FilterProp::Attacking { defender: None }]),
                     ),
                 },
             ))

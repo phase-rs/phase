@@ -15402,7 +15402,9 @@ mod tests {
                     panic!("filter should be typed, got {filter:?}");
                 };
                 assert!(tf.properties.contains(&FilterProp::Another));
-                assert!(tf.properties.contains(&FilterProp::Attacking));
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::Attacking { defender: None }));
                 let shares = tf.properties.iter().find(|p| {
                     matches!(
                         p,

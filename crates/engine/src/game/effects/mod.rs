@@ -526,8 +526,51 @@ fn drain_pending_repeat_until(state: &mut GameState) {
                 ability,
             };
         }
+        Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand,
+            stop_on_duplicate_exiled_names,
+        }) => {
+            if should_stop_repeat_until(
+                state,
+                &ability,
+                *stop_on_put_to_hand,
+                *stop_on_duplicate_exiled_names,
+            ) {
+                return;
+            }
+            let mut events = Vec::new();
+            let _ = resolve_ability_chain(state, &ability, &mut events, 1);
+        }
         None => {}
     }
+}
+
+/// CR 608.2c + CR 107.1c: Stop predicates for `RepeatContinuation::UntilStopConditions`.
+fn should_stop_repeat_until(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    stop_on_put_to_hand: bool,
+    stop_on_duplicate_exiled_names: bool,
+) -> bool {
+    if stop_on_put_to_hand {
+        let controller = ability.controller;
+        let put_to_hand = state
+            .cards_exiled_with_source_this_turn
+            .get(&ability.source_id)
+            .into_iter()
+            .flatten()
+            .any(|&id| {
+                state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|obj| obj.zone == Zone::Hand && obj.controller == controller)
+            });
+        if put_to_hand {
+            return true;
+        }
+    }
+    stop_on_duplicate_exiled_names
+        && crate::game::exile_links::duplicate_name_among_exiled_by_source(state, ability.source_id)
 }
 
 /// CR 303.4f + CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target
@@ -1407,6 +1450,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::ManaColorSpent { .. }
             | AbilityCondition::RevealedHasCardType { .. }
             | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
             | AbilityCondition::SourceEnteredThisTurn
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
@@ -3733,6 +3777,27 @@ pub fn resolve_ability_chain(
             }
             Ok(())
         }
+        Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand,
+            stop_on_duplicate_exiled_names,
+        }) => loop {
+            let initial_waiting_for = state.waiting_for.clone();
+            resolve_chain_body(state, ability, events, depth)?;
+            if state.waiting_for != initial_waiting_for {
+                state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
+                    ability: Box::new(ability.clone()),
+                });
+                return Ok(());
+            }
+            if should_stop_repeat_until(
+                state,
+                ability,
+                stop_on_put_to_hand,
+                stop_on_duplicate_exiled_names,
+            ) {
+                return Ok(());
+            }
+        },
     }
 }
 
@@ -5513,6 +5578,21 @@ pub(crate) fn evaluate_condition(
                 }
                 _ => false,
             }
+        }
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target } => {
+            crate::game::targeting::resolved_targets(ability, target, state)
+                .into_iter()
+                .find_map(|target_ref| match target_ref {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                })
+                .is_some_and(|id| {
+                    crate::game::exile_links::shares_name_with_other_exiled_by_source(
+                        state,
+                        ability.source_id,
+                        id,
+                    )
+                })
         }
         // CR 400.7: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.

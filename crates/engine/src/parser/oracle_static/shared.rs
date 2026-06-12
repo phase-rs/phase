@@ -1732,7 +1732,10 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
 
     let controlled_patterns = [
         ("tapped creatures you control", FilterProp::Tapped),
-        ("attacking creatures you control", FilterProp::Attacking),
+        (
+            "attacking creatures you control",
+            FilterProp::Attacking { defender: None },
+        ),
         // CR 700.9: "modified creatures you control" — permanents with
         // counters, equipped, or enchanted by own-controlled Aura.
         ("modified creatures you control", FilterProp::Modified),
@@ -1751,7 +1754,7 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
 
     if tp.lower == "attacking creatures" {
         return Some(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
         ));
     }
 

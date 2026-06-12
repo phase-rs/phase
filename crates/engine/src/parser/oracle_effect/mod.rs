@@ -14495,6 +14495,65 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RepeatStopPredicate {
+    PutToHand,
+    DuplicateExiledNames,
+}
+
+fn parse_repeat_stop_predicate(input: &str) -> OracleResult<'_, RepeatStopPredicate> {
+    alt((
+        value(
+            RepeatStopPredicate::PutToHand,
+            alt((
+                tag("you put a card into your hand"),
+                tag("you put that card into your hand"),
+            )),
+        ),
+        value(
+            RepeatStopPredicate::DuplicateExiledNames,
+            tag("you exile two cards with the same name"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes first."
+fn try_parse_repeat_until_stop_conditions(
+    lower: &str,
+) -> Option<crate::types::ability::RepeatContinuation> {
+    let trimmed = lower.trim().trim_end_matches('.');
+    let (rest, first) = preceded(
+        tag("repeat this process until "),
+        parse_repeat_stop_predicate,
+    )
+    .parse(trimmed)
+    .ok()?;
+    let (rest, second) = opt(preceded(tag(" or "), parse_repeat_stop_predicate))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(", whichever comes first"))
+        .parse(rest)
+        .ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+
+    let mut stop_on_put_to_hand = false;
+    let mut stop_on_duplicate_exiled_names = false;
+    for predicate in [Some(first), second].into_iter().flatten() {
+        match predicate {
+            RepeatStopPredicate::PutToHand => stop_on_put_to_hand = true,
+            RepeatStopPredicate::DuplicateExiledNames => stop_on_duplicate_exiled_names = true,
+        }
+    }
+
+    Some(
+        crate::types::ability::RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand,
+            stop_on_duplicate_exiled_names,
+        },
+    )
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -14567,7 +14626,7 @@ pub(crate) fn parse_effect_chain_with_context(
 /// by the casting-line parser; an optional leading copy of that sentence is
 /// stripped here defensively in case it reaches this entry inline.
 ///
-/// `FilterProp::AttackingController` matches every attacker whose defending
+/// `FilterProp::Attacking { defender: Some(ControllerRef::You) }` matches every attacker whose defending
 /// player is the controller — which the engine records as the controller of an
 /// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
 /// you control" collapse onto the one predicate.
@@ -14629,9 +14688,12 @@ fn try_parse_for_each_attacker_copy_blocker(
         true
     };
 
-    let source_filter = TargetFilter::Typed(
-        TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-    );
+    let source_filter =
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            }]),
+        );
     let mut def = AbilityDefinition::new(
         kind,
         Effect::CopyTokenBlockingAttacker {
@@ -15358,6 +15420,13 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes
+        // first" — auto-repeat loop with game-state stop predicates (Tainted Pact).
+        if let Some(continuation) = try_parse_repeat_until_stop_conditions(&lower_check) {
+            pending_repeat_until = Some(continuation);
+            continue;
+        }
+
         // CR 608.2c + CR 107.1c: "Repeat this process" — a loop-continuation
         // directive that doesn't produce an independent effect. It is a
         // back-reference applying to the process (chain) built so far.
@@ -15962,6 +16031,26 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
+        let (unless_same_name_condition, text) = if is_optional {
+            if let Some((stripped, unless_cond)) =
+                crate::parser::oracle_effect::conditions::strip_unless_shares_name_with_other_exiled_this_way(
+                    &text,
+                )
+            {
+                (Some(unless_cond), stripped)
+            } else {
+                (None, text)
+            }
+        } else {
+            (None, text)
+        };
+        let condition = match (condition, unless_same_name_condition) {
+            (Some(existing), Some(unless_cond)) => Some(AbilityCondition::And {
+                conditions: vec![existing, unless_cond],
+            }),
+            (None, Some(unless_cond)) => Some(unless_cond),
+            (existing, None) => existing,
+        };
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"
         // clause intact so the targeted-proliferate recognizer in
@@ -23891,10 +23980,12 @@ mod tests {
                 owner,
             } => {
                 assert_eq!(*owner, TargetFilter::Controller);
-                assert!(tf
-                    .properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::AttackingController)));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                )));
             }
             other => panic!("expected CopyTokenBlockingAttacker, got {other:?}"),
         }
@@ -36364,7 +36455,7 @@ mod tests {
         for (input, expected_prop, expected_negated) in [
             (
                 "draw a card if it was attacking",
-                FilterProp::Attacking,
+                FilterProp::Attacking { defender: None },
                 false,
             ),
             (
@@ -36374,7 +36465,7 @@ mod tests {
             ),
             (
                 "draw a card if it wasn't attacking",
-                FilterProp::Attacking,
+                FilterProp::Attacking { defender: None },
                 true,
             ),
             (
@@ -38291,10 +38382,11 @@ mod tests {
                     factor: 3,
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
-                            filter: TargetFilter::Typed(
-                                TypedFilter::creature()
-                                    .properties(vec![FilterProp::AttackingController]),
-                            ),
+                            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                                FilterProp::Attacking {
+                                    defender: Some(ControllerRef::You)
+                                }
+                            ]),),
                         },
                     }),
                 },
@@ -38607,7 +38699,7 @@ mod tests {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::TargetPlayer),
-                            properties: vec![FilterProp::Attacking],
+                            properties: vec![FilterProp::Attacking { defender: None }],
                         }),
                     },
                 },
@@ -39999,7 +40091,7 @@ mod tests {
                         properties,
                         ..
                     }) if type_filters.contains(&TypeFilter::Creature)
-                        && properties.contains(&FilterProp::Attacking)
+                        && properties.contains(&FilterProp::Attacking { defender: None })
                         && properties.contains(&FilterProp::Another)
                 ));
                 assert!(matches!(
@@ -40013,7 +40105,7 @@ mod tests {
                             })
                         }
                     }) if type_filters == &vec![TypeFilter::Creature]
-                        && properties == &vec![FilterProp::Attacking, FilterProp::Another]
+                        && properties == &vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
                 ));
                 assert_eq!(power, toughness);
             }
@@ -43294,7 +43386,7 @@ mod tests {
                         ..
                     })
                 }
-            } if properties.as_slice() == [FilterProp::Attacking]
+            } if properties.as_slice() == [FilterProp::Attacking { defender: None }]
         ));
     }
 

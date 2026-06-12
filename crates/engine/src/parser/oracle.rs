@@ -7763,7 +7763,7 @@ mod tests {
         };
         assert_eq!(filters.len(), 2);
         for (filter, property) in [
-            (&filters[0], FilterProp::Attacking),
+            (&filters[0], FilterProp::Attacking { defender: None }),
             (&filters[1], FilterProp::Blocking),
         ] {
             let TargetFilter::Typed(typed) = filter else {
@@ -11121,6 +11121,43 @@ mod tests {
             def.repeat_until, None,
             "the 'if you do' form is deferred — no predicate set, got {:?}",
             def.repeat_until,
+        );
+    }
+
+    #[test]
+    fn tainted_pact_parses_until_stop_repeat_and_unless_same_name_gate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityCondition, RepeatContinuation, TargetFilter};
+        let def = parse_effect_chain(
+            "Exile the top card of your library. You may put that card into your hand \
+             unless it has the same name as another card exiled this way. Repeat this process \
+             until you put a card into your hand or you exile two cards with the same name, \
+             whichever comes first.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::UntilStopConditions {
+                stop_on_put_to_hand: true,
+                stop_on_duplicate_exiled_names: true,
+            }),
+            "expected UntilStopConditions repeat_until, got {:?}",
+            def.repeat_until,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected optional put-to-hand sub_ability");
+        assert!(sub.optional, "put-to-hand rider must be optional");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetSharesNameWithOtherExiledThisWay {
+                    target: TargetFilter::ParentTarget,
+                }),
+            }),
+            "unless same-name gate must bind to ParentTarget, got {:?}",
+            sub.condition,
         );
     }
 

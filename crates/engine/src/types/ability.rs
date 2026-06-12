@@ -2135,7 +2135,12 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
-    Attacking,
+    /// CR 508.1b: Matches attacking creatures, optionally scoped by which player
+    /// the creature is attacking.
+    Attacking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        defender: Option<ControllerRef>,
+    },
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,
     /// CR 509.1g: Matches creatures currently blocking the filter source.
@@ -2531,10 +2536,6 @@ pub enum FilterProp {
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
-    /// CR 508.1b: Matches attacking creatures whose defending player equals the
-    /// filter's source controller ("creatures attacking you"). Distinct from
-    /// `Attacking`, which matches any attacker regardless of defender.
-    AttackingController,
     /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
     /// commander. Reads `GameObject::is_commander`, set during deck construction
     /// per CR 903.3 (the legendary card designated as that deck's commander).
@@ -11163,6 +11164,15 @@ pub enum RepeatContinuation {
     /// each iteration fully resolves, the controller is prompted
     /// (`WaitingFor::RepeatDecision`) to repeat or stop.
     ControllerChoice,
+    /// CR 608.2c + CR 107.1c: "repeat this process until [stop conditions],
+    /// whichever comes first" — after each iteration fully resolves, the engine
+    /// checks the configured stop predicates and auto-repeats when none fired.
+    /// Tainted Pact: stop when the controller puts a card into their hand or
+    /// when two cards exiled this way share a name.
+    UntilStopConditions {
+        stop_on_put_to_hand: bool,
+        stop_on_duplicate_exiled_names: bool,
+    },
 }
 
 /// CR 608.2c + CR 122.1: tags a `ChooseOneOf` branch whose effect must be
@@ -11509,6 +11519,10 @@ pub enum AbilityCondition {
         reference: TargetFilter,
         quality: SharedQuality,
     },
+    /// CR 607.2a + CR 608.2c: "unless it has the same name as another card
+    /// exiled this way" — true when the resolved `target` shares a name with
+    /// any other card linked to this ability's source via `exile_links`.
+    TargetSharesNameWithOtherExiledThisWay { target: TargetFilter },
     /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
     /// "unless ~ entered this turn"), wrap with `AbilityCondition::Not`.
@@ -15610,8 +15624,13 @@ mod tests {
     fn filter_prop_roundtrip() {
         let props = vec![
             FilterProp::Token,
-            FilterProp::Attacking,
-            FilterProp::AttackingController,
+            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent),
+            },
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {

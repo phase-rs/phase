@@ -288,10 +288,10 @@ pub(crate) fn is_combat_pump_parts(
         return true;
     }
     // Shape 2: continuous static that boosts attacking creatures.
-    // `FilterProp::Attacking` restricts the anthem to combatants. CR 613.4c.
+    // `FilterProp::Attacking { .. }` restricts the anthem to combatants. CR 613.4c.
     static_abilities.iter().any(|s| {
         s.mode == StaticMode::Continuous
-            && affected_filter_has_prop(&s.affected, &FilterProp::Attacking)
+            && affected_filter_has_attacking(&s.affected)
             && s.modifications.iter().any(|m| {
                 matches!(
                     m,
@@ -356,18 +356,23 @@ fn can_target_player(target: &TargetFilter) -> bool {
     matches!(target, TargetFilter::Any | TargetFilter::Player)
 }
 
-/// True if the `affected` `TargetFilter` contains `FilterProp::Attacking`
+/// True if the `affected` `TargetFilter` contains any `FilterProp::Attacking`
 /// anywhere in its filter tree. Handles `Typed`, `And`, and `Or` wrappers.
-fn affected_filter_has_prop(affected: &Option<TargetFilter>, prop: &FilterProp) -> bool {
-    let Some(filter) = affected else { return false };
-    filter_has_prop(filter, prop)
+fn affected_filter_has_attacking(affected: &Option<TargetFilter>) -> bool {
+    let Some(filter) = affected else {
+        return false;
+    };
+    filter_has_attacking(filter)
 }
 
-fn filter_has_prop(filter: &TargetFilter, prop: &FilterProp) -> bool {
+fn filter_has_attacking(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.properties.contains(prop),
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Attacking { .. })),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|f| filter_has_prop(f, prop))
+            filters.iter().any(filter_has_attacking)
         }
         _ => false,
     }
@@ -571,7 +576,7 @@ mod tests {
         let attacking_filter = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::Attacking],
+            properties: vec![FilterProp::Attacking { defender: None }],
         });
         let static_anthem = StaticDefinition {
             mode: StaticMode::Continuous,

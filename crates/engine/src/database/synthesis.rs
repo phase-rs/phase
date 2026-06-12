@@ -4870,7 +4870,8 @@ fn enlist_tap_target_filter() -> TargetFilter {
             ),
             TargetFilter::Not {
                 filter: Box::new(TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::Attacking { defender: None }]),
                 )),
             },
         ],
@@ -5142,7 +5143,10 @@ fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
 /// `RemoveKeyword` matcher so both describe one canonical filter.
 fn battlecry_target_filter() -> TypedFilter {
     let mut tf = TypedFilter::creature();
-    tf.properties = vec![FilterProp::Attacking, FilterProp::Another];
+    tf.properties = vec![
+        FilterProp::Attacking { defender: None },
+        FilterProp::Another,
+    ];
     tf
 }
 
@@ -5337,7 +5341,7 @@ fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(tf),
-                } if tf.properties.contains(&FilterProp::Attacking)
+                } if tf.properties.contains(&FilterProp::Attacking { defender: None })
                     && tf.properties.iter().any(|prop| matches!(
                         prop,
                         FilterProp::PtComparison {
@@ -5359,7 +5363,7 @@ fn build_mentor_trigger() -> TriggerDefinition {
     let mut target_filter = TypedFilter::creature();
     target_filter.properties = vec![
         // CR 702.134a: only attacking creatures are legal Mentor targets.
-        FilterProp::Attacking,
+        FilterProp::Attacking { defender: None },
         // CR 702.134a + CR 208.1: Mentor targets a creature with power
         // strictly less than the source creature's current power.
         FilterProp::PtComparison {
@@ -13004,7 +13008,7 @@ mod provoke_synthesis_tests {
                     if matches!(
                         filter.as_ref(),
                         TargetFilter::Typed(tf)
-                            if tf.properties.contains(&FilterProp::Attacking)
+                            if tf.properties.contains(&FilterProp::Attacking { defender: None })
                     )
             )
         });
@@ -13315,7 +13319,8 @@ mod mentor_synthesis_tests {
             panic!("counter target must be a TypedFilter");
         };
         assert!(
-            tf.properties.contains(&FilterProp::Attacking),
+            tf.properties
+                .contains(&FilterProp::Attacking { defender: None }),
             "target must be an attacking creature (CR 702.134a)"
         );
         // CR 702.134a + CR 208.1: power strictly less than this creature's power.
@@ -13736,7 +13741,10 @@ mod battlecry_synthesis_tests {
         // `Another`.
         assert_eq!(
             tf.properties,
-            vec![FilterProp::Attacking, FilterProp::Another]
+            vec![
+                FilterProp::Attacking { defender: None },
+                FilterProp::Another
+            ]
         );
     }
 
