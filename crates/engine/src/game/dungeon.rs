@@ -350,6 +350,8 @@ pub fn room_effects(
                         source_id: None,
                         exiled_by_ability_controller: None,
                         mana_spend_permission: None,
+                        card_filter: None,
+                        single_use: false,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),

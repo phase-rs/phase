@@ -17371,6 +17371,96 @@ mod pipeline_snapshot_tests {
         insta::assert_json_snapshot!(result);
     }
 
+    /// CR 601.2a + CR 611.2a (issue #2851): Chandra, Hope's Beacon +1 —
+    /// "Exile the top five cards of your library. Until the end of your next
+    /// turn, you may cast an instant or sorcery spell from among those exiled
+    /// cards." The cast-from-exile grant must carry BOTH the instant/sorcery
+    /// type filter AND the single-spell-total cap, not the unrestricted
+    /// impulse-draw shape (which dropped the filter, the cap, and the duration).
+    #[test]
+    fn pipeline_chandra_plus_one_exile_cast_typed_single_use() {
+        use crate::types::ability::{
+            CastingPermission, Duration, Effect, PlayerScope, TargetFilter, TypeFilter, TypedFilter,
+        };
+        let result = pipeline_parse(
+            "Exile the top five cards of your library. Until the end of your next turn, you may cast an instant or sorcery spell from among those exiled cards.",
+            "Chandra, Hope's Beacon",
+            &["Sorcery"],
+            &[],
+        );
+        let exile_top = result
+            .abilities
+            .first()
+            .expect("ExileTop root ability present");
+        assert!(
+            matches!(*exile_top.effect, Effect::ExileTop { .. }),
+            "root effect must be ExileTop, got {:?}",
+            exile_top.effect
+        );
+        let grant = exile_top
+            .sub_ability
+            .as_deref()
+            .expect("cast-from-exile grant must chain off ExileTop, not be swallowed");
+        match &*grant.effect {
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        duration:
+                            Duration::UntilEndOfNextTurnOf {
+                                player: PlayerScope::Controller,
+                            },
+                        card_filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
+                        single_use: true,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(
+                    type_filters.as_slice(),
+                    [TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery])],
+                    "card filter must restrict to instant or sorcery"
+                );
+            }
+            other => panic!(
+                "expected single-use, instant/sorcery-filtered PlayFromExile with UntilEndOfNextTurnOf, got {other:?}"
+            ),
+        }
+    }
+
+    /// CR 601.2a: The plural unbounded form ("you may cast spells from among
+    /// those exiled cards") must keep its unrestricted shape — no card filter,
+    /// not single-use — so existing impulse-cast cards (Nassari, Stolen
+    /// Strategy) are unaffected by the typed-grant extension.
+    #[test]
+    fn pipeline_plural_exile_cast_stays_unrestricted() {
+        use crate::types::ability::{CastingPermission, Effect};
+        let result = pipeline_parse(
+            "Exile the top five cards of your library. Until the end of your next turn, you may cast spells from among those exiled cards.",
+            "Plural Impulse",
+            &["Sorcery"],
+            &[],
+        );
+        let grant = result.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("grant chains off ExileTop");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        card_filter: None,
+                        single_use: false,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "plural form must stay unrestricted (no filter, not single-use), got {:?}",
+            grant.effect
+        );
+    }
+
     #[test]
     fn pipeline_creature_with_keywords_and_trigger() {
         let result = pipeline_parse(

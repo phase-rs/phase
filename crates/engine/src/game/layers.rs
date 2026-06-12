@@ -208,6 +208,29 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             | CastingPermission::Foretold { .. } => true,
         });
     }
+    // CR 601.2a + CR 611.2a: Garbage-collect single-use consumed markers whose
+    // grant has expired. After the prune above, drop any consumed-source entry
+    // that no longer has a live single-use `PlayFromExile` grant in exile, so a
+    // later re-grant from a same-id source is not pre-consumed and the set does
+    // not grow without bound.
+    let live_single_use_sources: std::collections::HashSet<crate::types::identifiers::ObjectId> =
+        state
+            .objects
+            .iter()
+            .flat_map(|(obj_id, obj)| {
+                obj.casting_permissions.iter().filter_map(move |p| match p {
+                    CastingPermission::PlayFromExile {
+                        source_id,
+                        single_use: true,
+                        ..
+                    } => Some(source_id.unwrap_or(*obj_id)),
+                    _ => None,
+                })
+            })
+            .collect();
+    state
+        .exile_play_single_use_consumed
+        .retain(|source| live_single_use_sources.contains(source));
 }
 
 /// CR 514.2: Remove durational casting permissions granted to
@@ -9150,6 +9173,8 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use: false,
             });
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -9174,6 +9199,8 @@ mod tests {
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use: false,
         });
         perms.push(CastingPermission::PlayFromExile {
             duration: Duration::Permanent,
@@ -9182,6 +9209,8 @@ mod tests {
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use: false,
         });
         perms.push(CastingPermission::AdventureCreature);
 
@@ -9218,6 +9247,8 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use: false,
             });
 
         // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
@@ -9303,6 +9334,8 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use: false,
             });
         state
             .objects
@@ -9318,6 +9351,8 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use: false,
             });
 
         // Active player is P0 — only P0's permission should expire.
@@ -9350,6 +9385,8 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use: false,
             });
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
