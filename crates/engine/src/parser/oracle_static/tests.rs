@@ -2117,7 +2117,10 @@ fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
         StaticMode::ModifyCost {
             mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
-            dynamic_count: Some(QuantityRef::AttackedThisTurn { filter: None }),
+            dynamic_count: Some(QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }),
             ..
         }
     ));
@@ -15594,4 +15597,52 @@ fn static_keyword_list_before_quoted_trigger_keeps_last_keyword() {
             .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
         "GrantTrigger missing: {mods:?}"
     );
+}
+
+#[test]
+fn static_graveyard_cards_have_retrace_during_your_turn() {
+    // Six: "During your turn, nonland permanent cards in your graveyard have retrace."
+    // CR 702.81a: Retrace is a casting keyword granted to cards in a specific zone.
+    // Emits a Continuous static with AddKeyword so the off-zone keyword-grant
+    // path sees the grant and the card becomes castable from the graveyard.
+    let text = "During your turn, nonland permanent cards in your graveyard have retrace.";
+    assert!(
+        parse_spells_have_keyword_for_test(text).is_some(),
+        "parse_spells_have_keyword should handle graveyard-zone keyword grants (Six)"
+    );
+    let def = parse_static_line(text).unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Retrace,
+            }),
+        "Expected AddKeyword(Retrace), got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }),
+                "Expected InZone(Graveyard), got {:?}",
+                tf.properties
+            );
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "Expected Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                "Expected Non(Land) type filter, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
 }

@@ -312,7 +312,25 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         }
         return Some(def);
     }
-
+    // Pattern 3: "[type] cards in/from [your zone] have [keyword]"
+    // CR 702.81a (Retrace): Grants a casting keyword to cards in a specific zone.
+    // Six grants retrace to nonland permanent cards in your graveyard.
+    // Emits a Continuous static with AddKeyword so the off-zone keyword-grant
+    // path (`effective_off_zone_keywords`) sees the grant and the card becomes
+    // castable from the graveyard.
+    {
+        let (base_filter, rest) = parse_type_phrase(subject);
+        if rest.trim().is_empty() && target_filter_is_your_graveyard(&base_filter) {
+            let mut def = StaticDefinition::continuous()
+                .affected(base_filter)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(text.to_string());
+            if let Some(condition) = condition.clone() {
+                def = def.condition(condition);
+            }
+            return Some(def);
+        }
+    }
     None
 }
 

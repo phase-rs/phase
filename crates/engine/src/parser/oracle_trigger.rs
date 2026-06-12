@@ -12188,6 +12188,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn trigger_intervening_if_no_creatures_attacked_this_turn_attaches_condition() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's end step, if no creatures attacked this turn, put a fury counter on this creature.",
+            "Charging Cinderhorn",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::All,
+                        filter: Some(TargetFilter::Typed(ref tf)),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) if tf.type_filters.contains(&TypeFilter::Creature)
+        ));
+    }
+
     // CR 603.6a + CR 110.5b: "Whenever a permanent you control enters tapped, ..." —
     // Amulet of Vigor class. The `enters tapped` rider must set
     // `ZoneChangeObjectIsTapped` (fires only when the *entering* permanent is
@@ -19207,7 +19228,11 @@ mod tests {
                 TriggerCondition::QuantityComparison {
                     lhs:
                         QuantityExpr::Ref {
-                            qty: QuantityRef::AttackedThisTurn { filter: None },
+                            qty:
+                                QuantityRef::AttackedThisTurn {
+                                    scope: CountScope::Controller,
+                                    filter: None,
+                                },
                         },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
