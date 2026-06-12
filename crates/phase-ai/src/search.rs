@@ -1,3 +1,6 @@
+use std::cmp::Ordering;
+use std::sync::Arc;
+
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
@@ -11,6 +14,8 @@ use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
 use crate::config::{AiConfig, ThreatAwareness};
 use crate::context::AiContext;
+use crate::features::DeckFeatures;
+use crate::plan::PlanSnapshot;
 use crate::planner::{
     apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
 };
@@ -18,6 +23,7 @@ use crate::policies::context::PolicyContext;
 use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
+use crate::session::AiSession;
 use crate::tactical_gate::gate_candidates;
 use crate::threat_profile::{
     build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
@@ -95,6 +101,18 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    let session = AiSession::arc_from_game(state);
+    choose_action_with_session(state, ai_player, config, rng, &session)
+}
+
+/// Choose the best action using a caller-owned per-game session cache.
+pub fn choose_action_with_session(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+) -> Option<GameAction> {
     // CR 103.5: For simultaneous mulligan states, the AI controller's only
     // job is to act on behalf of `ai_player`. If `ai_player` is not in the
     // pending set, there is nothing to choose — return None so the WASM
@@ -138,16 +156,20 @@ pub fn choose_action(
     // the dedicated scorer). The deterministic path returns the chosen
     // SelectCards directly; only fall through if it produces nothing.
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
-        if let Some(action) = deterministic_choice(state, ai_player, config, &[], None) {
+        let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
+        if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
             return Some(action);
         }
     }
 
-    let scored = score_candidates(state, ai_player, config);
+    let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
         return fallback_action(state);
+    }
+    if config.execution_mode.is_measurement() {
+        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
     }
     let chosen = if scored.len() == 1 {
         Some(scored[0].0.clone())
@@ -155,7 +177,7 @@ pub fn choose_action(
         softmax_select_pairs(&scored, config.temperature, rng)
     };
     if let Some(action) = &chosen {
-        emit_decision_trace(state, ai_player, config, action);
+        emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen
 }
@@ -174,6 +196,7 @@ fn emit_decision_trace(
     ai_player: PlayerId,
     config: &AiConfig,
     action: &GameAction,
+    session: &Arc<AiSession>,
 ) {
     if !tracing::event_enabled!(target: "phase_ai::decision_trace", tracing::Level::DEBUG) {
         return;
@@ -191,7 +214,7 @@ fn emit_decision_trace(
         return;
     };
 
-    let context = build_ai_context(state, ai_player, config);
+    let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
     emit_trace_for_candidate(state, &ctx, candidate, ai_player, config, &context);
 }
 
@@ -1030,9 +1053,19 @@ pub fn score_candidates(
     ai_player: PlayerId,
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
+    let session = AiSession::arc_from_game(state);
+    score_candidates_with_session(state, ai_player, config, &session)
+}
+
+fn score_candidates_with_session(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+) -> Vec<(GameAction, f64)> {
     let ctx = build_decision_context(state);
     let policies = PolicyRegistry::shared();
-    let context = build_ai_context(state, ai_player, config);
+    let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
 
     // Combat decisions bypass the candidate pipeline entirely — the combat AI
     // reads directly from game state and never uses generated candidates.
@@ -1079,7 +1112,7 @@ pub fn score_candidates(
     //
     // `cancelled_casts` and `pending_activations` clear on PassPriority;
     // `activated_abilities_this_turn` clears on turn change.
-    let gated: Vec<_> = gated
+    let mut gated: Vec<_> = gated
         .into_iter()
         .filter(|g| match &g.candidate.action {
             GameAction::CastSpell { object_id, .. } => {
@@ -1131,6 +1164,9 @@ pub fn score_candidates(
             _ => true,
         })
         .collect();
+    if config.execution_mode.is_measurement() {
+        gated.sort_by_cached_key(|g| action_order_key(&g.candidate.action));
+    }
 
     let actions: Vec<GameAction> = gated
         .iter()
@@ -1152,10 +1188,13 @@ pub fn score_candidates(
 
     // Score actions via search or heuristics
     if config.search.enabled {
-        // Deterministic mode ignores the wall-clock time budget so search is
+        // Measurement mode ignores the wall-clock time budget so search is
         // bounded solely by max_nodes — integration tests and ai-duel regression
         // runs rely on this to eliminate wall-clock flake.
-        let mut budget = match (config.search.deterministic, config.search.time_budget_ms) {
+        let mut budget = match (
+            config.execution_mode.is_measurement(),
+            config.search.time_budget_ms,
+        ) {
             (false, Some(ms)) => SearchBudget::with_time_limit(
                 config.search.max_nodes,
                 web_time::Duration::from_millis(ms as u64),
@@ -1212,7 +1251,11 @@ pub fn score_candidates(
         ranked.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    action_order_key(&a.candidate.action)
+                        .cmp(&action_order_key(&b.candidate.action))
+                })
         });
         ranked.truncate(branching);
 
@@ -1243,63 +1286,65 @@ pub fn score_candidates(
             out.push((r.candidate.action, score));
         }
         let _ = deadline_hit;
+        if config.execution_mode.is_measurement() {
+            out.sort_by_cached_key(|(action, _)| action_order_key(action));
+        }
         out
     } else {
         // Heuristic-only scoring
-        gated
+        let mut out: Vec<_> = gated
             .into_iter()
             .map(|candidate| {
                 let score = services.tactical_score(state, &ctx, &candidate.candidate, ai_player)
                     + candidate.penalty;
                 (candidate.candidate.action, score)
             })
-            .collect()
+            .collect();
+        if config.execution_mode.is_measurement() {
+            out.sort_by_cached_key(|(action, _)| action_order_key(action));
+        }
+        out
     }
 }
 
-/// Build AI context from the player's deck pool, or a neutral default if unavailable.
-fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> AiContext {
-    let ai_pool = state.deck_pools.iter().find(|p| p.player == player);
-    let deck = ai_pool.map(|p| p.current_main.as_slice()).unwrap_or(&[]);
-    if deck.is_empty() {
-        let mut ctx = AiContext::empty(&config.weights);
-        ctx.player = player;
-        return ctx;
-    }
-    // `analyze_for_player` keys the session's synergy/features/plan maps under
-    // the actual AI player up-front, so no `Arc::make_mut` + HashMap rekey is
-    // needed when the AI isn't in seat 0.
-    let mut ctx =
-        AiContext::analyze_for_player(deck, &config.weights, &config.archetype_multipliers, player);
-    // Populate opponent features so archetype lookups hit the cache instead
-    // of re-running `DeckProfile::analyze` per search call.
-    let session = std::sync::Arc::make_mut(&mut ctx.session);
-    // `analyze_for_player` defaults the AI player's bracket tier to `Core`
-    // (it has no `state` access). Read the declared tier from the AI's
-    // `PlayerDeckPool` and refresh the session features with it so
-    // `DeckFeatures::is_cedh` (and any future tier-gated feature) reflects
-    // the real bracket — without this, `ComboLinePolicy::activation()` would
-    // never fire for cEDH decks.
-    if let Some(pool) = ai_pool {
-        if pool.bracket_tier != engine::game::bracket_estimate::CommanderBracketTier::Core {
-            session.invalidate_player_features(player);
-            session.ensure_player_features(player, deck, pool.bracket_tier);
-        }
-    }
-    for pool in &state.deck_pools {
-        if pool.player != player {
-            session.ensure_player_features(pool.player, &pool.current_main, pool.bracket_tier);
-        }
-    }
+fn action_order_key(action: &GameAction) -> String {
+    format!("{action:?}")
+}
 
+/// Build AI context from the player's deck pool, or a neutral default if unavailable.
+fn build_ai_context_with_session(
+    state: &GameState,
+    player: PlayerId,
+    config: &AiConfig,
+    session: Arc<AiSession>,
+) -> AiContext {
+    let deck_profile = session
+        .deck_profile
+        .get(&player)
+        .cloned()
+        .unwrap_or_default();
+    let adjusted_weights = crate::eval::EvalWeightSet {
+        early: deck_profile
+            .adjust_weights_with(&config.archetype_multipliers, &config.weights.early),
+        mid: deck_profile.adjust_weights_with(&config.archetype_multipliers, &config.weights.mid),
+        late: deck_profile.adjust_weights_with(&config.archetype_multipliers, &config.weights.late),
+    };
+    let strategy = session.strategy.get(&player).cloned().unwrap_or_default();
+    let mut ctx = AiContext {
+        deck_profile,
+        adjusted_weights,
+        strategy,
+        opponent_threat: None,
+        session,
+        player,
+        deadline: engine::util::Deadline::none(),
+    };
     // Compute opponent threat profile based on difficulty setting.
     ctx.opponent_threat = match config.search.threat_awareness {
         ThreatAwareness::None => None,
         ThreatAwareness::ArchetypeOnly => {
-            // Use fixed archetype-based probabilities (no per-card analysis).
-            // Archetype is cached on `AiSession` (populated above via
-            // `ensure_player_features`), so this is a HashMap lookup — not a
-            // `DeckProfile::analyze` pass per search call.
+            // Use fixed archetype-based probabilities. Archetype is cached on
+            // `AiSession`, so this is a HashMap lookup.
             let opponents = engine::game::players::opponents(state, player);
             let opp_archetype = opponents
                 .first()
@@ -1317,6 +1362,10 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     };
 
     ctx
+}
+
+fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> AiContext {
+    build_ai_context_with_session(state, player, config, AiSession::arc_from_game(state))
 }
 
 /// Handle deterministic decisions that don't benefit from search or parallelism.
@@ -1419,19 +1468,30 @@ pub(crate) fn deterministic_choice(
     // authorized submitter (seat order) rather than `ai_player` — so without
     // this branch the AI can pick a selection sized for a different player and
     // the engine rejects it ("Expected N cards to bottom, got M"). Bottom the
-    // N least valuable cards, mirroring the DiscardToHandSize heuristic below.
+    // N least valuable cards, using the cached plan to preserve expected land
+    // count and structurally detected payoff cards.
     if let WaitingFor::MulliganBottomCards { pending }
     | WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for
     {
         let entry = pending.iter().find(|e| e.player == ai_player)?;
         let count = entry.count as usize;
-        let mut scored: Vec<_> = state.players[ai_player.0 as usize]
-            .hand
-            .iter()
-            .map(|&id| (id, evaluate_card_value(state, id)))
-            .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let to_bottom: Vec<_> = scored.iter().take(count).map(|(id, _)| *id).collect();
+        let owned_ctx;
+        let ctx = match context {
+            Some(c) => c,
+            None => {
+                owned_ctx = build_ai_context(state, ai_player, config);
+                &owned_ctx
+            }
+        };
+        let default_features = DeckFeatures::default();
+        let default_plan = PlanSnapshot::default();
+        let features = ctx
+            .session
+            .features
+            .get(&ai_player)
+            .unwrap_or(&default_features);
+        let plan = ctx.session.plan.get(&ai_player).unwrap_or(&default_plan);
+        let to_bottom = plan_aware_bottom_cards(state, ai_player, count, features, plan);
         return Some(GameAction::SelectCards { cards: to_bottom });
     }
 
@@ -1939,6 +1999,85 @@ fn evaluate_card_value(state: &GameState, obj_id: engine::types::identifiers::Ob
     value
 }
 
+fn plan_aware_bottom_cards(
+    state: &GameState,
+    player: PlayerId,
+    count: usize,
+    features: &DeckFeatures,
+    plan: &PlanSnapshot,
+) -> Vec<ObjectId> {
+    let hand: Vec<_> = state.players[player.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .collect();
+    let final_hand_size = hand.len().saturating_sub(count);
+    let land_target = plan_bottoming_land_target(plan, final_hand_size);
+    let land_count = hand
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Land))
+        })
+        .count();
+    let mut surplus_lands = land_count.saturating_sub(land_target);
+    let mut scored = Vec::with_capacity(hand.len());
+
+    for id in hand {
+        let score = state.objects.get(&id).map_or(0.0, |obj| {
+            if is_plan_payoff_name(features, &obj.name) {
+                25.0 + evaluate_card_value(state, id)
+            } else if obj.card_types.core_types.contains(&CoreType::Land) {
+                if surplus_lands > 0 {
+                    surplus_lands -= 1;
+                    -5.0
+                } else {
+                    30.0
+                }
+            } else {
+                evaluate_card_value(state, id)
+            }
+        });
+        scored.push((id, score));
+    }
+
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    scored.into_iter().take(count).map(|(id, _)| id).collect()
+}
+
+fn plan_bottoming_land_target(plan: &PlanSnapshot, final_hand_size: usize) -> usize {
+    let target = plan
+        .expected_lands
+        .get(2)
+        .copied()
+        .filter(|lands| *lands > 0)
+        .unwrap_or(3) as usize;
+    target.min(final_hand_size)
+}
+
+fn is_plan_payoff_name(features: &DeckFeatures, name: &str) -> bool {
+    features.landfall.payoff_names.iter().any(|n| n == name)
+        || features.aristocrats.outlet_names.iter().any(|n| n == name)
+        || features
+            .aristocrats
+            .death_trigger_names
+            .iter()
+            .any(|n| n == name)
+        || features.tokens_wide.payoff_names.iter().any(|n| n == name)
+        || features
+            .plus_one_counters
+            .payoff_names
+            .iter()
+            .any(|n| n == name)
+        || features
+            .spellslinger_prowess
+            .payoff_names
+            .iter()
+            .any(|n| n == name)
+}
+
 /// AI-local combination enumerator. Mirrors `engine::ai_support::candidates::combinations`
 /// but lives in `phase-ai` so the beam in `deterministic_choice` can build
 /// `C(BEAM_K, count)` tuples without paying the cost of the engine's full
@@ -2096,6 +2235,39 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(1);
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         assert_eq!(action, Some(GameAction::PassPriority));
+    }
+
+    #[test]
+    fn session_policy_memory_survives_consecutive_decisions() {
+        let state = make_state();
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        session.memory.write().unwrap().by_policy.insert(
+            PolicyId::LandfallTiming,
+            crate::session::PolicyState::LandfallTiming {
+                held_fetch_count: 7,
+                last_held_turn: state.turn_number,
+            },
+        );
+
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(
+            choose_action_with_session(&state, PlayerId(0), &config, &mut rng, &session),
+            Some(GameAction::PassPriority)
+        );
+        assert_eq!(
+            choose_action_with_session(&state, PlayerId(0), &config, &mut rng, &session),
+            Some(GameAction::PassPriority)
+        );
+
+        let memory = session.memory.read().unwrap();
+        assert!(matches!(
+            memory.by_policy.get(&PolicyId::LandfallTiming),
+            Some(crate::session::PolicyState::LandfallTiming {
+                held_fetch_count: 7,
+                last_held_turn: 2,
+            })
+        ));
     }
 
     #[test]
@@ -3151,8 +3323,24 @@ mod tests {
 
     /// Create a vanilla (zero-value) card directly in `owner`'s hand.
     fn vanilla_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        named_vanilla_in_hand(state, owner, "Card")
+    }
+
+    fn named_vanilla_in_hand(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
         let id = CardId(state.next_object_id);
-        create_object(state, id, owner, "Card".to_string(), Zone::Hand)
+        create_object(state, id, owner, name.to_string(), Zone::Hand)
+    }
+
+    fn land_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = named_vanilla_in_hand(state, owner, "Land");
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        id
     }
 
     /// Create a creature (high `evaluate_card_value`) directly in `owner`'s hand.
@@ -3277,6 +3465,53 @@ mod tests {
             }
             other => panic!("expected SelectCards, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plan_aware_bottoming_cuts_surplus_lands_to_plan_target() {
+        let mut state = make_state();
+        let lands: Vec<_> = (0..5)
+            .map(|_| land_in_hand(&mut state, PlayerId(1)))
+            .collect();
+        creature_in_hand(&mut state, PlayerId(1));
+        creature_in_hand(&mut state, PlayerId(1));
+
+        let mut plan = PlanSnapshot::default();
+        plan.expected_lands[2] = 3;
+        let bottoms =
+            plan_aware_bottom_cards(&state, PlayerId(1), 2, &DeckFeatures::default(), &plan);
+        let land_set: std::collections::HashSet<_> = lands.iter().copied().collect();
+
+        assert_eq!(bottoms.len(), 2);
+        assert!(
+            bottoms.iter().all(|id| land_set.contains(id)),
+            "bottoming should cut surplus lands before real threats"
+        );
+    }
+
+    #[test]
+    fn plan_aware_bottoming_protects_feature_payoff_names() {
+        let mut state = make_state();
+        let payoff = named_vanilla_in_hand(&mut state, PlayerId(1), "Landfall Payoff");
+        let filler_a = vanilla_in_hand(&mut state, PlayerId(1));
+        let filler_b = vanilla_in_hand(&mut state, PlayerId(1));
+        let features = DeckFeatures {
+            landfall: crate::features::LandfallFeature {
+                payoff_names: vec!["Landfall Payoff".to_string()],
+                commitment: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let bottoms =
+            plan_aware_bottom_cards(&state, PlayerId(1), 1, &features, &PlanSnapshot::default());
+
+        assert_ne!(bottoms, vec![payoff]);
+        assert!(
+            bottoms == vec![filler_a] || bottoms == vec![filler_b],
+            "bottoming should protect structurally detected payoff names"
+        );
     }
 
     /// Build a single-blocker AssignCombatDamage prompt and run the AI fallback.

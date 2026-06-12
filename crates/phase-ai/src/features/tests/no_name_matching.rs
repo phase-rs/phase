@@ -5,7 +5,8 @@
 //!
 //! Greps every `.rs` file under `crates/phase-ai/src/features/` and
 //! `crates/phase-ai/src/policies/` for the anti-patterns listed in
-//! `ANTI_PATTERNS`. Files containing the marker `allow: no_name_matching_self`
+//! `ANTI_PATTERNS` plus line-aware checks for `matches!(name, "...")` and
+//! predicate-call shapes like `pred(&obj.name)`. Files containing the marker `allow: no_name_matching_self`
 //! (used by this lint module to talk about the patterns it detects) are
 //! exempted.
 //!
@@ -28,10 +29,15 @@ use std::path::Path;
 
 const ANTI_PATTERNS: &[&str] = &[
     "obj.name ==",
+    "obj.name.eq",
+    "face.name ==",
+    "face.name.eq",
     ".name.contains(",
     "card.name ==",
     "card.name.eq",
     "match card.name.as_str()",
+    "match obj.name.as_str()",
+    "match face.name.as_str()",
 ];
 
 const ALLOW_MARKER: &str = "allow: no_name_matching_self";
@@ -78,5 +84,71 @@ fn walk(dir: &Path, violations: &mut Vec<String>) {
                 violations.push(format!("{}: contains `{}`", path.display(), pattern));
             }
         }
+        check_lines(&path, &contents, violations);
     }
+}
+
+fn check_lines(path: &Path, contents: &str, violations: &mut Vec<String>) {
+    let lines: Vec<&str> = contents.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        if has_bare_name_argument(code, "obj") || has_bare_name_argument(code, "face") {
+            violations.push(format!(
+                "{}:{}: bare name argument; use structural parts predicates or an explicit identity lookup",
+                path.display(),
+                idx + 1
+            ));
+        }
+        if has_literal_name_equality(code, "obj") || has_literal_name_equality(code, "face") {
+            violations.push(format!(
+                "{}:{}: string-literal equality against card name",
+                path.display(),
+                idx + 1
+            ));
+        }
+        if matches_name_literal(&lines, idx) {
+            violations.push(format!(
+                "{}:{}: `matches!(name, \"...\")` card-name classification",
+                path.display(),
+                idx + 1
+            ));
+        }
+    }
+}
+
+fn has_bare_name_argument(code: &str, binding: &str) -> bool {
+    let needle = format!("(&{binding}.name");
+    if !code.contains(&needle) {
+        return false;
+    }
+    !(code.contains(&format!(".contains(&{binding}.name"))
+        || code.contains(&format!("== &{binding}.name"))
+        || code.contains(&format!("==&{binding}.name")))
+}
+
+fn has_literal_name_equality(code: &str, binding: &str) -> bool {
+    code.contains(&format!("\" == &{binding}.name"))
+        || code.contains(&format!("\"==&{binding}.name"))
+        || code.contains(&format!("\" == {binding}.name"))
+        || code.contains(&format!("\"=={binding}.name"))
+}
+
+fn matches_name_literal(lines: &[&str], start: usize) -> bool {
+    let line = lines[start].split("//").next().unwrap_or("");
+    if !line.contains("matches!(") {
+        return false;
+    }
+    let mut snippet = String::new();
+    for line in lines.iter().skip(start).take(8) {
+        snippet.push_str(line.split("//").next().unwrap_or(""));
+        snippet.push('\n');
+        if line.contains(')') {
+            break;
+        }
+    }
+    let matches_name = snippet.contains("matches!(name,")
+        || snippet.contains("matches!( name,")
+        || snippet.contains("matches!(obj.name")
+        || snippet.contains("matches!(face.name");
+    matches_name && snippet.contains('"')
 }

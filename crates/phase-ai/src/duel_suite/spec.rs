@@ -13,8 +13,10 @@ use super::inline_decks::{
 };
 use super::{DeckRef, Expected, FeatureKind, MatchupSpec};
 
-/// Mirror tolerance default — a mirror match's P0 winrate must fall within
-/// `(0.5 ± MIRROR_DEFAULT_TOLERANCE)` to PASS.
+/// Legacy mirror tolerance retained in the static data shape. Runtime mirror
+/// classification uses a Wilson 95% confidence interval containing 0.5: quick
+/// n=10 smoke runs are intentionally low-power, while the n=100 suite narrows
+/// the false-fail band enough for the nightly gate.
 const MIRROR_TOLERANCE: f32 = 0.15;
 
 const fn snap(format: &'static str, file: &'static str) -> DeckRef {
@@ -52,7 +54,10 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p0: inline("Red Aggro", deck_red_aggro),
         p1: inline("Blue Control", deck_blue_control),
         exercises: &[FeatureKind::AggroPressure, FeatureKind::Control],
-        expected: Expected::Open,
+        expected: Expected::Triangle {
+            p0_winrate_min: 0.0,
+            p0_winrate_max: 1.0,
+        },
     },
     MatchupSpec {
         id: "black-vs-green",

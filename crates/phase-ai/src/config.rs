@@ -11,7 +11,7 @@ use crate::strategy_profile::StrategyProfile;
 /// cost of search quality on slow hardware. The same deadline gates expensive
 /// tactical projections so optional lookahead cannot dominate a move.
 ///
-/// Deterministic test and duel-suite runs call [`AiConfig::into_deterministic`]
+/// Measurement test and duel-suite runs call [`AiConfig::into_measurement`]
 /// to disable this wall-clock cap and remain bounded solely by node/depth
 /// budgets.
 ///
@@ -75,6 +75,22 @@ pub enum Platform {
     Wasm,
 }
 
+/// Runtime mode for AI execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Production and interactive callers use latency-bounded search and
+    /// caller-supplied entropy.
+    Interactive,
+    /// Regression measurement is a pure function of `(binary, config, seed)`.
+    Measurement { seed: u64 },
+}
+
+impl ExecutionMode {
+    pub fn is_measurement(self) -> bool {
+        matches!(self, ExecutionMode::Measurement { .. })
+    }
+}
+
 /// Search algorithm configuration.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -92,12 +108,6 @@ pub struct SearchConfig {
     /// truth — every call-site should reference that constant rather than
     /// writing a literal.
     pub time_budget_ms: Option<u32>,
-    /// When `true`, wall-clock deadlines are disabled — search is bounded only
-    /// by `max_nodes` / `max_depth`. Integration tests and `ai-duel` regression
-    /// runs pin this to `true` so they don't observe wall-clock flake.
-    /// Benchmarks and production code leave this `false` to measure the real
-    /// deadline-bounded regime users experience.
-    pub deterministic: bool,
     /// How much the AI reasons about opponent hand threats.
     pub threat_awareness: ThreatAwareness,
     /// Minimum remaining wall-clock budget (ms) required before running an
@@ -171,7 +181,6 @@ impl Default for SearchConfig {
             rollout_samples: 0,
             opponent_model: OpponentModel::DeterministicBestReply,
             time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-            deterministic: false,
             threat_awareness: ThreatAwareness::None,
             projection_min_budget_ms: 2000,
         }
@@ -210,8 +219,6 @@ pub struct PolicyPenalties {
     /// Per-mana-value bonus for bouncing expensive permanents.
     pub bounce_expensive_bonus_per_mv: f64,
 
-    /// Penalty for casting Destroy at an indestructible creature.
-    pub indestructible_destroy_penalty: f64,
     /// Base penalty for targeting a creature with ward (scaled by cost severity).
     pub ward_cost_penalty_base: f64,
 
@@ -309,7 +316,6 @@ impl Default for PolicyPenalties {
             bounce_token_bonus: 3.0,
             bounce_cheap_discount: -2.0,
             bounce_expensive_bonus_per_mv: 0.3,
-            indestructible_destroy_penalty: -8.0,
             ward_cost_penalty_base: -2.0,
             pump_response_bonus: 2.5,
             lethal_burn_bonus: 15.0,
@@ -399,6 +405,52 @@ fn default_opponent_chalice_counter_penalty() -> f64 {
     -4.0
 }
 
+/// Policy penalty fields present in the active CMA-ES `--group penalties`
+/// vector. Adding a `PolicyPenalties` field requires listing it here or in
+/// `UNTUNED_POLICY_PENALTY_FIELDS` with a reason.
+pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
+    "redundant_removal_penalty",
+    "redundant_damage_penalty",
+    "gift_card_penalty",
+    "gift_treasure_penalty",
+    "gift_food_penalty",
+    "gift_fish_penalty",
+    "worthy_target_threshold",
+    "overkill_base_penalty",
+    "removal_quality_mismatch",
+    "bounce_token_bonus",
+    "bounce_cheap_discount",
+    "bounce_expensive_bonus_per_mv",
+    "ward_cost_penalty_base",
+    "pump_response_bonus",
+    "lethal_burn_bonus",
+    "protect_spell_bonus_mult",
+    "lethality_tapout_penalty",
+    "sacrifice_land_penalty",
+    "sacrifice_token_cost",
+    "evasion_removal_bonus_mult",
+    "recursion_destroy_penalty",
+    "recursion_exile_bonus",
+    "death_trigger_destroy_penalty",
+    "wrath_overextend_penalty",
+    "low_life_defensive_bonus",
+    "low_life_aggro_penalty",
+    "card_advantage_behind_extra",
+    "counter_last_reservation_penalty",
+    "tempo_curve_bonus",
+    "synergy_casting_bonus",
+    "threat_counter_tapout_penalty",
+    "threat_wipe_overextend_penalty",
+    "combo_progress_this_turn_bonus",
+    "combo_progress_next_turn_bonus",
+    "own_chalice_counter_penalty",
+    "opponent_chalice_counter_penalty",
+];
+
+/// Policy penalties intentionally not present in an active CMA-ES parameter
+/// vector yet.
+pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[];
+
 /// Full AI configuration combining difficulty, search, and evaluation settings.
 #[derive(Debug, Clone)]
 pub struct AiConfig {
@@ -412,6 +464,7 @@ pub struct AiConfig {
     pub keyword_bonuses: KeywordBonuses,
     pub archetype_multipliers: ArchetypeMultipliers,
     pub policy_penalties: PolicyPenalties,
+    pub execution_mode: ExecutionMode,
     /// Number of players in the game (used for search budget scaling).
     pub player_count: u8,
 }
@@ -447,7 +500,6 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 0,
                 opponent_model: OpponentModel::DeterministicBestReply,
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-                deterministic: false,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
             },
@@ -471,7 +523,6 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 0,
                 opponent_model: OpponentModel::DeterministicBestReply,
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-                deterministic: false,
                 threat_awareness: ThreatAwareness::None,
                 projection_min_budget_ms: 0,
             },
@@ -495,7 +546,6 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 1,
                 opponent_model: OpponentModel::DeterministicBestReply,
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-                deterministic: false,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
                 projection_min_budget_ms: 2000,
             },
@@ -519,7 +569,6 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 1,
                 opponent_model: OpponentModel::ThreatWeightedReply,
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-                deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
             },
@@ -543,7 +592,6 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 2,
                 opponent_model: OpponentModel::ThreatWeightedReply,
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-                deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
             },
@@ -567,7 +615,6 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 rollout_samples: 2,
                 opponent_model: OpponentModel::ThreatWeightedReply,
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
-                deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
                 // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
                 // before nodes consume the budget
@@ -587,6 +634,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         keyword_bonuses: KeywordBonuses::default(),
         archetype_multipliers: ArchetypeMultipliers::default(),
         policy_penalties: PolicyPenalties::default(),
+        execution_mode: ExecutionMode::Interactive,
         player_count: 2,
     };
 
@@ -606,12 +654,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
 }
 
 impl AiConfig {
-    /// Return a copy of this config with deterministic mode enabled: wall-clock
+    /// Return a copy of this config with measurement mode enabled: wall-clock
     /// deadlines are disabled and search is bounded solely by `max_nodes` /
     /// `max_depth`. Used by integration tests and `ai-duel` regression runs to
     /// eliminate wall-clock flake. Production and benchmarks leave this off.
-    pub fn into_deterministic(mut self) -> Self {
-        self.search.deterministic = true;
+    pub fn into_measurement(mut self, seed: u64) -> Self {
+        self.execution_mode = ExecutionMode::Measurement { seed };
         self
     }
 }
@@ -934,5 +982,34 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.combo_progress_this_turn_bonus, 15.0);
         assert_eq!(p.combo_progress_next_turn_bonus, 5.0);
+    }
+
+    #[test]
+    fn every_policy_penalty_is_tuning_registered_or_explicitly_untuned() {
+        let value = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let fields: std::collections::BTreeSet<_> = value
+            .as_object()
+            .expect("PolicyPenalties serializes as object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let untuned: std::collections::BTreeSet<_> = UNTUNED_POLICY_PENALTY_FIELDS
+            .iter()
+            .map(|(field, _reason)| *field)
+            .collect();
+        let active: std::collections::BTreeSet<_> =
+            ACTIVE_POLICY_PENALTY_FIELDS.iter().copied().collect();
+        let registered: std::collections::BTreeSet<_> = active.union(&untuned).copied().collect();
+
+        assert_eq!(
+            fields, registered,
+            "PolicyPenalties fields must be present in an active CMA-ES group or UNTUNED_POLICY_PENALTY_FIELDS"
+        );
+        assert!(
+            UNTUNED_POLICY_PENALTY_FIELDS
+                .iter()
+                .all(|(_field, reason)| !reason.trim().is_empty()),
+            "every untuned policy penalty entry needs a reason"
+        );
     }
 }

@@ -1016,6 +1016,17 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
+    can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
+}
+
+fn can_activate_mana_ability_by_simulation(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    crate::game::perf_counters::record_state_clone_for_legality();
     let mut simulated = state.clone();
     activate_mana_ability(
         &mut simulated,

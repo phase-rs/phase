@@ -15,20 +15,29 @@ use engine::game::DeckEntry;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
+use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
 use crate::planner::quick_state_hash;
 use crate::policies::registry::PolicyId;
 use crate::projection::{project_to, BailReason, Projection, ProjectionHorizon, ProjectionKey};
+use crate::strategy_profile::StrategyProfile;
 use crate::synergy::SynergyGraph;
+
+/// Commanders are reliably castable build-around cards, so feature/profile
+/// detection should treat each commander face as more informative than a
+/// singleton main-deck card.
+const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
 
 /// Per-game cache shared by all decisions.
 #[derive(Debug, Clone, Default)]
 pub struct AiSession {
+    pub deck_profile: HashMap<PlayerId, DeckProfile>,
     pub features: HashMap<PlayerId, DeckFeatures>,
     pub plan: HashMap<PlayerId, PlanSnapshot>,
+    pub strategy: HashMap<PlayerId, StrategyProfile>,
     pub synergy: HashMap<PlayerId, SynergyGraph>,
-    pub memory: PolicyMemory,
+    pub memory: Arc<RwLock<PolicyMemory>>,
     /// Turn-scoped cache for opponent-turn projections. Key includes
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
@@ -46,24 +55,32 @@ impl AiSession {
     /// Decks not present in `state.deck_pools` get default (empty) entries.
     pub fn from_game(state: &GameState) -> Self {
         let mut features = HashMap::new();
+        let mut deck_profile = HashMap::new();
         let mut plan = HashMap::new();
+        let mut strategy = HashMap::new();
         let mut synergy = HashMap::new();
 
         for pool in &state.deck_pools {
-            let deck: &[DeckEntry] = &pool.current_main;
-            let player_features = DeckFeatures::analyze(deck, pool.bracket_tier);
+            let deck = analysis_deck(&pool.current_main, &pool.current_commander);
+            let player_profile = DeckProfile::analyze(&deck);
+            let player_features = DeckFeatures::analyze(&deck, pool.bracket_tier);
             let snapshot = derive_snapshot(&player_features);
-            let graph = SynergyGraph::build(deck);
+            let player_strategy = StrategyProfile::for_profile(&player_profile);
+            let graph = SynergyGraph::build(&deck);
+            deck_profile.insert(pool.player, player_profile);
             features.insert(pool.player, player_features);
             plan.insert(pool.player, snapshot);
+            strategy.insert(pool.player, player_strategy);
             synergy.insert(pool.player, graph);
         }
 
         Self {
+            deck_profile,
             features,
             plan,
+            strategy,
             synergy,
-            memory: PolicyMemory::default(),
+            memory: Arc::default(),
             projection_cache: Arc::default(),
         }
     }
@@ -78,11 +95,15 @@ impl AiSession {
         tier: engine::game::bracket_estimate::CommanderBracketTier,
     ) -> Self {
         let mut session = Self::default();
+        let player_profile = DeckProfile::analyze(deck);
         let player_features = DeckFeatures::analyze(deck, tier);
         let snapshot = derive_snapshot(&player_features);
+        let player_strategy = StrategyProfile::for_profile(&player_profile);
         let graph = SynergyGraph::build(deck);
+        session.deck_profile.insert(player, player_profile);
         session.features.insert(player, player_features);
         session.plan.insert(player, snapshot);
+        session.strategy.insert(player, player_strategy);
         session.synergy.insert(player, graph);
         session
     }
@@ -100,13 +121,10 @@ impl AiSession {
     /// Callers without pool access should pass `CommanderBracketTier::Core`.
     ///
     /// **Staleness note**: this no-ops on re-calls for an already-populated
-    /// player. That's safe because `AiSession` is currently rebuilt per
-    /// `choose_action` call (see `AiContext::analyze_with` in
-    /// `crates/phase-ai/src/context.rs`), so cached features cannot outlive
-    /// a single decision. If future work promotes `AiSession` to a
-    /// cross-decision lifetime (e.g., Phase 4's `SessionCompute`), add an
-    /// `invalidate_player_features(player)` hook and call it from any site
-    /// that mutates `state.deck_pools`.
+    /// player. The production auto-play path builds one `AiSession` at game
+    /// start and threads it through decisions, so callers that mutate
+    /// `state.deck_pools` must call `invalidate_player_features(player)`
+    /// before repopulating.
     pub fn ensure_player_features(
         &mut self,
         player: PlayerId,
@@ -116,20 +134,24 @@ impl AiSession {
         if self.features.contains_key(&player) || deck.is_empty() {
             return;
         }
+        let profile = DeckProfile::analyze(deck);
         let features = DeckFeatures::analyze(deck, tier);
         let snapshot = derive_snapshot(&features);
+        let strategy = StrategyProfile::for_profile(&profile);
+        self.deck_profile.insert(player, profile);
         self.features.insert(player, features);
         self.plan.insert(player, snapshot);
+        self.strategy.insert(player, strategy);
         self.synergy.insert(player, SynergyGraph::build(deck));
     }
 
     /// Drop cached per-player features so a subsequent `ensure_player_features`
-    /// call repopulates from fresh deck data. Currently unused (see the
-    /// staleness note on `ensure_player_features`); provided so future
-    /// cross-decision session lifetimes have a ready hook.
+    /// call repopulates from fresh deck data.
     pub fn invalidate_player_features(&mut self, player: PlayerId) {
+        self.deck_profile.remove(&player);
         self.features.remove(&player);
         self.plan.remove(&player);
+        self.strategy.remove(&player);
         self.synergy.remove(&player);
     }
 
@@ -202,6 +224,16 @@ impl AiSession {
     }
 }
 
+fn analysis_deck(main: &[DeckEntry], commander: &[DeckEntry]) -> Vec<DeckEntry> {
+    let mut deck = Vec::with_capacity(main.len() + commander.len());
+    deck.extend_from_slice(main);
+    deck.extend(commander.iter().cloned().map(|mut entry| {
+        entry.count = entry.count.saturating_mul(COMMANDER_ANALYSIS_WEIGHT);
+        entry
+    }));
+    deck
+}
+
 /// Typed cross-decision policy memory. Adding new memory-carrying policies
 /// requires adding a `PolicyState` variant — intentional friction that keeps
 /// memory shapes auditable and `AiSession: Clone + Debug`.
@@ -223,8 +255,16 @@ pub enum PolicyState {
 #[cfg(test)]
 mod tests {
     use engine::game::bracket_estimate::CommanderBracketTier;
-    use engine::types::game_state::GameState;
+    use engine::game::DeckEntry;
+    use engine::types::ability::{
+        ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType};
+    use engine::types::game_state::{GameState, PlayerDeckPool};
     use engine::types::player::PlayerId;
+    use engine::types::statics::StaticMode;
 
     use super::AiSession;
 
@@ -237,6 +277,35 @@ mod tests {
             bracket_tier: tier,
             ..Default::default()
         }
+    }
+
+    fn face(name: &str, core_types: Vec<CoreType>, subtypes: Vec<&str>) -> CardFace {
+        CardFace {
+            name: name.to_string(),
+            card_type: CardType {
+                core_types,
+                subtypes: subtypes.into_iter().map(str::to_string).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn deck_entry(card: CardFace, count: u32) -> DeckEntry {
+        DeckEntry { card, count }
+    }
+
+    fn elf_lord_commander() -> DeckEntry {
+        let mut card = face("Elf Lord Commander", vec![CoreType::Creature], vec!["Elf"]);
+        card.static_abilities.push(
+            StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Subtype("Elf".to_string()))
+                        .controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+        deck_entry(card, 1)
     }
 
     #[test]
@@ -297,6 +366,42 @@ mod tests {
             "CommanderBracketTier::Optimized (highest non-cEDH tier) must be recorded as-is"
         );
         assert_ne!(p0_features.bracket_tier, CommanderBracketTier::Cedh);
+    }
+
+    #[test]
+    fn commander_counts_toward_feature_detection_with_buildaround_weight() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            current_main: std::sync::Arc::new(vec![deck_entry(
+                face("Neutral Spell", vec![CoreType::Sorcery], Vec::new()),
+                99,
+            )]),
+            current_commander: std::sync::Arc::new(vec![elf_lord_commander()]),
+            bracket_tier: CommanderBracketTier::Core,
+            ..Default::default()
+        });
+
+        let session = AiSession::from_game(&state);
+        let tribal = &session
+            .features
+            .get(&PlayerId(0))
+            .expect("player features should be populated")
+            .tribal;
+        let elf = tribal
+            .tribes
+            .iter()
+            .find(|tribe| tribe.subtype == "Elf")
+            .expect("commander tribe should be detected");
+
+        assert_eq!(tribal.dominant_tribe.as_deref(), Some("Elf"));
+        assert!(
+            tribal.commitment >= crate::features::tribal::LORD_PRIORITY_FLOOR,
+            "weighted commander lord should clear tribal feature floors"
+        );
+        assert_eq!(elf.member_count, 4);
+        assert_eq!(elf.lord_count, 4);
     }
 
     #[test]

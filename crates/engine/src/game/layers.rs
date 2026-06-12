@@ -1565,6 +1565,7 @@ pub fn flush_layers(state: &mut GameState) {
     match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
         LayersDirty::Clean => {}
         LayersDirty::Full => {
+            super::perf_counters::record_layers_full_eval();
             evaluate_layers(state);
             super::public_state::mark_public_state_all_dirty(state);
         }
@@ -1573,9 +1574,12 @@ pub fn flush_layers(state: &mut GameState) {
                 return;
             }
             if incremental_flush_must_escalate(state, &ids) {
+                super::perf_counters::record_layers_escalated();
+                super::perf_counters::record_layers_full_eval();
                 evaluate_layers(state);
                 super::public_state::mark_public_state_all_dirty(state);
             } else {
+                super::perf_counters::record_layers_incremental();
                 apply_layers_incremental(state, &ids);
                 for id in &ids {
                     super::public_state::mark_public_state_object_dirty(state, *id);
@@ -1800,7 +1804,7 @@ fn any_active_static_condition_perturbed_by_entry(
 /// Cleared and repopulated wholesale (keyset is authoritative only for sources
 /// present + non-phased at this full eval; absence at consult fails closed).
 fn refresh_static_gate_truth(state: &mut GameState) {
-    let mut next: std::collections::HashMap<StaticGateKey, bool> = std::collections::HashMap::new();
+    let mut next: im::HashMap<StaticGateKey, bool> = im::HashMap::new();
     for_each_static_effect_source(state, |state, obj| {
         for (def_index, def) in obj.static_definitions.iter_all().enumerate() {
             if def.mode != StaticMode::Continuous {

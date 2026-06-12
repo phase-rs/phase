@@ -233,8 +233,16 @@ fn ai_vs_ai_completes_combat_sequence() {
     let ai_players: HashSet<PlayerId> = [P0, P1].into_iter().collect();
     let config = create_config(AiDifficulty::Medium, Platform::Native);
     let ai_configs = HashMap::from([(P0, config.clone()), (P1, config)]);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
 
-    let results = run_ai_actions(runner.state_mut(), &ai_players, &ai_configs);
+    let results = run_ai_actions(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+    );
 
     // Should take at least the DeclareBlockers action
     assert!(!results.is_empty(), "AI should take at least one action");

@@ -21277,6 +21277,38 @@ mod tests {
         }
     }
 
+    /// CR 603.7c + CR 608.2c: God-Pharaoh's Gift — "create a token that's a copy
+    /// of that card … It gains haste." The "It gains haste" grant, nested as the
+    /// token creator's own sub-ability, must apply to the newly created token
+    /// (`LastCreated`), not the source artifact (`SelfRef`). Issue #2356.
+    #[test]
+    fn token_creator_it_gains_keyword_binds_to_created_token() {
+        fn first_grant_affected(
+            def: &crate::types::ability::AbilityDefinition,
+        ) -> Option<TargetFilter> {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*def.effect
+            {
+                if let Some(s) = static_abilities.first() {
+                    return s.affected.clone();
+                }
+            }
+            def.sub_ability.as_deref().and_then(first_grant_affected)
+        }
+
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, you may exile a creature card from your graveyard. If you do, create a token that's a copy of that card, except it's a 4/4 black Zombie. It gains haste until end of turn.",
+            "God-Pharaoh's Gift",
+        );
+        let affected = first_grant_affected(def.execute.as_deref().expect("execute ability"));
+        assert_eq!(
+            affected,
+            Some(TargetFilter::LastCreated),
+            "the 'It gains haste' grant must apply to the created token, not SelfRef"
+        );
+    }
+
     /// CR 613.1 + CR 503.1a: The Rack — "the chosen player's upkeep" must
     /// scope the phase trigger to `SourceChosenPlayer`, not every active player.
     #[test]
