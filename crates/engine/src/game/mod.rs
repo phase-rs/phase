@@ -68,6 +68,12 @@ pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
+pub mod meld;
+// Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
+// so `meld.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "meld_tests.rs"]
+mod meld_tests;
 pub mod merge;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).

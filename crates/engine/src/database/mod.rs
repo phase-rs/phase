@@ -7,6 +7,7 @@ pub mod forge;
 pub mod haunt;
 pub mod hideaway;
 pub mod legality;
+pub mod meld;
 pub mod mtgjson;
 pub mod oracle_loader;
 pub mod search;
@@ -19,6 +20,8 @@ mod embalm_eternalize_tests;
 mod encore_tests;
 #[cfg(test)]
 mod hideaway_tests;
+#[cfg(test)]
+mod meld_tests;
 #[cfg(test)]
 mod unearth_tests;
 
