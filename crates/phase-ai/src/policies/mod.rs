@@ -31,6 +31,7 @@ mod life_total_resource;
 mod mana_efficiency;
 mod mill_targeting;
 pub mod mulligan;
+mod payment_selection;
 mod planeswalker_loyalty;
 mod plus_one_counters;
 mod ramp_timing;

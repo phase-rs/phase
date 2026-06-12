@@ -5,8 +5,8 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 use engine::types::ability::{
-    AbilityCost, Effect, EffectScope, QuantityExpr, ReplacementMode, TapStateChange, TargetFilter,
-    TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectScope,
+    QuantityExpr, ReplacementMode, TapStateChange, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -16,6 +16,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::cast_facts::collect_definition_effects;
@@ -108,6 +109,14 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 
 fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     match &ctx.candidate.action {
+        GameAction::CastSpell { .. } if cast_has_unpayable_self_etb_may_cost(ctx) => {
+            Some(PolicyReason::new("anti_self_harm_unpayable_etb_may_cost"))
+        }
+        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+            if grants_extra_turn_then_self_loss(ctx) =>
+        {
+            Some(PolicyReason::new("anti_self_harm_extra_turn_self_loss"))
+        }
         GameAction::DecideOptionalEffect { accept: true }
             if optional_effect_life_cost_is_lethal(ctx) =>
         {
@@ -120,6 +129,132 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
             .iter()
             .find_map(|target| target_reject_reason(ctx, target)),
         _ => None,
+    }
+}
+
+fn cast_has_unpayable_self_etb_may_cost(ctx: &PolicyContext<'_>) -> bool {
+    let GameAction::CastSpell { .. } = &ctx.candidate.action else {
+        return false;
+    };
+    let Some(source) = ctx.source_object() else {
+        return false;
+    };
+
+    source
+        .replacement_definitions
+        .iter_unchecked()
+        .any(|replacement| {
+            if replacement.event != ReplacementEvent::Moved {
+                return false;
+            }
+            let ReplacementMode::MayCost { cost, decline } = &replacement.mode else {
+                return false;
+            };
+            decline
+                .as_deref()
+                .is_some_and(decline_moves_self_to_graveyard)
+                && !cost.is_payable(ctx.state, ctx.ai_player, source.id)
+        })
+}
+
+fn decline_moves_self_to_graveyard(decline: &AbilityDefinition) -> bool {
+    ability_tree_any(decline, |effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Graveyard,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        )
+    })
+}
+
+fn grants_extra_turn_then_self_loss(ctx: &PolicyContext<'_>) -> bool {
+    action_ability_definitions(ctx).into_iter().any(|ability| {
+        ability_tree_any(ability, effect_grants_ai_extra_turn)
+            && ability_tree_any(ability, effect_loses_game_for_controller)
+    })
+}
+
+fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a AbilityDefinition> {
+    match &ctx.candidate.action {
+        GameAction::CastSpell { .. } => ctx
+            .source_object()
+            .into_iter()
+            .flat_map(|object| object.abilities.iter())
+            .filter(|ability| ability.kind == AbilityKind::Spell)
+            .collect(),
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => ctx
+            .state
+            .objects
+            .get(source_id)
+            .and_then(|object| object.abilities.get(*ability_index))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn ability_tree_any(
+    ability: &AbilityDefinition,
+    mut predicate: impl FnMut(&Effect) -> bool,
+) -> bool {
+    ability_tree_any_impl(ability, &mut predicate)
+}
+
+fn ability_tree_any_impl(
+    ability: &AbilityDefinition,
+    predicate: &mut impl FnMut(&Effect) -> bool,
+) -> bool {
+    predicate(&ability.effect)
+        || match &*ability.effect {
+            Effect::CreateDelayedTrigger { effect, .. } => ability_tree_any_impl(effect, predicate),
+            _ => false,
+        }
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| ability_tree_any_impl(sub, predicate))
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(|sub| ability_tree_any_impl(sub, predicate))
+        || ability
+            .mode_abilities
+            .iter()
+            .any(|mode| ability_tree_any_impl(mode, predicate))
+}
+
+fn effect_grants_ai_extra_turn(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller
+        }
+    )
+}
+
+fn effect_loses_game_for_controller(effect: &Effect) -> bool {
+    match effect {
+        Effect::LoseTheGame { target } => target
+            .as_ref()
+            .is_none_or(|target| matches!(target, TargetFilter::Controller)),
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            matches!(
+                condition,
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    ..
+                } | DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+            ) && ability_tree_any(effect, effect_loses_game_for_controller)
+        }
+        _ => false,
     }
 }
 
@@ -868,15 +1003,17 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification,
-        ControllerRef, FilterProp, PtValue, QuantityRef, ResolvedAbility, SacrificeCost,
-        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
+        ContinuousModification, ControllerRef, DiscardSelfScope, FilterProp, PtValue, QuantityRef,
+        ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
+    use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::StaticMode;
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
@@ -3550,6 +3687,170 @@ mod tests {
         AntiSelfHarmPolicy.score(&ctx)
     }
 
+    fn pre_cast_verdict_for_spell(state: &GameState, spell_id: ObjectId) -> PolicyVerdict {
+        let config = AiConfig::default();
+        let (decision, candidate) = make_cast_spell_decision(state, spell_id);
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        AntiSelfHarmPolicy.verdict(&ctx)
+    }
+
+    fn extra_turn_spell(state: &mut GameState, self_loss: bool) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Extra Turn Test".to_string(),
+            Zone::Hand,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+            },
+        );
+        if self_loss {
+            ability = ability.sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                        phase: Phase::End,
+                        player: PlayerId(0),
+                    },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::LoseTheGame { target: None },
+                    )),
+                    uses_tracked_set: false,
+                },
+            ));
+        }
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.abilities = Arc::new(vec![ability]);
+        id
+    }
+
+    fn mox_diamond_like_spell(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Mox Diamond Test".to_string(),
+            Zone::Hand,
+        );
+        let decline = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+            },
+        );
+        let mut land_filter = TypedFilter::new(TypeFilter::Land);
+        land_filter
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Hand });
+        let cost = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: Some(TargetFilter::Typed(land_filter)),
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.replacement_definitions
+            .push(ReplacementDefinition::new(ReplacementEvent::Moved).mode(
+                ReplacementMode::MayCost {
+                    cost,
+                    decline: Some(Box::new(decline)),
+                },
+            ));
+        id
+    }
+
+    fn hand_land(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Discardable Land".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        id
+    }
+
+    #[test]
+    fn rejects_unpayable_self_etb_may_cost_spell() {
+        let mut state = make_state();
+        let spell_id = mox_diamond_like_spell(&mut state);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_unpayable_etb_may_cost"
+        ));
+    }
+
+    #[test]
+    fn allows_self_etb_may_cost_spell_when_cost_is_payable() {
+        let mut state = make_state();
+        let spell_id = mox_diamond_like_spell(&mut state);
+        hand_land(&mut state);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_extra_turn_spell_with_delayed_self_loss() {
+        let mut state = make_state();
+        state.players[0].life = 38;
+        let spell_id = extra_turn_spell(&mut state, true);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_extra_turn_self_loss"
+        ));
+    }
+
+    #[test]
+    fn allows_extra_turn_spell_without_self_loss() {
+        let mut state = make_state();
+        let spell_id = extra_turn_spell(&mut state, false);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
     /// CR 702.16b: An opponent creature with protection from white is not a
     /// legal target for a white removal spell, so casting it would fizzle.
     /// The engine-backed legality check must surface the no-target penalty —
@@ -3620,9 +3921,6 @@ mod tests {
     }
 
     // --- Optional-effect life-cost self-harm guard ---------------------------
-
-    use engine::types::ability::ReplacementDefinition;
-    use engine::types::replacements::ReplacementEvent;
 
     /// Build an object on the battlefield carrying an Optional replacement whose
     /// life payment lives in the given branch of the execute ability tree.

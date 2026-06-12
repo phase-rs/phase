@@ -697,7 +697,7 @@ pub fn choose_blockers_with_profile(
 
     // Second pass: assign remaining blockers where they'd survive.
     // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
-    for &(attacker_id, _) in &sorted_attackers {
+    for &(attacker_id, attacker_value) in &sorted_attackers {
         if assignments.iter().any(|&(_, a)| a == attacker_id) {
             continue; // Already blocked
         }
@@ -729,7 +729,7 @@ pub fn choose_blockers_with_profile(
                     .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
             });
 
-        if let Some((blocker_id, priority, _)) = best {
+        if let Some((blocker_id, priority, selected_blocker_value)) = best {
             let attacker_power = attacker.power.unwrap_or(0);
             let p_life = state.players[player.0 as usize].life;
 
@@ -791,7 +791,13 @@ pub fn choose_blockers_with_profile(
             // (e.g. 1/1 in front of a 12/12 trample commander with 3 cmd-damage headroom).
             let chump_unsafe = priority == 0
                 && commander_chump_unsafe(state, player, attacker_id, blocker_toughness);
-            if !chump_unsafe && (priority > 0 || should_chump_stabilize || should_chump_race) {
+            let favorable_trade =
+                priority != 1 || selected_blocker_value <= attacker_value + damage_prevented as f64;
+            if !chump_unsafe
+                && ((priority > 0 && favorable_trade)
+                    || should_chump_stabilize
+                    || should_chump_race)
+            {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.push(blocker_id);
             }
@@ -2098,6 +2104,37 @@ mod tests {
             blocked_target,
             Some(big),
             "Deathtouch should block highest-value attacker"
+        );
+    }
+
+    #[test]
+    fn valuable_blocker_does_not_trade_down_into_small_deathtouch_attacker() {
+        let mut state = setup();
+        state.players[1].life = 20;
+        let snake = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Snake Token",
+            1,
+            1,
+            vec![Keyword::Deathtouch],
+        );
+        let sam = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Sam, Loyal Attendant",
+            3,
+            3,
+            vec![],
+        );
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[snake]);
+
+        assert!(
+            !blockers
+                .iter()
+                .any(|&(blocker, attacker)| blocker == sam && attacker == snake),
+            "AI should not trade a valuable blocker down into a 1/1 deathtouch attacker at 20 life"
         );
     }
 

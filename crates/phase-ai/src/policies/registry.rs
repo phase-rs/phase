@@ -20,6 +20,7 @@ use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
+use super::payment_selection::PaymentSelectionPolicy;
 use super::plus_one_counters::PlusOneCountersPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
@@ -101,6 +102,7 @@ pub enum PolicyId {
     LandAnimation,
     MillTargeting,
     ChaliceAvoidance,
+    PaymentSelection,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -161,6 +163,25 @@ pub const STRONG_MAX: f64 = 5.0;
 pub const CRITICAL_MAX: f64 = 15.0;
 
 impl PolicyVerdict {
+    pub fn score(delta: f64, reason: PolicyReason) -> Self {
+        let magnitude = delta.abs();
+        if magnitude == 0.0 {
+            Self::neutral(reason)
+        } else if magnitude <= NUDGE_MAX {
+            Self::nudge(delta, reason)
+        } else if magnitude <= PREFERENCE_MAX {
+            Self::preference(delta, reason)
+        } else if magnitude <= STRONG_MAX {
+            Self::strong(delta, reason)
+        } else {
+            Self::critical(delta.signum() * magnitude.min(CRITICAL_MAX), reason)
+        }
+    }
+
+    pub fn neutral(reason: PolicyReason) -> Self {
+        Self::Score { delta: 0.0, reason }
+    }
+
     pub fn reject(reason: PolicyReason) -> Self {
         Self::Reject { reason }
     }
@@ -286,6 +307,7 @@ impl Default for PolicyRegistry {
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
             Box::new(ChaliceAvoidancePolicy),
+            Box::new(PaymentSelectionPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
