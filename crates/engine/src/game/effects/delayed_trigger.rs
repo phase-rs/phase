@@ -68,9 +68,10 @@ pub fn resolve(
     // CR 603.7c: A phase-based delayed trigger (`AtNextPhase` /
     // `AtNextPhaseForPlayer`) fires on a `PhaseChanged` event that carries no
     // source object, so a `TriggeringSource` reference left in its inner effect
-    // ("return it" / "it becomes a black Zombie") would resolve to nothing at
-    // firing time. Snapshot the triggering object now and rebind the chain's
-    // `TriggeringSource` slots to `ParentTarget` so they resolve against the
+    // ("return it" / "it becomes a black Zombie" / "create a token that's a
+    // copy of it") would resolve to nothing at firing time. Snapshot the
+    // triggering object now — INDEPENDENTLY of any parent chosen target — and
+    // rebind the chain's `TriggeringSource` slots so they resolve against that
     // snapshot. Event-based conditions (WhenDies/WheneverEvent/…) carry their
     // own firing event and must keep re-resolving `TriggeringSource` per fire.
     let phase_based_condition = matches!(
@@ -78,8 +79,67 @@ pub fn resolve(
         crate::types::ability::DelayedTriggerCondition::AtNextPhase { .. }
             | crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
     );
-    let refs_triggering_source =
-        phase_based_condition && ability_chain_refs_triggering_source(&delayed_ability);
+
+    // CR 603.7c: `TriggeringSource` ("it"/"that creature") and `ParentTarget`
+    // (the parent ability's chosen target) are DISTINCT context refs. Snapshot
+    // each from its own source: `ParentTarget` from `ability.targets` (via
+    // `parent_target_snapshot`), and `TriggeringSource` from the creation-time
+    // triggering event (via `resolve_event_context_target`). Never reuse
+    // `ability.targets` for the triggering-source binding, or a delayed ability
+    // whose parent also chose a target would bind "it" to the wrong object.
+    //
+    // Slot layout of the snapshotted `targets`:
+    //   * `[0..parent_len]` — the parent ability's chosen targets, for genuine
+    //     `ParentTarget` references.
+    //   * `[parent_len]`    — the independent `TriggeringSource` snapshot, when
+    //     the chain references "it" AND the parent also carries chosen targets
+    //     (so the two contexts never collide). When the chain references ONLY
+    //     `TriggeringSource`, the snapshot is the sole target and a plain
+    //     `ParentTarget` rebind suffices.
+    let refs_parent_target =
+        phase_based_condition && super::effect_refs_parent_target(&delayed_ability.effect);
+    let parent_targets = if refs_parent_target {
+        parent_target_snapshot(state, ability)
+    } else {
+        vec![]
+    };
+
+    // CR 603.7c: Detect + rebind every `TriggeringSource` slot (including nested
+    // and hidden context/object slots — `CopyTokenOf`, attach, `And`/`Or`, …)
+    // in a single comprehensive pass. When the parent also carried chosen
+    // targets, bind the triggering source to its own trailing slot and pin
+    // genuine `ParentTarget` refs to their front slot so the two never read each
+    // other's object; otherwise a plain `ParentTarget` rebind resolves against
+    // the lone snapshot entry. The front-slot pin runs ONLY when a triggering
+    // source was actually found, so a multi-target `ParentTarget` chain without
+    // any "it" reference keeps its full target set untouched.
+    let triggering_index = parent_targets.len();
+    let refs_triggering_source = phase_based_condition && {
+        if refs_parent_target {
+            let found = rebind_triggering_source(
+                &mut delayed_ability,
+                &TargetFilter::ParentTargetSlot {
+                    index: triggering_index,
+                },
+            );
+            if found {
+                pin_parent_target_to_front_slot(&mut delayed_ability);
+            }
+            found
+        } else {
+            rebind_triggering_source_to_parent_target(&mut delayed_ability)
+        }
+    };
+
+    let triggering_source_snapshot = if refs_triggering_source {
+        crate::game::targeting::resolve_event_context_target(
+            state,
+            &TargetFilter::TriggeringSource,
+            ability.source_id,
+        )
+    } else {
+        None
+    };
 
     // CR 603.7c + CR 701.36a: If the delayed inner effect references the
     // "token created this way" anaphor via `TargetFilter::LastCreated`,
@@ -88,24 +148,25 @@ pub fn resolve(
     // time `last_created_token_ids` will have been overwritten by other
     // token-creating effects (CR 603.7c: a delayed trigger refers to a
     // particular object even if later events change it).
-    let snapshot_targets =
-        if super::effect_refs_parent_target(&delayed_ability.effect) || refs_triggering_source {
-            parent_target_snapshot(state, ability)
-        } else if effect_references_last_created(&delayed_ability.effect)
-            && !state.last_created_token_ids.is_empty()
-        {
-            state
-                .last_created_token_ids
-                .iter()
-                .map(|&id| TargetRef::Object(id))
-                .collect()
-        } else {
-            vec![]
-        };
-
-    if refs_triggering_source {
-        rebind_triggering_source_to_parent_target(&mut delayed_ability);
-    }
+    let snapshot_targets = if refs_parent_target || triggering_source_snapshot.is_some() {
+        let mut targets = parent_targets;
+        // When both contexts are live, append the triggering source so it lands
+        // in its own (`triggering_index`) slot; otherwise it is the only entry.
+        if let Some(ts) = triggering_source_snapshot {
+            targets.push(ts);
+        }
+        targets
+    } else if effect_references_last_created(&delayed_ability.effect)
+        && !state.last_created_token_ids.is_empty()
+    {
+        state
+            .last_created_token_ids
+            .iter()
+            .map(|&id| TargetRef::Object(id))
+            .collect()
+    } else {
+        vec![]
+    };
 
     // CR 603.7 + CR 608.2h: Snapshot parent-resolution-dependent
     // quantity refs to Fixed before the delayed trigger gets stashed.
@@ -165,46 +226,70 @@ fn effect_references_last_created(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
 }
 
-/// CR 603.7c: True if any target slot in the ability chain references the
-/// triggering object via `TargetFilter::TriggeringSource` ("return it" /
-/// "exile that creature" / "it becomes …"). Used by `resolve` to decide whether
-/// to snapshot the triggering object at creation time for a phase-based delayed
-/// trigger — see `rebind_triggering_source_to_parent_target`.
-fn ability_chain_refs_triggering_source(ability: &ResolvedAbility) -> bool {
-    matches!(
-        ability.effect.target_filter(),
-        Some(TargetFilter::TriggeringSource)
-    ) || ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(ability_chain_refs_triggering_source)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_chain_refs_triggering_source)
-}
-
 /// CR 603.7c: A delayed triggered ability whose inner effect refers to the
-/// triggering object via `TriggeringSource` must bind that reference to the
-/// object as it was at creation time, NOT re-resolve it at firing time. For
-/// phase-based delayed triggers (`AtNextPhase` / `AtNextPhaseForPlayer`) the
-/// firing event is a `PhaseChanged` that carries no source object, so a
-/// `TriggeringSource` left in the effect would resolve to nothing when the
-/// delayed ability fires. Rewrite every `TriggeringSource` target slot across
-/// the chain to `ParentTarget`, which the resolver resolves against the
-/// snapshotted `ability.targets` (Grave Betrayal: "return it … as a black
-/// Zombie at the beginning of the next end step").
-fn rebind_triggering_source_to_parent_target(ability: &mut ResolvedAbility) {
+/// triggering object via `TriggeringSource` ("return it" / "exile that
+/// creature" / "it becomes …" / "create a token that's a copy of it") must bind
+/// that reference to the object as it was at creation time, NOT re-resolve it at
+/// firing time. For phase-based delayed triggers (`AtNextPhase` /
+/// `AtNextPhaseForPlayer`) the firing event is a `PhaseChanged` that carries no
+/// source object, so a `TriggeringSource` left in the effect would resolve to
+/// nothing when the delayed ability fires.
+///
+/// Single comprehensive authority: walks the whole ability chain and rewrites
+/// EVERY `TriggeringSource` slot — top-level, nested (`And`/`Or`), and hidden
+/// (`CopyTokenOf.target`, `Token.attach_to`, `Attach.attachment`,
+/// `CreateDamageReplacement.recipient_object_filter`, …) — via the
+/// `each_target_filter_mut` visitor, returning `true` if any slot was found and
+/// rebound. Detection and rebinding are one pass; callers no longer need a
+/// separate detector.
+fn rebind_triggering_source(ability: &mut ResolvedAbility, replacement: &TargetFilter) -> bool {
+    let mut found = false;
     crate::parser::oracle_effect::each_target_filter_mut(&mut ability.effect, &mut |filter| {
         if matches!(filter, TargetFilter::TriggeringSource) {
-            *filter = TargetFilter::ParentTarget;
+            *filter = replacement.clone();
+            found = true;
         }
     });
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        rebind_triggering_source_to_parent_target(sub_ability);
+        found |= rebind_triggering_source(sub_ability, replacement);
     }
     if let Some(else_ability) = ability.else_ability.as_mut() {
-        rebind_triggering_source_to_parent_target(else_ability);
+        found |= rebind_triggering_source(else_ability, replacement);
+    }
+    found
+}
+
+/// CR 603.7c: Rewrite every `TriggeringSource` slot across the chain to
+/// `ParentTarget`, which the resolver resolves against the snapshotted
+/// `ability.targets` (Grave Betrayal: "return it … as a black Zombie at the
+/// beginning of the next end step"). Returns whether any slot was rebound — see
+/// `rebind_triggering_source`.
+fn rebind_triggering_source_to_parent_target(ability: &mut ResolvedAbility) -> bool {
+    rebind_triggering_source(ability, &TargetFilter::ParentTarget)
+}
+
+/// CR 603.7c + CR 608.2c: When a phase-based delayed trigger references BOTH the
+/// parent's chosen target (`ParentTarget`) AND the triggering object
+/// (`TriggeringSource`), the two snapshots live in distinct slots of the
+/// delayed ability's `targets`. Pin genuine `ParentTarget` refs to slot 0 (the
+/// parent's chosen target) so they do not over-read the trailing
+/// `TriggeringSource` slot. Mirrors `rebind_triggering_source` but for the
+/// parent-target context; uses the same comprehensive slot visitor.
+///
+/// Assumes a single chosen parent target (slot 0) — the only shape a
+/// phase-delayed "both contexts" ability takes in practice; a multi-target
+/// parent would need per-slot fanout, which no current card exercises.
+fn pin_parent_target_to_front_slot(ability: &mut ResolvedAbility) {
+    crate::parser::oracle_effect::each_target_filter_mut(&mut ability.effect, &mut |filter| {
+        if matches!(filter, TargetFilter::ParentTarget) {
+            *filter = TargetFilter::ParentTargetSlot { index: 0 };
+        }
+    });
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        pin_parent_target_to_front_slot(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        pin_parent_target_to_front_slot(else_ability);
     }
 }
 
@@ -1805,5 +1890,167 @@ mod tests {
             "returned creature must be a Zombie (got subtypes {:?})",
             returned.card_types.subtypes
         );
+    }
+
+    /// Build a `ZoneChanged` triggering event for `object_id` (Battlefield ->
+    /// Graveyard). `resolve_event_context_target(TriggeringSource)` reads this to
+    /// snapshot the dying object at delayed-trigger creation time.
+    fn dies_event(object_id: ObjectId) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                object_id,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        }
+    }
+
+    fn copy_token_of(target: TargetFilter) -> Effect {
+        Effect::CopyTokenOf {
+            target,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        }
+    }
+
+    /// FIX B — CR 603.7c: A phase-based delayed trigger whose inner effect is
+    /// `CopyTokenOf { target: TriggeringSource }` ("at the beginning of the next
+    /// end step, create a token that's a copy of it") hides its copy-source slot
+    /// from `Effect::target_filter()`. The comprehensive `each_target_filter_mut`
+    /// visitor must still reach it so the triggering object is snapshotted and the
+    /// `TriggeringSource` slot is rebound — otherwise the copy at firing time has
+    /// no source. Discriminates: pre-FIX-B the hidden `CopyTokenOf.target` was
+    /// never visited, so `targets` stayed empty and the slot stayed
+    /// `TriggeringSource`.
+    #[test]
+    fn copy_token_of_triggering_source_is_snapshotted_and_rebound() {
+        let mut state = GameState::new_two_player(42);
+        let dying = ObjectId(10);
+        state.current_trigger_event = Some(dies_event(dying));
+
+        let effect_def =
+            AbilityDefinition::new(AbilityKind::Spell, copy_token_of(TargetFilter::TriggeringSource));
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        // The triggering object was snapshotted into the delayed ability's targets.
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(dying)],
+            "the hidden CopyTokenOf copy-source must snapshot the triggering object"
+        );
+        // The hidden copy-source slot was rebound off TriggeringSource so it
+        // resolves against the snapshot (ParentTarget -> ability.targets).
+        match &state.delayed_triggers[0].ability.effect {
+            Effect::CopyTokenOf { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTarget,
+                    "the hidden CopyTokenOf.target must be rebound from TriggeringSource"
+                );
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    /// FIX A — CR 603.7c: A phase-based delayed trigger that references BOTH the
+    /// parent's chosen target (`ParentTarget`) AND the triggering object
+    /// (`TriggeringSource`, "it") must resolve each to its OWN distinct object.
+    /// The TriggeringSource snapshot is taken from the creation-time event, NOT
+    /// from `ability.targets`; the two contexts live in separate slots so they
+    /// never collide. Discriminates: if the snapshot reuses `ability.targets`
+    /// (the parent's chosen object), "it" would wrongly bind to the chosen target
+    /// instead of the dying creature.
+    #[test]
+    fn both_parent_target_and_triggering_source_resolve_to_distinct_objects() {
+        let mut state = GameState::new_two_player(42);
+        let chosen = ObjectId(20); // parent's chosen target
+        let dying = ObjectId(21); // triggering ("it") object — distinct
+        state.current_trigger_event = Some(dies_event(dying));
+
+        // Inner chain: Bounce ParentTarget (the chosen target), then a sub-ability
+        // CopyTokenOf TriggeringSource (a copy of "it").
+        let mut effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+        );
+        effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            copy_token_of(TargetFilter::TriggeringSource),
+        )));
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            // The parent ability has a chosen target (`chosen`).
+            vec![TargetRef::Object(chosen)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        // Slot 0 = chosen parent target; slot 1 = independent triggering source.
+        assert_eq!(
+            delayed.ability.targets,
+            vec![TargetRef::Object(chosen), TargetRef::Object(dying)],
+            "parent chosen target and triggering source must occupy distinct slots"
+        );
+        // Genuine ParentTarget was pinned to slot 0 (the chosen target).
+        match &delayed.ability.effect {
+            Effect::Bounce { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    "genuine ParentTarget must pin to the chosen-target slot, not the triggering source"
+                );
+            }
+            other => panic!("expected Bounce, got {other:?}"),
+        }
+        // TriggeringSource was rebound to its own trailing slot (index 1), which
+        // resolves to the dying object — NOT the chosen target.
+        let sub = delayed
+            .ability
+            .sub_ability
+            .as_deref()
+            .expect("sub-ability must be preserved");
+        match &sub.effect {
+            Effect::CopyTokenOf { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetSlot { index: 1 },
+                    "TriggeringSource must bind to its own slot (the dying object), distinct from the chosen target"
+                );
+            }
+            other => panic!("expected sub CopyTokenOf, got {other:?}"),
+        }
     }
 }

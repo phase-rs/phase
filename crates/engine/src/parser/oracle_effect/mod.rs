@@ -13734,21 +13734,41 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
 }
 
 /// CR 109.4 + CR 608.2c: Apply `f` to every `TargetFilter` reachable through
-/// the common target-bearing fields of an `Effect`. Companion to
+/// an `Effect` — the single authority for target-slot traversal. Companion to
 /// `each_quantity_expr_mut`; used by callers that need to rewrite target slots
 /// across an effect chain (e.g. the prevention follow-up call site rewrites
 /// `ParentTargetController` → `PostReplacementSourceController` so "the source's
-/// controller draws cards" resolves against the prevented event's damage source).
+/// controller draws cards" resolves against the prevented event's damage source,
+/// and the phase-based delayed-trigger rebind that maps `TriggeringSource` →
+/// `ParentTarget`).
 ///
-/// Pragmatic visitor — covers the subset of `Effect` variants whose target
-/// slots are statically declared as `TargetFilter` or `Option<TargetFilter>`.
-/// Variants not listed here keep their target slots untouched; **add an arm
-/// when introducing a new target-bearing variant** so future rewrites cover it.
-/// Variant list mirrors `replace_target_with_parent` plus a handful of
-/// player-targetable effects (Draw, LoseLife, Discard, Mill, Scry, Surveil,
-/// RevealFromHand) whose `target` field is a `TargetFilter` and can therefore
-/// hold a player ref like `ParentTargetController`.
+/// Comprehensive visitor — covers every `Effect` variant whose target slots are
+/// declared as `TargetFilter` or `Option<TargetFilter>`, including the *hidden*
+/// context/object slots that no longer surface through the single-slot
+/// `Effect::target_filter()` accessor (`CopyTokenOf.{target, owner,
+/// source_filter}`, `Token.{owner, attach_to}`, `Attach.attachment`,
+/// `UnattachAll.attachment`, and the three `CreateDamageReplacement` filters).
+/// Each visited slot is also descended into via `And`/`Or`/`Not` so a context
+/// ref nested inside a composite filter is reached too. **Add an arm when
+/// introducing a new target-bearing variant** so future rewrites cover it.
 pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut TargetFilter)) {
+    /// Apply `f` to `filter` and then descend into its `And`/`Or`/`Not`
+    /// children so a target slot holding a composite filter has every leaf
+    /// visited. `f` runs on the composite node first (so a rewrite that
+    /// replaces the whole node still works) and then on each surviving child.
+    fn visit(filter: &mut TargetFilter, f: &mut impl FnMut(&mut TargetFilter)) {
+        f(filter);
+        match filter {
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                for nested in filters.iter_mut() {
+                    visit(nested, f);
+                }
+            }
+            TargetFilter::Not { filter } => visit(filter, f),
+            _ => {}
+        }
+    }
+
     match effect {
         // CR 701.26a/b: only single-target tap/untap exposes a per-event target
         // filter; the mass (`All`) scope is a population filter and was never
@@ -13767,8 +13787,6 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Bounce { target, .. }
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::UnattachAll { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
@@ -13784,17 +13802,77 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::RevealTop { player: target, .. }
         | Effect::ExileTop { player: target, .. }
         | Effect::Manifest { target, .. }
-        | Effect::TargetOnly { target, .. } => f(target),
-        Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
-        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
+        | Effect::TargetOnly { target, .. } => visit(target, f),
+        Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => {
+            visit(target, f)
+        }
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
+            visit(target, f)
+        }
+        // CR 303.7 + CR 601.2c: `Attach`/`UnattachAll` carry TWO target slots —
+        // the host (`target`) and the equipment/aura moved onto it
+        // (`attachment`). Both must be visited so a context ref ("attach it to
+        // …") in either position is rebound.
+        Effect::Attach { target, attachment } | Effect::UnattachAll { target, attachment } => {
+            visit(target, f);
+            visit(attachment, f);
+        }
+        // CR 109.4 + CR 115.1 + CR 707.2: `CopyTokenOf` hides the copy *source*
+        // (`target`), the token *creator/owner* (`owner`), and the non-targeting
+        // for-each source set (`source_filter`). `Effect::target_filter()`
+        // surfaces only one of these, so the hidden slots must be visited here —
+        // a phase-delayed "create a token that's a copy of it" lowers "it" into
+        // `target: TriggeringSource` and would otherwise never be rebound.
+        Effect::CopyTokenOf {
+            target,
+            owner,
+            source_filter,
+            ..
+        } => {
+            visit(target, f);
+            visit(owner, f);
+            if let Some(source_filter) = source_filter {
+                visit(source_filter, f);
+            }
+        }
+        // CR 109.4 + CR 303.7: `Token` hides its creator/owner and the
+        // attach-to host; `Effect::target_filter()` surfaces only one.
+        Effect::Token {
+            owner, attach_to, ..
+        } => {
+            visit(owner, f);
+            if let Some(attach_to) = attach_to {
+                visit(attach_to, f);
+            }
+        }
+        // CR 614.9 + CR 115.1: `CreateDamageReplacement` carries three hidden
+        // `TargetFilter` slots (the damage source, the redirect recipient, and
+        // the original-recipient host) that `Effect::target_filter()` returns
+        // `None` for. Visit each so a context ref in any of them is rebound.
+        Effect::CreateDamageReplacement {
+            source_filter,
+            redirect_object_filter,
+            recipient_object_filter,
+            ..
+        } => {
+            if let Some(source_filter) = source_filter {
+                visit(source_filter, f);
+            }
+            if let Some(redirect_object_filter) = redirect_object_filter {
+                visit(redirect_object_filter, f);
+            }
+            if let Some(recipient_object_filter) = recipient_object_filter {
+                visit(recipient_object_filter, f);
+            }
+        }
         Effect::LoseLife {
             target: Some(target),
             ..
-        } => f(target),
+        } => visit(target, f),
         Effect::GenericEffect {
             target: Some(target),
             ..
-        } => f(target),
+        } => visit(target, f),
         _ => {}
     }
 }
