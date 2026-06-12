@@ -249,25 +249,42 @@ fn contextual_batched_trigger_event(
     trig_def: &TriggerDefinition,
     obj_id: ObjectId,
 ) -> Option<GameEvent> {
-    let GameEvent::AttackersDeclared {
-        defending_player, ..
-    } = event
-    else {
-        return Some(event.clone());
-    };
-
-    let matching_attacks = match trig_def.mode {
-        TriggerMode::Attacks => {
+    let (defending_player, matching_attacks) = match (event, trig_def.mode.clone()) {
+        (
+            GameEvent::AttackersDeclared {
+                defending_player, ..
+            },
+            TriggerMode::Attacks,
+        ) => (
+            *defending_player,
             super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
                 .into_iter()
                 .flat_map(|event| match event {
                     GameEvent::AttackersDeclared { attacks, .. } => attacks,
                     _ => Vec::new(),
                 })
-                .collect()
-        }
-        TriggerMode::YouAttack => {
-            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state)
+                .collect(),
+        ),
+        (
+            GameEvent::AttackersDeclared {
+                defending_player, ..
+            },
+            TriggerMode::YouAttack,
+        ) => (
+            *defending_player,
+            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state),
+        ),
+        (GameEvent::BlockersDeclared { .. }, TriggerMode::YouAttackUnblocked) => {
+            let matching = super::trigger_matchers::matching_you_attack_unblocked_pairs(
+                event, trig_def, obj_id, state,
+            );
+            let defending_player = state
+                .combat
+                .as_ref()
+                .and_then(|combat| combat.attackers.first().map(|a| a.defending_player))
+                .or_else(|| state.objects.get(&obj_id).map(|o| o.controller))
+                .unwrap_or(PlayerId(0));
+            (defending_player, matching)
         }
         _ => return Some(event.clone()),
     };
@@ -285,7 +302,7 @@ fn contextual_batched_trigger_event(
     // event subset, not every attacker in the declaration.
     Some(GameEvent::AttackersDeclared {
         attacker_ids: matching_attackers,
-        defending_player: *defending_player,
+        defending_player,
         attacks: matching_attacks,
     })
 }

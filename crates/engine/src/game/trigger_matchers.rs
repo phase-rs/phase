@@ -78,6 +78,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::LeavesBattlefield => match_leaves_battlefield,
         TriggerMode::BecomesBlocked => match_becomes_blocked,
         TriggerMode::YouAttack => match_you_attack,
+        TriggerMode::YouAttackUnblocked => match_you_attack_unblocked,
         TriggerMode::DamageReceived => match_damage_received,
         TriggerMode::ExcessDamage => match_excess_damage,
         TriggerMode::ExcessDamageAll => match_excess_damage_all,
@@ -284,6 +285,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Combat: becomes blocked, you attack
     r.insert(TriggerMode::BecomesBlocked, match_becomes_blocked);
     r.insert(TriggerMode::YouAttack, match_you_attack);
+    r.insert(TriggerMode::YouAttackUnblocked, match_you_attack_unblocked);
 
     // Damage: is dealt damage
     r.insert(TriggerMode::DamageReceived, match_damage_received);
@@ -3143,6 +3145,57 @@ pub(super) fn match_you_attack(
     state: &GameState,
 ) -> bool {
     !matching_you_attack_pairs(event, trigger, source_id, state).is_empty()
+}
+
+/// CR 508.3d + CR 509.1h: Batched "one or more [creatures] attack [you] and
+/// aren't blocked" triggers. Fires on `BlockersDeclared` when at least one
+/// attacker matching the trigger's filters was not assigned blockers.
+pub(super) fn match_you_attack_unblocked(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    !matching_you_attack_unblocked_pairs(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_you_attack_unblocked_pairs(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<(ObjectId, crate::game::combat::AttackTarget)> {
+    let GameEvent::BlockersDeclared { .. } = event else {
+        return Vec::new();
+    };
+    let Some(combat) = state.combat.as_ref() else {
+        return Vec::new();
+    };
+    if combat.attackers.is_empty() {
+        return Vec::new();
+    }
+    let defending_player = combat.attackers[0].defending_player;
+    let attacker_ids: Vec<ObjectId> = combat.attackers.iter().map(|a| a.object_id).collect();
+    let attacks: Vec<_> = combat
+        .attackers
+        .iter()
+        .map(|a| (a.object_id, a.attack_target))
+        .collect();
+    let synthetic = GameEvent::AttackersDeclared {
+        attacker_ids,
+        defending_player,
+        attacks,
+    };
+    matching_you_attack_pairs(&synthetic, trigger, source_id, state)
+        .into_iter()
+        .filter(|(id, _)| {
+            combat
+                .attackers
+                .iter()
+                .find(|attacker| attacker.object_id == *id)
+                .is_some_and(|attacker| !attacker.blocked)
+        })
+        .collect()
 }
 
 pub(super) fn matching_you_attack_pairs(
@@ -7001,6 +7054,104 @@ mod tests {
         assert!(!match_attacker_unblocked(
             &event, &trigger, attacker, &state
         ));
+    }
+
+    #[test]
+    fn you_attack_unblocked_matches_opponent_creature_attacking_you_unblocked() {
+        let mut state = setup();
+        let jewel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coveted Jewel".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker,
+                PlayerId(0),
+            )],
+            ..Default::default()
+        });
+        let mut trigger = make_trigger(TriggerMode::YouAttackUnblocked);
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![],
+        };
+        assert!(match_you_attack_unblocked(&event, &trigger, jewel, &state));
+    }
+
+    #[test]
+    fn you_attack_unblocked_rejects_blocked_opponent_attacker() {
+        let mut state = setup();
+        let jewel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coveted Jewel".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let mut attacker_info =
+            crate::game::combat::AttackerInfo::attacking_player(attacker, PlayerId(0));
+        attacker_info.blocked = true;
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![attacker_info],
+            ..Default::default()
+        });
+        let mut trigger = make_trigger(TriggerMode::YouAttackUnblocked);
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, attacker)],
+        };
+        assert!(!match_you_attack_unblocked(&event, &trigger, jewel, &state));
     }
 
     #[test]

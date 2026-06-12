@@ -236,6 +236,10 @@ pub enum TriggerMode {
     AttackersDeclared,
     /// CR 508.3d: "Whenever you attack" — triggers for the attacking player.
     YouAttack,
+    /// CR 508.3d + CR 509.1h: "Whenever one or more [creatures] attack [you] and
+    /// aren't blocked" — fires after blockers are declared when at least one
+    /// matching attacker was not assigned blockers.
+    YouAttackUnblocked,
     AttackersDeclaredOneTarget,
     /// CR 509.1h: Triggers when an attacking creature becomes blocked.
     AttackerBlocked,
@@ -709,6 +713,7 @@ impl FromStr for TriggerMode {
             "VisitAttraction" => TriggerMode::VisitAttraction,
             "Vote" => TriggerMode::Vote,
             "YouAttack" => TriggerMode::YouAttack,
+            "YouAttackUnblocked" => TriggerMode::YouAttackUnblocked,
             "Waterbend" => TriggerMode::Waterbend,
             _ => TriggerMode::Unknown(s.to_string()),
         };
@@ -974,6 +979,7 @@ mod tests {
             "Vote",
             "Waterbend",
             "YouAttack",
+            "YouAttackUnblocked",
         ];
 
         let mut known_count = 0;
