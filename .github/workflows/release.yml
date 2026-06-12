@@ -149,7 +149,7 @@ jobs:
         # phase-tauri is excluded from the root workspace (client/src-tauri),
         # so `-p phase-tauri` from the repo root cannot resolve it. Drive the
         # check via the crate's own manifest instead.
-        run: cargo check --manifest-path client/src-tauri/Cargo.toml
+        run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
 
   build-wasm:
     name: Build WASM + Frontend
