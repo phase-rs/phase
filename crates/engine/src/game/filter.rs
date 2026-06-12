@@ -1287,12 +1287,21 @@ fn filter_inner_for_object(
                     // surface a TargetFilter::Player slot via collect_target_slots
                     // whenever this variant appears).
                     ControllerRef::TargetPlayer => {
-                        let target_player = ability.and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                TargetRef::Player(pid) => Some(*pid),
-                                TargetRef::Object(_) => None,
+                        let target_player = ability
+                            .and_then(|a| {
+                                a.targets.iter().find_map(|t| match t {
+                                    TargetRef::Player(pid) => Some(*pid),
+                                    TargetRef::Object(_) => None,
+                                })
                             })
-                        });
+                            // CR 603.2: When no player target was chosen, "that
+                            // player" is the triggering event's player. Non-Phase
+                            // triggers resolve their player anaphor from event
+                            // context, not a chosen/auto-bound target — Hellkite
+                            // Tyrant's "all artifacts that player controls" on a
+                            // combat-damage trigger. Mirrors the TriggeringPlayer
+                            // arm below; inert outside a trigger.
+                            .or_else(|| crate::game::quantity::triggering_event_player(state));
                         match target_player {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -1455,10 +1464,18 @@ fn filter_inner_for_object(
         // therefore matches no objects, which is the correct fallback when no
         // tracked set is available.
         TargetFilter::TrackedSetFiltered { id, filter } => {
-            let in_set = state
-                .tracked_object_sets
-                .get(id)
-                .is_some_and(|set| set.contains(&object_id));
+            let in_set = if id.0 == 0 {
+                state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(tracked_id, _)| tracked_id.0)
+                    .is_some_and(|(_, set)| set.contains(&object_id))
+            } else {
+                state
+                    .tracked_object_sets
+                    .get(id)
+                    .is_some_and(|set| set.contains(&object_id))
+            };
             in_set
                 && filter_inner_for_object(
                     state,

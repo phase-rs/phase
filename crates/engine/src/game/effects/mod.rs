@@ -550,6 +550,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_with_counters,
             duration,
             track_exiled_by_source,
+            mut moved_count,
             effect_kind,
         } = pending;
         let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
@@ -575,11 +576,33 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
+            let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
                 state, &ctx, *obj_id, events,
             ) {
-                crate::game::effects::change_zone::ZoneMoveResult::Done => {}
+                crate::game::effects::change_zone::ZoneMoveResult::Done => {
+                    if let Some(count) = moved_count.as_mut() {
+                        if before_zone != Some(ctx.destination)
+                            && state
+                                .objects
+                                .get(obj_id)
+                                .is_some_and(|object| object.zone == ctx.destination)
+                        {
+                            *count += 1;
+                        }
+                    }
+                }
                 crate::game::effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    if let Some(count) = moved_count.as_mut() {
+                        if before_zone != Some(ctx.destination)
+                            && state
+                                .objects
+                                .get(obj_id)
+                                .is_some_and(|object| object.zone == ctx.destination)
+                        {
+                            *count += 1;
+                        }
+                    }
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
                             remaining: remaining[i + 1..].to_vec(),
@@ -594,6 +617,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_with_counters: ctx.enter_with_counters.clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            moved_count,
                             effect_kind,
                         });
                     paused = true;
@@ -614,6 +638,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_with_counters: ctx.enter_with_counters.clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            moved_count,
                             effect_kind,
                         });
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -657,6 +682,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // Devour snapshot. NOT cleared on the `paused` break above (a further
         // devourer's sacrifice and the remaining members still need it).
         let _ = state.devour_eligible_snapshot.take();
+        if let Some(count) = moved_count {
+            state.last_effect_count = Some(count);
+        }
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
@@ -1941,6 +1969,7 @@ pub fn resolve_effect(
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
+        Effect::GainControlAll { .. } => gain_control::resolve_all(state, ability, events),
         Effect::Goad { .. } | Effect::GoadAll { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
@@ -1979,6 +2008,7 @@ pub fn resolve_effect(
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),
+        Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)
@@ -2255,6 +2285,16 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    if let Effect::SetTapState {
+        scope: EffectScope::All,
+        target,
+        ..
+    } = effect
+    {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     // `GrantCastingPermission` has a `target` field that is not exposed by
     // `Effect::target_filter()` (it selects objects to grant permission to,
     // not spell/ability targets). Inspect directly so "the rest" / "those
@@ -2354,6 +2394,13 @@ fn affected_objects_from_events(
             .filter_map(|target| match target {
                 TargetRef::Object(id) => Some(*id),
                 TargetRef::Player(_) => None,
+            })
+            .collect(),
+        Effect::GainControlAll { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ControllerChanged { object_id, .. } => Some(*object_id),
+                _ => None,
             })
             .collect(),
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
@@ -6073,10 +6120,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
-        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        ControllerRef, DelayedTriggerCondition, Duration, EffectScope, FilterProp,
+        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
+        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -9127,6 +9174,93 @@ mod tests {
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
     }
 
+    /// CR 613.1b + CR 608.2c: a mass gain-control effect publishes the objects
+    /// actually gained so a downstream "those creatures" continuation can act on
+    /// that exact set (Call for Aid / Mob Rule class). This exercises both the
+    /// `GainControlAll` publication arm and the `SetTapState(All)` tracked-set
+    /// consumer path; without either, the creatures remain tapped.
+    #[test]
+    fn gain_control_all_publishes_tracked_set_for_those_creatures_tail() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Call for Aid".to_string(),
+            Zone::Stack,
+        );
+
+        let make_tapped_creature = |state: &mut GameState, card_id: u64, name: &str| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.tapped = true;
+            id
+        };
+        let creature_a = make_tapped_creature(&mut state, 2, "Stolen A");
+        let creature_b = make_tapped_creature(&mut state, 3, "Stolen B");
+        let noncreature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Ignored Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&noncreature).unwrap().tapped = true;
+
+        let untap_those_creatures = ResolvedAbility::new(
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let gain_control = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(untap_those_creatures);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &gain_control, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        for id in [creature_a, creature_b] {
+            let obj = state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.controller,
+                PlayerId(0),
+                "gained creature should be controlled by P0"
+            );
+            assert!(
+                !obj.tapped,
+                "gained creature should be untapped by the tracked-set tail"
+            );
+        }
+        assert!(
+            state.objects.get(&noncreature).unwrap().tapped,
+            "non-gained object must not be included in the tracked set"
+        );
+    }
+
     /// CR 701.20b + CR 608.2c: `RevealTop` publishes `CardsRevealed`, not
     /// `ZoneChanged`. Without a dedicated arm in `affected_objects_from_events`,
     /// the tracked-set publish is empty and `ChooseFromZone` falls back to a
@@ -11477,6 +11611,9 @@ mod tests {
                     source_id: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -14103,6 +14240,9 @@ mod tests {
                     source_id: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

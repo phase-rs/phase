@@ -93,7 +93,7 @@ fn score_activation(
 
     for effect in effects {
         match effect {
-            Effect::GainControl { .. } => {
+            Effect::GainControl { .. } | Effect::GainControlAll { .. } => {
                 control_change_effect = true;
             }
             Effect::ExchangeControl { target_a, target_b } => {
@@ -130,7 +130,7 @@ fn score_selected_targets(ctx: &PolicyContext<'_>, targets: &[TargetRef]) -> Pol
 
     for effect in ctx.effects() {
         match effect {
-            Effect::GainControl { .. } => {
+            Effect::GainControl { .. } | Effect::GainControlAll { .. } => {
                 control_change_effect = true;
             }
             Effect::GiveControl { target, .. } => {
