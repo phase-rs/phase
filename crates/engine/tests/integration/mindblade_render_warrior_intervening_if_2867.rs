@@ -55,8 +55,17 @@ fn mindblade_render_fires_when_a_warrior_deals_combat_damage() {
     let p1_life_before = runner.life(P1);
 
     run_combat(&mut runner, vec![warrior], vec![]);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&warrior)
+        .expect("attacker must remain present before trigger resolution")
+        .card_types
+        .subtypes = vec!["Human".to_string()];
     // CR 603.3: the intervening-if trigger went on the stack during the combat
     // damage step; resolve it (the draw/lose-life are mandatory, no prompt).
+    // CR 608.2i + CR 608.2h: "that damage was dealt by a Warrior" reads the
+    // source's damage-time snapshot, not its live subtypes at resolution.
     runner.advance_until_stack_empty();
 
     assert_eq!(

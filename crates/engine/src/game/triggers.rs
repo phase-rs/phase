@@ -31,7 +31,10 @@ use super::conditions::{
     eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
     eval_source_is_attacking, eval_source_is_tapped,
 };
-use super::filter::{matches_target_filter, spell_record_matches_filter, FilterContext};
+use super::filter::{
+    matches_target_filter, matches_target_filter_on_damage_record_source,
+    spell_record_matches_filter, FilterContext,
+};
 use super::game_object::GameObject;
 use super::speed::{
     effective_speed, has_max_speed, mark_speed_trigger_used, speed_key_source,
@@ -4438,35 +4441,57 @@ pub(crate) fn check_trigger_condition(
             matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
         }),
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
-        // — true when ANY source of the triggering damage matches `filter`. An
-        // object that deals damage is the source of that damage (CR 120.1).
-        // Both damage-event shapes are handled because a `DamageReceived`
-        // trigger ("your opponents are dealt combat damage") is dispatched on
-        // the per-source `DamageDealt` event, while the batched
-        // `CombatDamageDealtToPlayer` event carries the step-local per-source
-        // amounts; checking either keeps the predicate correct regardless of
-        // which event the matcher fired on. Reuses `target_filter_matches_object`
-        // — the same matcher the trigger source-filter layer uses — relative to
-        // the ability's own source for context. The `unwrap_or` fallback is only
-        // reached if `source_id` is absent, which does not occur for a
-        // battlefield-bound triggered ability.
-        TriggerCondition::EventDamageSourceMatchesFilter { filter } => {
-            let ctx_source = source_id.unwrap_or(ObjectId(0));
-            let source_matches = |id: ObjectId| {
-                crate::game::trigger_matchers::target_filter_matches_object(
-                    state, id, filter, ctx_source,
-                )
-            };
-            match trigger_event {
-                Some(GameEvent::DamageDealt {
-                    source_id: dmg_src, ..
-                }) => source_matches(*dmg_src),
-                Some(GameEvent::CombatDamageDealtToPlayer { source_amounts, .. }) => {
-                    source_amounts.iter().any(|(src, _)| source_matches(*src))
+        // evaluates the triggering damage source as it was when the damage was
+        // dealt. Reuse the same DamageRecord snapshot matcher as
+        // PlayerFilter::OpponentDealtCombatDamage so later type changes or zone
+        // moves do not change what "that damage was dealt by" refers to.
+        TriggerCondition::EventDamageSourceMatchesFilter { filter } => trigger_event
+            .and_then(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id: dmg_src,
+                    target,
+                    amount,
+                    is_combat,
+                    ..
+                } => {
+                    let ctx = FilterContext::from_source_with_controller(
+                        source_id.unwrap_or(ObjectId(0)),
+                        controller,
+                    );
+                    state.damage_dealt_this_turn.iter().rev().find(|record| {
+                        record.source_id == *dmg_src
+                            && record.target == *target
+                            && record.amount == *amount
+                            && record.is_combat == *is_combat
+                            && matches_target_filter_on_damage_record_source(
+                                state, record, filter, &ctx,
+                            )
+                    })
                 }
-                _ => false,
-            }
-        }
+                GameEvent::CombatDamageDealtToPlayer {
+                    player_id,
+                    source_amounts,
+                    ..
+                } => {
+                    let ctx = FilterContext::from_source_with_controller(
+                        source_id.unwrap_or(ObjectId(0)),
+                        controller,
+                    );
+                    source_amounts.iter().find_map(|(dmg_src, amount)| {
+                        state.damage_dealt_this_turn.iter().rev().find(|record| {
+                            record.source_id == *dmg_src
+                                && record.target == TargetRef::Player(*player_id)
+                                && record.amount == *amount
+                                && record.is_combat
+                                && matches_target_filter_on_damage_record_source(
+                                    state, record, filter, &ctx,
+                                )
+                        })
+                    })
+                }
+                _ => None,
+            })
+            .is_some(),
         // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
         // persisted `ChosenAttribute::Label` (set when the anchor-word
         // permanent entered the battlefield) matches the linked anchor word.
