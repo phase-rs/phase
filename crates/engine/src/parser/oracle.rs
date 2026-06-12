@@ -8559,6 +8559,61 @@ mod tests {
         );
     }
 
+    /// Issue #2858: Archangel Elspeth's three loyalty abilities must parse as
+    /// three separate activated abilities in printed order with costs +1, -2,
+    /// and -6. If the -6 line drops or mis-costs, activating it charges the wrong
+    /// loyalty. The -6 effect is the mass return-from-graveyard.
+    #[test]
+    fn archangel_elspeth_loyalty_abilities_parse() {
+        let r = parse(
+            "[+1]: Create a 1/1 white Soldier creature token with lifelink.\n\
+             [\u{2212}2]: Put two +1/+1 counters on target creature. It becomes an Angel in addition to its other types and gains flying.\n\
+             [\u{2212}6]: Return all nonland permanent cards with mana value 3 or less from your graveyard to the battlefield.",
+            "Archangel Elspeth",
+            &[],
+            &["Planeswalker"],
+            &["Elspeth"],
+        );
+        assert_eq!(r.abilities.len(), 3, "abilities: {:?}", r.abilities);
+        assert!(
+            matches!(
+                r.abilities[0].cost,
+                Some(AbilityCost::Loyalty { amount: 1 })
+            ),
+            "ability 0 cost: {:?}",
+            r.abilities[0].cost
+        );
+        assert!(
+            matches!(
+                r.abilities[1].cost,
+                Some(AbilityCost::Loyalty { amount: -2 })
+            ),
+            "ability 1 cost: {:?}",
+            r.abilities[1].cost
+        );
+        assert!(
+            matches!(
+                r.abilities[2].cost,
+                Some(AbilityCost::Loyalty { amount: -6 })
+            ),
+            "ability 2 cost: {:?}",
+            r.abilities[2].cost
+        );
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            ..
+        } = &*r.abilities[2].effect
+        else {
+            panic!(
+                "the -6 effect must be a graveyard-to-battlefield mass return, got {:?}",
+                r.abilities[2].effect
+            );
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Battlefield);
+    }
+
     #[test]
     fn forest_reminder_text_only() {
         let r = parse("({T}: Add {G}.)", "Forest", &[], &["Land"], &["Forest"]);

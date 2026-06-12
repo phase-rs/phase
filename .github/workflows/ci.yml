@@ -332,7 +332,7 @@ jobs:
         # 30-45min build-tauri matrix. Catches them on every PR in ~3 min.
         # Driven via --manifest-path because client/src-tauri is excluded
         # from the root workspace, so `-p phase-tauri` cannot resolve it.
-        run: cargo check --manifest-path client/src-tauri/Cargo.toml
+        run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
 
   rust-check:
     name: Rust (fmt, clippy, test, coverage-gate)
