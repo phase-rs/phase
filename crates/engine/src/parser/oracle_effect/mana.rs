@@ -2487,6 +2487,37 @@ mod tests {
         }
     }
 
+    /// Issue #2900: Blinkmoth Urn effect body after the intervening-if clause.
+    #[test]
+    fn parse_add_mana_that_player_for_each_artifact_they_control() {
+        let effect =
+            try_parse_add_mana_effect("that player adds {C} for each artifact they control.")
+                .expect("Blinkmoth Urn mana body must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    target,
+                    Some(TargetFilter::ScopedPlayer),
+                    "recipient must be the scoped phase player"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "count must be ObjectCount, got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::Mana, got {other:?}"),
+        }
+    }
+
     /// CR 106.1: `{C}{C} for each X` preserves the literal symbol count as a
     /// `Multiply` factor; `{C} for each X` emits a bare `Ref` (no `Multiply`).
     #[test]

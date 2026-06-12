@@ -70,6 +70,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -252,6 +253,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -1285,12 +1287,21 @@ fn filter_inner_for_object(
                     // surface a TargetFilter::Player slot via collect_target_slots
                     // whenever this variant appears).
                     ControllerRef::TargetPlayer => {
-                        let target_player = ability.and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                TargetRef::Player(pid) => Some(*pid),
-                                TargetRef::Object(_) => None,
+                        let target_player = ability
+                            .and_then(|a| {
+                                a.targets.iter().find_map(|t| match t {
+                                    TargetRef::Player(pid) => Some(*pid),
+                                    TargetRef::Object(_) => None,
+                                })
                             })
-                        });
+                            // CR 603.2: When no player target was chosen, "that
+                            // player" is the triggering event's player. Non-Phase
+                            // triggers resolve their player anaphor from event
+                            // context, not a chosen/auto-bound target — Hellkite
+                            // Tyrant's "all artifacts that player controls" on a
+                            // combat-damage trigger. Mirrors the TriggeringPlayer
+                            // arm below; inert outside a trigger.
+                            .or_else(|| crate::game::quantity::triggering_event_player(state));
                         match target_player {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -1433,6 +1444,7 @@ fn filter_inner_for_object(
             .and_then(|t| t.as_object())
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
+        TargetFilter::LastRevealed => state.last_revealed_ids.contains(&object_id),
         TargetFilter::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
             .is_some_and(|snapshot| snapshot.object_id == object_id),
@@ -1452,10 +1464,18 @@ fn filter_inner_for_object(
         // therefore matches no objects, which is the correct fallback when no
         // tracked set is available.
         TargetFilter::TrackedSetFiltered { id, filter } => {
-            let in_set = state
-                .tracked_object_sets
-                .get(id)
-                .is_some_and(|set| set.contains(&object_id));
+            let in_set = if id.0 == 0 {
+                state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(tracked_id, _)| tracked_id.0)
+                    .is_some_and(|(_, set)| set.contains(&object_id))
+            } else {
+                state
+                    .tracked_object_sets
+                    .get(id)
+                    .is_some_and(|set| set.contains(&object_id))
+            };
             in_set
                 && filter_inner_for_object(
                     state,
@@ -1715,6 +1735,7 @@ fn zone_change_filter_inner(
             .iter()
             .any(|att| att.object_id == source_id),
         TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -1944,6 +1965,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::Neighbor { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -2181,6 +2203,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::Neighbor { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -4052,6 +4075,26 @@ fn most_prevalent_creature_types_in_zone(
 /// For "creature type": all objects must share at least one creature subtype.
 /// For "color": all objects must share at least one color.
 /// For "card type": all objects must share at least one card type.
+/// CR 608.2c + CR 201.2: True when two objects share at least one value of the
+/// named quality. Used by `AbilityCondition::ObjectsShareQuality`.
+pub fn objects_share_quality(
+    state: &GameState,
+    left: ObjectId,
+    right: ObjectId,
+    quality: &SharedQuality,
+) -> bool {
+    let Some(left_obj) = state.objects.get(&left) else {
+        return false;
+    };
+    let Some(right_obj) = state.objects.get(&right) else {
+        return false;
+    };
+    let left_vals = object_shared_quality_values(left_obj, quality, &state.all_creature_types);
+    let right_vals = object_shared_quality_values(right_obj, quality, &state.all_creature_types);
+    !left_vals.is_disjoint(&right_vals)
+}
+
+/// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
 pub fn validate_shares_quality(
     state: &GameState,
     targets: &[TargetRef],
@@ -5874,6 +5917,60 @@ mod tests {
             nonmatching,
             &filter,
             &ctx
+        ));
+    }
+
+    #[test]
+    fn objects_share_quality_matches_shared_card_type() {
+        let mut state = setup();
+        let creature_a = add_creature(&mut state, PlayerId(0), "Creature A");
+        let creature_b = add_creature(&mut state, PlayerId(0), "Creature B");
+
+        assert!(super::objects_share_quality(
+            &state,
+            creature_a,
+            creature_b,
+            &SharedQuality::CardType,
+        ));
+        let instant = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Instant A".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Land A".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert!(!super::objects_share_quality(
+            &state,
+            creature_a,
+            land,
+            &SharedQuality::CardType,
+        ));
+        assert!(!super::objects_share_quality(
+            &state,
+            creature_a,
+            instant,
+            &SharedQuality::CardType,
         ));
     }
 

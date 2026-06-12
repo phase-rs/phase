@@ -56,6 +56,73 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 613.1b: Mass control-change (Layer 2 — control-changing effects) — gain
+/// control of EVERY battlefield permanent matching the effect's `target` filter
+/// (the untargeted "all" counterpart of [`resolve`], mirroring
+/// `destroy::resolve_all`). Hellkite Tyrant's "gain control of all artifacts
+/// that player controls": the filter is enumerated against the battlefield with
+/// an ability-bound [`FilterContext`], so a `controller: TargetPlayer` clause
+/// resolves to the effect's player target (e.g. the player dealt combat damage),
+/// and one Layer-2 control TCE is registered per match.
+pub fn resolve_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
+
+    let Effect::GainControlAll { target } = &ability.effect else {
+        return Err(EffectError::InvalidParam(
+            "expected GainControlAll effect".to_string(),
+        ));
+    };
+
+    // "you gain control" — the ability's controller takes control.
+    let new_controller = ability.controller;
+
+    // Ability-context filter evaluation, identical to `destroy::resolve_all`:
+    // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
+    // TargetPlayer`) from the ability before matching.
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let matching: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching {
+        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+        // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            new_controller,
+            duration.clone(),
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_echo_due_for_new_controller(state, obj_id);
+        if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller,
+                new_controller,
+            });
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
 /// CR 613.3: The player who gains control. Normally the ability controller;
 /// after a resolution-scoped `Choose(Opponent)` whose dependent effect is
 /// `GainControl { SelfRef }`, the chosen opponent is the recipient
@@ -270,6 +337,107 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
+    /// controls". The mass `GainControlAll` enumerates the battlefield, binds
+    /// `controller: TargetPlayer` to the effect's player target (the player
+    /// dealt combat damage), takes control of EVERY matching artifact, and
+    /// leaves non-artifacts (and the controller's own artifacts) untouched.
+    #[test]
+    fn gain_control_all_takes_every_matching_artifact_of_target_player() {
+        use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Hellkite Tyrant (the source), controlled by P0.
+        let hellkite = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hellkite Tyrant".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Two artifacts controlled by the target player P1.
+        let make_artifact = |state: &mut GameState, cid: u32, name: &str| {
+            let id = create_object(
+                state,
+                CardId(cid.into()),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+            id
+        };
+        let boots = make_artifact(&mut state, 2, "Swiftfoot Boots");
+        let banana = make_artifact(&mut state, 3, "Banana");
+
+        // A non-artifact creature P1 controls — must NOT be taken.
+        let bear = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        // An artifact P0 already controls — already theirs; control is unchanged.
+        let own_artifact = make_artifact(&mut state, 5, "Sol Ring");
+        state.objects.get_mut(&own_artifact).unwrap().controller = PlayerId(0);
+        state
+            .objects
+            .get_mut(&own_artifact)
+            .unwrap()
+            .base_controller = Some(PlayerId(0));
+
+        // "all artifacts that player controls", with the damaged player (P1) as
+        // the effect's player target — exactly what the parsed Hellkite trigger
+        // resolves to.
+        let ability = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            hellkite,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&boots).unwrap().controller,
+            PlayerId(0),
+            "P1's artifact (Boots) must transfer to Hellkite's controller",
+        );
+        assert_eq!(
+            state.objects.get(&banana).unwrap().controller,
+            PlayerId(0),
+            "P1's artifact (Banana) must transfer too — ALL artifacts, not one",
+        );
+        assert_eq!(
+            state.objects.get(&bear).unwrap().controller,
+            PlayerId(1),
+            "P1's non-artifact creature must NOT be taken",
+        );
+        assert_eq!(
+            state.objects.get(&own_artifact).unwrap().controller,
+            PlayerId(0),
+            "P0's own artifact stays with P0 (the filter is the target player's)",
+        );
     }
 
     #[test]

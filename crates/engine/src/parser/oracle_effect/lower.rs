@@ -5,7 +5,7 @@ use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, veri
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::super::oracle_nom::duration::{parse_duration, parse_for_as_long_as_condition};
 use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -1134,8 +1134,8 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     }
 }
 
-/// CR 608.2k + CR 603.7c + CR 701.36a: Rewrite token anaphors following a
-/// token-creating effect.
+/// CR 611.2c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
+/// anaphors following a token-creating effect.
 ///
 /// Two rewrites, both scoped to defs whose chain contains a prior token
 /// creator (`Populate`, `CopyTokenOf`, `Token`):
@@ -1165,7 +1165,7 @@ fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
         {
             continue;
         }
-        rewrite_populated_anaphor_in_effect(&mut defs[i].effect);
+        rewrite_populated_anaphor_in_def(&mut defs[i]);
     }
 }
 
@@ -1176,13 +1176,28 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
     )
 }
 
+/// Walk an ability definition, rewriting the populated-token anaphor at
+/// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
+/// the "sacrifice it" pattern inside a delayed trigger also rewrites.
+fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
+    if let Some(new_effect) =
+        rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
+    {
+        *def.effect = new_effect;
+        def.duration = None;
+        return;
+    }
+
+    rewrite_populated_anaphor_in_effect(&mut def.effect);
+}
+
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
 /// it appears. Recurses into `CreateDelayedTrigger.effect` so the "sacrifice
 /// it" pattern inside a delayed trigger also rewrites.
 fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     // Case 1: bare Unimplemented anaphor at the top level (e.g., "the token
     // created this way gains haste").
-    if let Some(new_effect) = rewrite_token_created_this_way_unimplemented(effect) {
+    if let Some(new_effect) = rewrite_token_created_this_way_unimplemented(effect, None) {
         *effect = new_effect;
         return;
     }
@@ -1201,12 +1216,15 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
 /// a replacement `GenericEffect`. Returns `None` when the shape doesn't
 /// match so the caller leaves the effect untouched.
 ///
-/// CR 608.2k + CR 603.7c: Recognized anaphor prefixes resolve to the
+/// CR 611.2c + CR 603.7c: Recognized anaphor prefixes resolve to the
 /// just-created token via `TargetFilter::LastCreated`. The longer
 /// populate-specific phrases ("the token(s) created this way ") MUST be
 /// tried before the plain "the token " prefix to avoid the latter
 /// shadowing the qualified forms when both could match.
-pub(crate) fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> Option<Effect> {
+pub(crate) fn rewrite_token_created_this_way_unimplemented(
+    effect: &Effect,
+    clause_duration: Option<Duration>,
+) -> Option<Effect> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
@@ -1222,10 +1240,12 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> O
         tag("the tokens created this way "),
         tag("this token "),
         tag("that token "),
+        tag("the tokens "),
         tag("the token "),
     ));
     let (rest, _matched) = anaphor.parse(lower.as_str()).ok()?;
-    let mods = crate::parser::oracle_static::parse_continuous_modifications(rest);
+    let (mod_text, duration) = strip_trailing_duration(rest.trim());
+    let mods = crate::parser::oracle_static::parse_continuous_modifications(mod_text);
     if mods.is_empty() {
         return None;
     }
@@ -1235,7 +1255,9 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> O
         .description(text.to_string());
     Some(Effect::GenericEffect {
         static_abilities: vec![static_def],
-        duration: Some(Duration::UntilEndOfTurn),
+        duration: duration
+            .or(clause_duration)
+            .or(Some(Duration::UntilEndOfTurn)),
         target: Some(TargetFilter::LastCreated),
     })
 }
@@ -4052,6 +4074,24 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    // CR 603.2b + CR 608.2c: A bare player anaphor recipient ("them" / "they")
+    // in a player-scoped trigger body ("At the beginning of each player's
+    // upkeep, ~ deals N damage to them") follows the player scope established
+    // by the trigger condition — the player whose upkeep it is. The generic
+    // pronoun resolver treats bare "them" as an object anaphor and binds it to
+    // `ParentTarget`, which has no referent here, so the damage hits no one
+    // (Roiling Vortex, issue #2891).
+    if let Some(target) = resolve_player_anaphor_damage_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source: None,
+            },
+            "",
+        ));
+    }
+
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
     let rem = trim_dangling_target_word(rem);
@@ -4063,6 +4103,63 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         },
         rem,
     ))
+}
+
+/// CR 603.2b + CR 608.2c: Resolve a bare player-anaphor damage recipient
+/// ("them" / "they") to the player the trigger's `relative_player_scope`
+/// established, mirroring how the "that player" event-context anaphor resolves.
+///
+/// Returns `None` for any recipient that is not the bare anaphor, and for
+/// contexts with neither a player scope nor a player-actor trigger subject — so
+/// the caller's generic target parse (and the object "them" → `ParentTarget`
+/// anaphor used by, e.g., "destroy them") is left untouched. The scope mapping
+/// matches `that_player_library_filter`: `ScopedPlayer` (per-player phase
+/// triggers) stays `ScopedPlayer`; the triggering-event and target-player scopes
+/// resolve to `TriggeringPlayer`; attack triggers resolve to the
+/// `DefendingPlayer`. When no explicit scope is set, a player-actor trigger
+/// subject ("an opponent draws a card") makes "them"/"they" the triggering
+/// player — the same subject fallback `that_player_library_filter` uses
+/// (Razorkin Needlehead, issue #2869).
+fn resolve_player_anaphor_damage_recipient(
+    after_to: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let trimmed = after_to.trim().trim_end_matches(['.', ',', ';']).trim();
+    let lower = trimmed.to_lowercase();
+    let is_player_anaphor = nom_parse_lower(&lower, |input| {
+        all_consuming(value(
+            (),
+            alt((tag::<_, _, OracleError<'_>>("them"), tag("they"))),
+        ))
+        .parse(input)
+    })
+    .is_some();
+    if !is_player_anaphor {
+        return None;
+    }
+    match ctx.relative_player_scope {
+        Some(ControllerRef::ScopedPlayer) => Some(TargetFilter::ScopedPlayer),
+        Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {
+            Some(TargetFilter::TriggeringPlayer)
+        }
+        Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
+        // CR 608.2k: No explicit player scope — fall back to the trigger
+        // subject. A player-actor subject (a bare player filter: empty type
+        // filters with a controller ref, e.g. "an opponent draws a card", or
+        // `TargetFilter::Player`) makes "them"/"they" the triggering player,
+        // not the object the generic pronoun resolver would bind. An
+        // object-typed subject (non-empty type filters) keeps that object
+        // anaphor. Mirrors `that_player_library_filter`'s subject fallback.
+        _ => match &ctx.subject {
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters.is_empty() && tf.controller.is_some() =>
+            {
+                Some(TargetFilter::TriggeringPlayer)
+            }
+            Some(TargetFilter::Player) => Some(TargetFilter::TriggeringPlayer),
+            _ => None,
+        },
+    }
 }
 
 /// CR 607.2d + CR 608.2c + CR 120.1: In damage-recipient grammar, singular
@@ -4817,11 +4914,15 @@ pub(super) fn apply_where_x_effect_expression(
                 // CR 107.3i + CR 611.2c: A continuous "gets +X/+X … where X is
                 // <expression>" grant lowers to dynamic P/T modifications whose
                 // `value` defaults to `CostXPaid` (X paid as the spell/ability was
-                // cast) when no binding clause has been applied yet. Substitute the
-                // surrounding where-X binding into each dynamic modification so a
-                // triggered/targeted pump (Xenagos, God of Revels: "where X is that
-                // creature's power") tracks the bound quantity instead of the
-                // cost-X fallback. Mirrors the `Pump`/`SearchLibrary` arms above.
+                // cast) when no binding clause has been applied yet. The
+                // surrounding where-clause is the more specific binding and must
+                // own every X reference, including those nested in the grant's
+                // continuous modifications. Substitute it into each dynamic
+                // modification so a triggered/targeted pump (Xenagos, God of
+                // Revels: "where X is that creature's power") or a static grant
+                // (Craterhoof Behemoth: "where X is the number of creatures you
+                // control") tracks the bound quantity instead of the cost-X
+                // fallback. Mirrors the `Pump`/`SearchLibrary` arms above.
                 for modification in static_def.modifications.iter_mut() {
                     apply_where_x_continuous_modification(modification, where_x_expression);
                 }
@@ -4833,24 +4934,72 @@ pub(super) fn apply_where_x_effect_expression(
 
 /// CR 107.3i + CR 611.2c: Substitute a "where X is <expression>" binding into a
 /// continuous modification's dynamic `QuantityExpr` value. Only the value-carrying
-/// dynamic P/T and dynamic-keyword variants hold an X-bearing `QuantityExpr`;
-/// every other `ContinuousModification` variant is a fixed/typed modification
-/// with no X to rebind (the `_` no-op arm).
+/// dynamic P/T and dynamic-keyword grants (the +X/+X / set-P/T / dynamic-keyword
+/// variants) hold an X-bearing `QuantityExpr`; every other `ContinuousModification`
+/// variant is a fixed/typed modification with no X to rebind (enumerated as
+/// explicit no-ops below). `apply_where_x_quantity_expression` only rewrites a
+/// `CostXPaid` / bare `Variable("X")` value, so a modification whose quantity is
+/// already a concrete reference is left unchanged.
 fn apply_where_x_continuous_modification(
     modification: &mut ContinuousModification,
     where_x_expression: Option<&str>,
 ) {
     match modification {
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
+        ContinuousModification::SetDynamicPower { value, .. }
+        | ContinuousModification::SetDynamicToughness { value, .. }
+        | ContinuousModification::SetPowerDynamic { value, .. }
+        | ContinuousModification::SetToughnessDynamic { value, .. }
+        | ContinuousModification::AddDynamicPower { value, .. }
+        | ContinuousModification::AddDynamicToughness { value, .. }
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
             *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
         }
-        _ => {}
+        // Resolution-time-consumed; where-X counter quantities are applied by
+        // the counter/enter-with parser paths before this continuous grant pass.
+        ContinuousModification::AddCounterOnEnter { .. } => {}
+        // Non-dynamic modifications carry fixed integers, enum payloads, or
+        // nested definitions that are already parsed/lowered independently.
+        // Keep this wildcard-free so a future QuantityExpr-carrying variant
+        // forces a deliberate where-X decision.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => {}
     }
 }
 

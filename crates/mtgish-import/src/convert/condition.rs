@@ -323,6 +323,11 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
         Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
             left_battlefield_trigger_condition(filter)?
         }
+        // CR 508.1a + CR 603.4: "if no [type] attacked this turn" — global
+        // absence of attackers (Charging Cinderhorn, Keldon Twilight).
+        Condition::NoPermanentsPassFilter(type_filter, prop_filter) => {
+            no_permanents_pass_filter_trigger(type_filter, prop_filter)?
+        }
 
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -537,6 +542,34 @@ fn left_battlefield_static_condition(filter: &Permanents) -> ConvResult<StaticCo
         lhs: left_battlefield_lhs(filter)?,
         comparator: Comparator::GE,
         rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
+/// CR 508.1a + CR 603.4: "if no [type] [passes property filter]" where the
+/// property is attack-history (`AttackedThisTurn`). Maps onto a global
+/// `AttackedThisTurn` quantity gate (Charging Cinderhorn, Keldon Twilight).
+fn no_permanents_pass_filter_trigger(
+    type_filter: &Permanents,
+    prop_filter: &Permanents,
+) -> ConvResult<TriggerCondition> {
+    if !matches!(prop_filter, Permanents::AttackedThisTurn) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "TriggerCondition",
+            needed_variant: format!(
+                "NoPermanentsPassFilter with property {prop_filter:?} (only AttackedThisTurn supported)"
+            ),
+        });
+    }
+    let filter = convert_permanents(type_filter)?;
+    Ok(TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::All,
+                filter: Some(filter),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
     })
 }
 
@@ -1031,6 +1064,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Neighbor { .. } => "Neighbor",
         TargetFilter::AttachedTo => "AttachedTo",
         TargetFilter::LastCreated => "LastCreated",
+        TargetFilter::LastRevealed => "LastRevealed",
         TargetFilter::CostPaidObject => "CostPaidObject",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
@@ -2009,7 +2043,10 @@ pub fn convert_player_predicate_ability(
             require_you_player(player, "Players::AttackedThisTurn (ability)")?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn { filter: None },
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2356,7 +2393,10 @@ pub fn convert_player_predicate_static(
             require_you_player(player, "Players::AttackedThisTurn (static)")?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn { filter: None },
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },

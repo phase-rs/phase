@@ -1674,6 +1674,7 @@ pub struct SpellCast<'a> {
     target_players: Vec<PlayerId>,
     target_objects: Vec<ObjectId>,
     convoke_with: Vec<ObjectId>,
+    optional: OptionalPolicy,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1687,7 +1688,21 @@ impl<'a> SpellCast<'a> {
             target_players: Vec::new(),
             target_objects: Vec::new(),
             convoke_with: Vec::new(),
+            optional: OptionalPolicy::default(),
         }
+    }
+
+    /// Accept optional ("you may") effects/costs during resolution
+    /// (CR 609.3 / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
+        self
+    }
+
+    /// Decline optional ("you may") effects/costs during resolution.
+    pub fn decline_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Decline;
+        self
     }
 
     /// Declare the modal "choose N" mode indices for a modal spell (CR 700.2).
@@ -1759,6 +1774,7 @@ impl<'a> SpellCast<'a> {
             target_players,
             target_objects,
             convoke_with,
+            optional,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1926,6 +1942,7 @@ impl<'a> SpellCast<'a> {
             remaining_objects,
             declared_players,
             selected_casting_variant,
+            optional,
         }
     }
 
@@ -1948,6 +1965,7 @@ pub struct CastCommit<'a> {
     remaining_objects: Vec<ObjectId>,
     declared_players: Vec<PlayerId>,
     selected_casting_variant: Option<CastingVariantChoiceOption>,
+    optional: OptionalPolicy,
 }
 
 impl<'a> CastCommit<'a> {
@@ -1970,6 +1988,7 @@ impl<'a> CastCommit<'a> {
             life_before,
             remaining_objects,
             declared_players,
+            optional,
             ..
         } = self;
 
@@ -1984,6 +2003,7 @@ impl<'a> CastCommit<'a> {
         let policy = ResolutionPolicy {
             targets_objects: remaining_objects,
             targets_players: declared_players,
+            optional,
             ..ResolutionPolicy::default()
         };
         drive_resolution(runner, &policy);

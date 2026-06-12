@@ -406,46 +406,59 @@ pub fn resolve_set_life_total(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let amount = match &ability.effect {
-        Effect::SetLifeTotal { amount, .. } => {
-            crate::game::quantity::resolve_quantity_with_targets(state, amount, ability)
-        }
+    let (amount_expr, target) = match &ability.effect {
+        Effect::SetLifeTotal { amount, target } => (amount, target),
         _ => return Err(EffectError::MissingParam("SetLifeTotal amount".to_string())),
     };
+    let amount = crate::game::quantity::resolve_quantity_with_targets(state, amount_expr, ability);
 
-    let target_player_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Player(pid) = t {
-                Some(*pid)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.controller);
-
-    let current_life = state
-        .players
-        .iter()
-        .find(|p| p.id == target_player_id)
-        .ok_or(EffectError::PlayerNotFound)?
-        .life;
-    let diff = amount - current_life;
-
-    // CR 119.5: Decompose into the matching gain/loss event. A diff of 0 is a
-    // no-op. apply_life_gain / apply_damage_life_loss each handle their own
-    // CR 119.7 / CR 119.8 short-circuits and replacement pipeline routing.
-    let deferred = match diff.signum() {
-        1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-        -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
-        _ => None,
+    // CR 119.5 + CR 608.2f: Resolve which players' life totals are set. The
+    // common single-player forms ("your" → Controller, "target player's" →
+    // the chosen target) preserve the original single-player behavior. The
+    // non-targeted all-players form ("each player's life total becomes N" —
+    // Worldfire, issue #2882) expands to every player in APNAP order.
+    let target_player_ids: Vec<PlayerId> = if matches!(target, TargetFilter::AllPlayers) {
+        crate::game::players::apnap_order(state)
+    } else {
+        vec![ability
+            .targets
+            .iter()
+            .find_map(|t| {
+                if let TargetRef::Player(pid) = t {
+                    Some(*pid)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(ability.controller)]
     };
-    if deferred.is_some() {
-        // CR 614.7: A competing replacement required a player choice; the
-        // helper already installed the WaitingFor state. Return without
-        // emitting EffectResolved — the resume path will complete resolution.
-        return Ok(());
+
+    // CR 119.5: Set each player's life total one at a time, decomposing into the
+    // matching gain/loss event. apply_life_gain / apply_damage_life_loss each
+    // handle their own CR 119.7 / CR 119.8 short-circuits and replacement
+    // pipeline routing.
+    for target_player_id in target_player_ids {
+        let current_life = state
+            .players
+            .iter()
+            .find(|p| p.id == target_player_id)
+            .map(|p| p.life)
+            .ok_or(EffectError::PlayerNotFound)?;
+        let diff = amount - current_life;
+
+        let deferred = match diff.signum() {
+            1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
+            -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
+            _ => None,
+        };
+        if deferred.is_some() {
+            // CR 614.7: A competing replacement required a player choice; the
+            // helper already installed the WaitingFor state. Return without
+            // emitting EffectResolved — the resume path completes resolution.
+            // (A multi-player set that hits a replacement mid-list defers from
+            // that player onward, mirroring the original single-player path.)
+            return Ok(());
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -512,6 +525,34 @@ mod tests {
         resolve_gain(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[0].life, 25);
+    }
+
+    #[test]
+    fn set_life_total_all_players_sets_every_player_no_target() {
+        // CR 119.5 + issue #2882: Worldfire's "Each player's life total becomes 1"
+        // must set EVERY player to 1 with no targeting prompt — not just the
+        // controller and not a single chosen player.
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[1].life = 15;
+        let ability = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                target: TargetFilter::AllPlayers,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![], // no Player targets — AllPlayers is a non-targeted scope
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_set_life_total(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 1,
+            "controller's life should become 1"
+        );
+        assert_eq!(state.players[1].life, 1, "opponent's life should become 1");
     }
 
     #[test]

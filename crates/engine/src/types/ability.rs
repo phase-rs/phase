@@ -14,7 +14,7 @@ use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint,
 };
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
@@ -1627,6 +1627,37 @@ pub enum CastingPermission {
         /// card rather than creating a global player permission.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mana_spend_permission: Option<ManaSpendPermission>,
+        /// CR 601.2a: Optional card-type/quality filter restricting WHICH of the
+        /// granted-permission objects may actually be cast. `None` (the common
+        /// case — Light Up the Stage, Reckless Impulse) authorizes any exiled
+        /// card. `Some(filter)` scopes the grant to cards matching `filter`
+        /// (Chandra, Hope's Beacon +1: "you may cast an instant or sorcery spell
+        /// from among those exiled cards"). Enforced in
+        /// `casting::play_from_exile_permission_source`, so the same gate covers
+        /// both the cast path and the land-play path; a card that fails the
+        /// filter is invisible to `has_exile_cast_permission`. Evaluated with a
+        /// `FilterContext::neutral()` because card-type filters are printed
+        /// object qualities, not source/controller-relative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card_filter: Option<TargetFilter>,
+        /// CR 603.7 + CR 611.2a: Identity of the resolving tracked set for a
+        /// `single_use` grant. This is deliberately separate from `source_id`:
+        /// the same permanent can create overlapping "one spell from among
+        /// those cards" effects, and each tracked set gets its own cast slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        single_use_group: Option<TrackedSetId>,
+        /// CR 601.2a + CR 611.2a: When `true`, this grant authorizes at most ONE
+        /// cast across its entire duration window — the "you may cast *a/one*
+        /// [type] spell from among those exiled cards" class (Chandra, Hope's
+        /// Beacon +1). Distinct from `frequency: OncePerTurn`, which resets each
+        /// turn (CR 514.2): a single-use grant spanning two turns still permits
+        /// only one cast total. On the finalizing cast, the shared grant is
+        /// stripped from every exiled object carrying the same `single_use_group`
+        /// (`casting::consume_single_use_play_from_exile`), making the remaining
+        /// cards uncastable. `false` (default) preserves the unlimited
+        /// within-window impulse-draw behavior.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single_use: bool,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -2893,6 +2924,13 @@ pub enum TargetFilter {
     /// Resolves to the most recently created token(s) from Effect::Token.
     /// Used for "create X and [verb] it" patterns (e.g. "create a token and suspect it").
     LastCreated,
+    /// CR 701.20e + CR 608.2c: Resolves to the most recently looked-at or
+    /// revealed card(s) from a `Dig`/`RevealTop` effect in the current
+    /// resolution (`state.last_revealed_ids`). Used by anaphoric "it" /
+    /// "that card" references after "look at the top card of your library"
+    /// (Amareth, the Lustrous) and by `AbilityCondition::ObjectsShareQuality`
+    /// subject slots.
+    LastRevealed,
     /// CR 400.7j + CR 608.2k: Resolves to the object paid as a cost for the
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
@@ -3619,13 +3657,18 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 508.1a: Number of creatures the controller attacked with this turn,
-    /// optionally narrowed by `filter` (e.g. "attacked with a token / a
-    /// commander / a Wolf"). `None` counts all attacking creatures (the bare
-    /// "if you attacked this turn" / "for each creature you attacked with this
-    /// turn" patterns); `Some(filter)` counts only this-turn attackers matching
-    /// `filter`, resolved against `state.creatures_attacked_this_turn`.
+    /// CR 508.1a: Number of creatures that attacked this turn, scoped by
+    /// `scope` and optionally narrowed by `filter` (e.g. "attacked with a
+    /// token / a commander / a Wolf"). `Controller` + `filter: None` counts all
+    /// attacking creatures the controller declared (the bare "if you attacked
+    /// this turn" / "for each creature you attacked with this turn" patterns);
+    /// `All` + `filter: Some(creature)` counts every creature that attacked this
+    /// turn by any player ("if no creatures attacked this turn"). Filtered forms
+    /// resolve against `state.attacker_declarations_this_turn` declaration-time
+    /// snapshots so attackers that left the battlefield still count.
     AttackedThisTurn {
+        #[serde(default = "default_count_scope_controller")]
+        scope: CountScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
@@ -6594,6 +6637,18 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 613.1b: Mass control-change (Layer 2 — control-changing effects) —
+    /// gain control of EVERY permanent matching `target`, with no targeting or
+    /// selection (the untargeted "all" counterpart of `GainControl`, mirroring
+    /// `Destroy` → `DestroyAll`).
+    /// Hellkite Tyrant ("gain control of all artifacts that player controls").
+    /// `target` is enumerated against the battlefield at resolution; a
+    /// `controller: TargetPlayer` filter binds to the effect's player target
+    /// (e.g. the player dealt combat damage).
+    GainControlAll {
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+    },
     ControlNextTurn {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -6892,6 +6947,18 @@ pub enum Effect {
     /// target (opponents and per-opponent attack binding are chosen by the
     /// effect, like `Myriad`).
     Encore,
+    /// CR 701.42a / CR 712.4a: Meld — exile both the real meld instigator
+    /// (`source`) and a battlefield object named `partner` that the controller
+    /// both owns and controls, then put a single melded permanent onto the
+    /// battlefield whose characteristics are the `result` card (the combined back
+    /// faces, exposed in card-data as the named result). No player-selectable
+    /// target — the partner is found by name + ownership at resolution. Resolver:
+    /// `game/meld.rs`.
+    Meld {
+        source: String,
+        partner: String,
+        result: String,
+    },
     /// CR 702.55a: Haunt — exile the source card (currently in a graveyard, put
     /// there by dying or by resolving) from the graveyard, *haunting* the target
     /// creature: it moves to exile and an `ExileLinkKind::Haunt` link records the
@@ -8817,6 +8884,10 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
+                // CR 608.2c + CR 115.1: "that token" / "those tokens"
+                // continuations bind to objects created earlier in the same
+                // resolution; they are never declared as player-chosen targets.
+                | TargetFilter::LastCreated
                 // CR 102.1 + CR 103.1: the seating neighbor is computed at the
                 // resolver (`game::players::neighbor`), never declared as a
                 // chosen target slot — so it is a context ref.
@@ -9150,6 +9221,9 @@ impl Effect {
             // CR 702.141a: opponents and per-opponent attack binding are chosen
             // by the effect, not declared as targets.
             | Effect::Encore
+            // CR 701.42b: the meld partner is found by name + ownership at
+            // resolution, not declared as a player-selectable target.
+            | Effect::Meld { .. }
             // CR 508.1: copies are chosen by the effect, not declared as targets.
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::ChangeSpeed { .. }
@@ -9157,6 +9231,10 @@ impl Effect {
             | Effect::DamageAll { .. }
             | Effect::DamageEachPlayer { .. }
             | Effect::DestroyAll { .. }
+            // CR 613.1b: GainControlAll's `target` is a mass *population* filter
+            // (enumerated at resolution), not a chosen target slot — like
+            // DestroyAll, its `target_filter()` is None.
+            | Effect::GainControlAll { .. }
             | Effect::GoadAll { .. }
             | Effect::BounceAll { .. }
             | Effect::CounterAll { .. }
@@ -9360,6 +9438,7 @@ impl Effect {
             | Effect::ChangeZone { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
             | Effect::ControlNextTurn { .. }
             | Effect::Attach { .. }
             | Effect::UnattachAll { .. }
@@ -9385,6 +9464,7 @@ impl Effect {
             | Effect::CastCopyOfCard { .. }
             | Effect::Myriad
             | Effect::Encore
+            | Effect::Meld { .. }
             | Effect::ExileHaunting { .. }
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
@@ -9557,6 +9637,7 @@ impl Effect {
             | Effect::ChangeZone { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
             | Effect::ControlNextTurn { .. }
             | Effect::Attach { .. }
             | Effect::UnattachAll { .. }
@@ -9582,6 +9663,7 @@ impl Effect {
             | Effect::CastCopyOfCard { .. }
             | Effect::Myriad
             | Effect::Encore
+            | Effect::Meld { .. }
             | Effect::ExileHaunting { .. }
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
@@ -9720,6 +9802,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChangeZoneAll { .. } => "ChangeZoneAll",
         Effect::Dig { .. } => "Dig",
         Effect::GainControl { .. } => "GainControl",
+        Effect::GainControlAll { .. } => "GainControlAll",
         Effect::ControlNextTurn { .. } => "ControlNextTurn",
         Effect::Attach { .. } => "Attach",
         Effect::UnattachAll { .. } => "UnattachAll",
@@ -9748,6 +9831,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
         Effect::Encore => "Encore",
+        Effect::Meld { .. } => "Meld",
         Effect::ExileHaunting { .. } => "ExileHaunting",
         Effect::HideawayConceal { .. } => "HideawayConceal",
         Effect::CopyTokenBlockingAttacker { .. } => "CopyTokenBlockingAttacker",
@@ -9916,6 +10000,7 @@ pub enum EffectKind {
     ChangeZoneAll,
     Dig,
     GainControl,
+    GainControlAll,
     ControlNextTurn,
     Attach,
     AttachAll,
@@ -9948,6 +10033,7 @@ pub enum EffectKind {
     CopyTokenOf,
     Myriad,
     Encore,
+    Meld,
     ExileHaunting,
     HideawayConceal,
     BecomeCopy,
@@ -10121,6 +10207,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChangeZoneAll { .. } => EffectKind::ChangeZoneAll,
             Effect::Dig { .. } => EffectKind::Dig,
             Effect::GainControl { .. } => EffectKind::GainControl,
+            Effect::GainControlAll { .. } => EffectKind::GainControlAll,
             Effect::ControlNextTurn { .. } => EffectKind::ControlNextTurn,
             Effect::Attach { .. } => EffectKind::Attach,
             Effect::UnattachAll { .. } => EffectKind::UnattachAll,
@@ -10149,6 +10236,7 @@ impl From<&Effect> for EffectKind {
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
             Effect::Encore => EffectKind::Encore,
+            Effect::Meld { .. } => EffectKind::Meld,
             Effect::ExileHaunting { .. } => EffectKind::ExileHaunting,
             Effect::HideawayConceal { .. } => EffectKind::HideawayConceal,
             // CR 707.2: classified as a copy-token effect — the block placement
@@ -11380,6 +11468,17 @@ pub enum AbilityCondition {
         /// `card_types`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype_filter: Option<Box<TargetFilter>>,
+    },
+    /// CR 608.2c + CR 201.2: Compare whether two anaphoric object references
+    /// share at least one value of the named quality at resolution time.
+    /// Covers "if it shares a card type with that permanent" (Amareth) and the
+    /// full `SharedQuality` axis (color, creature type, name, mana value, etc.).
+    /// `subject` and `reference` are resolved via `resolved_targets` — typical
+    /// pairings are `LastRevealed` × `TriggeringSource`.
+    ObjectsShareQuality {
+        subject: TargetFilter,
+        reference: TargetFilter,
+        quality: SharedQuality,
     },
     /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker

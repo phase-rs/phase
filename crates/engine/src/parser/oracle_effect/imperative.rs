@@ -1505,11 +1505,23 @@ pub(super) fn parse_targeted_action_ast(
                 grant_extra_turn_after,
             });
         }
+        // CR 613.1b: "gain control of all/each <filter>" is the untargeted mass
+        // form (Hellkite Tyrant) — mirrors "destroy all". Detect the mass
+        // pluralizer; `parse_target_with_ctx` still consumes the "all "/"each "
+        // prefix into the population filter, so only the flag is threaded.
+        let all = nom_on_lower(text, lower, |input| {
+            value(
+                (),
+                alt((tag("gain control of all "), tag("gain control of each "))),
+            )
+            .parse(input)
+        })
+        .is_some();
         let (target_text, _) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::GainControl { target });
+        return Some(TargetedImperativeAst::GainControl { target, all });
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
@@ -1685,7 +1697,13 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             subject: TargetFilter::SelfRef,
         },
-        TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
+        TargetedImperativeAst::GainControl { target, all } => {
+            if all {
+                Effect::GainControlAll { target }
+            } else {
+                Effect::GainControl { target }
+            }
+        }
         TargetedImperativeAst::ControlNextTurn {
             target,
             grant_extra_turn_after,
@@ -7147,6 +7165,18 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
             clause
         }
+        // CR 603.5 / CR 608.2d: "you may <effect>" and subject-stripped "each
+        // player may <effect>" both arrive here as `YouMay` (the `you`/`may`
+        // first-word arms). The optionality is an ability-level flag, not part
+        // of the Effect, so lower the body and mark the CLAUSE optional. The
+        // bare `lower_imperative_family_effect` path drops the "may" entirely,
+        // making the effect mandatory — e.g. Mog, Moogle Warrior's "each player
+        // may discard a card" became a forced discard (issue #2901).
+        ImperativeFamilyAst::YouMay { text } => {
+            let mut clause = parsed_clause(super::parse_effect(&text));
+            clause.optional = true;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -9183,6 +9213,50 @@ mod tests {
             "Expected GainControl, got {effect:?}"
         );
         let _ = (text, lower);
+    }
+
+    /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
+    /// controls" is the untargeted MASS form, lowered to `GainControlAll`
+    /// (mirrors "destroy all" → `DestroyAll`). The "target" single form must
+    /// stay `GainControl`. The mass population filter still carries the type +
+    /// `controller: TargetPlayer` anaphor.
+    #[test]
+    fn parse_gain_control_of_all_is_mass_gain_control_all() {
+        use crate::types::ability::TypeFilter;
+        let text = "gain control of all artifacts that player controls";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("mass gain control should parse");
+        match lower_targeted_action_ast(ast) {
+            Effect::GainControlAll { target } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Artifact),
+                        "filter must be artifacts, got {tf:?}"
+                    );
+                    // A "that player controls" controller anaphor is present; the
+                    // concrete `ControllerRef` (TargetPlayer in the Hellkite
+                    // trigger) is resolved with effect context — see the
+                    // GainControlAll runtime test for the bound-target behavior.
+                    assert!(
+                        tf.controller.is_some(),
+                        "mass filter must carry a controller anaphor, got {tf:?}"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected GainControlAll, got {other:?}"),
+        }
+
+        // Regression: the targeted single form stays GainControl.
+        let single = "gain control of target artifact";
+        let single_lower = single.to_lowercase();
+        let ast =
+            parse_targeted_action_ast(single, &single_lower, &mut ParseContext::default()).unwrap();
+        assert!(
+            matches!(lower_targeted_action_ast(ast), Effect::GainControl { .. }),
+            "targeted gain control must stay GainControl"
+        );
     }
 
     #[test]

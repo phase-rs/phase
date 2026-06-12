@@ -34,6 +34,21 @@ pub fn transform_permanent(
         return Ok(());
     }
 
+    // CR 712.4c: Unlike other double-faced cards, meld cards cannot be
+    // transformed or converted; any instruction to do so is ignored. Key on the
+    // TYPED meld discriminator (`merge_kind == Some(MergeKind::Meld)`) rather than
+    // `merged_components.len() == 2`: a two-creature MUTATE permanent ALSO has
+    // `merged_components.len() == 2` (set at `merge.rs`), so a length check would
+    // wrongly block a mutate pile containing a DFC from transforming. The melded
+    // survivor renders the RESULT (a non-DFC) and has no back face to flip.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|o| o.merge_kind == Some(crate::game::game_object::MergeKind::Meld))
+    {
+        return Ok(());
+    }
+
     let back_face = obj
         .back_face
         .clone()
