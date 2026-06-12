@@ -3411,34 +3411,28 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
 /// attackers that left the battlefield still satisfy "attacked this turn".
 fn parse_no_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("no ").parse(input)?;
-    if let Some(attacked_pos) = rest.find(" attacked this turn") {
-        let type_text = &rest[..attacked_pos];
-        let (filter, leftover) = parse_type_phrase(type_text.trim());
-        if !leftover.trim().is_empty() || matches!(filter, TargetFilter::Any) {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Fail,
-            )));
-        }
-        let consumed = "no ".len() + attacked_pos + " attacked this turn".len();
-        return Ok((
-            &input[consumed..],
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn {
-                        scope: CountScope::All,
-                        filter: Some(filter),
-                    },
-                },
-                comparator: Comparator::EQ,
-                rhs: QuantityExpr::Fixed { value: 0 },
-            },
-        ));
+    let (rest, type_text) = take_until(" attacked this turn").parse(rest)?;
+    let (rest, _) = tag(" attacked this turn").parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::AttackedThisTurn {
+                    scope: CountScope::All,
+                    filter: Some(filter),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+    ))
 }
 
 fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
