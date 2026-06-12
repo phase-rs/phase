@@ -3316,7 +3316,10 @@
             "frequency",
             "source_id",
             "exiled_by_ability_controller",
-            "mana_spend_permission"
+            "mana_spend_permission",
+            "card_filter",
+            "single_use_group",
+            "single_use"
           ],
           "doc": "CR 400.7i: Play from exile until duration expires (impulse draw). Building block for \"exile top N, choose one, you may play it this turn\" patterns.  `granted_to` records the player the permission was granted to — i.e. the controller of the effect that created it (CR 611.2a/b). This is required to correctly expire `Duration::UntilNextTurnOf` permissions at the grantee's next untap step and `Duration::UntilEndOfTurn` permissions at cleanup (CR 514.2). Cast-permission checks (`has_exile_cast_permission`) do not consult this field — it governs duration pruning only.",
           "cr_refs": [

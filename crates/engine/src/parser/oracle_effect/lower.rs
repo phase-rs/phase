@@ -24,9 +24,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
@@ -4911,9 +4911,86 @@ pub(super) fn apply_where_x_effect_expression(
                 if let Some(condition) = static_def.condition.as_mut() {
                     apply_where_x_static_condition(condition, where_x_expression);
                 }
+                // CR 107.3i: A continuous grant's dynamic P/T ("creatures you
+                // control get +X/+X …, where X is the number of creatures you
+                // control" — Craterhoof Behemoth) parses its X in isolation and
+                // defaults to `CostXPaid`; the surrounding where-clause is the
+                // more specific binding and must own every X reference, including
+                // those nested in the grant's continuous modifications.
+                for modification in static_def.modifications.iter_mut() {
+                    apply_where_x_continuous_modification(modification, where_x_expression);
+                }
             }
         }
         _ => {}
+    }
+}
+
+/// CR 107.3i: Propagate a "where X is <expression>" binding into the dynamic
+/// `QuantityExpr` carried by a continuous modification (the +X/+X / set-P/T /
+/// dynamic-keyword grants). `apply_where_x_quantity_expression` only rewrites a
+/// `CostXPaid` / bare `Variable("X")` value, so a modification whose quantity is
+/// already a concrete reference is left unchanged.
+fn apply_where_x_continuous_modification(
+    modification: &mut ContinuousModification,
+    where_x_expression: Option<&str>,
+) {
+    match modification {
+        ContinuousModification::SetDynamicPower { value, .. }
+        | ContinuousModification::SetDynamicToughness { value, .. }
+        | ContinuousModification::SetPowerDynamic { value, .. }
+        | ContinuousModification::SetToughnessDynamic { value, .. }
+        | ContinuousModification::AddDynamicPower { value, .. }
+        | ContinuousModification::AddDynamicToughness { value, .. }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
+            *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+        }
+        // Resolution-time-consumed; where-X counter quantities are applied by
+        // the counter/enter-with parser paths before this continuous grant pass.
+        ContinuousModification::AddCounterOnEnter { .. } => {}
+        // Non-dynamic modifications carry fixed integers, enum payloads, or
+        // nested definitions that are already parsed/lowered independently.
+        // Keep this wildcard-free so a future QuantityExpr-carrying variant
+        // forces a deliberate where-X decision.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => {}
     }
 }
 

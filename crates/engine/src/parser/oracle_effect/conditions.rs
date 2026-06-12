@@ -2652,7 +2652,10 @@ fn parse_attacked_with_filter_condition(text: &str) -> Option<AbilityCondition> 
     let make = |filter: Option<TargetFilter>, count: i32| {
         Some(AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::AttackedThisTurn { filter },
+                qty: QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter,
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: count },
@@ -4040,7 +4043,10 @@ mod tests {
             parse_attacked_with_filter_condition("you attacked with three or more creatures"),
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn { filter: None },
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -4053,6 +4059,7 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
                         filter: Some(TargetFilter::Typed(ref tf)),
                     },
                 },
@@ -4065,6 +4072,7 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
                         filter: Some(TargetFilter::SelfRef),
                     },
                 },
