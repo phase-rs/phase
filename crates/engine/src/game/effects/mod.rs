@@ -2942,6 +2942,18 @@ fn effect_refs_triggering_source(effect: &Effect) -> bool {
         .any(|f| filter_refs_triggering_source(f))
 }
 
+fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
+    effect_refs_triggering_source(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_refs_triggering_source)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_refs_triggering_source)
+}
+
 /// CR 603.7 + CR 109.5: Replace the first `TargetRef::Object` in a target
 /// slice with the supplied object id. Used by the `repeat_for: TrackedSetSize`
 /// per-iteration rebind so the i-th iteration's parent reference (e.g.,
