@@ -5,12 +5,15 @@
 //! The ETB trigger must carry a NonToken intervening-if so token copies do not
 //! re-trigger, and the follow-up clause must goad those copies permanently.
 
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
     ContinuousModification, Duration, Effect, FilterProp, TargetFilter, TriggerCondition,
     TypeFilter,
 };
+use engine::types::game_state::GameState;
 use engine::types::keywords::Keyword;
+use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -105,4 +108,78 @@ fn life_of_the_party_parsed_etb_has_no_unimplemented_leaks() {
             sub.effect
         );
     }
+}
+
+#[test]
+fn life_of_the_party_runtime_token_copy_does_not_retrigger_etb() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(
+            &["first strike", "trample", "haste"],
+            LIFE_OF_THE_PARTY_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(life).resolve();
+    let state = outcome.state();
+
+    assert!(
+        state.stack.is_empty(),
+        "Life of the Party ETB must resolve without token-copy ETB recursion; stack: {:?}",
+        state.stack
+    );
+    assert_eq!(
+        life_of_the_party_count(state, P0, false),
+        1,
+        "the original non-token Life of the Party should remain under P0"
+    );
+    assert_eq!(
+        life_of_the_party_count(state, P1, true),
+        1,
+        "the opponent should create exactly one token copy"
+    );
+    let token_id = *state
+        .battlefield
+        .iter()
+        .find(|id| {
+            state.objects.get(id).is_some_and(|object| {
+                object.name == "Life of the Party" && object.controller == P1 && object.is_token
+            })
+        })
+        .expect("opponent token copy should exist");
+    assert!(
+        state.transient_continuous_effects.iter().any(|effect| {
+            effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: token_id }
+                && effect.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                })
+        }),
+        "the created token should be permanently goaded"
+    );
+}
+
+fn life_of_the_party_count(
+    state: &GameState,
+    controller: engine::types::player::PlayerId,
+    is_token: bool,
+) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|object| {
+            object.name == "Life of the Party"
+                && object.controller == controller
+                && object.is_token == is_token
+        })
+        .count()
 }

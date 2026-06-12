@@ -41594,7 +41594,7 @@ mod tests {
         }
     }
 
-    /// CR 608.2k + CR 701.15b: "the tokens are goaded" anaphor after token creation.
+    /// CR 611.2c + CR 701.15b: "the tokens are goaded" anaphor after token creation.
     #[test]
     fn rewrite_recognizer_accepts_the_tokens_goaded_prefix() {
         let effect = Effect::unimplemented(
