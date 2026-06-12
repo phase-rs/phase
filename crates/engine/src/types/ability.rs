@@ -7917,6 +7917,12 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
         filter: TargetFilter,
+        /// CR 701.20a: How many matching cards to reveal and keep. Defaults to 1
+        /// for single-match cards (e.g. "reveal until you reveal a creature card").
+        /// Multi-match cards (e.g. Skyserpent Seeker: "reveal until you reveal two
+        /// land cards") use higher fixed values or dynamic expressions (X).
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         /// Where the matching card goes (Hand or Battlefield). When
         /// `kept_optional_to` is `Some`, this is repurposed as the *decline*
         /// zone (where the kept card goes if the controller declines).

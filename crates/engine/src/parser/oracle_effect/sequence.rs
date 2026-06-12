@@ -541,11 +541,29 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 }
             }
             '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
-                push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
-                current.clear();
-                compound_subject_each_sticky = false;
-                while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
-                    chars.next();
+                // CR 701.20a: Suppress sentence split for reveal-until with multi-match destination.
+                // Pattern: "reveal cards from the top of your library until you reveal [quantity] [filter] cards. put them [destination]"
+                // The destination in the second sentence is part of the same effect.
+                let current_lower = current.to_ascii_lowercase();
+                let remainder: String = chars.clone().collect();
+                let remainder_trimmed = remainder.trim_start().to_ascii_lowercase();
+                let is_reveal_until_with_destination = nom_primitives::scan_contains(&current_lower, "reveal cards from the top of")
+                        && nom_primitives::scan_contains(&current_lower, "until you reveal")
+                        // allow-noncombinator: structural sentence boundary check on raw characters
+                        && remainder_trimmed.starts_with("put them");
+                if is_reveal_until_with_destination {
+                    // Don't split - keep the destination as part of the same clause
+                    current.push(ch);
+                    while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                        chars.next();
+                    }
+                } else {
+                    push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
+                    current.clear();
+                    compound_subject_each_sticky = false;
+                    while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                        chars.next();
+                    }
                 }
             }
             _ => {

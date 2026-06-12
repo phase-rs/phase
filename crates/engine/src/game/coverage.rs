@@ -2357,12 +2357,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::RevealUntil {
             player,
             filter,
+            count,
             kept_destination,
             rest_destination,
             ..
         } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("until".into(), fmt_target(filter)));
+            d.push(("count".into(), format!("{:?}", count)));
             d.push(("kept".into(), format!("{:?}", kept_destination)));
             d.push(("rest".into(), format!("{:?}", rest_destination)));
         }

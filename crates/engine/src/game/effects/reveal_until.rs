@@ -26,6 +26,7 @@ pub fn resolve(
     let (
         player_filter,
         filter,
+        count,
         kept_destination,
         rest_destination,
         enter_tapped,
@@ -35,6 +36,7 @@ pub fn resolve(
         Effect::RevealUntil {
             player,
             filter,
+            count,
             kept_destination,
             rest_destination,
             enter_tapped,
@@ -43,6 +45,7 @@ pub fn resolve(
         } => (
             player,
             filter,
+            count.clone(),
             *kept_destination,
             *rest_destination,
             *enter_tapped,
@@ -68,20 +71,28 @@ pub fn resolve(
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
     let library: Vec<ObjectId> = player.library.iter().copied().collect();
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
-    let mut hit_card: Option<ObjectId> = None;
+    let mut hit_cards: Vec<ObjectId> = Vec::new();
 
     // CR 107.3a + CR 601.2b: Evaluate the filter with the ability in scope so
     // dynamic thresholds (e.g. `Variable("X")`) resolve correctly.
     let ctx = FilterContext::from_ability(ability);
 
-    // CR 701.20a: Reveal cards one at a time.
+    // CR 701.20a: Resolve the count of matching cards to reveal and keep.
+    // Use resolve_quantity_with_targets to handle variable X quantities (chosen_x).
+    let count_to_keep =
+        crate::game::quantity::resolve_quantity_with_targets(state, &count, ability);
+
+    // CR 701.20a: Reveal cards one at a time, collecting up to count_to_keep matches.
     for &card_id in &library {
         // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
         state.revealed_cards.insert(card_id);
 
         if matches_target_filter(state, card_id, filter, &ctx) {
-            hit_card = Some(card_id);
-            break;
+            if hit_cards.len() < count_to_keep as usize {
+                hit_cards.push(card_id);
+            } else {
+                revealed_misses.push(card_id);
+            }
         } else {
             revealed_misses.push(card_id);
         }
@@ -89,9 +100,7 @@ pub fn resolve(
 
     // Build the full list of revealed card IDs for the event.
     let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
-    if let Some(hit) = hit_card {
-        all_revealed.push(hit);
-    }
+    all_revealed.extend(hit_cards.iter().copied());
 
     // Emit CardsRevealed for all revealed cards.
     let card_names: Vec<String> = all_revealed
@@ -109,17 +118,16 @@ pub fn resolve(
 
     // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — when
     // the kept destination is a controller choice and a hit was found, pause for
-    // `WaitingFor::RevealUntilKeptChoice`. The choice handler routes the hit card,
-    // moves the misses, and drains `pending_continuation`. `EffectResolved` is
-    // emitted here (before the pause) mirroring `discover::resolve`.
-    if let (Some(accept_zone), Some(hit)) = (kept_optional_to, hit_card) {
+    // `WaitingFor::RevealUntilKeptChoice`. This is only for single-match cards
+    // (count=1 with kept_optional_to). Multi-match cards don't use optional choice.
+    if let (Some(accept_zone), Some(hit)) = (kept_optional_to, hit_cards.first()) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
         });
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
-            hit_card: hit,
+            hit_card: *hit,
             source_id: ability.source_id,
             accept_zone,
             decline_zone: kept_destination,
@@ -131,8 +139,8 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Move the matching card to its destination.
-    if let Some(hit) = hit_card {
+    // Move all matching cards to their destination (multi-match case).
+    for hit in &hit_cards {
         match kept_destination {
             Zone::Battlefield => {
                 // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
@@ -143,7 +151,7 @@ pub fn resolve(
                 // tap-state. The pipeline applies `enter_tapped` from the seeded
                 // `EntryMods`, so the previous manual `obj.tapped = true` is
                 // dropped (it would double the work the tail already does).
-                let mut req = ZoneMoveRequest::effect(hit, Zone::Battlefield, ability.source_id);
+                let mut req = ZoneMoveRequest::effect(*hit, Zone::Battlefield, ability.source_id);
                 req.mods.enter_tapped = enter_tapped;
                 match zone_pipeline::move_object(state, req, events) {
                     ZoneMoveResult::Done => {}
@@ -157,7 +165,7 @@ pub fn resolve(
                     // continuation drain, not here, so the prompt is not clobbered.
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(hit);
+                        clear_markers.push(*hit);
                         zone_pipeline::defer_completion_on_pause(
                             state,
                             BatchCompletion::RevealRestPile {
@@ -179,10 +187,15 @@ pub fn resolve(
                 if enters_attacking {
                     let controller = state
                         .objects
-                        .get(&hit)
+                        .get(hit)
                         .map(|obj| obj.controller)
                         .unwrap_or(ability.controller);
-                    crate::game::combat::enter_attacking(state, hit, ability.source_id, controller);
+                    crate::game::combat::enter_attacking(
+                        state,
+                        *hit,
+                        ability.source_id,
+                        controller,
+                    );
                 }
             }
             Zone::Library => {
@@ -193,14 +206,14 @@ pub fn resolve(
                 // can still fire.
                 match zone_pipeline::move_object(
                     state,
-                    ZoneMoveRequest::effect(hit, Zone::Library, ability.source_id)
+                    ZoneMoveRequest::effect(*hit, Zone::Library, ability.source_id)
                         .at_library_position(LibraryPosition::Bottom),
                     events,
                 ) {
                     ZoneMoveResult::Done => {}
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(hit);
+                        clear_markers.push(*hit);
                         zone_pipeline::defer_completion_on_pause(
                             state,
                             BatchCompletion::RevealRestPile {
@@ -225,13 +238,13 @@ pub fn resolve(
                 // and `EffectResolved` doesn't land over the parked prompt.
                 match zone_pipeline::move_object(
                     state,
-                    ZoneMoveRequest::effect(hit, other, ability.source_id),
+                    ZoneMoveRequest::effect(*hit, other, ability.source_id),
                     events,
                 ) {
                     ZoneMoveResult::Done => {}
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(hit);
+                        clear_markers.push(*hit);
                         zone_pipeline::defer_completion_on_pause(
                             state,
                             BatchCompletion::RevealRestPile {
@@ -266,9 +279,7 @@ pub fn resolve(
     // pile lands, and bail before the inline tail so `EffectResolved` never lands
     // over the parked prompt.
     let mut clear_markers = revealed_misses.clone();
-    if let Some(hit) = hit_card {
-        clear_markers.push(hit);
-    }
+    clear_markers.extend(hit_cards.iter().copied());
     match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
         zone_pipeline::BatchMoveResult::Done => {}
         zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -399,10 +410,11 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, ChosenAttribute, ReplacementDefinition, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
 
@@ -467,6 +479,7 @@ mod tests {
             Effect::RevealUntil {
                 player: TargetFilter::Controller,
                 filter,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 kept_destination,
                 rest_destination,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -491,6 +504,7 @@ mod tests {
             Effect::RevealUntil {
                 player,
                 filter,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 kept_destination,
                 rest_destination,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1046,6 +1060,7 @@ mod tests {
                 Effect::RevealUntil {
                     player: TargetFilter::Controller,
                     filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1163,6 +1178,7 @@ mod tests {
             Effect::RevealUntil {
                 player: TargetFilter::Controller,
                 filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 kept_destination: Zone::Hand,
                 rest_destination: Zone::Library,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1234,6 +1250,7 @@ mod tests {
                 filter: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                     crate::types::ability::TypeFilter::Planeswalker,
                 )),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 kept_destination: Zone::Hand,
                 rest_destination: Zone::Library,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1269,6 +1286,398 @@ mod tests {
             Some(5),
             "planeswalker must enter with intrinsic loyalty via the CR 614.1c delivery tail"
         );
+    }
+
+    /// Issue #3042: Multi-match reveal-until collects multiple matching cards
+    /// and moves them to the specified destination. This test verifies that
+    /// when `count > 1`, the resolver collects all matching cards up to the
+    /// count and moves them together.
+    #[test]
+    fn reveal_until_multi_match_collects_two_lands_to_battlefield() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Land, Land, Land, Creature] (top to bottom)
+        let land1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land3)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let creature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::land()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                kept_destination: Zone::Battlefield,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Two lands should be on the battlefield
+        assert!(
+            state.battlefield.contains(&land1),
+            "first land should be on battlefield"
+        );
+        assert!(
+            state.battlefield.contains(&land2),
+            "second land should be on battlefield"
+        );
+
+        // Third land and creature should remain in library (revealed but not kept)
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 2, "library should have 2 cards");
+        assert!(library.contains(&land3), "third land should be in library");
+        assert!(library.contains(&creature), "creature should be in library");
+
+        // Verify reveal events - single CardsRevealed event with all revealed cards
+        let reveal_event = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::CardsRevealed { .. }))
+            .expect("should have CardsRevealed event");
+        if let GameEvent::CardsRevealed { card_ids, .. } = reveal_event {
+            assert_eq!(
+                card_ids.len(),
+                4,
+                "should reveal all 4 cards (3 lands + 1 creature)"
+            );
+        }
+    }
+
+    /// Issue #3042: Multi-match reveal-until with variable count (X) should
+    /// parse correctly and use the resolved X value at runtime.
+    #[test]
+    fn reveal_until_multi_match_with_x_quantity() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Land, Land, Land]
+        let land1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land3)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::land()),
+                count: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        // Set X = 2 for the ability
+        ability.chosen_x = Some(2);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // With X=2, two lands should be in hand
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 2, "hand should have 2 lands");
+        assert!(hand.contains(&land1), "first land should be in hand");
+        assert!(hand.contains(&land2), "second land should be in hand");
+
+        // Third land should remain in library
+        assert!(
+            state.players[0].library.contains(&land3),
+            "third land should be in library"
+        );
+    }
+
+    /// Issue #3042: Reveal-until with "shares a card type with it" filter should
+    /// correctly match cards that share a type with a reference card.
+    #[test]
+    fn reveal_until_filter_shares_card_type_with_reference() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Creature, Land, Instant] (top to bottom)
+        // Reference is a Creature, so it should match the Creature card
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let instant = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        // Create a reference creature on the battlefield
+        let reference = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().properties(vec![
+                        crate::types::ability::FilterProp::SharesQuality {
+                            quality: crate::types::ability::SharedQuality::CardType,
+                            reference: Some(Box::new(TargetFilter::SpecificObject {
+                                id: reference,
+                            })),
+                            relation: crate::types::ability::SharedQualityRelation::Shares,
+                        },
+                    ]),
+                ),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            reference,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The creature should be in hand (shares type with reference)
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 1, "hand should have 1 card");
+        assert!(hand.contains(&creature), "creature should be in hand");
+
+        // Land and instant should remain in library
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 2, "library should have 2 cards");
+        assert!(library.contains(&land), "land should be in library");
+        assert!(library.contains(&instant), "instant should be in library");
+    }
+
+    /// Issue #3042: Reveal-until with equipment filter should correctly match
+    /// Equipment cards.
+    #[test]
+    fn reveal_until_filter_equipment() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Equipment, Creature, Land] (top to bottom)
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sword of Fire and Ice".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&equipment)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Equipment".to_string());
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().with_type(
+                        crate::types::ability::TypeFilter::Subtype("Equipment".to_string()),
+                    ),
+                ),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The equipment should be in hand
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 1, "hand should have 1 card");
+        assert!(hand.contains(&equipment), "equipment should be in hand");
+
+        // Creature and land should remain in library
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 2, "library should have 2 cards");
+        assert!(library.contains(&creature), "creature should be in library");
+        assert!(library.contains(&land), "land should be in library");
     }
 
     /// CR 109.5 + CR 701.20a: When `player = ParentTargetController`, the library
@@ -1370,5 +1779,224 @@ mod tests {
             _ => None,
         });
         assert_eq!(revealing_player, Some(PlayerId(1)));
+    }
+
+    /// Issue #3042: Reveal-until with "of that type" filter should correctly match
+    /// cards of the chosen creature type.
+    #[test]
+    fn reveal_until_filter_chosen_creature_type() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Elf, Goblin, Land] (top to bottom)
+        // Source has chosen type "Elf", so it should match the Elf card
+        let elf = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&elf)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&elf)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        let goblin = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Goblin Guide".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&goblin)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&goblin)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Goblin".to_string());
+        let land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // Create a source with chosen creature type "Elf"
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Metallic Mimic".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CreatureType("Elf".to_string()));
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().properties(vec![
+                        crate::types::ability::FilterProp::IsChosenCreatureType,
+                    ]),
+                ),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The Elf should be in hand (matches chosen type)
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 1, "hand should have 1 card");
+        assert!(hand.contains(&elf), "elf should be in hand");
+
+        // Goblin and land should remain in library
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 2, "library should have 2 cards");
+        assert!(library.contains(&goblin), "goblin should be in library");
+        assert!(library.contains(&land), "land should be in library");
+    }
+
+    /// Issue #3042: Reveal-until with "with mana value equal to X" filter should
+    /// correctly match cards with the specified mana value.
+    #[test]
+    fn reveal_until_filter_mana_value_equal() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [CMC 2, CMC 3, CMC 1] (top to bottom)
+        // Filter is CMC = 2, so it should match the 2-drop
+        let cmc2 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&cmc2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&cmc2).unwrap().mana_cost = ManaCost::generic(2);
+        let cmc3 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dragon".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&cmc3)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&cmc3).unwrap().mana_cost = ManaCost::generic(3);
+        let cmc1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&cmc1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&cmc1).unwrap().mana_cost = ManaCost::generic(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().properties(vec![
+                        crate::types::ability::FilterProp::Cmc {
+                            comparator: crate::types::ability::Comparator::EQ,
+                            value: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                        },
+                    ]),
+                ),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The CMC 2 card should be in hand
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 1, "hand should have 1 card");
+        assert!(hand.contains(&cmc2), "cmc2 should be in hand");
+
+        // CMC 3 and CMC 1 should remain in library
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 2, "library should have 2 cards");
+        assert!(library.contains(&cmc3), "cmc3 should be in library");
+        assert!(library.contains(&cmc1), "cmc1 should be in library");
     }
 }

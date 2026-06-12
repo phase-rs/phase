@@ -4286,15 +4286,19 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 701.20a: "reveal it" / "reveal them" — standalone reveal of a referenced object
     // (e.g., the card looked at via a dig effect). Maps to RevealTop { count: 1 }.
+    // Must NOT match "reveal cards from the top of..." patterns (handled by try_parse_reveal_until).
     if let Ok((rest, _)) =
         alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals "))).parse(tp.lower)
     {
-        if alt((
-            value((), tag::<_, _, OracleError<'_>>("it")),
-            value((), tag("them")),
-        ))
-        .parse(rest.trim_end_matches('.'))
-        .is_ok()
+        // Ensure this is not a "reveal cards from the top of..." pattern
+        // allow-noncombinator: collision guard against nested reveal-until patterns
+        if !rest.to_lowercase().starts_with("cards from the top of")
+            && alt((
+                value((), tag::<_, _, OracleError<'_>>("it")),
+                value((), tag("them")),
+            ))
+            .parse(rest.trim_end_matches('.'))
+            .is_ok()
         {
             return parsed_clause(Effect::RevealTop {
                 player: TargetFilter::Controller,
@@ -5758,8 +5762,6 @@ fn parse_threshold_comparator(input: &str) -> Option<Comparator> {
 /// Used by both the active-form and passive-form `RevealUntil` parsers so that
 /// any future possessive arm addition only needs to be made in one place.
 fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
-    let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = tag("cards from the top of ").parse(input)?;
     // CR 109.5: possessive determiner identifying the library owner. Both English
     // possessive forms ("your"/"their"/"his"/"her"/"its") map to the same parsed
@@ -5778,6 +5780,8 @@ fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), 
 }
 
 fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
+    let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = parse_reveal_cards_from_library_until(input)?;
     // Active-voice pronoun + matching verb form.
     let (input, _) = alt((
@@ -5788,7 +5792,6 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
         tag("it reveals "),
     ))
     .parse(input)?;
-    let (input, _) = nom_primitives::parse_article(input)?;
     Ok((input, ()))
 }
 
@@ -5800,20 +5803,72 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
 ///
 /// Covers: Indomitable Creativity, Blessed Reincarnation, Tunnel Vision.
 fn parse_reveal_until_passive_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    parse_reveal_cards_from_library_until(input)
+    // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
+    // If subject already extracted, input starts with "reveals cards from the top of..."
+    let (input, _) = alt((
+        // Subject already extracted with verb: "reveals cards from the top of..." / "reveal cards from the top of..."
+        preceded(
+            alt((tag("reveals "), tag("reveal "))),
+            tag("cards from the top of "),
+        ),
+        // Subject already extracted without verb: "cards from the top of..."
+        tag("cards from the top of "),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag("your "),
+        tag("their "),
+        tag("his "),
+        tag("her "),
+        tag("its "),
+        // CR 109.5: "top of that library" — Mirror-Mad Phantasm class
+        tag("that "),
+    ))
+    .parse(input)?;
+    value((), tag("library until ")).parse(input)
+}
+
+/// CR 701.20a: Parse the **passive-voice** prefix with subject already extracted:
+/// "cards from the top of <possessive> library until " (no verb, since subject was extracted).
+/// This is used when the subject (e.g., "target player") has already been parsed.
+fn parse_reveal_until_passive_prefix_no_verb(
+    input: &str,
+) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = tag("cards from the top of ").parse(input)?;
+    let (input, _) = alt((
+        tag("your "),
+        tag("their "),
+        tag("his "),
+        tag("her "),
+        tag("its "),
+        tag("that "),
+    ))
+    .parse(input)?;
+    value((), tag("library until ")).parse(input)
 }
 
 fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> {
-    all_consuming(alt((
-        terminated(take_until(" card"), (tag(" card"), opt(tag(".")))),
-        terminated(take_until("."), tag(".")),
+    alt((
+        terminated(take_until(" cards"), tag(" cards")),
+        terminated(take_until(" card"), tag(" card")),
+        terminated(take_until(" and"), tag(" and")),
         rest,
-    )))
+    ))
     .parse(input)
 }
 
 fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str> {
-    all_consuming(alt((terminated(take_until(" card"), tag(" card")), rest))).parse(input)
+    // Strip article ("a" / "an") if present
+    let (input, _) = nom_primitives::parse_article
+        .parse(input)
+        .unwrap_or((input, ()));
+    // Strip trailing " card" or " cards" if present
+    alt((
+        terminated(take_until(" cards"), tag(" cards")),
+        terminated(take_until(" card"), tag(" card")),
+        rest,
+    ))
+    .parse(input)
 }
 
 /// Build a [`TargetFilter`] from the bare filter phrase extracted from a `RevealUntil`
@@ -5835,6 +5890,91 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
     if let Some(filter) = try_parse_chosen_kind_filter(filter_text) {
         return filter;
     }
+
+    // Chosen type: "creature card of that type" / "the chosen type"
+    if nom_primitives::scan_contains(filter_text, "of that type")
+        || nom_primitives::scan_contains(filter_text, "the chosen type")
+    {
+        return TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+        );
+    }
+
+    // Shares-a-type: "shares a creature type with [it/equipped creature]"
+    if nom_primitives::scan_contains(filter_text, "shares a creature type with") {
+        let reference = if nom_primitives::scan_contains(filter_text, "equipped creature") {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+        } else if nom_primitives::scan_contains(filter_text, "it") {
+            TargetFilter::LastRevealed
+        } else {
+            // Default to LastRevealed for "shares a creature type with it"
+            TargetFilter::LastRevealed
+        };
+        return TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::SharesQuality {
+                quality: crate::types::ability::SharedQuality::CreatureType,
+                reference: Some(Box::new(reference)),
+                relation: crate::types::ability::SharedQualityRelation::Shares,
+            },
+        ]));
+    }
+
+    // Shares-a-card-type: "shares a card type with [it]"
+    if nom_primitives::scan_contains(filter_text, "shares a card type with") {
+        let reference = if nom_primitives::scan_contains(filter_text, "it") {
+            TargetFilter::LastRevealed
+        } else {
+            // Default to LastRevealed for "shares a card type with it"
+            TargetFilter::LastRevealed
+        };
+        return TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::SharesQuality {
+                quality: crate::types::ability::SharedQuality::CardType,
+                reference: Some(Box::new(reference)),
+                relation: crate::types::ability::SharedQualityRelation::Shares,
+            },
+        ]));
+    }
+
+    // Mana-value comparisons: "with mana value equal to [X/the result]" / "with lesser mana value"
+    if nom_primitives::scan_contains(filter_text, "with mana value equal to") {
+        // Parse the value after "equal to"
+        let after_equal = match terminated::<_, _, OracleError<'_>, _, _>(
+            take_until("with mana value equal to"),
+            tag("with mana value equal to"),
+        )
+        .parse(filter_text)
+        {
+            Ok((after, _before)) => after.trim(),
+            Err(_) => "",
+        };
+        let value = if nom_primitives::scan_contains(after_equal, "x") {
+            crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }
+        } else {
+            // Default to 0 for now - this would need proper parsing
+            crate::types::ability::QuantityExpr::Fixed { value: 0 }
+        };
+        return TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+            comparator: crate::types::ability::Comparator::EQ,
+            value,
+        }]));
+    }
+
+    if nom_primitives::scan_contains(filter_text, "with lesser mana value") {
+        return TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+            comparator: crate::types::ability::Comparator::LT,
+            value: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::ObjectManaValue {
+                    scope: crate::types::ability::ObjectScope::EventSource,
+                },
+            },
+        }]));
+    }
+
     let (parsed, _) = parse_target(filter_text);
     parsed
 }
@@ -5844,16 +5984,137 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
 /// passive voice (`"until a/an <filter> [card] is revealed [and exiles that card]"`).
 /// Builds [`Effect::RevealUntil`] with `player` identifying whose library is revealed.
 fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEffectClause> {
-    // CR 701.20a: Active-voice form — "…until they reveal a <filter>".
+    // CR 701.20a: Check for active-voice form FIRST — "…until <pronoun> reveal[s] [N] <filter> cards"
+    // This handles cases like "reveal cards from the top of your library until you reveal two land cards"
     let active_result = nom_on_lower(tp.original, tp.lower, parse_reveal_until_prefix);
     if let Some((_, rest_orig)) = active_result {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        let (_, filter_text) = parse_reveal_until_active_filter_text(rest_lower).ok()?;
+
+        // Try to parse quantity before the filter: "until you reveal two land cards"
+        let (count, after_count_lower) =
+            if let Ok((after, n)) = nom_primitives::parse_number.parse(rest_lower) {
+                let count = crate::types::ability::QuantityExpr::Fixed { value: n as i32 };
+                let after = after.trim_start();
+                (count, after)
+            } else if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest_lower) {
+                let count = crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                };
+                let after = after.trim_start();
+                (count, after)
+            } else {
+                // Default to 1 when no quantity specified
+                (
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    rest_lower,
+                )
+            };
+
+        // Try to parse optional article before filter
+        let (after_article_lower, _had_article) =
+            match nom_primitives::parse_article.parse(after_count_lower) {
+                Ok((after, _)) => (after, true),
+                Err(_) => (after_count_lower, false),
+            };
+
+        // For filters with "shares", "of that type", "with mana value", or "lesser", capture everything
+        // up to the end of the sentence since they don't end with "card" or "cards"
+        // allow-noncombinator: structural dispatch to select parsing strategy based on filter shape
+        let (rest_after_filter, filter_text) = if after_article_lower.contains("shares") // allow-noncombinator: check filter type
+            || after_article_lower.contains("of that type") // allow-noncombinator: check filter type
+            || after_article_lower.contains("the chosen type") // allow-noncombinator: check filter type
+            || after_article_lower.contains("with mana value") // allow-noncombinator: check filter type
+            || after_article_lower.contains("lesser")
+        // allow-noncombinator: check filter type
+        {
+            // Find the end of the filter (end of sentence or continuation)
+            // allow-noncombinator: sentence boundary detection for structural filter extraction
+            let filter_end = after_article_lower
+                .find('.')
+                .or_else(|| after_article_lower.find(','))
+                .or_else(|| after_article_lower.find(" and ")) // allow-noncombinator: find clause boundary
+                .unwrap_or(after_article_lower.len());
+            (
+                &after_article_lower[filter_end..],
+                &after_article_lower[..filter_end],
+            )
+        } else {
+            parse_reveal_until_active_filter_text(after_article_lower).ok()?
+        };
         let filter = build_reveal_until_filter(filter_text);
+
+        // Calculate remaining text after the filter text
+        let remaining_after_filter = rest_after_filter.trim();
+
+        // Parse destination for multi-match cards: "put them onto the battlefield" / "put them into your hand"
+        // Default to Hand for single-match cards
+        let kept_destination = if matches!(
+            count,
+            crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        ) {
+            Zone::Hand
+        } else {
+            // For multi-match, look for destination patterns
+            // The destination may be in the same sentence or a separate sentence after the period
+            // Check the full original text for destination patterns in followup clauses
+            let full_lower = tp.lower.to_lowercase();
+            let dest_battlefield = full_lower.contains("onto the battlefield"); // allow-noncombinator: select destination
+            let dest_hand = full_lower.contains("into your hand"); // allow-noncombinator: select destination
+            let dest_graveyard = full_lower.contains("into your graveyard"); // allow-noncombinator: select destination
+            if dest_battlefield {
+                Zone::Battlefield
+            } else if dest_hand {
+                Zone::Hand
+            } else if dest_graveyard {
+                Zone::Graveyard
+            } else {
+                // Default to Hand for multi-match if no explicit destination
+                Zone::Hand
+            }
+        };
+
+        // CR 701.20a: Reject unsupported tails to avoid silent misparses.
+        // For single-match (count=1), allow continuation text (handled by sub_ability).
+        // For multi-match, allow empty tail (defaults to Hand) or specific destination patterns.
+        let is_single_match = matches!(
+            count,
+            crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+        if !remaining_after_filter.is_empty() {
+            let lower_remaining = remaining_after_filter.to_lowercase();
+            if is_single_match {
+                // Single-match: allow continuation patterns like "put that card"
+                // allow-noncombinator: structural validation of continuation patterns
+                if !lower_remaining.contains("put that card") // allow-noncombinator: reject invalid tail
+                    && !lower_remaining.contains("you may put that card") // allow-noncombinator: reject invalid tail
+                    && !lower_remaining.contains("put it") // allow-noncombinator: reject invalid tail
+                    && !lower_remaining.contains("and the rest")
+                // allow-noncombinator: reject invalid tail
+                {
+                    return None;
+                }
+            } else {
+                // Multi-match: allow empty tail (defaults to Hand) or specific destination patterns
+                // allow-noncombinator: structural validation of destination patterns
+                if !lower_remaining.is_empty()
+                    && !lower_remaining.contains("onto the battlefield") // allow-noncombinator: reject invalid tail
+                    && !lower_remaining.contains("into your hand") // allow-noncombinator: reject invalid tail
+                    && !lower_remaining.contains("into your graveyard") // allow-noncombinator: reject invalid tail
+                    && !lower_remaining.contains("put those cards")
+                // allow-noncombinator: reject invalid tail
+                {
+                    return None;
+                }
+            }
+        }
+
         return Some(parsed_clause(Effect::RevealUntil {
             player,
             filter,
-            kept_destination: Zone::Hand,
+            count,
+            kept_destination,
             rest_destination: Zone::Library,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
@@ -5861,53 +6122,109 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         }));
     }
 
-    // CR 701.20a: Passive-voice form — "…until a/an <filter> [card] is revealed
-    // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
-    // Tunnel Vision). Passive prefix stops before the article; extract article,
-    // filter phrase, and optional exile suffix here.
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
-    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+    // CR 701.20a: Check for passive-voice form — "…until [N] <filter> cards are revealed"
+    // This handles cases like "target player reveals cards from the top of their library until two land cards are revealed"
+    // Also try the no-verb variant for when subject is already extracted
+    let mut passive_result = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix);
+    if passive_result.is_none() {
+        passive_result = nom_on_lower(
+            tp.original,
+            tp.lower,
+            parse_reveal_until_passive_prefix_no_verb,
+        );
+    }
+    if passive_result.is_some() {
+        let (_, rest_orig) = passive_result?;
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
-    // Consume the article ("a" / "an").
-    let (_, after_article_orig) =
-        nom_on_lower(rest_orig, rest_lower, nom_primitives::parse_article)?;
-    let after_article_lower = &rest_lower[rest_lower.len() - after_article_orig.len()..];
+        // Try to parse quantity before the article: "until two land cards are revealed"
+        let (count, after_count_lower) =
+            if let Ok((after, n)) = nom_primitives::parse_number.parse(rest_lower) {
+                let count = crate::types::ability::QuantityExpr::Fixed { value: n as i32 };
+                let after = after.trim_start();
+                (count, after)
+            } else if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest_lower) {
+                let count = crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                };
+                let after = after.trim_start();
+                (count, after)
+            } else {
+                // Default to 1 when no quantity specified
+                (
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    rest_lower,
+                )
+            };
 
-    // Capture everything up to " is revealed" — this is the filter phrase.
-    let (remainder, captured) = take_until::<_, _, OracleError<'_>>(" is revealed")
-        .parse(after_article_lower)
+        // Capture everything up to " is revealed" or " are revealed" — this is the filter phrase (includes article).
+        let (remainder, captured) = alt((
+            take_until::<_, _, OracleError<'_>>(" is revealed"),
+            take_until::<_, _, OracleError<'_>>(" are revealed"),
+        ))
+        .parse(after_count_lower)
         .ok()?;
 
-    // Strip trailing " card" if present ("artifact or creature card" → "artifact or creature").
-    // Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
-    let (_, filter_text) = parse_reveal_until_passive_filter_text(captured).ok()?;
+        // For filters with "shares", "of that type", "with mana value", or "lesser", don't strip " card"
+        // since they don't end with "card" or "cards" in the standard way
+        // allow-noncombinator: structural dispatch to select parsing strategy based on filter shape
+        let filter_text = if captured.contains("shares") // allow-noncombinator: check filter type
+            || captured.contains("of that type") // allow-noncombinator: check filter type
+            || captured.contains("the chosen type") // allow-noncombinator: check filter type
+            || captured.contains("with mana value") // allow-noncombinator: check filter type
+            || captured.contains("lesser")
+        // allow-noncombinator: check filter type
+        {
+            captured.trim()
+        } else {
+            // Strip trailing " card" if present ("artifact or creature card" → "artifact or creature").
+            // Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
+            parse_reveal_until_passive_filter_text(captured).ok()?.1
+        };
 
-    let filter = build_reveal_until_filter(filter_text);
+        let filter = build_reveal_until_filter(filter_text);
 
-    // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
-    // card goes directly to Exile. Consume " is revealed" via nom tag, then check
-    // the optional exile clause with a tag probe (.is_ok() since opt is infallible anyway).
-    let (after_is_revealed, _) = tag::<_, _, OracleError<'_>>(" is revealed")
+        // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
+        // card goes directly to Exile. Consume " is revealed" or " are revealed" via nom tag, then check
+        // the optional exile clause with a tag probe (.is_ok() since opt is infallible anyway).
+        let (after_is_revealed, _) = alt((
+            tag::<_, _, OracleError<'_>>(" is revealed"),
+            tag::<_, _, OracleError<'_>>(" are revealed"),
+        ))
         .parse(remainder)
         .ok()?;
-    let inline_exile = tag::<_, _, OracleError<'_>>(" and exiles that card")
-        .parse(after_is_revealed)
-        .is_ok();
-    let kept_destination = if inline_exile {
-        Zone::Exile
-    } else {
-        Zone::Hand
-    };
+        // allow-noncombinator: whitespace trimming before nom parsing
+        let trimmed_after = after_is_revealed.trim();
+        let (remaining, exile_suffix) = opt(tag::<_, _, OracleError<'_>>("and exiles that card"))
+            .parse(trimmed_after)
+            .ok()?;
+        let kept_destination = if exile_suffix.is_some() {
+            Zone::Exile
+        } else {
+            Zone::Hand
+        };
 
-    Some(parsed_clause(Effect::RevealUntil {
-        player,
-        filter,
-        kept_destination,
-        rest_destination: Zone::Library,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enters_attacking: false,
-        kept_optional_to: None,
-    }))
+        // CR 701.20a: Reject unsupported tails for passive voice.
+        // Only allow empty tail or "and exiles that card" suffix.
+        if !remaining.trim().is_empty() {
+            return None;
+        }
+
+        return Some(parsed_clause(Effect::RevealUntil {
+            player,
+            filter,
+            count,
+            kept_destination,
+            rest_destination: Zone::Library,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+        }));
+    }
+
+    None
 }
 
 /// CR 614.11 + CR 701.20a: Detect a "card of the chosen kind" reveal-until
@@ -10303,11 +10620,13 @@ fn lower_subject_predicate_ast(
                 }
             }
             // CR 701.20a: "<player> reveals the top [N] card(s) of their library"
+            // Must NOT match "reveal cards from the top of... until" patterns (handled by try_parse_reveal_until).
             if alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals ")))
                 .parse(pred_lower.as_str())
                 .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
+                && !scan_contains_phrase(&pred_lower, "until")
             {
                 // Delegate to nom combinator (input already lowercase from pred_lower).
                 let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
@@ -38723,6 +39042,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=Controller, creature->hand, rest->library, got: {:?}",
@@ -38754,6 +39074,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=ParentTargetController, got: {:?}",
@@ -38830,6 +39151,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Land)
             ),
             "expected RevealUntil(kept=Graveyard, rest=Graveyard), got: {:?}",
@@ -38907,6 +39229,7 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Artifact)
             ),
             "expected RevealUntil player=Controller, artifact->battlefield, got: {:?}",
@@ -46532,4 +46855,215 @@ fn for_each_target_player_controls_search_that_players_library_keeps_caster_sear
         panic!("expected typed target-player library owner, got {target_player:?}");
     };
     assert_eq!(target_player.controller, None);
+}
+
+// -----------------------------------------------------------------------
+// RevealUntil parser tests (issue #3042)
+// -----------------------------------------------------------------------
+
+#[test]
+fn reveal_until_multi_match_quantity_two() {
+    let def = parse_effect_chain(
+        "reveal cards from the top of your library until you reveal two land cards",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { count, filter, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {:?}", filter);
+    };
+    assert!(tf
+        .type_filters
+        .iter()
+        .any(|f| matches!(f, TypeFilter::Land)));
+}
+
+#[test]
+fn reveal_until_multi_match_quantity_three() {
+    let def = parse_effect_chain(
+        "reveal cards from the top of your library until you reveal three creature cards",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { count, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 3 });
+}
+
+#[test]
+fn reveal_until_multi_match_quantity_x() {
+    let def = parse_effect_chain(
+        "reveal cards from the top of your library until you reveal X land cards",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { count, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert!(matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name }
+        } if name == "X"
+    ));
+}
+
+#[test]
+fn reveal_until_single_match_defaults_to_one() {
+    let def = parse_effect_chain(
+        "reveal cards from the top of your library until you reveal a land card",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { count, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+}
+
+#[test]
+fn reveal_until_multi_match_battlefield_destination() {
+    let def = parse_effect_chain(
+            "reveal cards from the top of your library until you reveal two land cards. put them onto the battlefield tapped",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil {
+        kept_destination,
+        count,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(kept_destination, &Zone::Battlefield);
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+}
+
+#[test]
+fn reveal_until_multi_match_hand_destination() {
+    let def = parse_effect_chain(
+            "reveal cards from the top of your library until you reveal two creature cards. put them into your hand",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil {
+        kept_destination,
+        count,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(kept_destination, &Zone::Hand);
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+}
+
+#[test]
+fn reveal_until_filter_shares_card_type() {
+    let def = parse_effect_chain(
+            "reveal cards from the top of your library until you reveal a card that shares a card type with it",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil { filter, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {:?}", filter);
+    };
+    assert!(tf
+        .properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::SharesQuality { .. })));
+}
+
+#[test]
+fn reveal_until_filter_equipped_creature() {
+    let def = parse_effect_chain(
+            "reveal cards from the top of your library until you reveal an equipment card. attach it to equipped creature",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil { filter, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {:?}", filter);
+    };
+    assert!(tf
+        .type_filters
+        .iter()
+        .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Equipment")));
+}
+
+#[test]
+fn reveal_until_passive_multi_match() {
+    let def = parse_effect_chain(
+            "target player reveals cards from the top of their library until two land cards are revealed",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil { count, player, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+    assert_eq!(player, &TargetFilter::Player);
+}
+
+#[test]
+fn reveal_until_filter_chosen_type() {
+    let def = parse_effect_chain(
+        "reveal cards from the top of your library until you reveal a creature card of that type",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { filter, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {:?}", filter);
+    };
+    assert!(tf
+        .properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::IsChosenCreatureType)));
+}
+
+#[test]
+fn reveal_until_filter_mana_value_equal_x() {
+    let def = parse_effect_chain(
+            "reveal cards from the top of your library until you reveal a creature card with mana value equal to x",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil { filter, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {:?}", filter);
+    };
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn reveal_until_filter_lesser_mana_value() {
+    let def = parse_effect_chain(
+            "reveal cards from the top of your library until you reveal a creature card with lesser mana value",
+            AbilityKind::Spell,
+        );
+    let Effect::RevealUntil { filter, .. } = def.effect.as_ref() else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed filter, got {:?}", filter);
+    };
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::Cmc {
+            comparator: Comparator::LT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue { .. }
+            }
+        }
+    )));
 }
