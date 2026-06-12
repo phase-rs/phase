@@ -2893,6 +2893,13 @@ pub enum TargetFilter {
     /// Resolves to the most recently created token(s) from Effect::Token.
     /// Used for "create X and [verb] it" patterns (e.g. "create a token and suspect it").
     LastCreated,
+    /// CR 701.20e + CR 608.2c: Resolves to the most recently looked-at or
+    /// revealed card(s) from a `Dig`/`RevealTop` effect in the current
+    /// resolution (`state.last_revealed_ids`). Used by anaphoric "it" /
+    /// "that card" references after "look at the top card of your library"
+    /// (Amareth, the Lustrous) and by `AbilityCondition::ObjectsShareQuality`
+    /// subject slots.
+    LastRevealed,
     /// CR 400.7j + CR 608.2k: Resolves to the object paid as a cost for the
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
@@ -4598,6 +4605,14 @@ pub enum StaticCondition {
     /// CR 400.7: True when the source permanent entered the battlefield this turn.
     /// Used for "as long as this [permanent] entered this turn" conditional statics.
     SourceEnteredThisTurn,
+    /// CR 601.2 + CR 611.3a: True when the source permanent was cast (its
+    /// `cast_from_zone` is `Some`). `zone: None` = cast from any zone; `Some(z)`
+    /// = cast specifically from zone `z`. Used for "as long as it was cast"
+    /// continuous grants (The Tarrasque).
+    WasCast {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<crate::types::zones::Zone>,
+    },
     /// CR 701.54a: True when this creature is the ring-bearer for its controller.
     IsRingBearer,
     /// CR 701.54c: True when the controller's ring level is at least this value (0-indexed).
@@ -8814,6 +8829,10 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
+                // CR 608.2c + CR 115.1: "that token" / "those tokens"
+                // continuations bind to objects created earlier in the same
+                // resolution; they are never declared as player-chosen targets.
+                | TargetFilter::LastCreated
                 // CR 102.1 + CR 103.1: the seating neighbor is computed at the
                 // resolver (`game::players::neighbor`), never declared as a
                 // chosen target slot — so it is a context ref.
@@ -11377,6 +11396,17 @@ pub enum AbilityCondition {
         /// `card_types`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype_filter: Option<Box<TargetFilter>>,
+    },
+    /// CR 608.2c + CR 201.2: Compare whether two anaphoric object references
+    /// share at least one value of the named quality at resolution time.
+    /// Covers "if it shares a card type with that permanent" (Amareth) and the
+    /// full `SharedQuality` axis (color, creature type, name, mana value, etc.).
+    /// `subject` and `reference` are resolved via `resolved_targets` — typical
+    /// pairings are `LastRevealed` × `TriggeringSource`.
+    ObjectsShareQuality {
+        subject: TargetFilter,
+        reference: TargetFilter,
+        quality: SharedQuality,
     },
     /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker

@@ -491,6 +491,15 @@ pub fn resolved_targets(
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
+    // CR 701.20e: "it" / "that card" after a look-at or reveal instruction.
+    if matches!(target_filter, TargetFilter::LastRevealed) {
+        return state
+            .last_revealed_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+    }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
@@ -644,6 +653,7 @@ pub(crate) fn resolved_object_ids_for_filter(
             .into_iter()
             .collect(),
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
+        TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))

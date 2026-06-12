@@ -1270,6 +1270,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::CastTimingPermission { .. }
             | AbilityCondition::ManaColorSpent { .. }
             | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
             | AbilityCondition::SourceEnteredThisTurn
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
@@ -5350,6 +5351,32 @@ pub(crate) fn evaluate_condition(
                 None => true,
             };
             type_matches && subtype_matches && filter_matches
+        }
+        // CR 608.2c + CR 201.2: "if it shares a [quality] with [reference]" —
+        // compare two anaphoric object references at resolution time.
+        AbilityCondition::ObjectsShareQuality {
+            subject,
+            reference,
+            quality,
+        } => {
+            let subject_id = crate::game::targeting::resolved_targets(ability, subject, state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                });
+            let reference_id = crate::game::targeting::resolved_targets(ability, reference, state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                });
+            match (subject_id, reference_id) {
+                (Some(left), Some(right)) => {
+                    crate::game::filter::objects_share_quality(state, left, right, quality)
+                }
+                _ => false,
+            }
         }
         // CR 400.7: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.

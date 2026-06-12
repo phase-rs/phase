@@ -5,7 +5,7 @@ use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, veri
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::super::oracle_nom::duration::{parse_duration, parse_for_as_long_as_condition};
 use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -1134,8 +1134,8 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     }
 }
 
-/// CR 608.2k + CR 603.7c + CR 701.36a: Rewrite token anaphors following a
-/// token-creating effect.
+/// CR 611.2c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
+/// anaphors following a token-creating effect.
 ///
 /// Two rewrites, both scoped to defs whose chain contains a prior token
 /// creator (`Populate`, `CopyTokenOf`, `Token`):
@@ -1165,7 +1165,7 @@ fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
         {
             continue;
         }
-        rewrite_populated_anaphor_in_effect(&mut defs[i].effect);
+        rewrite_populated_anaphor_in_def(&mut defs[i]);
     }
 }
 
@@ -1176,13 +1176,28 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
     )
 }
 
+/// Walk an ability definition, rewriting the populated-token anaphor at
+/// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
+/// the "sacrifice it" pattern inside a delayed trigger also rewrites.
+fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
+    if let Some(new_effect) =
+        rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
+    {
+        *def.effect = new_effect;
+        def.duration = None;
+        return;
+    }
+
+    rewrite_populated_anaphor_in_effect(&mut def.effect);
+}
+
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
 /// it appears. Recurses into `CreateDelayedTrigger.effect` so the "sacrifice
 /// it" pattern inside a delayed trigger also rewrites.
 fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     // Case 1: bare Unimplemented anaphor at the top level (e.g., "the token
     // created this way gains haste").
-    if let Some(new_effect) = rewrite_token_created_this_way_unimplemented(effect) {
+    if let Some(new_effect) = rewrite_token_created_this_way_unimplemented(effect, None) {
         *effect = new_effect;
         return;
     }
@@ -1201,12 +1216,15 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
 /// a replacement `GenericEffect`. Returns `None` when the shape doesn't
 /// match so the caller leaves the effect untouched.
 ///
-/// CR 608.2k + CR 603.7c: Recognized anaphor prefixes resolve to the
+/// CR 611.2c + CR 603.7c: Recognized anaphor prefixes resolve to the
 /// just-created token via `TargetFilter::LastCreated`. The longer
 /// populate-specific phrases ("the token(s) created this way ") MUST be
 /// tried before the plain "the token " prefix to avoid the latter
 /// shadowing the qualified forms when both could match.
-pub(crate) fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> Option<Effect> {
+pub(crate) fn rewrite_token_created_this_way_unimplemented(
+    effect: &Effect,
+    clause_duration: Option<Duration>,
+) -> Option<Effect> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
@@ -1222,10 +1240,12 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> O
         tag("the tokens created this way "),
         tag("this token "),
         tag("that token "),
+        tag("the tokens "),
         tag("the token "),
     ));
     let (rest, _matched) = anaphor.parse(lower.as_str()).ok()?;
-    let mods = crate::parser::oracle_static::parse_continuous_modifications(rest);
+    let (mod_text, duration) = strip_trailing_duration(rest.trim());
+    let mods = crate::parser::oracle_static::parse_continuous_modifications(mod_text);
     if mods.is_empty() {
         return None;
     }
@@ -1235,7 +1255,9 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> O
         .description(text.to_string());
     Some(Effect::GenericEffect {
         static_abilities: vec![static_def],
-        duration: Some(Duration::UntilEndOfTurn),
+        duration: duration
+            .or(clause_duration)
+            .or(Some(Duration::UntilEndOfTurn)),
         target: Some(TargetFilter::LastCreated),
     })
 }
@@ -4052,6 +4074,24 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    // CR 603.2b + CR 608.2c: A bare player anaphor recipient ("them" / "they")
+    // in a player-scoped trigger body ("At the beginning of each player's
+    // upkeep, ~ deals N damage to them") follows the player scope established
+    // by the trigger condition — the player whose upkeep it is. The generic
+    // pronoun resolver treats bare "them" as an object anaphor and binds it to
+    // `ParentTarget`, which has no referent here, so the damage hits no one
+    // (Roiling Vortex, issue #2891).
+    if let Some(target) = resolve_player_anaphor_damage_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source: None,
+            },
+            "",
+        ));
+    }
+
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
     let rem = trim_dangling_target_word(rem);
@@ -4063,6 +4103,44 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         },
         rem,
     ))
+}
+
+/// CR 603.2b + CR 608.2c: Resolve a bare player-anaphor damage recipient
+/// ("them" / "they") to the player the trigger's `relative_player_scope`
+/// established, mirroring how the "that player" event-context anaphor resolves.
+///
+/// Returns `None` for any recipient that is not the bare anaphor, and for
+/// contexts with no player scope — so the caller's generic target parse (and
+/// the object "them" → `ParentTarget` anaphor used by, e.g., "destroy them")
+/// is left untouched. The scope mapping matches `that_player_library_filter`:
+/// `ScopedPlayer` (per-player phase triggers) stays `ScopedPlayer`; the
+/// triggering-event and target-player scopes resolve to `TriggeringPlayer`;
+/// attack triggers resolve to the `DefendingPlayer`.
+fn resolve_player_anaphor_damage_recipient(
+    after_to: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let trimmed = after_to.trim().trim_end_matches(['.', ',', ';']).trim();
+    let lower = trimmed.to_lowercase();
+    let is_player_anaphor = nom_parse_lower(&lower, |input| {
+        all_consuming(value(
+            (),
+            alt((tag::<_, _, OracleError<'_>>("them"), tag("they"))),
+        ))
+        .parse(input)
+    })
+    .is_some();
+    if !is_player_anaphor {
+        return None;
+    }
+    match ctx.relative_player_scope {
+        Some(ControllerRef::ScopedPlayer) => Some(TargetFilter::ScopedPlayer),
+        Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {
+            Some(TargetFilter::TriggeringPlayer)
+        }
+        Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
+        _ => None,
+    }
 }
 
 /// CR 607.2d + CR 608.2c + CR 120.1: In damage-recipient grammar, singular

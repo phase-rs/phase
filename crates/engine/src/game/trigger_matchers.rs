@@ -708,6 +708,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
