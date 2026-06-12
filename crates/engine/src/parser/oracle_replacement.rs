@@ -5219,6 +5219,33 @@ fn strip_as_long_as_prefix_for_prevention(
     }
 }
 
+/// CR 615.1a: Detect the subject-first self-prevention phrasing in which the
+/// source `~` is the grammatical subject of the passive `would be dealt`
+/// (Unbreathing Horde: `If ~ would be dealt damage, prevent that damage ...`),
+/// optionally with a combat/noncombat qualifier. In this form the damage
+/// recipient is always the source itself, so the shield must scope to `SelfRef`
+/// rather than falling through to prevent all damage to any recipient. This is
+/// distinct from the recipient-first phrasing already covered by the `dealt to
+/// ~` checks (`If damage would be dealt to ~, ...`, Anti-Venom / Phantom Tiger).
+///
+/// Matching only the literal `~` subject keeps the attached-subject variant
+/// (`If equipped creature would be dealt damage ...`, Panther Habit) routing
+/// through the `EquippedBy`/`EnchantedBy` filter path instead of `SelfRef`.
+///
+/// Scans at word boundaries so the subject phrase need not start the line; the
+/// leading `if` / `as long as ...` gate has already been stripped by the caller.
+fn scan_self_subject_would_be_dealt_damage(working_lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("~ would be dealt "),
+            // Optional combat/noncombat qualifier before "damage".
+            terminated(opt(alt((tag("noncombat "), tag("combat ")))), tag("damage")),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -5329,9 +5356,15 @@ fn parse_damage_prevention_replacement(
     let valid_card_filter: Option<TargetFilter> =
         if nom_primitives::scan_contains(working_lower, "dealt to ~")
             || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
+            || scan_self_subject_would_be_dealt_damage(working_lower)
         {
-            // CR 615.1a: Self-scoped prevention ("If damage would be dealt to ~")
-            // must gate on `valid_card: SelfRef`, not a broad creature damage filter.
+            // CR 615.1a: Self-scoped prevention must gate on `valid_card: SelfRef`,
+            // not a broad creature damage filter. Two surface forms reach here:
+            //   1. recipient-first: "If damage would be dealt to ~, ..." (Anti-Venom)
+            //   2. subject-first:   "If ~ would be dealt damage, ..." (Unbreathing
+            //      Horde) — the source is the grammatical subject of the passive
+            //      "would be dealt", so the shield only ever sees damage dealt to
+            //      the source itself.
             Some(TargetFilter::SelfRef)
         } else {
             nom_primitives::scan_at_word_boundaries(working_lower, |input| {
@@ -6571,6 +6604,91 @@ mod tests {
                 "must not use broad CreatureOnly damage_target_filter: {text}"
             );
         }
+    }
+
+    /// CR 615.1a: Unbreathing Horde — "If this creature would be dealt damage,
+    /// prevent that damage and remove a +1/+1 counter from it."
+    ///
+    /// The subject-first phrasing ("~ would be dealt damage") must scope the
+    /// shield to the source itself (`valid_card: SelfRef`), not to every damage
+    /// recipient. Without it the shield fell through to `valid_card = None` and
+    /// prevented ALL damage to ANY object/player. The same-sentence rider
+    /// ("remove a +1/+1 counter from it") must bind "it" to the source and
+    /// remove one +1/+1 counter per prevention event.
+    #[test]
+    fn unbreathing_horde_self_prevention_scopes_to_self_and_removes_counter() {
+        let def = parse_replacement_line(
+            "If this creature would be dealt damage, prevent that damage and \
+             remove a +1/+1 counter from it.",
+            "Unbreathing Horde",
+        )
+        .expect("Unbreathing Horde prevention should parse");
+
+        // Scope: the shield gates on SelfRef, not a broad recipient filter.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "subject-first self prevention must gate on SelfRef"
+        );
+        assert!(
+            def.damage_target_filter.is_none(),
+            "must not use a broad damage_target_filter"
+        );
+
+        // Rider: removes one +1/+1 counter from the source per prevention.
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("counter-removal rider must be parsed");
+        match &*execute.effect {
+            Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, Some(CounterType::Plus1Plus1));
+                assert_eq!(*count, 1);
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "rider 'it' must bind to self"
+                );
+            }
+            other => panic!("expected Effect::RemoveCounter, got {other:?}"),
+        }
+    }
+
+    /// Full-card regression: parsing Unbreathing Horde's complete Oracle text
+    /// must surface the self-scoped damage-prevention replacement (DamageDone,
+    /// `valid_card: SelfRef`) alongside the ETB enter-with-counters replacement,
+    /// rather than dropping the prevention or scoping it to all damage.
+    #[test]
+    fn unbreathing_horde_full_card_prevention_is_self_scoped() {
+        let parsed = parse_oracle_text(
+            "This creature enters with a +1/+1 counter on it for each other Zombie \
+             you control and each Zombie card in your graveyard.\n\
+             If this creature would be dealt damage, prevent that damage and \
+             remove a +1/+1 counter from it.",
+            "Unbreathing Horde",
+            &[],
+            &["Creature".to_string()],
+            &["Zombie".to_string()],
+        );
+
+        let prevention = parsed
+            .replacements
+            .iter()
+            .find(|r| r.event == ReplacementEvent::DamageDone)
+            .expect("self-prevention replacement must be parsed from the full card");
+        assert_eq!(
+            prevention.valid_card,
+            Some(TargetFilter::SelfRef),
+            "damage prevention must be scoped to the Horde itself"
+        );
+        assert!(
+            prevention.damage_target_filter.is_none(),
+            "must not broaden the shield to all recipients"
+        );
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
