@@ -2916,6 +2916,32 @@ fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     }
 }
 
+/// True if the filter directly or recursively references `TargetFilter::TriggeringSource`.
+///
+/// Used by `delayed_trigger::resolve()` to gate the event-context snapshot for
+/// delayed triggers whose inner effect targets the trigger's source object via
+/// the "it" anaphor (e.g. "return it to the battlefield").
+///
+/// Checks all object-target slots via `effect_parent_ref_slots`, including
+/// hidden slots that `effect_target_filter` does not surface (e.g.,
+/// `Attach.attachment`).
+fn filter_refs_triggering_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::TriggeringSource => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_refs_triggering_source)
+        }
+        TargetFilter::Not { filter } => filter_refs_triggering_source(filter),
+        _ => false,
+    }
+}
+
+fn effect_refs_triggering_source(effect: &Effect) -> bool {
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|f| filter_refs_triggering_source(f))
+}
+
 /// CR 603.7 + CR 109.5: Replace the first `TargetRef::Object` in a target
 /// slice with the supplied object id. Used by the `repeat_for: TrackedSetSize`
 /// per-iteration rebind so the i-th iteration's parent reference (e.g.,
