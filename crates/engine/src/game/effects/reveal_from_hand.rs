@@ -11,6 +11,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
     AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
 
@@ -76,7 +78,8 @@ pub fn resolve(
     // normal RevealChoice handler path.
     //
     // CR 107.3 + CR 611.2: Seed the continuation's targets with the source so
-    // `Effect::Tap { target: SelfRef }` (the reveal-land decline branch)
+    // `Effect::SetTapState { target: SelfRef, scope: Single, state: Tap }` (the
+    // reveal-land decline branch)
     // resolves correctly when drained. Mirrors `apply_post_replacement_effect`'s
     // convention of threading the source object as the default target.
     if let Some(def) = on_decline {
@@ -161,8 +164,10 @@ mod tests {
     fn tap_self_ability() -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
     }
@@ -295,8 +300,10 @@ mod tests {
         );
         let conditional_tap = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .condition(crate::types::ability::AbilityCondition::Not {
@@ -373,8 +380,10 @@ mod tests {
         );
         let conditional_tap = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .condition(crate::types::ability::AbilityCondition::Not {

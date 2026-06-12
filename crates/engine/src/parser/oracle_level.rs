@@ -11,6 +11,7 @@ use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::{parse_static_line, parse_static_line_multi};
+use super::oracle_util::strip_reminder_text;
 
 /// CR 711: Parse LEVEL block lines from a leveler creature's Oracle text.
 ///
@@ -101,6 +102,10 @@ pub(crate) fn parse_level_blocks(
                 let keywords: Vec<&str> = next.split(',').map(|s| s.trim()).collect();
                 let mut any_keyword = false;
                 for kw_text in &keywords {
+                    // CR 711.2a: Reminder text in parentheses ("Shroud (This creature…)")
+                    // must not prevent keyword recognition inside a {LEVEL} striation.
+                    let stripped = strip_reminder_text(kw_text);
+                    let kw_text = stripped.trim();
                     if let Some(kw) = parse_keyword_from_oracle(&kw_text.to_lowercase()) {
                         if !matches!(kw, crate::types::keywords::Keyword::Unknown(_)) {
                             modifications.push(ContinuousModification::AddKeyword { keyword: kw });

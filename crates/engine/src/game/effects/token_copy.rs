@@ -1,18 +1,23 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::{DisplaySource, GameObject};
 use crate::game::layers::compute_current_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    TargetRef, TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCopyTokenBatch, PendingCopyTokenResolution};
+use crate::types::game_state::{
+    GameState, PendingCopyTokenBatch, PendingCopyTokenResolution, PendingCounterPostAction,
+};
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::proposed_event::{CopyTokenSpec, EtbTapState, ProposedEvent};
+use crate::types::proposed_event::{
+    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+};
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -204,6 +209,7 @@ pub fn resolve(
                 values: Box::new(values),
                 display_source: source.display_source,
                 printed_ref: source.printed_ref.clone(),
+                token_image_ref: source.token_image_ref.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -268,7 +274,13 @@ fn drain_copy_token_resolution(
 
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
-                super::token::apply_create_token_after_replacement(state, event, events);
+                if !super::token::apply_create_token_after_replacement(state, event, events) {
+                    pending
+                        .created_ids
+                        .extend(state.last_created_token_ids.clone());
+                    state.pending_copy_token_resolution = Some(pending);
+                    return;
+                }
                 pending
                     .created_ids
                     .extend(state.last_created_token_ids.clone());
@@ -295,6 +307,75 @@ fn drain_copy_token_resolution(
     });
 }
 
+/// CR 601.2f + CR 603.4: Triggers gated on a cast-time additional-cost payment
+/// ("if its offspring cost was paid", "if it was kicked") are inert on a token
+/// copy — the token was created, not cast, so the payment condition can never
+/// hold. Only the payment-gated condition is stripped: persistent battlefield
+/// abilities that *observe* spell casts (Magecraft's `SpellCastOrCopy`,
+/// "whenever you cast a [type] spell" `SpellCast`) are copiable text per
+/// CR 707.2 and must survive on the copy.
+fn is_cast_payment_gated_trigger(trig: &TriggerDefinition) -> bool {
+    matches!(
+        trig.condition,
+        Some(TriggerCondition::AdditionalCostPaid { .. })
+    )
+}
+
+/// CR 601.2f + CR 707.2: Remove spell-casting-only copiable characteristics
+/// from a freshly created copy token (Offspring/Kicker keywords, "if it was
+/// kicked" / "if offspring was paid" ETB triggers, etc.).
+fn strip_spell_casting_copiable_characteristics(obj: &mut GameObject) {
+    obj.keywords.retain(|kw| !kw.is_spell_casting_only());
+    obj.base_keywords.retain(|kw| !kw.is_spell_casting_only());
+    obj.trigger_definitions
+        .retain(|trig| !is_cast_payment_gated_trigger(trig));
+    Arc::make_mut(&mut obj.base_trigger_definitions)
+        .retain(|trig| !is_cast_payment_gated_trigger(trig));
+}
+
+/// CR 111.10 + CR 702.175a: When a card-related token preset exists (Offspring,
+/// set-specific copy tokens), route the copy through the token art database
+/// instead of rendering as a card-copy with a "Copy" badge.
+fn resolve_predefined_token_display(
+    state: &mut GameState,
+    copy_source_id: ObjectId,
+    token_id: ObjectId,
+) {
+    let body = {
+        let token = match state.objects.get(&token_id) {
+            Some(token) if token.display_source == DisplaySource::Card => token,
+            _ => return,
+        };
+        TokenCharacteristics {
+            display_name: token.name.clone(),
+            power: token.power,
+            toughness: token.toughness,
+            core_types: token.card_types.core_types.clone(),
+            subtypes: token.card_types.subtypes.clone(),
+            supertypes: token.card_types.supertypes.clone(),
+            colors: token.color.clone(),
+            keywords: token.keywords.clone(),
+        }
+    };
+    let Some(image_ref) =
+        crate::game::token_presets::find_card_linked_copy_token_ref(state, copy_source_id, &body)
+    else {
+        return;
+    };
+    if let Some(token) = state.objects.get_mut(&token_id) {
+        token.display_source = DisplaySource::Token;
+        token.token_image_ref = Some(image_ref);
+    }
+}
+
+/// CR 707.2: Finalize a copy token after P/T exceptions and cast-only stripping.
+fn finalize_copied_token(state: &mut GameState, copy_source_id: ObjectId, token_id: ObjectId) {
+    if let Some(token) = state.objects.get_mut(&token_id) {
+        strip_spell_casting_copiable_characteristics(token);
+    }
+    resolve_predefined_token_display(state, copy_source_id, token_id);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_copy_token_after_replacement(
     state: &mut GameState,
@@ -304,23 +385,40 @@ pub(crate) fn apply_copy_token_after_replacement(
     enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
     final_count: u32,
     events: &mut Vec<GameEvent>,
-) -> Vec<ObjectId> {
+) -> CopyTokenApplyStatus {
     let CopyTokenSpec {
         values,
         display_source,
         printed_ref,
+        token_image_ref,
         extra_keywords,
         additional_modifications,
         tapped,
         enters_attacking,
+        sacrifice_at,
         source_id,
         controller,
-        ..
     } = copy;
     let name = values.name.clone();
     let mut created_ids = Vec::with_capacity(final_count as usize);
 
-    for _ in 0..final_count {
+    // CR 306.5b + CR 707.2: A token that's a copy of a planeswalker enters with
+    // loyalty counters equal to the copied permanent's loyalty — CR 306.5c makes
+    // the counter map the single source of truth for loyalty. The copy path
+    // builds the object directly (not through the ZoneChange ETB-counter seeding
+    // used by cast/play/effect entries), so seed the intrinsic loyalty counters
+    // here, ahead of any explicit `enter_with_counters`, routing them through
+    // `add_counter_with_replacement` below so Doubling Season etc. apply
+    // (CR 614.1a). Without this a copied planeswalker enters with 0 loyalty
+    // counters and dies immediately to CR 704.5i. Copies don't track battle
+    // defense (`CopiableValues` has no defense field), so only loyalty is seeded.
+    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
+        crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None)
+            .into_iter()
+            .chain(enter_with_counters.iter().cloned())
+            .collect();
+
+    for index in 0..final_count {
         let token_id = zones::create_object(
             state,
             CardId(0),
@@ -334,6 +432,9 @@ pub(crate) fn apply_copy_token_after_replacement(
         token.display_source = display_source;
         token.printed_ref = printed_ref.clone();
         token.base_printed_ref = printed_ref.clone();
+        // CR 111.1 + CR 707.2: when copying a true token, carry its exact token
+        // art pointer so the copy resolves the same art (not a name fallback).
+        token.token_image_ref = token_image_ref.clone();
         token.name = values.name.clone();
         token.base_name = values.name.clone();
         token.mana_cost = values.mana_cost.clone();
@@ -377,26 +478,123 @@ pub(crate) fn apply_copy_token_after_replacement(
             }
         }
 
-        let _ = token;
-        apply_token_modifications(state, token_id, &additional_modifications, events);
-
-        let token = state.objects.get_mut(&token_id).unwrap();
         token.tapped = enter_tapped.resolve(tapped);
         let _ = token;
+        let finalization = CopyTokenFinalization {
+            name: name.clone(),
+            enters_attacking,
+            source_id,
+            controller,
+        };
+        if !apply_token_modifications(
+            state,
+            token_id,
+            &finalization,
+            &additional_modifications,
+            events,
+        ) {
+            let remaining_count = final_count.saturating_sub(index + 1);
+            if remaining_count > 0 {
+                super::counters::append_pending_counter_post_actions(
+                    state,
+                    vec![PendingCounterPostAction::ContinueCopyTokenCreation {
+                        owner: token_owner,
+                        copy: Box::new(CopyTokenSpec {
+                            values: values.clone(),
+                            display_source,
+                            printed_ref: printed_ref.clone(),
+                            token_image_ref: token_image_ref.clone(),
+                            extra_keywords: extra_keywords.clone(),
+                            additional_modifications: additional_modifications.clone(),
+                            tapped,
+                            enters_attacking,
+                            sacrifice_at: sacrifice_at.clone(),
+                            source_id,
+                            controller,
+                        }),
+                        enter_tapped,
+                        enter_with_counters: enter_with_counters.clone(),
+                        remaining_count,
+                    }],
+                );
+            }
+            state.last_created_token_ids = created_ids.clone();
+            return CopyTokenApplyStatus {
+                created_ids,
+                completion: CopyTokenApplyCompletion::Paused,
+            };
+        }
+
+        finalize_copied_token(state, source_id, token_id);
 
         // CR 614.1c + CR 122.6a: ETB-counter replacement mutations are carried
         // on the accepted CreateToken spec, even for copy tokens whose full
         // CR 707 payload lives in `CopyTokenSpec`.
-        for (counter_type, counter_count) in &enter_with_counters {
-            if *counter_count > 0 {
-                super::counters::add_counter_with_replacement(
+        for (counter_index, (counter_type, counter_count)) in etb_counters.iter().enumerate() {
+            if *counter_count > 0
+                && !super::counters::add_counter_with_replacement(
                     state,
                     token_owner,
                     token_id,
                     counter_type.clone(),
                     *counter_count,
                     events,
+                )
+            {
+                state.last_created_token_ids = created_ids.clone();
+                let remaining_counters = etb_counters[counter_index + 1..]
+                    .iter()
+                    .filter(|(_, count)| *count > 0)
+                    .map(|(counter_type, count)| {
+                        crate::types::game_state::PendingCounterAddition::Object {
+                            actor: token_owner,
+                            object_id: token_id,
+                            counter_type: counter_type.clone(),
+                            count: *count,
+                        }
+                    })
+                    .collect();
+                let remaining_count = final_count.saturating_sub(index + 1);
+                super::counters::stash_pending_counter_additions(
+                    state,
+                    remaining_counters,
+                    crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                        EffectKind::CopyTokenOf,
+                        source_id,
+                        vec![
+                            PendingCounterPostAction::FinalizeCopyTokenEntry {
+                                object_id: token_id,
+                                name: name.clone(),
+                                enters_attacking,
+                                source_id,
+                                controller,
+                            },
+                            PendingCounterPostAction::ContinueCopyTokenCreation {
+                                owner: token_owner,
+                                copy: Box::new(CopyTokenSpec {
+                                    values: values.clone(),
+                                    display_source,
+                                    printed_ref: printed_ref.clone(),
+                                    token_image_ref: token_image_ref.clone(),
+                                    extra_keywords: extra_keywords.clone(),
+                                    additional_modifications: additional_modifications.clone(),
+                                    tapped,
+                                    enters_attacking,
+                                    sacrifice_at: sacrifice_at.clone(),
+                                    source_id,
+                                    controller,
+                                }),
+                                enter_tapped,
+                                enter_with_counters: enter_with_counters.clone(),
+                                remaining_count,
+                            },
+                        ],
+                    ),
                 );
+                return CopyTokenApplyStatus {
+                    created_ids,
+                    completion: CopyTokenApplyCompletion::Paused,
+                };
             }
         }
 
@@ -405,7 +603,7 @@ pub(crate) fn apply_copy_token_after_replacement(
             crate::game::combat::enter_attacking(state, token_id, source_id, controller);
         }
 
-        // CR 111.10a-v: Predefined token abilities for known subtypes (Treasure, Food, etc.).
+        // CR 111.10: Predefined token abilities for known subtypes (Treasure, Food, etc.).
         super::token::inject_predefined_token_abilities(state, token_id);
         // Battlefield entry of a copy token: request an incremental re-derive
         // for just this token. `flush_layers` escalates to a full pass when
@@ -428,11 +626,89 @@ pub(crate) fn apply_copy_token_after_replacement(
         events.push(GameEvent::TokenCreated {
             object_id: token_id,
             name: name.clone(),
+            source_id,
         });
         created_ids.push(token_id);
     }
 
-    created_ids
+    CopyTokenApplyStatus {
+        created_ids,
+        completion: CopyTokenApplyCompletion::Completed,
+    }
+}
+
+pub(crate) struct CopyTokenApplyStatus {
+    pub(crate) created_ids: Vec<ObjectId>,
+    pub(crate) completion: CopyTokenApplyCompletion,
+}
+
+pub(crate) enum CopyTokenApplyCompletion {
+    Completed,
+    Paused,
+}
+
+struct CopyTokenFinalization {
+    name: String,
+    enters_attacking: bool,
+    source_id: ObjectId,
+    controller: crate::types::player::PlayerId,
+}
+
+/// CR 707.2 / CR 707.9: Complete copy-token entry and apply remaining copy
+/// modifications after resuming from a counter-placement replacement pause.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
+    state: &mut GameState,
+    token_id: ObjectId,
+    name: String,
+    enters_attacking: bool,
+    source_id: ObjectId,
+    controller: crate::types::player::PlayerId,
+    remaining_modifications: Vec<ContinuousModification>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let finalization = CopyTokenFinalization {
+        name: name.clone(),
+        enters_attacking,
+        source_id,
+        controller,
+    };
+    if !apply_token_modifications(
+        state,
+        token_id,
+        &finalization,
+        &remaining_modifications,
+        events,
+    ) {
+        return false;
+    }
+    finalize_copied_token(state, source_id, token_id);
+    if enters_attacking {
+        crate::game::combat::enter_attacking(state, token_id, source_id, controller);
+    }
+    super::token::inject_predefined_token_abilities(state, token_id);
+    crate::game::layers::mark_layers_entered(state, token_id);
+    crate::game::restrictions::record_battlefield_entry(state, token_id);
+    crate::game::restrictions::record_token_created(state, token_id);
+    if let Some(token) = state.objects.get(&token_id) {
+        let zone_change_record = token.snapshot_for_zone_change(token_id, None, Zone::Battlefield);
+        events.push(GameEvent::ZoneChanged {
+            object_id: token_id,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(zone_change_record),
+        });
+    }
+    events.push(GameEvent::TokenCreated {
+        object_id: token_id,
+        name,
+        source_id,
+    });
+    state.last_created_token_ids.push(token_id);
+    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        pending.created_ids.push(token_id);
+    }
+    true
 }
 
 /// CR 707.2: Compute the longest contiguous prefix of `source_ids` (top-down
@@ -503,10 +779,11 @@ pub(crate) fn compute_copy_batch_prefix(
 fn apply_token_modifications(
     state: &mut GameState,
     token_id: ObjectId,
+    finalization: &CopyTokenFinalization,
     modifications: &[ContinuousModification],
     events: &mut Vec<GameEvent>,
-) {
-    for modification in modifications {
+) -> bool {
+    for (index, modification) in modifications.iter().enumerate() {
         match modification {
             // CR 205.4 + CR 707.9b: "the token isn't legendary" (Miirym class).
             ContinuousModification::RemoveSupertype { supertype } => {
@@ -535,12 +812,12 @@ fn apply_token_modifications(
                 count,
                 if_type,
             } => {
-                let controller = state
+                let counter_actor = state
                     .objects
                     .get(&token_id)
                     .map(|o| o.controller)
                     .unwrap_or(crate::types::player::PlayerId(0));
-                let n = resolve_quantity(state, count, controller, token_id).max(0) as u32;
+                let n = resolve_quantity(state, count, counter_actor, token_id).max(0) as u32;
                 if n == 0 {
                     continue;
                 }
@@ -555,14 +832,31 @@ fn apply_token_modifications(
                 if !gate_passes {
                     continue;
                 }
-                super::counters::add_counter_with_replacement(
+                if !super::counters::add_counter_with_replacement(
                     state,
-                    controller,
+                    counter_actor,
                     token_id,
                     counter_type.clone(),
                     n,
                     events,
-                );
+                ) {
+                    super::counters::stash_pending_counter_post_actions(
+                        state,
+                        EffectKind::CopyTokenOf,
+                        finalization.source_id,
+                        vec![
+                            PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                                object_id: token_id,
+                                name: finalization.name.clone(),
+                                enters_attacking: finalization.enters_attacking,
+                                source_id: finalization.source_id,
+                                controller: finalization.controller,
+                                remaining_modifications: modifications[index + 1..].to_vec(),
+                            },
+                        ],
+                    );
+                    return false;
+                }
             }
             // CR 707.9b: Name override applied at copy time.
             ContinuousModification::SetName { name } => {
@@ -743,6 +1037,7 @@ fn apply_token_modifications(
             _ => {}
         }
     }
+    true
 }
 
 /// CR 205.1a + CR 613.1d: remove every subtype belonging to the given
@@ -783,10 +1078,10 @@ mod tests {
     use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
-        CostPaidObjectSnapshot, Effect, FilterProp, ObjectScope, QuantityExpr,
-        QuantityModification, QuantityRef, ReplacementDefinition, RoundingMode, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ContinuousModification,
+        ControllerRef, CostPaidObjectSnapshot, Effect, FilterProp, ObjectScope, PtValue,
+        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, RoundingMode,
+        TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::PrintedCardRef;
@@ -797,6 +1092,7 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
 
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
     /// color, and replaces creature subtypes (The Scarab God shape) stamps each
@@ -1526,6 +1822,78 @@ mod tests {
         assert_eq!(token.power, Some(2));
         assert_eq!(token.toughness, Some(2));
         assert!(token.is_token);
+    }
+
+    /// Issue #2402: Hazel of the Rootbloom — copy a non-Squirrel token target
+    /// whose live characteristics must be mirrored into `base_*` fields by the
+    /// real token creation path before copy-token resolution reads copiable values.
+    #[test]
+    fn issue_2402_copy_token_of_token_target_creates_copy() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hazel".to_string(),
+            Zone::Battlefield,
+        );
+        let create_food = ResolvedAbility::new(
+            Effect::Token {
+                name: "Food".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Food".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::token::resolve(&mut state, &create_food, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+        let food = state.last_created_token_ids[0];
+        let food_token = state.objects.get(&food).unwrap();
+        assert!(food_token.base_characteristics_initialized);
+        assert_eq!(food_token.base_name, "Food");
+        assert_eq!(
+            food_token.base_card_types.core_types,
+            vec![CoreType::Artifact]
+        );
+        assert_eq!(food_token.base_card_types.subtypes, vec!["Food"]);
+
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Object(food)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let copy_id = ObjectId(state.next_object_id - 1);
+        let copy = state.objects.get(&copy_id).unwrap();
+        assert!(copy.is_token);
+        assert_eq!(copy.name, "Food");
+        assert_eq!(copy.card_types.core_types, vec![CoreType::Artifact]);
+        assert_eq!(copy.card_types.subtypes, vec!["Food"]);
     }
 
     /// CR 109.4 + CR 111.2: "target opponent creates a token that's a copy of
@@ -2331,6 +2699,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn paused_copy_token_add_counter_on_enter_preserves_remaining_batch() {
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&replacement_source).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+
+        let source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(2);
+            source.base_toughness = Some(2);
+            source.power = Some(2);
+            source.toughness = Some(2);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Soldier".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::AddCounterOnEnter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    if_type: None,
+                }],
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        let mut choice_events = Vec::new();
+        for _ in 0..2 {
+            let result =
+                apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+            choice_events.extend(result.events);
+        }
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            2,
+            "copy-token counter pauses must preserve the current token and remaining copies"
+        );
+        for token_id in &state.last_created_token_ids {
+            let token = state.objects.get(token_id).unwrap();
+            assert!(token.is_token);
+            assert_eq!(token.name, "Soldier");
+        }
+        assert_eq!(
+            choice_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        source_id: ObjectId(100),
+                    }
+                ))
+                .count(),
+            1,
+            "the copy-token effect should resolve once after the paused batch finishes"
+        );
+    }
+
     /// CR 707.9f: Conditional `if_type` declines when the resolved object's
     /// core type doesn't match. Token-copy of a non-creature with
     /// `AddCounterOnEnter { if_type: Some(Creature) }` must NOT place the
@@ -2392,6 +2862,77 @@ mod tests {
             p1p1, 0,
             "if_type=Creature must skip on a Planeswalker copy; counters={:?}",
             token.counters
+        );
+    }
+
+    /// CR 306.5b + CR 306.5c + CR 707.2: A token that's a copy of a planeswalker
+    /// must enter with loyalty counters equal to the copied loyalty — the copy
+    /// path builds the object directly, bypassing the ZoneChange ETB-counter
+    /// seeding, so it must seed loyalty counters itself. Pre-fix the copy carried
+    /// only the `loyalty` field with no counter, so once the layer system treats
+    /// the counter map as the source of truth (CR 306.5c) the copy would read 0
+    /// loyalty and die immediately to CR 704.5i.
+    #[test]
+    fn copy_token_of_planeswalker_seeds_loyalty_counters() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_loyalty = Some(5);
+            s.loyalty = Some(5);
+            s.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Planeswalker],
+                subtypes: vec!["Jace".to_string()],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        assert_eq!(
+            state.objects[&token_id]
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied(),
+            Some(5),
+            "planeswalker copy must seed loyalty counters equal to copied loyalty",
+        );
+
+        // The copy must survive a layer re-evaluation at its real loyalty, not
+        // snap to 0 (it's still on the battlefield, not in the graveyard).
+        evaluate_layers(&mut state);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert_eq!(
+            token.loyalty,
+            Some(5),
+            "copied planeswalker loyalty must derive from its seeded counters",
         );
     }
 
@@ -2629,6 +3170,115 @@ mod tests {
         assert_eq!(token.name, "Coruscation Mage");
         assert!(token.card_types.subtypes.contains(&"Wizard".to_string()));
         assert!(token.is_token);
+        assert!(
+            !token
+                .keywords
+                .iter()
+                .any(|kw| matches!(kw, crate::types::keywords::Keyword::Offspring(_))),
+            "offspring token must not retain the cast-only Offspring keyword"
+        );
+        assert!(
+            !token.trigger_definitions.iter_all().any(|trig| matches!(
+                trig.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )),
+            "offspring token must not retain AdditionalCostPaid ETB triggers"
+        );
+    }
+
+    /// CR 707.2 vs CR 601.2f + CR 603.4: copy-token finalization strips only
+    /// cast-payment-gated triggers ("if its offspring cost was paid" / "if it
+    /// was kicked"). Persistent spell-cast observers — Magecraft's
+    /// `SpellCastOrCopy`, generic "whenever you cast a [type] spell"
+    /// `SpellCast` — are copiable battlefield text and must survive on the
+    /// token copy.
+    #[test]
+    fn copy_token_keeps_spell_cast_triggers_strips_payment_gated_triggers() {
+        let mut state = GameState::new_two_player(42);
+
+        let parent_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Archmage Emeritus".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let parent = state.objects.get_mut(&parent_id).unwrap();
+            parent.base_power = Some(2);
+            parent.base_toughness = Some(2);
+            parent.power = Some(2);
+            parent.toughness = Some(2);
+            parent.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string(), "Wizard".to_string()],
+            };
+            parent.card_types = parent.base_card_types.clone();
+
+            // Magecraft-style persistent battlefield trigger (CR 707.10 note:
+            // observes casts/copies; it is not itself cast-time bookkeeping).
+            let magecraft = TriggerDefinition::new(TriggerMode::SpellCastOrCopy).description(
+                "Magecraft — Whenever you cast or copy an instant or sorcery spell, draw a card."
+                    .to_string(),
+            );
+            // Offspring-style ETB trigger gated on a cast-time payment.
+            let offspring_etb = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::SelfRef)
+                .condition(TriggerCondition::AdditionalCostPaid {
+                    source: AdditionalCostPaymentSource::Any,
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                })
+                .description("offspring etb".to_string());
+            parent.base_trigger_definitions = Arc::new(vec![magecraft, offspring_etb]);
+            parent.trigger_definitions = Arc::clone(&parent.base_trigger_definitions).into();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            parent_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(
+            token
+                .trigger_definitions
+                .iter_all()
+                .any(|trig| matches!(trig.mode, TriggerMode::SpellCastOrCopy)),
+            "token copy must keep the persistent Magecraft SpellCastOrCopy trigger (CR 707.2)"
+        );
+        assert!(
+            token
+                .base_trigger_definitions
+                .iter()
+                .any(|trig| matches!(trig.mode, TriggerMode::SpellCastOrCopy)),
+            "copiable base triggers must also keep the SpellCastOrCopy trigger (CR 707.2)"
+        );
+        assert!(
+            !token.trigger_definitions.iter_all().any(|trig| matches!(
+                trig.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )),
+            "token copy must strip cast-payment-gated triggers (CR 601.2f + CR 603.4)"
+        );
     }
 
     /// CR 707.9b: dynamic copy exceptions are resolved after the copied values

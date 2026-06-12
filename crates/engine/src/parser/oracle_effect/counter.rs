@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::multispace0;
-use nom::combinator::{eof, value};
+use nom::character::complete::{multispace0, space1};
+use nom::combinator::{eof, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -221,6 +221,21 @@ fn resolve_counter_placement_target<'a>(
             let on_offset = lower.len() - on_rest.len();
             (&text[on_offset..], None)
         }
+    } else if let Some((count, after_target)) = nom_on_lower(on_rest, on_rest, |i| {
+        // CR 601.2c: "each of <N|X> target <type>" — an EXACT-count multi-target
+        // distribution (not "up to"). The count binds the number of targets; X
+        // resolves from the activation cost's {X}. `peek("target")` does not
+        // consume, so the downstream `parse_target_with_ctx` still sees
+        // "target <type>". The `space1` + `peek("target")` requirement excludes
+        // "each of those creatures" / "each creature" from this arm.
+        let (i, ()) = value((), tag("each of ")).parse(i)?;
+        let (i, count) = super::parse_multi_target_count_expr(i)?;
+        let (i, ()) = value((), space1).parse(i)?;
+        let (i, _) = peek(tag("target")).parse(i)?;
+        Ok((i, count))
+    }) {
+        let on_offset = lower.len() - after_target.len();
+        (&text[on_offset..], Some(MultiTargetSpec::exact(count)))
     } else {
         let on_offset = lower.len() - on_rest.len();
         (&text[on_offset..], None)
@@ -384,13 +399,48 @@ pub(super) fn try_parse_put_counter<'a>(
     // the clause wasn't found before "on {target}" and must appear here.
     if dynamic_deferred {
         let trimmed = remainder.trim_start();
-        let (after_clause, qty) = nom_quantity::parse_equal_to(trimmed).ok()?;
-        count_expr = if rebind_deferred_to_placement_object {
-            rebind_post_target_counter_quantity(qty, trimmed, &target)
-        } else {
-            qty
-        };
-        remainder = after_clause.trim_start();
+        match nom_quantity::parse_equal_to(trimmed) {
+            Ok((after_clause, qty)) => {
+                count_expr = if rebind_deferred_to_placement_object {
+                    rebind_post_target_counter_quantity(qty, trimmed, &target)
+                } else {
+                    qty
+                };
+                remainder = after_clause.trim_start();
+            }
+            Err(_) => {
+                // CR 122.1 + CR 608.2c: Emit the survivable `Variable { "count" }`
+                // placeholder ONLY when there is no in-line "equal to {qty}" clause
+                // — i.e. the count is carried externally (a vote-tally head whose
+                // "equal to ... votes" suffix was stripped before parsing). Then
+                // the PutCounter/PutCounterAll effect still builds and is available
+                // for the external bind (`Effect::count_expr_mut`); an unbound
+                // `Variable { "count" }` resolves to 0 (quantity.rs `resolve_ref`),
+                // so it is inert until bound. Symmetric with the token path's
+                // "a number of" placeholder, which is likewise only reached when
+                // no inline count was found.
+                //
+                // If an "equal to" clause IS present but its quantity failed to
+                // parse, fall through (return None) to preserve prior dispatch.
+                // Emitting a placeholder here would bind a wrong 0-count AND orphan
+                // the unparsed quantity / trailing conditional as a swallowed
+                // clause — the regression this guard prevents: Drizzt Do'Urden
+                // ("...equal to the difference") and Jared Carthalion ("...equal to
+                // the number of colors it is") left their following intervening-if
+                // / conditional clauses swallowed (Condition_If) when the count
+                // silently became a placeholder.
+                if nom_on_lower(trimmed, trimmed, |i| value((), tag("equal to ")).parse(i))
+                    .is_some()
+                {
+                    return None;
+                }
+                count_expr = QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "count".to_string(),
+                    },
+                };
+            }
+        }
     }
 
     if let Some((for_each_count, after_suffix)) = parse_counter_for_each_suffix(remainder) {
@@ -1353,6 +1403,39 @@ mod tests {
             .any(|p| matches!(p, FilterProp::Named { name } if name.eq_ignore_ascii_case("Gruff Triplets"))));
     }
 
+    /// CR 122.1 + CR 608.2c: a "put a number of {type} counters on {target}"
+    /// body with NO in-line "equal to {qty}" clause carries its count
+    /// externally (a vote-tally clause binds it later). The dynamic-deferred
+    /// branch must still build the `PutCounter` effect with the survivable
+    /// `Variable { "count" }` placeholder instead of returning `None` (which
+    /// would lose the effect). This is the load-bearing parser change for the
+    /// Emissary Green counter clause. An unbound `Variable { "count" }`
+    /// resolves to 0, so the placeholder is inert until the external bind.
+    #[test]
+    fn put_counter_a_number_of_no_equal_to_emits_count_placeholder() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        let text = "put a number of +1/+1 counters on each creature you control";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "count".to_string(),
+                },
+            },
+            "deferred 'a number of' with no 'equal to' must emit the survivable count placeholder"
+        );
+    }
+
     /// CR 122.1 + CR 208.3: target-then-count ordering with NO "a number of"
     /// and no leading count — "put +1/+1 counters on <target> equal to its
     /// power" (The Roaring Toeclaws, Experiment Twelve). The counter type
@@ -1505,6 +1588,46 @@ mod tests {
                     name: "X".to_string()
                 }
             }))
+        );
+    }
+
+    /// CR 601.2c: "each of X target creatures" (no "up to") is an EXACT-count
+    /// multi-target — exactly X chosen targets, X bound from the activation
+    /// cost. Must be `MultiTargetSpec::exact(Variable("X"))`, NOT `up_to` and
+    /// NOT an unconstrained all-creatures filter (the misparse this fixes).
+    #[test]
+    fn put_counter_each_of_x_target_creatures_exact_count() {
+        let (_effect, _, multi) = try_parse_put_counter(
+            "put a -1/-1 counter on each of x target creatures",
+            "put a -1/-1 counter on each of x target creatures",
+            &mut default_ctx(),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            multi,
+            Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }))
+        );
+    }
+
+    /// CR 601.2c: fixed-count form "each of two target creatures" ⇒
+    /// `MultiTargetSpec::exact(Fixed(2))`.
+    #[test]
+    fn put_counter_each_of_two_target_creatures_exact_count() {
+        let (_effect, _, multi) = try_parse_put_counter(
+            "put a -1/-1 counter on each of two target creatures",
+            "put a -1/-1 counter on each of two target creatures",
+            &mut default_ctx(),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            multi,
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
         );
     }
 

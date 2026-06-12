@@ -29,7 +29,7 @@ jobs:
   # binaryen.
   card-data:
     name: Card data & R2
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -246,7 +246,7 @@ jobs:
   # parallel. The output feeds the frontend build via artifact.
   build-wasm:
     name: Build WASM
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -399,7 +399,7 @@ jobs:
   # warming the workspace compile would need sccache or similar.
   build-server-binary:
     name: Build server binary
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

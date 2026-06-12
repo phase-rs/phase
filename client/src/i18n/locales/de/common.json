@@ -71,7 +71,9 @@
     "seatsOccupied": "{{occupied}}/{{total}} Plätze belegt",
     "startGame": "Spiel starten",
     "startNow": "Jetzt starten",
-    "fillWithAi": "Mit KI auffüllen"
+    "fillWithAi": "Mit KI auffüllen",
+    "joinLinkCopied": "Beitrittslink kopiert",
+    "copyJoinLink": "Beitrittslink kopieren: {{joinShare}}"
   },
   "grantDebug": {
     "heading": "Sandbox: Debug-Berechtigungen",

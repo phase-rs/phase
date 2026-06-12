@@ -44,7 +44,8 @@
     "endDraftConfirm": "Zakonczyc ten draft dla wszystkich? Tej akcji nie mozna cofnac."
   },
   "manaCurve": {
-    "title": "Krzywa many"
+    "title": "Krzywa many",
+    "bucketLabel": "Wartość many {{bucket}}"
   },
   "pickTimer": {
     "label": "Czas na wybór",

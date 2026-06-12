@@ -24,6 +24,10 @@ impl SacrificeValuePolicy {
                 resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
                 ..
             } | WaitingFor::WardSacrificeChoice { .. }
+                | WaitingFor::EffectZoneChoice {
+                    effect_kind: engine::types::ability::EffectKind::Sacrifice,
+                    ..
+                }
         ) {
             return 0.0;
         }

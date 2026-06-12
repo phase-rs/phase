@@ -17,7 +17,6 @@ expression: "&ir"
         "duration": null,
         "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

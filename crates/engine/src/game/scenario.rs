@@ -25,7 +25,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ConvokeMode, GameState, PendingCast, WaitingFor,
+    ActionResult, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
+    ConvokeMode, GameState, PendingCast, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -613,6 +614,18 @@ impl GameScenario {
         self.add_spell_to_zone(player, name, is_instant, Zone::Library)
     }
 
+    /// Add an instant or sorcery to a player's graveyard without Oracle text.
+    ///
+    /// Use `is_instant: true` for instants, `false` for sorceries.
+    pub fn add_spell_to_graveyard(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        is_instant: bool,
+    ) -> CardBuilder<'_> {
+        self.add_spell_to_zone(player, name, is_instant, Zone::Graveyard)
+    }
+
     fn add_spell_to_zone(
         &mut self,
         player: PlayerId,
@@ -900,6 +913,21 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// CR 302: Make this card a creature. Strips the spell core types
+    /// (Instant/Sorcery) pushed by `add_spell_to_library_top` and adds Creature.
+    /// Mirrors `as_sorcery`/`as_instant`; reusable for search/tutor library tests.
+    pub fn as_creature(&mut self) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types
+            .core_types
+            .retain(|t| *t != CoreType::Instant && *t != CoreType::Sorcery);
+        if !obj.card_types.core_types.contains(&CoreType::Creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// Add the Legendary supertype (CR 205.4a: a card's supertypes are printed
     /// on the type line; CR 205.4d: a permanent with the legendary supertype is
     /// subject to the "legend rule" state-based action).
@@ -1008,21 +1036,11 @@ impl<'a> CardBuilder<'a> {
         let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
         let obj = self.state.objects.get_mut(&self.id).unwrap();
         apply_card_face_to_object(obj, &face);
-        // CR 603.6a: `create_object` registers the trigger index before Oracle
-        // text is applied. Re-index after `from_oracle_text` so scenario-seeded
-        // triggers (e.g. upkeep lines added via `add_creature_from_oracle`) fire.
+        // CR 603.6a: Scenario seeding uses `create_object` + `add_to_zone`, not
+        // `move_to_zone`, so ETB registration never runs. Re-index after Oracle
+        // text is applied so synthesized upkeep triggers are consultable.
         if zone == Zone::Battlefield {
-            let object_id = self.id;
-            let registration = self.state.objects.get(&object_id).map(|obj| {
-                let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
-                    obj.trigger_definitions.as_slice().iter().cloned().collect();
-                let synthetic = crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
-                (defs, synthetic)
-            });
-            if let Some((defs, synthetic)) = registration {
-                self.state.trigger_index.remove(object_id);
-                self.state.trigger_index.add(object_id, &defs, synthetic);
-            }
+            crate::game::trigger_index::reindex_object_triggers(self.state, self.id);
         }
         self
     }
@@ -1448,10 +1466,12 @@ impl GameRunner {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
             WaitingFor::CastOffer {
                 kind: CastOfferKind::Adventure { .. },
@@ -1464,6 +1484,18 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::Evoke => {
                     "AlternativeCastChoice(Evoke)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Emerge => {
+                    "AlternativeCastChoice(Emerge)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Dash => {
+                    "AlternativeCastChoice(Dash)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Blitz => {
+                    "AlternativeCastChoice(Blitz)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Spectacle => {
+                    "AlternativeCastChoice(Spectacle)"
                 }
                 crate::types::game_state::AlternativeCastKeyword::Overload => {
                     "AlternativeCastChoice(Overload)"
@@ -1519,10 +1551,21 @@ impl GameRunner {
                 kind: CastOfferKind::Cascade { .. },
                 ..
             } => "CascadeChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Ripple { .. },
+                ..
+            } => "RippleChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            } => "FreeCastWindow",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
             WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
+            WaitingFor::TimeTravelChoice { .. } => "TimeTravelChoice",
+            WaitingFor::AssistChoosePlayer { .. } => "AssistChoosePlayer",
+            WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
@@ -1625,11 +1668,13 @@ impl GameRunner {
 pub struct SpellCast<'a> {
     runner: &'a mut GameRunner,
     spell: ObjectId,
+    casting_variant: Option<CastingVariant>,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
     target_players: Vec<PlayerId>,
     target_objects: Vec<ObjectId>,
     convoke_with: Vec<ObjectId>,
+    optional: OptionalPolicy,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1637,12 +1682,27 @@ impl<'a> SpellCast<'a> {
         SpellCast {
             runner,
             spell,
+            casting_variant: None,
             modes: None,
             x: None,
             target_players: Vec::new(),
             target_objects: Vec::new(),
             convoke_with: Vec::new(),
+            optional: OptionalPolicy::default(),
         }
+    }
+
+    /// Accept optional ("you may") effects/costs during resolution
+    /// (CR 609.3 / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
+        self
+    }
+
+    /// Decline optional ("you may") effects/costs during resolution.
+    pub fn decline_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Decline;
+        self
     }
 
     /// Declare the modal "choose N" mode indices for a modal spell (CR 700.2).
@@ -1655,6 +1715,14 @@ impl<'a> SpellCast<'a> {
     /// Announce the value of X (CR 107.3a / CR 601.2b). Omit for non-X spells.
     pub fn x(mut self, value: u32) -> Self {
         self.x = Some(value);
+        self
+    }
+
+    /// Choose a cast variant when the engine offers a `CastingVariantChoice`
+    /// (CR 601.2b). Omit for ordinary casts; the driver panics if a spell
+    /// surfaces a variant choice without an explicit test intent.
+    pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
+        self.casting_variant = Some(variant);
         self
     }
 
@@ -1693,21 +1761,20 @@ impl<'a> SpellCast<'a> {
         self
     }
 
-    /// Drive the full cast pipeline to its conclusion and return the outcome.
-    ///
-    /// Panics with a clear, extend-me message on any pipeline state the driver
-    /// is not yet taught to handle, or when a declared intent cannot be matched
-    /// to a required slot. A panic here is a *test-harness* signal: extend the
-    /// driver or drive the case manually — never assert around a silent skip.
-    pub fn resolve(self) -> CastOutcome {
+    /// Drive the cast pipeline until the spell is committed to the stack and a
+    /// priority window opens (CR 601.2i). Use this when a test must inspect the
+    /// live stack object before resolution.
+    pub fn commit(self) -> CastCommit<'a> {
         let SpellCast {
             runner,
             spell,
+            casting_variant,
             modes,
             x,
             target_players,
             target_objects,
             convoke_with,
+            optional,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1725,6 +1792,8 @@ impl<'a> SpellCast<'a> {
                 object_id: spell,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("CastSpell must be accepted by the engine");
 
@@ -1738,9 +1807,32 @@ impl<'a> SpellCast<'a> {
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
         // the driver reaches the post-cast `Priority` window.
         let mut hand_at_commit: Option<Vec<(PlayerId, usize)>> = None;
+        let mut selected_casting_variant: Option<CastingVariantChoiceOption> = None;
 
         for _ in 0..64 {
             match &runner.state.waiting_for {
+                // CR 601.2b: choose a legal cast variant the engine authored.
+                WaitingFor::CastingVariantChoice { options, .. } => {
+                    let variant = casting_variant.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::CastingVariantChoice but no \
+                             .casting_variant(..) was declared — declare the intended cast variant"
+                        )
+                    });
+                    let index = options
+                        .iter()
+                        .position(|option| option.variant == variant)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "SpellCast could not find requested cast variant {:?} in options {:?}",
+                                variant, options
+                            )
+                        });
+                    selected_casting_variant = Some(options[index].clone());
+                    runner
+                        .act(GameAction::ChooseCastingVariant { index })
+                        .expect("ChooseCastingVariant must be accepted");
+                }
                 // CR 601.2b: modal spell announces its mode choice.
                 WaitingFor::ModeChoice { .. } => {
                     let indices = modes.clone().unwrap_or_else(|| {
@@ -1843,6 +1935,63 @@ impl<'a> SpellCast<'a> {
             )
         });
 
+        CastCommit {
+            runner,
+            hand_baseline,
+            life_before,
+            remaining_objects,
+            declared_players,
+            selected_casting_variant,
+            optional,
+        }
+    }
+
+    /// Drive the full cast pipeline to its conclusion and return the outcome.
+    ///
+    /// Panics with a clear, extend-me message on any pipeline state the driver
+    /// is not yet taught to handle, or when a declared intent cannot be matched
+    /// to a required slot. A panic here is a *test-harness* signal: extend the
+    /// driver or drive the case manually — never assert around a silent skip.
+    pub fn resolve(self) -> CastOutcome {
+        self.commit().resolve()
+    }
+}
+
+/// A spell committed to the stack, before resolution starts.
+pub struct CastCommit<'a> {
+    runner: &'a mut GameRunner,
+    hand_baseline: Vec<(PlayerId, usize)>,
+    life_before: Vec<(PlayerId, i32)>,
+    remaining_objects: Vec<ObjectId>,
+    declared_players: Vec<PlayerId>,
+    selected_casting_variant: Option<CastingVariantChoiceOption>,
+    optional: OptionalPolicy,
+}
+
+impl<'a> CastCommit<'a> {
+    /// Read the current pre-resolution state.
+    pub fn state(&self) -> &GameState {
+        &self.runner.state
+    }
+
+    /// The cast variant option selected during `CastingVariantChoice`, if the
+    /// cast surfaced that prompt.
+    pub fn selected_casting_variant(&self) -> Option<&CastingVariantChoiceOption> {
+        self.selected_casting_variant.as_ref()
+    }
+
+    /// Resolve the committed spell and return the usual behavior delta.
+    pub fn resolve(self) -> CastOutcome {
+        let CastCommit {
+            runner,
+            hand_baseline,
+            life_before,
+            remaining_objects,
+            declared_players,
+            optional,
+            ..
+        } = self;
+
         // Resolution. The shared driver auto-answers ordering/scry/trigger-
         // target/multi-target/optional prompts from the declared intent and
         // stops at any prompt it is not taught to answer (e.g. a `SearchChoice`
@@ -1854,6 +2003,7 @@ impl<'a> SpellCast<'a> {
         let policy = ResolutionPolicy {
             targets_objects: remaining_objects,
             targets_players: declared_players,
+            optional,
             ..ResolutionPolicy::default()
         };
         drive_resolution(runner, &policy);
@@ -2035,6 +2185,14 @@ impl<'a> AbilityActivation<'a> {
     /// explicitness at call sites.
     pub fn decline_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Decline;
+        self
+    }
+
+    /// Accept optional ("you may") effects/costs during resolution
+    /// (CR 609.3 / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
+    /// opt-in accept, for abilities whose payoff is gated behind a "you may".
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
         self
     }
 
@@ -2271,6 +2429,25 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                 runner
                     .act(GameAction::ChooseTarget { target: choice })
                     .expect("ChooseTarget (trigger) must be accepted");
+            }
+            // CR 608.2c: Some resolving spell abilities choose targets during
+            // resolution. Reuse the same slot-matching policy as cast-time
+            // targeting so tests can declare the intended object/player once.
+            WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let choice = pick_slot_target(
+                    slot,
+                    &mut remaining_objects,
+                    declared_players,
+                    selection.current_slot,
+                );
+                runner
+                    .act(GameAction::ChooseTarget { target: choice })
+                    .expect("ChooseTarget (resolution) must be accepted");
             }
             // CR 601.2c: a variable-count multi-target set is submitted as one
             // SelectCards of the declared object targets that are legal here.

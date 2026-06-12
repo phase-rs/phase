@@ -54,7 +54,7 @@ fn synthesize_encore_builds_graveyard_sorcery_speed_ability() {
     let def = &face.abilities[0];
     assert_eq!(def.kind, AbilityKind::Activated);
     assert_eq!(def.activation_zone, Some(Zone::Graveyard));
-    assert!(def.sorcery_speed, "activate only as a sorcery");
+    assert!(def.is_sorcery_speed(), "activate only as a sorcery");
     assert!(matches!(def.effect.as_ref(), Effect::Encore));
 
     // CR 602.1a: activation cost = keyword mana cost + exile-self-from-graveyard.
@@ -408,7 +408,7 @@ fn real_encore_card_synthesizes_encore_ability() {
                 && matches!(d.effect.as_ref(), Effect::Encore)
         })
         .expect("a graveyard-activated Encore ability must be synthesized");
-    assert!(def.sorcery_speed, "activate only as a sorcery");
+    assert!(def.is_sorcery_speed(), "activate only as a sorcery");
     assert!(
         matches!(
             def.cost.as_ref(),

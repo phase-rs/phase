@@ -178,12 +178,14 @@ export function openPhaseSocket(
         build_commit: string;
         protocol_version: number;
         mode: "Full" | "LobbyOnly";
+        public_url?: string;
       };
       const info: ServerInfo = {
         version: data.server_version,
         buildCommit: data.build_commit,
         protocolVersion: data.protocol_version,
         mode: data.mode,
+        publicUrl: data.public_url,
       };
 
       // Accept any server in [MIN_SUPPORTED_SERVER_PROTOCOL, PROTOCOL_VERSION].

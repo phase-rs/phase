@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
 
 DATA_DIR="data/scryfall"
-ORACLE_FILE="$DATA_DIR/oracle-cards.json"
-OUTPUT="client/public/scryfall-data.json"
+ORACLE_FILE="${SCRYFALL_ORACLE_FILE:-$DATA_DIR/oracle-cards.json}"
+OUTPUT="${SCRYFALL_IMAGES_OUTPUT:-client/public/scryfall-data.json}"
 
 echo "=== Scryfall Data Generation ==="
 
@@ -32,6 +32,9 @@ mkdir -p "$(dirname "$OUTPUT")"
 #   1. The card's `oracle_id` (Scryfall's stable per-card identifier). This is
 #      the *canonical* lookup path — the engine carries `printed_ref.oracle_id`
 #      on every battlefield object and the frontend resolves images by it.
+#      Reversible cards (`layout: "reversible_card"`) omit root-level
+#      `oracle_id`; the jq transform falls back to `card_faces[0].oracle_id`
+#      (both faces share the same id — see issue #2031).
 #      Keying by oracle_id sidesteps the name-asymmetry trap that breaks
 #      MDFCs played as their Scryfall-back face (e.g. Mystic Peak, the back
 #      face of "Pinnacle Monk // Mystic Peak", was unreachable when keyed by
@@ -73,8 +76,10 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
   ([.[] |
     select(.layout as $l | $exclude | index($l) | not) |
     . as $card |
+    ($card.oracle_id // $card.card_faces[0].oracle_id) as $oracle_id |
+    select($oracle_id != null) |
     {
-      oracle_id: $card.oracle_id,
+      oracle_id: $oracle_id,
       face_names: (if $card.card_faces then
         [$card.card_faces[] | .name | js_downcase]
       else
@@ -91,19 +96,20 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       layout: $card.layout,
       name: $card.name,
       mana_cost: ($card.mana_cost // $card.card_faces[0].mana_cost // ""),
-      cmc: $card.cmc,
-      type_line: $card.type_line,
+      cmc: ($card.cmc // $card.card_faces[0].cmc // 0),
+      type_line: ($card.type_line // $card.card_faces[0].type_line // ""),
       colors: ($card.colors // $card.card_faces[0].colors // []),
-      color_identity: $card.color_identity,
-      keywords: ($card.keywords // [])
+      color_identity: ($card.color_identity // $card.card_faces[0].color_identity // []),
+      keywords: ($card.keywords // $card.card_faces[0].keywords // [])
     } as $entry |
     (
-      [$card.oracle_id | ascii_downcase] +
+      ([$oracle_id | ascii_downcase]) +
       [$card.name | js_downcase] +
       if $card.card_faces and ($card.card_faces[0].name != $card.name)
       then [$card.card_faces[0].name | js_downcase]
       else [] end
     ) | unique[] |
+    select(. != null) |
     {key: ., value: $entry}
   ]) +
   # Token entries (keyed with "token:" prefix)

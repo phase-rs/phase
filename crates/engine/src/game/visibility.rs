@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::types::game_state::{GameState, PayCostKind, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -158,19 +158,38 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
 
     // CR 406.3: A card exiled face down can't be examined by any player
-    // except when an instruction allows it. Foretell is the only modeled
-    // face-down-exile look permission today; other face-down exile classes
-    // (Necropotence / Asmodeus by default, Bomat-style look permissions until
-    // their static is modeled) fail closed and redact the card for every
-    // viewer.
+    // except when an instruction allows it. Two modeled look-permission classes:
+    // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
+    // controller of the permanent that exiled the card may look, keyed on the
+    // dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
+    // exile class — including plain `TrackedBySource` exiles that grant no
+    // look-permission (Bomat Courier's "(You can't look at it.)", Necropotence,
+    // Asmodeus) — fails closed and redacts the card for every viewer.
     let hidden_facedown_exile_ids: Vec<ObjectId> = filtered
         .exile
         .iter()
         .copied()
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
-                let viewer_can_examine = obj.foretold && can_view_private_for_player(obj.owner);
-                obj.face_down && !viewer_can_examine
+                if !obj.face_down {
+                    return false;
+                }
+                // CR 702.143e: foretold card — its owner may look.
+                let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
+                // CR 702.75a + CR 607.2a: the controller of the permanent that
+                // exiled this card under Hideaway may look at it. Keyed on the
+                // dedicated `HideawayLookable` link kind so plain
+                // `TrackedBySource` face-down exiles that grant no look-permission
+                // (Bomat Courier, Necropotence, Asmodeus) stay redacted.
+                let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+                    link.exiled_id == *obj_id
+                        && link.kind == crate::types::game_state::ExileLinkKind::HideawayLookable
+                        && state
+                            .objects
+                            .get(&link.source_id)
+                            .is_some_and(|src| can_view_private_for_player(src.controller))
+                });
+                !(foretell_ok || hideaway_lookable_by_viewer)
             })
         })
         .collect();
@@ -183,28 +202,34 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // permanents controlled by another player." Face-down objects on the
     // battlefield (manifest / morph / disguise / cloak) and any future modeled
     // face-down stack spells keep their real identity in `back_face`. That
-    // hidden identity is look-permission of the *controller* alone — strip
+    // hidden identity is look-permission of the *controller* alone. Strip
     // `back_face` for every viewer who is not the controller so the underlying
     // card never leaks to opponents over the wire. The controller (turn-control
-    // aware, matching the rest of this filter) retains it so their client can
-    // show them the face. DFC back faces (`face_down == false`) are public
-    // information and are intentionally left untouched.
-    let leaked_facedown_object_ids: Vec<ObjectId> = filtered
+    // aware, matching the rest of this filter) retains it and gets only display
+    // identity projected onto the filtered object; CR 708.2 face-down rules
+    // characteristics stay intact. DFC back faces (`face_down == false`) are
+    // public information and are intentionally left untouched.
+    let facedown_object_ids: Vec<ObjectId> = filtered
         .battlefield
         .iter()
         .copied()
         .chain(filtered.stack.iter().map(|entry| entry.id))
         .filter(|obj_id| {
-            state.objects.get(obj_id).is_some_and(|obj| {
-                obj.face_down
-                    && obj.back_face.is_some()
-                    && !can_view_private_for_player(obj.controller)
-            })
+            state
+                .objects
+                .get(obj_id)
+                .is_some_and(|obj| obj.face_down && obj.back_face.is_some())
         })
         .collect();
-    for obj_id in leaked_facedown_object_ids {
-        if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-            obj.back_face = None;
+    for obj_id in facedown_object_ids {
+        if let Some(source) = state.objects.get(&obj_id) {
+            if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                if can_view_private_for_player(source.controller) {
+                    reveal_face_down_identity_to_controller(obj);
+                } else {
+                    redact_face_down_identity_from_observer(obj);
+                }
+            }
         }
     }
 
@@ -227,6 +252,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         kept_destination,
         rest_destination,
         source_id,
+        enter_tapped,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -240,6 +266,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 kept_destination,
                 rest_destination,
                 source_id,
+                enter_tapped,
             };
         }
     }
@@ -344,6 +371,42 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 up_to,
                 constraint: constraint.clone(),
                 source_id,
+            };
+        }
+    }
+
+    // CR 400.2: Hand is a hidden zone. `FreeCastWindow` (Invoke Calamity) is the
+    // first `CastOffer` kind whose `candidates` reference cards in the
+    // controller's HAND (as well as the public graveyard). Exposing the raw
+    // candidate ids to an opponent would leak which of the controller's hand
+    // cards are eligible instant/sorcery spells within the MV budget. Redact the
+    // candidate list to opaque placeholders for viewers who cannot see the
+    // controller's private zones — `remaining_casts`, `remaining_mv_budget`, and
+    // the rider stay public (CR 601.2 + CR 408 — the resolving spell is public).
+    if let WaitingFor::CastOffer {
+        player,
+        kind:
+            CastOfferKind::FreeCastWindow {
+                ref candidates,
+                remaining_casts,
+                remaining_mv_budget,
+                ref filter,
+                ref zones,
+                exile_instead_of_graveyard,
+            },
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::FreeCastWindow {
+                    candidates: candidates.iter().map(|_| ObjectId(0)).collect(),
+                    remaining_casts,
+                    remaining_mv_budget,
+                    filter: filter.clone(),
+                    zones: zones.clone(),
+                    exile_instead_of_graveyard,
+                },
             };
         }
     }
@@ -584,6 +647,23 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     }
 }
 
+fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::GameObject) {
+    if let Some(back_face) = &obj.back_face {
+        obj.name = back_face.name.clone();
+        obj.base_name = back_face.name.clone();
+        obj.printed_ref = back_face.printed_ref.clone();
+        obj.base_printed_ref = back_face.printed_ref.clone();
+    }
+}
+
+fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::GameObject) {
+    obj.name = "Hidden Card".to_string();
+    obj.base_name = "Hidden Card".to_string();
+    obj.printed_ref = None;
+    obj.base_printed_ref = None;
+    obj.back_face = None;
+}
+
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
 /// controller's ordering choice may carry private data —
 /// the firing `GameEvent` can reference hidden-zone objects
@@ -670,6 +750,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_state: crate::types::game_state::AssistState::NotOffered,
         })
     }
 
@@ -686,6 +767,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -1676,6 +1758,9 @@ mod tests {
         let controller_view = filter_state_for_viewer(&state, controller);
         let controller_obj = controller_view.objects.get(&secret).unwrap();
         assert!(controller_obj.face_down);
+        assert_eq!(controller_obj.name, "Secret Manifest");
+        assert_eq!(controller_obj.power, Some(2));
+        assert_eq!(controller_obj.toughness, Some(2));
         let controller_back = controller_obj
             .back_face
             .as_ref()
@@ -1688,11 +1773,85 @@ mod tests {
         let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
         let opponent_obj = opponent_view.objects.get(&secret).unwrap();
         assert!(opponent_obj.face_down);
+        assert_eq!(opponent_obj.name, "Hidden Card");
         assert!(
             opponent_obj.back_face.is_none(),
             "opponent must not see the manifested card's hidden identity"
         );
         assert_eq!(opponent_obj.power, Some(2));
         assert_eq!(opponent_obj.toughness, Some(2));
+    }
+
+    /// CR 400.2 — Invoke Calamity's `FreeCastWindow` lists the controller's
+    /// eligible HAND cards as candidates. An opponent viewer must NOT learn which
+    /// hand card ids are eligible; the controller sees the real ids.
+    #[test]
+    fn free_cast_window_hides_hand_candidates_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let hand_candidate = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand Sorcery".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: CastOfferKind::FreeCastWindow {
+                candidates: vec![hand_candidate],
+                remaining_casts: 2,
+                remaining_mv_budget: Some(6),
+                filter: crate::types::ability::TargetFilter::Any,
+                zones: vec![Zone::Graveyard, Zone::Hand],
+                exile_instead_of_graveyard: true,
+            },
+        };
+
+        // The controller sees the real candidate ids (and the public scalars).
+        let controller_view = filter_state_for_viewer(&state, PlayerId(0));
+        match controller_view.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(candidates, vec![hand_candidate]);
+                assert_eq!(remaining_casts, 2);
+                assert_eq!(remaining_mv_budget, Some(6));
+            }
+            other => panic!("expected FreeCastWindow for controller, got {other:?}"),
+        }
+
+        // An opponent sees opaque placeholders, not the hand candidate id; the
+        // public scalars (count, budget, rider) are preserved.
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        match opponent_view.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        exile_instead_of_graveyard,
+                        ..
+                    },
+                ..
+            } => {
+                assert!(
+                    !candidates.contains(&hand_candidate),
+                    "opponent must not see the controller's hand candidate id"
+                );
+                assert_eq!(candidates, vec![ObjectId(0)]);
+                assert_eq!(remaining_casts, 2);
+                assert_eq!(remaining_mv_budget, Some(6));
+                assert!(exile_instead_of_graveyard);
+            }
+            other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
+        }
     }
 }

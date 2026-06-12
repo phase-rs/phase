@@ -2,6 +2,12 @@ pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
 pub mod bending;
+pub mod blitz;
+// Tests for `blitz` live in a sibling file (declared here, not in `blitz.rs`,
+// so `blitz.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "blitz_tests.rs"]
+mod blitz_tests;
 pub mod bracket_estimate;
 pub mod casting;
 pub(crate) mod casting_costs;
@@ -16,8 +22,14 @@ pub mod combat;
 pub mod combat_damage;
 pub mod commander;
 pub mod companion;
+pub(crate) mod conditions;
 pub mod cost_payability;
+pub(crate) mod costs;
 pub mod coverage;
+pub mod dash;
+#[cfg(test)]
+#[path = "dash_tests.rs"]
+mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
@@ -42,6 +54,12 @@ pub mod filter;
 pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
+pub mod haunt;
+// Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
+// so `haunt.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "haunt_tests.rs"]
+mod haunt_tests;
 pub mod keywords;
 pub mod layers;
 pub mod life_costs;
@@ -50,6 +68,12 @@ pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
+pub mod meld;
+// Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
+// so `meld.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "meld_tests.rs"]
+mod meld_tests;
 pub mod merge;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
@@ -76,6 +100,9 @@ pub mod scenario;
 pub mod scenario_db;
 pub mod specialize;
 pub mod speed;
+pub mod splice;
+#[cfg(test)]
+mod splice_tests;
 pub mod stack;
 pub mod static_abilities;
 pub mod static_source_index;
@@ -88,6 +115,7 @@ pub mod triggers;
 pub mod turn_control;
 pub mod turns;
 pub mod visibility;
+pub mod zone_pipeline;
 pub mod zones;
 
 #[cfg(test)]
@@ -114,8 +142,7 @@ pub use engine::{
 pub use engine_debug::route_debug_create_to_battlefield;
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
-pub use layers::evaluate_layers;
-pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
+pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};
 pub use printed_cards::rehydrate_game_from_card_db;
 pub use public_state::finalize_public_state;
 pub use triggers::process_triggers;

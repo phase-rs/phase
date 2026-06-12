@@ -52,7 +52,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{ChoiceType, Effect};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -478,6 +478,8 @@ fn cast_siege_from_hand(runner: &mut GameRunner, siege: ObjectId, chosen_label: 
             object_id: siege,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 must be able to cast Frostcliff Siege from hand");
 

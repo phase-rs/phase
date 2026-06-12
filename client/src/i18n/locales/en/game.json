@@ -264,6 +264,7 @@
     "grantsProperty": "Grants a property to the spell"
   },
   "zone": {
+    "commandZone": "Command Zone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",
@@ -283,6 +284,8 @@
     "graveyardShort": "GY",
     "graveyardTitle": "Graveyard ({{count}})",
     "libraryAlt": "Library",
+    "library": "Library",
+    "libraryLower": "library",
     "libraryCount_one": "Library ({{count}} card)",
     "libraryCount_other": "Library ({{count}} cards)",
     "playFromTop": "Play {{name}} from top of library",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Choose amount to pay",
     "payAmount": "Pay {{value}} {{resource}}",
     "resourceEnergy": "energy",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "counters"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",
@@ -426,6 +430,7 @@
     "one": "a {{target}}",
     "nounPlayer": "player",
     "nounNonlandPermanent": "nonland permanent",
+    "nounSpell": "spell",
     "nounCreature": "creature",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "target permanent",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
       "takeEffect": "Take the Effect"
+    },
+    "spliceOffer": {
+      "title": "Splice onto Arcane?",
+      "subtitle": "Choose a card to reveal and splice into this spell, or cast without splicing.",
+      "spliceCard": "Splice {{name}}",
+      "decline": "Don’t Splice",
+      "declineDescription": "Cast the spell without adding another card’s text.",
+      "unknownCard": "Card #{{id}}"
     },
     "activationCost": {
       "title": "Choose Activation Cost"
@@ -1170,6 +1183,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1180,6 +1197,11 @@
     "warpAltLabel": "Cast with Warp",
     "warpAltSuffix": "(exiles at end step)",
     "warpSubtitle": "Cast {{name}} normally or use its Warp cost.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Cast Normally",
+    "dashAltLabel": "Cast with Dash",
+    "dashAltSuffix": "(gains haste, returns to hand at end step)",
+    "dashSubtitle": "Cast {{name}} normally or use its Dash cost.",
     "evokeEyebrow": "Evoke",
     "evokeNormalLabel": "Cast Normally",
     "evokeAltLabel": "Cast with Evoke",
@@ -1230,15 +1252,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
+    "rippleEyebrow": "Ripple",
     "title": "Cast {{name}}?",
     "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
     "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
+    "subtitleRipple": "Ripple revealed {{name}}. Cast it without paying its mana cost, or decline and put all {{total}} revealed cards on the bottom of your library in a random order.",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "putIntoHand": "Put into hand",
     "decline": "Decline",
     "discoverDeclineSuffix": "(put the rest on the bottom)",
     "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Free Cast",
+    "title": "Cast a spell for free",
+    "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
+    "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "castNamed": "Cast {{name}}",
+    "castSuffix": "(without paying its mana cost)",
+    "done": "Done",
+    "doneSuffix": "(stop casting spells this way)"
   },
   "castingVariant": {
     "eyebrow": "Cast",
@@ -1250,6 +1284,7 @@
     "variantEscape": "Cast with Escape",
     "variantRetrace": "Cast with Retrace",
     "variantHarmonize": "Cast with Harmonize",
+    "variantMayhem": "Cast with Mayhem",
     "variantFlashback": "Cast with Flashback",
     "variantAftermath": "Cast with Aftermath",
     "variantGraveyardPermission": "Cast from Graveyard",
@@ -1262,6 +1297,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantFuse": "Cast with Fuse",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {
@@ -1275,6 +1311,7 @@
     "eyebrow": "Choice",
     "title": "Choose one",
     "subtitle": "Select the option to resolve.",
+    "subtitleBinary": "Pick one of the two options below.",
     "optionFallback": "Option {{number}}"
   },
   "combatTax": {
@@ -1430,6 +1467,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferate",
     "proliferateSubtitle": "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
+    "timeTravelTitle": "Time Travel",
+    "timeTravelRemoveSubtitle": "Choose any number of eligible objects to remove a time counter from.",
+    "timeTravelAddSubtitle": "Choose any number of remaining eligible objects to add a time counter to.",
     "chooseObjectsTitle": "Choose Permanents",
     "chooseObjectsSubtitle": "Choose any number of permanents. You pay a cost for each one chosen.",
     "selectAll": "All",
@@ -1449,7 +1489,9 @@
     "scopeMulti": "Choose new targets for the spell",
     "subtitle": "{{scope}}. Current: {{current}}",
     "confirm": "Confirm",
-    "badgeNewTarget": "New target"
+    "badgeNewTarget": "New target",
+    "slotLabel": "Target {{index}}: {{current}} → {{chosen}}",
+    "unselected": "unchanged"
   },
   "separatePiles": {
     "chooserName": "Player {{number}}",

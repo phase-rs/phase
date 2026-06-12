@@ -131,6 +131,19 @@ pub fn resolve(
         }
         _ => (&TargetFilter::Any, &default_count, false, 0),
     };
+    // CR 400.7: A self-referential sacrifice ("sacrifice this creature") does
+    // nothing if the source has left and re-entered the battlefield (blink/
+    // flicker) since this ability fired — the re-entered permanent is a new
+    // object. Sacrifice is non-targeted and resolves `SelfRef` through a
+    // resolution-time pool filter rather than the `resolved_targets` chokepoint,
+    // so the self-reference epoch guard must be applied here explicitly.
+    if matches!(filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
     let scoped_ability;
     let ability = if matches!(
         sacrifice_controller_scope(filter),
@@ -188,17 +201,25 @@ pub fn resolve(
             .iter()
             .copied()
             .filter(|id| {
-                state.objects.get(id).is_some_and(|obj| {
-                    obj.controller == chooser
-                        && !obj.is_emblem
-                        && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                        && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-                            state,
-                            ability,
-                            *id,
-                            chooser,
-                        )
-                })
+                // CR 614.13a/b: restrict to objects present before the devourer co-entry
+                // began; vacuous when None. (Pool is built from LIVE battlefield, so an
+                // object an earlier co-entering devourer already sacrificed is excluded by
+                // the live basis, and the devourers themselves by the snapshot.)
+                state
+                    .devour_eligible_snapshot
+                    .as_ref()
+                    .is_none_or(|s| s.contains(id))
+                    && state.objects.get(id).is_some_and(|obj| {
+                        obj.controller == chooser
+                            && !obj.is_emblem
+                            && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                            && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                                state,
+                                ability,
+                                *id,
+                                chooser,
+                            )
+                    })
             })
             .collect();
 
@@ -272,7 +293,7 @@ pub fn resolve(
             effect_kind: EffectKind::Sacrifice,
             zone: Zone::Battlefield,
             destination: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,

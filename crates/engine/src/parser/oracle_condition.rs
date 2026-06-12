@@ -20,6 +20,26 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+fn scan_source_zone_filter(text: &str) -> Option<Zone> {
+    let mut offset = 0;
+    while offset <= text.len() {
+        if let Ok((rest, zone)) = super::oracle_nom::filter::parse_zone_filter(&text[offset..]) {
+            if rest
+                .chars()
+                .next()
+                .is_none_or(|ch| matches!(ch, ' ' | ',' | '.'))
+            {
+                return Some(zone);
+            }
+        }
+        match text[offset..].find(' ') {
+            Some(i) => offset += i + 1,
+            None => break,
+        }
+    }
+    None
+}
+
 /// CR 601.3 / CR 602.5: Parse a restriction condition from Oracle text into a typed
 /// `ParsedCondition`. These conditions gate whether a spell can be cast or ability activated.
 /// Returns `None` for unrecognized conditions (caller treats `None` as permissive true).
@@ -234,6 +254,9 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     // the full zone vocabulary (graveyard/hand/exile/library/battlefield) is covered
     // uniformly with word-boundary safety and the combinator-mandated parse path.
     if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(text) {
+        return Some(ParsedCondition::SourceInZone { zone });
+    }
+    if let Some(zone) = scan_source_zone_filter(text) {
         return Some(ParsedCondition::SourceInZone { zone });
     }
     // Source state: scan for state keywords after the subject using nom at word boundaries
@@ -559,6 +582,38 @@ fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
         .is_ok()
     {
         return Some(ParsedCondition::HandSizeExact { count: 0 });
+    }
+    // "you have no [kind] cards in hand" — e.g. "you have no land cards in hand".
+    // CR 601.3: Cast restriction — hand contains no cards of the given core type
+    // or subtype. Use count: 1 + Not because count-at-least 0 is always true.
+    // Verified: CR 601.3 (docs/MagicCompRules.txt:2475).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you have no ").parse(text) {
+        if let Ok((_, kind_raw)) = terminated(
+            take_until::<_, _, OracleError<'_>>(" card"),
+            alt((tag(" cards in hand"), tag(" card in hand"))),
+        )
+        .parse(rest)
+        {
+            let kind = kind_raw.trim();
+            if let Some(core_type) = parse_core_type_word(kind) {
+                return Some(ParsedCondition::Not {
+                    condition: Box::new(ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                        zone: Zone::Hand,
+                        core_type,
+                        count: 1,
+                    }),
+                });
+            }
+            if !kind.is_empty() {
+                return Some(ParsedCondition::Not {
+                    condition: Box::new(ParsedCondition::ZoneSubtypeCardCountAtLeast {
+                        zone: Zone::Hand,
+                        subtype: kind.to_string(),
+                        count: 1,
+                    }),
+                });
+            }
+        }
     }
     if tag::<_, _, OracleError<'_>>("you have one or fewer cards in hand")
         .parse(text)
@@ -1089,7 +1144,7 @@ fn parse_you_control_subtype_count(text: &str) -> Option<(usize, String)> {
 /// remainder returned by `parse_type_phrase` must be empty for the parse to
 /// succeed; otherwise we'd silently truncate qualifying clauses that the filter
 /// layer hasn't absorbed.
-fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> {
+pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> {
     let rest = alt((
         tag::<_, _, OracleError<'_>>("it targets a "),
         tag("it targets an "),
@@ -1116,6 +1171,19 @@ fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> {
                 }),
             });
         }
+    }
+    // CR 115.1: "it targets a permanent or player" — proliferate-style pool
+    // (Shiko and Narset, Unified Flurry gate). Matched before `parse_type_phrase`
+    // so the "or player" half is not dropped.
+    if rest.trim() == "permanent or player" {
+        return Some(ParsedCondition::SpellTargetsFilter {
+            filter: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::permanent()),
+                    TargetFilter::Player,
+                ],
+            },
+        });
     }
     let (filter, remainder) = parse_type_phrase(rest);
     if !remainder.trim().is_empty() {
@@ -1150,7 +1218,7 @@ fn capitalize_condition_word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CountScope, FilterProp, QuantityExpr};
+    use crate::types::ability::{CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter};
 
     #[test]
     fn parses_source_conditions() {
@@ -1171,6 +1239,10 @@ mod tests {
             Some(ParsedCondition::SourceInZone {
                 zone: Zone::Graveyard
             }),
+        );
+        assert_eq!(
+            parse_restriction_condition("~ is on the stack"),
+            Some(ParsedCondition::SourceInZone { zone: Zone::Stack }),
         );
         assert_eq!(
             parse_restriction_condition("From your graveyard"),
@@ -1492,6 +1564,91 @@ mod tests {
     }
 
     #[test]
+    fn parses_opponent_controls_more_than_you_activation_restrictions() {
+        use crate::types::ability::{
+            Comparator, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef, TypeFilter,
+        };
+
+        // Issue #859 / #2908: Weathered Wayfarer — existential "more lands than you".
+        let parsed = parse_restriction_condition("an opponent controls more lands than you")
+            .expect("Weathered Wayfarer activation restriction must parse");
+        match parsed {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        comparator: Comparator::GT,
+                                        ..
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected existential opponent ControlsCount GT, got {other:?}"),
+        }
+
+        // Issue #2908: Isolated Watchtower — "at least two more lands than you".
+        let parsed =
+            parse_restriction_condition("an opponent controls at least two more lands than you")
+                .expect("Isolated Watchtower activation restriction must parse");
+        match parsed {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        comparator: Comparator::GE,
+                                        count,
+                                        ..
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => match count.as_ref() {
+                QuantityExpr::Offset { offset: 2, .. } => {}
+                other => panic!("expected Offset(+2) count threshold, got {other:?}"),
+            },
+            other => {
+                panic!("expected existential opponent ControlsCount GE (you+2), got {other:?}")
+            }
+        }
+
+        // Building-block proof: creatures variant shares the same combinator axis.
+        let parsed = parse_restriction_condition("an opponent controls more creatures than you")
+            .expect("creature comparison activation restriction must parse");
+        match parsed {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        filter: TargetFilter::Typed(tf),
+                                        comparator: Comparator::GT,
+                                        ..
+                                    },
+                            },
+                    },
+                ..
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature ControlsCount GT, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unrecognized_returns_none() {
         assert_eq!(
             parse_restriction_condition("something completely unknown"),
@@ -1517,6 +1674,24 @@ mod tests {
                 );
             }
             other => panic!("expected SpellTargetsFilter(IsCommander), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn it_targets_a_permanent_or_player_parses_to_spell_targets_filter() {
+        let parsed = parse_restriction_condition("it targets a permanent or player")
+            .expect("should parse the permanent-or-player predicate");
+        match parsed {
+            ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Or { filters },
+            } => {
+                assert!(filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Permanent)
+                )));
+                assert!(filters.contains(&TargetFilter::Player));
+            }
+            other => panic!("expected SpellTargetsFilter(Or), got {other:?}"),
         }
     }
 

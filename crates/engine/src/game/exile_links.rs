@@ -45,6 +45,21 @@ pub(crate) fn push_tracked_by_source(
     exiled_id: ObjectId,
     source_id: ObjectId,
 ) {
+    push_with_kind(state, exiled_id, source_id, ExileLinkKind::TrackedBySource);
+}
+
+/// CR 607.2a + CR 406.6: Record an exiled→source link with an explicit
+/// `ExileLinkKind`, deduped on the `(exiled_id, source_id)` pair (mirrors
+/// `push_tracked_by_source`, which delegates here for the plain tracked kind).
+/// Used by Hideaway (`ExileLinkKind::HideawayLookable`, CR 702.75a) to mark the
+/// exiled card as look-permitted for the source's controller while keeping it
+/// discoverable by the kind-agnostic `ExiledBySource` companion-ability filter.
+pub(crate) fn push_with_kind(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    kind: ExileLinkKind,
+) {
     if state
         .exile_links
         .iter()
@@ -55,7 +70,7 @@ pub(crate) fn push_tracked_by_source(
     state.exile_links.push(ExileLink {
         exiled_id,
         source_id,
-        kind: ExileLinkKind::TrackedBySource,
+        kind,
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
 }
@@ -152,6 +167,61 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
+    /// CR 702.167a/c: a `CraftMaterial` link must survive the craft source's
+    /// battlefield exit (it self-exiles mid-activation and returns with the same
+    /// ObjectId), so the returned permanent can still read what it was crafted
+    /// with. A plain `TrackedBySource` link from the same source is pruned on
+    /// that exit — the contrast that motivates the dedicated kind.
+    #[test]
+    fn craft_material_link_survives_source_battlefield_exit() {
+        use crate::game::zones::{create_object, move_to_zone};
+        use crate::types::game_state::{ExileLinkKind, GameState};
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Crafted Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let material = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Craft Material".to_string(),
+            Zone::Exile,
+        );
+        push_with_kind(&mut state, material, source, ExileLinkKind::CraftMaterial);
+        let tracked = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Tracked".to_string(),
+            Zone::Exile,
+        );
+        push_with_kind(&mut state, tracked, source, ExileLinkKind::TrackedBySource);
+
+        // The craft source self-exiles mid-activation (battlefield -> exile).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Exile, &mut events);
+
+        assert!(
+            state.exile_links.iter().any(|l| l.exiled_id == material
+                && l.source_id == source
+                && matches!(l.kind, ExileLinkKind::CraftMaterial)),
+            "CraftMaterial link must survive the source's battlefield exit"
+        );
+        assert!(
+            !state
+                .exile_links
+                .iter()
+                .any(|l| l.exiled_id == tracked && l.source_id == source),
+            "TrackedBySource link must be pruned on the source's battlefield exit"
+        );
+    }
+
     #[test]
     fn plain_exile_effect_has_no_linked_exile_consumer() {
         let ability = ResolvedAbility::new(
@@ -162,7 +232,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],

@@ -27,6 +27,7 @@
 
 use engine::game::scenario::GameScenario;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
@@ -103,6 +104,8 @@ fn cast_tinybones(runner: &mut engine::game::scenario::GameRunner, tinybones: Ob
             object_id: tinybones,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting a 0-cost enchantment should succeed");
     // Drain priority so the enchantment resolves onto the battlefield and its
@@ -501,6 +504,8 @@ fn tinybones_second_trigger_mill_and_lose_life_fans_out_per_player() {
             object_id: legend,
             card_id: legend_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting a 0-cost legendary creature should succeed");
     runner.advance_until_stack_empty();

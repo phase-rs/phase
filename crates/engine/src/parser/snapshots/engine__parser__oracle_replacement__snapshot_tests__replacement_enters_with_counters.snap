@@ -22,7 +22,6 @@ expression: def
     "duration": null,
     "description": null,
     "target_prompt": null,
-    "sorcery_speed": false,
     "condition": null,
     "optional_targeting": false,
     "optional": false,
@@ -35,5 +34,6 @@ expression: def
     "type": "SelfRef"
   },
   "description": "~ enters the battlefield with two +1/+1 counters on it.",
-  "condition": null
+  "condition": null,
+  "destination_zone": "Battlefield"
 }

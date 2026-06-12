@@ -200,7 +200,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr,
-        TargetFilter, TypedFilter,
+        SacrificeCost, TargetFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -220,10 +220,10 @@ mod tests {
                 damage_source: None,
             },
         );
-        ability.cost = Some(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            count: 1,
-        });
+        ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            1,
+        )));
         ability
     }
 
@@ -241,12 +241,10 @@ mod tests {
                 AbilityCost::Mana {
                     cost: engine::types::mana::ManaCost::generic(2),
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(engine::types::ability::SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    1,
+                )),
             ],
         });
         ability

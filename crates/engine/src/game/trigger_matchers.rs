@@ -24,6 +24,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
         TriggerMode::Evolved => match_evolved,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
+        // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
+        // dies; resolved through the `ExileLinkKind::Haunt` link.
+        TriggerMode::HauntedCreatureDies => crate::game::haunt::match_haunted_creature_dies,
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
         | TriggerMode::DamageAll
@@ -211,6 +214,11 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Core matchers with real logic
     r.insert(TriggerMode::ChangesZone, match_changes_zone);
     r.insert(TriggerMode::ChangesZoneAll, match_changes_zone_all);
+    // CR 702.55c: Haunt payoff — fires from exile when the haunted creature dies.
+    r.insert(
+        TriggerMode::HauntedCreatureDies,
+        crate::game::haunt::match_haunted_creature_dies,
+    );
     r.insert(TriggerMode::DamageDone, match_damage_done);
     r.insert(TriggerMode::DamageDoneOnce, match_damage_done);
     r.insert(TriggerMode::DamageAll, match_damage_done);
@@ -641,6 +649,18 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
     }
 }
 
+fn is_player_scope_attack_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers => true,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: Some(_),
+            properties,
+        }) => type_filters.is_empty() && properties.is_empty(),
+        _ => false,
+    }
+}
+
 /// Basic runtime matching of a TargetFilter against a game object.
 /// Handles the common filter patterns used in triggers.
 pub(super) fn target_filter_matches_object(
@@ -688,6 +708,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -753,6 +774,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CreatureDestroyed { object_id }
         | GameEvent::Evolved { object_id }
         | GameEvent::PermanentSacrificed { object_id, .. }
+        | GameEvent::ControllerChanged { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
         | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
         // CR 702.140c + CR 730.2c: the merged (surviving) permanent is the subject.
@@ -796,6 +818,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::CounterAdded { .. }
+        | GameEvent::ObjectIntensified { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
@@ -1320,10 +1343,56 @@ pub(super) fn matching_attack_events(
         ..
     } = event
     {
-        // Find which attacker(s) satisfy the creature filter
+        if let Some(filter) = trigger
+            .valid_source
+            .as_ref()
+            .filter(|filter| is_player_scope_attack_filter(filter))
+        {
+            // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
+            // once per attacked defending player, not once per attacking
+            // creature, while still carrying a single defending-player context.
+            let Some(attacking_player) = attacker_ids
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|o| o.controller))
+            else {
+                return Vec::new();
+            };
+            if !player_matches_filter(filter, state, attacking_player, source_id) {
+                return Vec::new();
+            }
+            let mut seen_defending_players = Vec::new();
+            return attacker_ids
+                .iter()
+                .filter_map(|id| {
+                    let target = attacks
+                        .iter()
+                        .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
+                        .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+                    if !attack_target_matches(trigger, state, target, *defending_player, source_id)
+                    {
+                        return None;
+                    }
+                    let event_defending_player =
+                        attack_target_defending_player(state, target, *defending_player);
+                    if seen_defending_players.contains(&event_defending_player) {
+                        return None;
+                    }
+                    seen_defending_players.push(event_defending_player);
+                    Some(GameEvent::AttackersDeclared {
+                        attacker_ids: vec![*id],
+                        defending_player: event_defending_player,
+                        attacks: vec![(*id, target)],
+                    })
+                })
+                .collect();
+        }
+
+        // Find which attacker(s) satisfy the creature / attacking-player filter.
         let attacker_matches = |id: &ObjectId| -> bool {
             if trigger.valid_card.is_some() {
                 valid_card_matches(trigger, state, *id, source_id)
+            } else if trigger.valid_source.is_some() {
+                valid_source_matches(trigger, state, *id, source_id)
             } else {
                 *id == source_id
             }
@@ -1567,6 +1636,27 @@ pub(super) fn match_counter_added(
                 let previous = current.saturating_sub(*count);
                 // Fire only when the threshold is crossed: previous < threshold <= current
                 if !(previous < threshold && threshold <= current) {
+                    return false;
+                }
+                // CR 702.155a: A Saga with read ahead can't have its chapter
+                // abilities trigger the turn it entered the battlefield unless its
+                // lore count equals that chapter's number exactly. Entering at
+                // chapter N seeds N lore counters at once (0 -> N), which crosses
+                // every threshold 1..N; suppress all but the exact-count chapter
+                // on the enter-turn. After the enter-turn (one counter per turn)
+                // current == threshold holds at each crossing, so the gate is inert.
+                //
+                // Scoped to Lore: CR 702.155a restricts only chapter abilities
+                // (which trigger on lore counters). A Read-Ahead Saga with a
+                // thresholded trigger on some other counter type must not be
+                // suppressed on its enter turn.
+                if threshold != current
+                    && *counter_type == crate::types::counter::CounterType::Lore
+                    && state.objects.get(object_id).is_some_and(|obj| {
+                        obj.entered_battlefield_turn == Some(state.turn_number)
+                            && obj.has_keyword(&crate::types::keywords::Keyword::ReadAhead)
+                    })
+                {
                     return false;
                 }
             }
@@ -2468,10 +2558,11 @@ pub(super) fn match_changes_controller(
 ) -> bool {
     matches!(
         event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::GainControl,
-            ..
-        }
+        GameEvent::ControllerChanged { .. }
+            | GameEvent::EffectResolved {
+                kind: EffectKind::GainControl,
+                ..
+            }
     )
 }
 
@@ -2612,17 +2703,64 @@ pub(super) fn match_foretell(
     }
 }
 
-/// CR 702.110a: "When this creature exploits" = source is the exploiter.
+/// CR 702.110b: "exploits a creature" — fires when a creature matching the
+/// trigger's subject filter exploits. `valid_card`/`valid_source` scope the
+/// EXPLOITER: `SelfRef` ⇒ "this creature exploits", a typed/controller
+/// filter ⇒ "a creature you control exploits". With no filter, defaults to
+/// the source ("this creature exploits").
 pub(super) fn match_exploited(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::CreatureExploited { exploiter, .. } if *exploiter == source_id
-    )
+    let GameEvent::CreatureExploited { exploiter, .. } = event else {
+        return false;
+    };
+    // `valid_source`/`valid_card` scope the EXPLOITER's subject filter. With no
+    // filter, "this creature exploits" — match the source by identity.
+    match trigger
+        .valid_source
+        .as_ref()
+        .or(trigger.valid_card.as_ref())
+    {
+        Some(filter) => exploiter_matches_subject_filter(state, *exploiter, filter, source_id),
+        None => *exploiter == source_id,
+    }
+}
+
+/// CR 603.10a + CR 400.7: Match an exploiter against the trigger's subject
+/// filter. Exploit emits `CreatureExploited` only AFTER the sacrifice resolves
+/// (CR 702.110b), so a creature that exploited ITSELF is already in the
+/// graveyard and its live object has had all battlefield characteristics
+/// (control, types, granted abilities) stripped. A typed filter like "a
+/// creature you control" would then fail to match. When the exploiter has left
+/// the battlefield, evaluate the filter against its last-known battlefield
+/// snapshot (`lki_cache`) instead of the stripped graveyard object. An exploiter
+/// that sacrificed a DIFFERENT creature is still on the battlefield and matches
+/// on the live path.
+fn exploiter_matches_subject_filter(
+    state: &GameState,
+    exploiter: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> bool {
+    if target_filter_matches_object(state, exploiter, filter, source_id) {
+        return true;
+    }
+    if state
+        .objects
+        .get(&exploiter)
+        .is_none_or(|o| o.zone != Zone::Battlefield)
+    {
+        if let Some(lki) = state.lki_cache.get(&exploiter) {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            return super::filter::matches_target_filter_on_lki_snapshot(
+                state, exploiter, lki, filter, &ctx,
+            );
+        }
+    }
+    false
 }
 
 /// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
@@ -2753,24 +2891,29 @@ pub(super) fn match_leaves_battlefield(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id,
-        from,
-        to,
-        ..
+        from, to, record, ..
     } = event
     {
-        if *from != Some(Zone::Battlefield) {
-            return false;
-        }
-        if let Some(destination) = trigger.destination {
-            if destination != *to {
-                return false;
-            }
-        }
-        if !destination_matches_constraint(*to, &trigger.destination_constraint) {
-            return false;
-        }
-        valid_card_matches(trigger, state, *object_id, source_id)
+        // CR 603.10a: LeavesBattlefield is a battlefield-origin zone change.
+        // Default `origin = None` to Battlefield, matching the legacy matcher.
+        let origin = if !trigger.origin_zones.is_empty() {
+            OriginConstraint::OneOf(trigger.origin_zones.clone())
+        } else if let Some(origin) = trigger.origin {
+            OriginConstraint::Equals(origin)
+        } else {
+            OriginConstraint::Equals(Zone::Battlefield)
+        };
+        zone_change_clause_matches(
+            &origin,
+            trigger.destination.as_ref(),
+            &trigger.destination_constraint,
+            trigger.valid_card.as_ref(),
+            from,
+            to,
+            record,
+            source_id,
+            state,
+        )
     } else {
         false
     }
@@ -2794,6 +2937,14 @@ pub(super) fn matching_becomes_blocked_events(
     state: &GameState,
 ) -> Vec<GameEvent> {
     if let GameEvent::BlockersDeclared { assignments } = event {
+        // CR 509.3d: the "becomes blocked by a creature [with quality]" form
+        // (carries a `valid_target` blocker filter) triggers once for each
+        // matching blocker. CR 509.3c: the bare "becomes blocked" form (no
+        // blocker qualifier, `valid_target: None`) triggers only once each combat
+        // for the attacker, regardless of how many creatures block it — so the
+        // matching assignments are collapsed to a single event per attacker.
+        let per_blocker = trigger.valid_target.is_some();
+        let mut emitted_attackers: Vec<ObjectId> = Vec::new();
         assignments
             .iter()
             .filter_map(|(blocker, attacker)| {
@@ -2802,13 +2953,26 @@ pub(super) fn matching_becomes_blocked_events(
                 } else {
                     *attacker == source_id
                 };
+                if !attacker_matches {
+                    return None;
+                }
                 let blocker_matches = match &trigger.valid_target {
                     Some(filter) => {
                         target_filter_matches_object(state, *blocker, filter, source_id)
                     }
                     None => true,
                 };
-                (attacker_matches && blocker_matches).then_some(GameEvent::BlockersDeclared {
+                if !blocker_matches {
+                    return None;
+                }
+                // CR 509.3c: only the first matching blocker fires the bare form.
+                if !per_blocker {
+                    if emitted_attackers.contains(attacker) {
+                        return None;
+                    }
+                    emitted_attackers.push(*attacker);
+                }
+                Some(GameEvent::BlockersDeclared {
                     assignments: vec![(*blocker, *attacker)],
                 })
             })
@@ -2904,16 +3068,57 @@ pub(super) fn match_excess_damage(
         if *excess > 0 && *src == source_id)
 }
 
-/// CR 120.10: ExcessDamageAll — fires when any source deals excess damage to a permanent.
+/// CR 120.10: ExcessDamageAll — fires when any source deals excess damage to a
+/// permanent or player matching the trigger's `valid_card` / `valid_target` filters.
 ///
 /// See `match_excess_damage` for why `trigger.damage_amount` is not consulted.
 pub(super) fn match_excess_damage_all(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::DamageDealt { excess, .. } if *excess > 0)
+    if let GameEvent::DamageDealt {
+        target,
+        is_combat,
+        excess,
+        ..
+    } = event
+    {
+        if *excess == 0 {
+            return false;
+        }
+        match trigger.damage_kind {
+            DamageKindFilter::Any => {}
+            DamageKindFilter::CombatOnly if !is_combat => return false,
+            DamageKindFilter::NoncombatOnly if *is_combat => return false,
+            DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => {}
+        }
+        match target {
+            TargetRef::Object(target_id) => {
+                if trigger.valid_card.is_none() && trigger.valid_target.is_some() {
+                    return false;
+                }
+                if trigger.valid_card.is_some() {
+                    valid_card_matches(trigger, state, *target_id, source_id)
+                } else {
+                    true
+                }
+            }
+            TargetRef::Player(pid) => {
+                if trigger.valid_card.is_some() {
+                    return false;
+                }
+                if trigger.valid_target.is_some() {
+                    valid_player_matches(trigger, state, *pid, source_id)
+                } else {
+                    true
+                }
+            }
+        }
+    } else {
+        false
+    }
 }
 
 /// YouAttack: fires once when a player declares attackers matching the trigger's
@@ -6686,6 +6891,62 @@ mod tests {
         );
     }
 
+    /// CR 509.3c: a bare "becomes blocked" trigger (no by-a-creature qualifier,
+    /// i.e. `valid_target: None` — Bushido CR 702.45a, Rampage CR 702.23a) triggers
+    /// only ONCE per combat for the attacker, even when multiple creatures block it.
+    /// The matcher must collapse a multi-blocker assignment to a single event;
+    /// firing once per blocker double-pumps Bushido (a double-blocked Bushido 2
+    /// would wrongly become 6/6 instead of 4/4) and over-counts Rampage.
+    #[test]
+    fn becomes_blocked_trigger_fires_once_for_bare_form_when_multi_blocked() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bushido Samurai".to_string(),
+            Zone::Battlefield,
+        );
+        let first_blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "First Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker, first_blocker, second_blocker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        // Bare "becomes blocked": self-scoped, no blocker qualifier (valid_target None).
+        let trigger = make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(first_blocker, attacker), (second_blocker, attacker)],
+        };
+
+        let matched = matching_becomes_blocked_events(&event, &trigger, attacker, &state);
+
+        assert_eq!(
+            matched,
+            vec![GameEvent::BlockersDeclared {
+                assignments: vec![(first_blocker, attacker)]
+            }],
+            "CR 509.3c: bare 'becomes blocked' fires once per combat, not once per blocker"
+        );
+    }
+
     #[test]
     fn attacker_unblocked_matches_when_source_is_not_blocked() {
         let mut state = setup();
@@ -7486,6 +7747,108 @@ mod tests {
         assert!(!match_counter_added(&event, &trigger_ch2, saga_id, &state));
     }
 
+    /// CR 702.155a: a read-ahead Saga that entered at chapter N this turn
+    /// (0 -> N lore counters) triggers only the exact-count chapter N; the
+    /// crossed-over chapters 1..N-1 are suppressed. A non-read-ahead Saga that
+    /// jumps to N this turn still fires every crossed chapter.
+    #[test]
+    fn read_ahead_suppresses_skipped_chapters_on_enter_turn() {
+        use crate::types::ability::CounterTriggerFilter;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let chapter = |n: u32| {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .valid_card(TargetFilter::SelfRef)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: crate::types::counter::CounterType::Lore,
+                    threshold: Some(n),
+                })
+        };
+
+        // Read-ahead Saga that entered this turn at chapter 3 (0 -> 3 at once).
+        let saga_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Read-Ahead Saga".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&saga_id).unwrap();
+            obj.keywords.push(Keyword::ReadAhead);
+            obj.counters
+                .insert(crate::types::counter::CounterType::Lore, 3);
+        }
+        let event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::types::counter::CounterType::Lore,
+            count: 3,
+        };
+        assert!(
+            match_counter_added(&event, &chapter(3), saga_id, &state),
+            "chapter 3 (exact count) fires"
+        );
+        assert!(
+            !match_counter_added(&event, &chapter(1), saga_id, &state),
+            "chapter 1 suppressed on read-ahead enter-turn"
+        );
+        assert!(
+            !match_counter_added(&event, &chapter(2), saga_id, &state),
+            "chapter 2 suppressed on read-ahead enter-turn"
+        );
+
+        // A non-read-ahead Saga that jumps 0 -> 3 this turn still fires chapter 1.
+        let normal_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Normal Saga".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&normal_id)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Lore, 3);
+        let normal_event = GameEvent::CounterAdded {
+            object_id: normal_id,
+            counter_type: crate::types::counter::CounterType::Lore,
+            count: 3,
+        };
+        assert!(
+            match_counter_added(&normal_event, &chapter(1), normal_id, &state),
+            "non-read-ahead Saga still fires chapter 1 on a 0->3 jump"
+        );
+
+        // CR 702.155a is scoped to chapter (lore) abilities: a non-Lore
+        // thresholded trigger on the same Read-Ahead Saga must NOT be suppressed
+        // on its enter turn. Give the read-ahead Saga a 0 -> 2 +1/+1 jump and a
+        // +1/+1 threshold-1 trigger; it fires (0 < 1 <= 2) despite threshold != current.
+        state
+            .objects
+            .get_mut(&saga_id)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 2);
+        let p1p1_event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: 2,
+        };
+        let p1p1_trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                threshold: Some(1),
+            });
+        assert!(
+            match_counter_added(&p1p1_event, &p1p1_trigger, saga_id, &state),
+            "non-Lore thresholded trigger on a Read-Ahead Saga is not suppressed (CR 702.155a is lore-only)"
+        );
+    }
+
     #[test]
     fn counter_filter_double_addition() {
         use crate::types::ability::CounterTriggerFilter;
@@ -7816,6 +8179,7 @@ mod tests {
                 },
                 TargetFilter::StackAbility {
                     controller: Some(controller),
+                    tag: None,
                 },
             ],
         }
@@ -7900,6 +8264,87 @@ mod tests {
         trigger.valid_source = Some(TargetFilter::StackSpell);
 
         // Event: trigger_owner becomes the target of an activated ability
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    /// Build a stack `TriggeredAbility` carrying an optional keyword `ability_tag`,
+    /// mirroring how a synthesized Backup ETB ability reaches the stack.
+    fn setup_with_tagged_triggered_ability(tag: Option<AbilityTag>) -> (GameState, ObjectId) {
+        let mut state = setup();
+        let ability_id = ObjectId(60);
+        let mut ability = ResolvedAbility::new(
+            crate::types::ability::Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(1),
+        );
+        ability.context.ability_tag = tag;
+        state.stack.push_back(StackEntry {
+            id: ability_id,
+            source_id: ObjectId(10),
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(10),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        (state, ability_id)
+    }
+
+    #[test]
+    fn becomes_target_backup_ability_matches_tagged_source() {
+        // CR 702.165a: a `BecomesTarget` trigger whose `valid_source` filters on
+        // `AbilityTag::Backup` matches when the targeting stack ability carries
+        // that tag (Huge Truck targeted by a backup ability).
+        let (state, ability_id) = setup_with_tagged_triggered_ability(Some(AbilityTag::Backup));
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(AbilityTag::Backup),
+        });
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_backup_ability_rejects_untagged_source() {
+        // CR 702.165a: an untagged stack ability (a plain triggered/activated
+        // ability) is NOT a backup ability and must not fire the trigger.
+        let (state, ability_id) = setup_with_tagged_triggered_ability(None);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(AbilityTag::Backup),
+        });
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
@@ -9650,6 +10095,89 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn excess_damage_all_noncombat_only_rejects_combat() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ExcessDamageAll);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(ObjectId(2)),
+            amount: 5,
+            is_combat: true,
+            excess: 2,
+        };
+        assert!(!match_excess_damage_all(
+            &event,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+    }
+
+    #[test]
+    fn excess_damage_all_valid_card_filters_target_object() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Treasure Maker".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let own_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [opponent_creature, own_creature] {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.card_types.core_types.push(CoreType::Creature);
+            }
+        }
+
+        let mut trigger = make_trigger(TriggerMode::ExcessDamageAll);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+
+        let matching = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(opponent_creature),
+            amount: 5,
+            is_combat: false,
+            excess: 2,
+        };
+        let non_matching = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(own_creature),
+            amount: 5,
+            is_combat: false,
+            excess: 2,
+        };
+
+        assert!(match_excess_damage_all(
+            &matching, &trigger, source_id, &state
+        ));
+        assert!(!match_excess_damage_all(
+            &non_matching,
+            &trigger,
+            source_id,
+            &state
+        ));
+    }
+
     // ---------------------------------------------------------------------------
     // CR 702.184a: Station trigger matcher tests
     // ---------------------------------------------------------------------------
@@ -10892,5 +11420,173 @@ mod tests {
             std::slice::from_ref(&event),
         );
         assert_eq!(count, None);
+    }
+
+    // CR 702.110b: `match_exploited` scopes the exploiter via `valid_card` /
+    // `valid_source` rather than hard-coding `exploiter == source`.
+
+    #[test]
+    fn exploited_self_ref_matches_self_exploit() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_self_ref_rejects_other_exploiter() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: other,
+            sacrificed: other,
+        };
+
+        assert!(!match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_typed_controller_matches_other_controlled_exploiter() {
+        let mut state = setup();
+        // "Whenever a creature you control exploits a creature, …": the trigger
+        // source and the (different) exploiter share a controller.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exploit Payoff".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: other,
+            sacrificed: other,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_no_filter_defaults_to_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::Exploited);
+        assert!(trigger.valid_card.is_none());
+        assert!(trigger.valid_source.is_none());
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    /// CR 603.10a + CR 400.7: a creature that exploits ITSELF satisfies a typed
+    /// subject filter ("a creature you control") via its last-known battlefield
+    /// snapshot. Drives the REAL zone-change pipeline (`move_to_zone`) so the
+    /// graveyard object is genuinely stripped (control/types cleared) and
+    /// `lki_cache` is populated exactly as it is in a live game. This flips to
+    /// `false` if the LKI fallback in `exploiter_matches_subject_filter` is
+    /// reverted, because `target_filter_matches_object` reads the stripped
+    /// graveyard object.
+    #[test]
+    fn exploited_typed_filter_matches_self_sacrificed_exploiter_via_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sidisi's Faithful".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Real zone-change pipeline: snapshots LKI and strips the graveyard object.
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert!(state.lki_cache.contains_key(&source));
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        let mut you = make_trigger(TriggerMode::Exploited);
+        you.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(
+            match_exploited(&event, &you, source, &state),
+            "CR 603.10a: self-sacrificed exploiter matches 'a creature you control' via LKI"
+        );
+
+        let mut opponent = make_trigger(TriggerMode::Exploited);
+        opponent.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        assert!(
+            !match_exploited(&event, &opponent, source, &state),
+            "an opponent-controlled subject filter must NOT match the controller's own exploiter"
+        );
     }
 }

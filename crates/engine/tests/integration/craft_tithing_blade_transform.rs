@@ -83,7 +83,7 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
             owner_library: false,
             enter_transformed: true,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),

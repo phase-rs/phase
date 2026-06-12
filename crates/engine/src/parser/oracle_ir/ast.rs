@@ -2,11 +2,11 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
-    ControllerRef, CounterSourceRider, Duration, Effect, FaceDownProfile, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
-    PaymentCost, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
+    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect,
+    FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -302,6 +302,10 @@ pub(crate) enum ContinuationAst {
         /// Cyberman artifact creatures."). `None` = normal face-up entry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<FaceDownProfile>,
+        /// CR 614.1 / CR 110.5b: "onto the battlefield tapped" on the
+        /// from-among put-step.
+        #[serde(default)]
+        enter_tapped: bool,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -368,11 +372,13 @@ pub(crate) enum ContinuationAst {
 
 /// CR 701.20e / CR 701.17c: How many cards a "from among [set]" continuation
 /// takes. `All` is the mass quantifier ("put all creature cards milled this
-/// way ...") that lowers to a `ChangeZoneAll`; the bounded forms lower to a
+/// way ...") that lowers to a `ChangeZoneAll`; `AnyNumber` is an unbounded
+/// player choice ("put any number of ..."), and the bounded forms lower to a
 /// singular `ChangeZone` (`Up` → up_to, `Exactly` → fixed count).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PutCount {
     All,
+    AnyNumber,
     Up(u32),
     Exactly(u32),
 }
@@ -441,6 +447,20 @@ pub(crate) enum ImperativeFamilyAst {
     },
     /// CR 701.62a: Manifest dread.
     ManifestDread,
+    /// CR 701.58a: Cloak the top card(s) of a library — face-down 2/2 with
+    /// ward {2}, turnable face up for its mana cost if it's a creature card.
+    Cloak {
+        target: TargetFilter,
+        count: QuantityExpr,
+    },
+    /// CR 406.3 + CR 701.20a: Turn an exiled face-down card face up via a
+    /// resolving effect (not the morph special action). The Imprint "flip"
+    /// cards — Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation
+    /// of Avacyn — say "turn the exiled card(s) face up"; `target` references
+    /// the card(s) the source exiled.
+    TurnFaceUp {
+        target: TargetFilter,
+    },
     BecomeMonarch,
     /// CR 701.49: "venture into the dungeon"
     VentureIntoDungeon,
@@ -753,6 +773,9 @@ pub(crate) enum TargetedImperativeAst {
     },
     GainControl {
         target: TargetFilter,
+        /// True for the untargeted mass form ("gain control of all/each …"),
+        /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
+        all: bool,
     },
     ControlNextTurn {
         target: TargetFilter,
@@ -876,6 +899,8 @@ pub(crate) enum UtilityImperativeAst {
     },
     Copy {
         target: TargetFilter,
+        /// CR 707.10c: set when the imperative remainder is a copy-retarget grant.
+        retarget: CopyRetargetPermission,
     },
     Transform {
         target: TargetFilter,
@@ -902,6 +927,7 @@ pub(crate) enum HandRevealImperativeAst {
         random: bool,
     },
     RevealAll {
+        target: TargetFilter,
         card_filter: TargetFilter,
     },
     /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
@@ -1001,11 +1027,23 @@ pub(crate) enum PutImperativeAst {
         /// `(counter_type, count)`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
+    /// CR 400.7 + CR 110.2a: Mass put effects ("put all creature cards from all
+    /// graveyards onto the battlefield") lower to `Effect::ChangeZoneAll`.
+    ZoneChangeAll {
+        origin: Option<Zone>,
+        destination: Zone,
+        target: TargetFilter,
+        enters_under: Option<ControllerRef>,
+        enter_tapped: bool,
+    },
     TopOfLibrary,
     BottomOfLibrary,
     NthFromTop {
         n: u32,
     },
+    /// CR 121.5: "put that many cards from the top of your library into your
+    /// hand" moves library cards without drawing them (Scroll Rack).
+    PutTopCardsIntoHandMatchingExileCount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1070,9 +1108,12 @@ pub(crate) enum CostResourceImperativeAst {
     /// in the CostResource AST (DamageSource, DamageEachPlayer, etc.).
     /// The Effect is already fully constructed by try_parse_damage.
     DamageEffect(Box<Effect>),
-    /// CR 118.1: "pay {cost}" as an effect verb (mana or life).
+    /// CR 118.1: "pay {cost}" as an effect verb (mana, life, energy, …).
+    /// Carries the unified `AbilityCost` taxonomy directly (lowered to
+    /// `Effect::PayCost { cost, scale: None, .. }`); this IR path never emits a
+    /// per-object scaled mana cost.
     Pay {
-        cost: PaymentCost,
+        cost: AbilityCost,
     },
 }
 
@@ -1229,6 +1270,12 @@ pub(crate) fn with_clause_duration(
         } => {
             *effect_duration = Some(duration);
         }
+        Effect::BecomeCopy {
+            duration: ref mut effect_duration,
+            ..
+        } => {
+            *effect_duration = Some(duration);
+        }
         _ => {}
     }
     clause
@@ -1304,11 +1351,4 @@ pub(crate) struct ActivatedConstraintAst {
     /// during parsing. Runtime enforcement is a future item; currently stripped
     /// so the sentence does not produce an `Unimplemented` fallback.
     pub(crate) any_player_may_activate: bool,
-}
-
-impl ActivatedConstraintAst {
-    pub(crate) fn sorcery_speed(&self) -> bool {
-        self.restrictions
-            .contains(&ActivationRestriction::AsSorcery)
-    }
 }

@@ -71,7 +71,9 @@
     "seatsOccupied": "{{occupied}}/{{total}} assentos ocupados",
     "startGame": "Iniciar Jogo",
     "startNow": "Iniciar Agora",
-    "fillWithAi": "Preencher com IA"
+    "fillWithAi": "Preencher com IA",
+    "joinLinkCopied": "Link de entrada copiado",
+    "copyJoinLink": "Copiar link de entrada: {{joinShare}}"
   },
   "grantDebug": {
     "heading": "Sandbox: Permissões de Depuração",

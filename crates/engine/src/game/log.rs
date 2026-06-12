@@ -150,8 +150,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::CounterAdded { .. }
+        | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
         | GameEvent::CounterRemoved { .. }
+        | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::Regenerated { .. }
@@ -304,6 +306,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 // CR 702.29c: Cycling emits a dedicated `GameEvent::Cycled`, not a
                 // `KeywordAbilityActivated` event, so this arm is unreachable.
                 AbilityTag::Cycling => " activates cycling: ",
+                // CR 702.165a: Backup is a triggered ability — it never emits a
+                // `KeywordAbilityActivated` event, so this arm is unreachable.
+                AbilityTag::Backup => " activates backup: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -634,6 +639,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
+        GameEvent::ObjectIntensified { object_id, amount } => vec![
+            card_seg(state, *object_id),
+            text(" intensified by "),
+            num(*amount as i32),
+        ],
+
         GameEvent::Evolved { object_id } => {
             vec![card_seg(state, *object_id), text(" evolved")]
         }
@@ -710,7 +721,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
-        GameEvent::TokenCreated { object_id, name } => vec![
+        GameEvent::TokenCreated {
+            object_id, name, ..
+        } => vec![
             text("Token created: "),
             LogSegment::CardName {
                 name: name.clone(),
@@ -737,6 +750,18 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" sacrifices "),
             card_seg(state, *object_id),
+        ],
+
+        GameEvent::ControllerChanged {
+            object_id,
+            old_controller,
+            new_controller,
+        } => vec![
+            card_seg(state, *object_id),
+            text(" changed controller from "),
+            player_seg(state, *old_controller),
+            text(" to "),
+            player_seg(state, *new_controller),
         ],
 
         GameEvent::EffectResolved { kind, source_id } => vec![
@@ -1312,6 +1337,7 @@ mod tests {
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),
                 name: "Zombie".to_string(),
+                source_id: ObjectId(0),
             },
             GameEvent::PowerToughnessChanged {
                 object_id: ObjectId(1),

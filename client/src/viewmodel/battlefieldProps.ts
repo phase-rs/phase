@@ -9,7 +9,13 @@ function canGroup(obj: GameObject): boolean {
 function groupKey(obj: GameObject): string {
   const kw = obj.keywords.map((k) => typeof k === "string" ? k : JSON.stringify(k)).sort().join(",");
   const colors = [...obj.color].sort().join("");
-  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${JSON.stringify(obj.counters)}`;
+  // Tokens that share a display name (e.g. SOS vs BLC Pest) differ by rules text
+  // and/or preset art — include both so visually distinct tokens never stack.
+  const tokenRules = obj.token_rules_text ?? "";
+  const tokenPreset = obj.token_image_ref?.preset_id ?? "";
+  const isToken = obj.is_token ?? false;
+  const isCommander = obj.is_commander ?? false;
+  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${JSON.stringify(obj.counters)}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
 }
 
 export interface BattlefieldPartition {

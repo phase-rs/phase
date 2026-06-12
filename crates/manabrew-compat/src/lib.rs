@@ -1233,21 +1233,13 @@ fn playable_objects(actions: &[GameAction]) -> HashSet<ObjectId> {
         .filter_map(|action| match action {
             GameAction::PlayLand { object_id, .. }
             | GameAction::CastSpell { object_id, .. }
-            | GameAction::CastSpellWithPaymentMode { object_id, .. }
             | GameAction::CastSpellForFree { object_id, .. }
-            | GameAction::CastSpellForFreeWithPaymentMode { object_id, .. }
             | GameAction::CastSpellAsMiracle { object_id, .. }
-            | GameAction::CastSpellAsMiracleWithPaymentMode { object_id, .. }
             | GameAction::CastSpellAsMadness { object_id, .. }
-            | GameAction::CastSpellAsMadnessWithPaymentMode { object_id, .. }
             | GameAction::PlayFaceDown { object_id, .. }
             | GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. }
-            | GameAction::CastSpellAsSneakWithPaymentMode { hand_object, .. }
-            | GameAction::CastSpellAsWebSlinging { hand_object, .. }
-            | GameAction::CastSpellAsWebSlingingWithPaymentMode { hand_object, .. } => {
-                Some(*hand_object)
-            }
+            | GameAction::CastSpellAsWebSlinging { hand_object, .. } => Some(*hand_object),
             GameAction::CastPreparedCopy { source } | GameAction::CastParadigmCopy { source } => {
                 Some(*source)
             }
@@ -1657,7 +1649,8 @@ mod tests {
     use super::*;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, CategoryChooserScope, Effect, ModalChoice, ResolvedAbility, TargetFilter,
+        AbilityCost, CategoryChooserScope, Effect, EffectKind, ModalChoice, ResolvedAbility,
+        TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterMatch;
@@ -1705,6 +1698,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -1888,6 +1882,7 @@ mod tests {
                     permanents: vec![ObjectId(22)],
                     pending_effect: Box::new(dummy_ability()),
                     remaining: 1,
+                    min_total_power: None,
                 },
                 PlayerId(0),
             ),
@@ -1925,6 +1920,8 @@ mod tests {
                             TargetRef::Player(PlayerId(1)),
                         ],
                     }],
+                    effect_kind: EffectKind::CopySpell,
+                    effect_source_id: Some(ObjectId(1)),
                     current_slot: 0,
                 },
                 PlayerId(0),
@@ -1980,6 +1977,8 @@ mod tests {
                     player: PlayerId(0),
                     kind: PayCostKind::RemoveCounter {
                         counter_type: CounterMatch::Any,
+                        count: 1,
+                        selection: engine::types::ability::CounterCostSelection::SingleObject,
                     },
                     choices: vec![ObjectId(29)],
                     count: 1,
@@ -2217,6 +2216,7 @@ mod tests {
                     kept_destination: None,
                     rest_destination: None,
                     source_id: None,
+                    enter_tapped: false,
                 },
             ),
             (

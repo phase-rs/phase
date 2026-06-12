@@ -109,11 +109,13 @@ pub fn cast_paradigm_copy(
     if !has_link {
         return Err("no ParadigmSource link for this source/player".to_string());
     }
-    // Select the first ability as the spell ability.
-    let ability_def = src_clone
-        .abilities
-        .first()
-        .cloned()
+    // CR 608.2 + CR 707.10: Mirror the normal cast path — a spell's on-resolve
+    // chain is the union of every `AbilityKind::Spell` entry (each with its own
+    // `sub_ability` tail) folded by `combined_spell_ability_def`. Taking only
+    // `.first()` dropped sibling spell abilities (issue #1960: Decorum
+    // Dissertation's "loses 2 life" conjunct lived in a second spell ability,
+    // so Paradigm copies drew but did not deduct life).
+    let ability_def = crate::game::casting::combined_spell_ability_def(&src_clone)
         .ok_or_else(|| "paradigm source has no spell ability".to_string())?;
 
     let copy_id = ObjectId(state.next_object_id);
@@ -230,5 +232,139 @@ mod tests {
         assert!(primed, "second spell resolves first → primes");
         assert_eq!(state.paradigm_primed.len(), 1);
         assert_eq!(state.exile_links.len(), 1);
+    }
+
+    /// Issue #1960 — Decorum Dissertation's resolution chain must include both
+    /// Draw and LoseLife after `combined_spell_ability_def` folds every spell
+    /// ability on the card.
+    #[test]
+    fn decorum_dissertation_combined_spell_chain_includes_draw_and_lose_life() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::Effect;
+
+        const ORACLE: &str = "Target player draws two cards and loses 2 life.";
+
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_spell_to_hand_from_oracle(P0, "Decorum Dissertation", false, ORACLE)
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        let combined =
+            crate::game::casting::combined_spell_ability_def(obj).expect("combined spell ability");
+        let mut node = Some(&combined);
+        let mut saw_draw = false;
+        let mut saw_lose_life = false;
+        while let Some(def) = node {
+            match &*def.effect {
+                Effect::Draw { .. } => saw_draw = true,
+                Effect::LoseLife { .. } => saw_lose_life = true,
+                _ => {}
+            }
+            node = def.sub_ability.as_deref();
+        }
+        assert!(saw_draw, "combined chain must include Draw");
+        assert!(saw_lose_life, "combined chain must include LoseLife");
+    }
+
+    /// Issue #1960 — a Paradigm copy must run the full combined spell chain, not
+    /// only the first sibling spell ability.
+    #[test]
+    fn paradigm_copy_resolves_draw_and_lose_life_chain() {
+        use std::sync::Arc;
+
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::stack;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TargetRef,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::StackEntryKind;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let target = PlayerId(1);
+        let life_before = state.players[1].life;
+
+        // Seed the target player's library so Draw can resolve.
+        for i in 0..3 {
+            let card_id = CardId(state.next_object_id);
+            state.next_object_id += 1;
+            let lib_id = create_object(
+                &mut state,
+                card_id,
+                target,
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+            state.players[1].library.push_front(lib_id);
+        }
+
+        let source_id = create_object(
+            &mut state,
+            CardId(100),
+            controller,
+            "Decorum Dissertation".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(3);
+            // Mirror parsed storage: Draw and LoseLife are sibling spell abilities.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Player,
+                },
+            ));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: Some(TargetFilter::Player),
+                },
+            ));
+        }
+        arm_paradigm(&mut state, source_id, controller, "Decorum Dissertation");
+
+        let mut events = Vec::new();
+        let copy_id = cast_paradigm_copy(&mut state, source_id, controller, &mut events).unwrap();
+
+        let combined = crate::game::casting::combined_spell_ability_def(
+            state.objects.get(&copy_id).expect("copy object"),
+        )
+        .expect("copy carries combined spell ability");
+        let resolved = build_resolved_from_def_with_targets(
+            &combined,
+            copy_id,
+            controller,
+            vec![TargetRef::Player(target)],
+        );
+        if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
+            if let StackEntryKind::Spell { ability, .. } = &mut entry.kind {
+                *ability = Some(resolved);
+            }
+        }
+
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[1].hand.len(),
+            2,
+            "Paradigm copy must draw two cards for the chosen player"
+        );
+        assert_eq!(
+            state.players[1].life,
+            life_before - 2,
+            "Paradigm copy must also deduct two life (issue #1960)"
+        );
     }
 }

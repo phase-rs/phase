@@ -8,17 +8,17 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_on_counter_added_record,
-    matches_target_filter_on_damage_record_source, matches_target_filter_on_zone_change_record,
-    player_matches_target_filter_in_state, spell_record_matches_filter, type_filter_matches,
-    FilterContext,
+    matches_target_filter, matches_target_filter_on_attack_declaration_record,
+    matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
+    matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
+    spell_record_matches_filter, type_filter_matches, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, AttackScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
-    ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter,
-    ZoneRef,
+    AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
+    CastManaSpentMetric, ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -266,6 +266,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // references: unaffected by another object's battlefield entry/exit.
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
+        | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
@@ -274,6 +275,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
@@ -303,7 +305,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::AttackedThisTurn
+        | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -319,6 +321,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
@@ -434,6 +437,7 @@ fn entered_object_perturbs_quantity_ref(
         // enumeration to the `false` arm of `quantity_ref_uses_object_count`.
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
+        | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
@@ -442,6 +446,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
@@ -471,7 +476,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::AttackedThisTurn
+        | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -487,6 +492,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
@@ -905,20 +911,29 @@ pub fn resolve_quantity_with_targets_slice(
 ///
 /// Used by `DamageEachPlayer` to evaluate per-player quantities like
 /// "the number of nonbasic lands that player controls".
-/// `scope_player` overrides `controller` for `ObjectCount` (ControllerRef::You)
-/// and `SpellsCastThisTurn` resolution.
+/// `scope_player` binds `ControllerRef::ScopedPlayer` during the per-player
+/// iteration; the ability controller (from the source object) is used for
+/// `ControllerRef::You` ("creatures you control").
 pub(crate) fn resolve_quantity_scoped(
     state: &GameState,
     expr: &QuantityExpr,
     source_id: ObjectId,
     scope_player: PlayerId,
 ) -> i32 {
+    // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
+    // controller, not to the current DamageEachPlayer recipient.
+    let ability_controller = state
+        .objects
+        .get(&source_id)
+        .map(|obj| obj.controller)
+        .unwrap_or(scope_player);
+
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(
             state,
             qty,
-            scope_player,
+            ability_controller,
             QuantityContext {
                 entering: None,
                 source: source_id,
@@ -1037,7 +1052,13 @@ fn resolve_ref(
             a,
             a.original_controller.unwrap_or(a.controller),
         ),
-        None => FilterContext::from_source_with_controller(source_id, controller),
+        None => {
+            let mut fc = FilterContext::from_source_with_controller(source_id, controller);
+            // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
+            // the current recipient while ControllerRef::You stays on `controller`.
+            fc.scoped_iteration_player = ctx.scoped_player;
+            fc
+        }
     };
     filter_ctx.recipient_id = ctx.recipient;
     let player = state.players.iter().find(|p| p.id == controller);
@@ -1066,6 +1087,19 @@ fn resolve_ref(
         QuantityRef::LifeTotal { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| p.life)
         }
+        // CR 106.4: floating mana of `color` (or any color) in the controller's
+        // mana pool. Controller-scoped — `player` is the controller. Omnath,
+        // Locus of Mana ("+1/+1 for each unspent green mana you have").
+        QuantityRef::UnspentMana { color } => player
+            .map(|p| {
+                usize_to_i32_saturating(match color {
+                    Some(c) => p
+                        .mana_pool
+                        .count_color(crate::types::mana::ManaType::from(*c)),
+                    None => p.mana_pool.produced_mana_total(),
+                })
+            })
+            .unwrap_or(0),
         // CR 122.1: Counter-kind lookup summed across scope players. Controller
         // scope resolves to a single player; Opponents/All may span multiple.
         // Per-player u32 is widened to u64 before summing; the i32::try_from
@@ -1272,6 +1306,19 @@ fn resolve_ref(
             ability,
             |obj| obj.power,
             |lki| lki.power,
+        ),
+        // Digital-only Alchemy: read the object's current intensity. The reader
+        // is the source itself (a spell on the stack or a permanent reading its
+        // own intensity), so the live object carries it; LKI does not track
+        // intensity, so it has no fallback.
+        QuantityRef::Intensity { scope } => resolve_object_pt(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            |obj| Some(i32::try_from(obj.intensity).unwrap_or(i32::MAX)),
+            |_lki| None,
         ),
         QuantityRef::Toughness { scope } => resolve_object_pt(
             state,
@@ -1571,6 +1618,7 @@ fn resolve_ref(
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
+            filter,
             scope,
         } => {
             let mut count = 0;
@@ -1585,7 +1633,13 @@ fn resolve_ref(
                             ZoneRef::Exile => unreachable!(),
                         };
                         for &obj_id in zone_ids {
-                            if matches_zone_card_filter(state, obj_id, card_types) {
+                            if matches_zone_card_filter(
+                                state,
+                                obj_id,
+                                card_types,
+                                filter.as_ref(),
+                                &filter_ctx,
+                            ) {
                                 count += 1;
                             }
                         }
@@ -1597,7 +1651,14 @@ fn resolve_ref(
                         if let Some(obj) = state.objects.get(&obj_id) {
                             let owner_matches =
                                 count_scope_owner_matches(state, scope, ctx, controller, obj.owner);
-                            if owner_matches && matches_zone_card_filter(state, obj_id, card_types)
+                            if owner_matches
+                                && matches_zone_card_filter(
+                                    state,
+                                    obj_id,
+                                    card_types,
+                                    filter.as_ref(),
+                                    &filter_ctx,
+                                )
                             {
                                 count += 1;
                             }
@@ -1689,6 +1750,19 @@ fn resolve_ref(
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
+            // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
+            // if it had one or more <X> counters on it, put that many <X> counters
+            // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
+            // the count of `<X>` counters the triggering object had as it left
+            // (kind taken from the resolving counter effect). Counters cease to
+            // exist on the zone change (CR 122.2), so the live object's map is
+            // empty — the count comes from the leaving object's last-known
+            // information. Sits LAST and fires only for counter-placing effects:
+            // a dies/leaves trigger whose "that many" is produced by a preceding
+            // effect (Whirlpool Drake: "shuffle the cards from your hand into your
+            // library, then draw that many cards") is a non-counter effect, so it
+            // resolves via `last_effect_count`/`last_effect_amount` above.
+            .or_else(|| event_context_counter_count_from_lki(state, ability))
             .unwrap_or(0),
         // CR 608.2c: If an earlier effect in this same resolution captured an
         // explicit object context, use that object before the original trigger
@@ -1773,57 +1847,45 @@ fn resolve_ref(
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
         }
+        // CR 701.38 + CR 608.2c: Number of votes tallied for `choice_index`,
+        // counting ballots (not voters) from `state.last_vote_ballots`. Summing
+        // ballots — rather than counting distinct voters — is the consequence of
+        // CR 701.38d: a player granted multiple votes casts multiple ballots, so
+        // a single player can contribute more than one to a choice's tally.
+        QuantityRef::VoteCount { choice_index } => usize_to_i32_saturating(
+            state
+                .last_vote_ballots
+                .iter()
+                .filter(|(_, ballot_choice)| *ballot_choice == *choice_index)
+                .count(),
+        ),
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
         // lands, so multiple Forests still contribute one.
         QuantityRef::BasicLandTypeCount {
             controller: land_controller,
         } => {
-            let target_player = ability.and_then(|a| {
-                a.targets.iter().find_map(|target| match target {
-                    TargetRef::Player(player) => Some(*player),
-                    TargetRef::Object(_) => None,
-                })
-            });
-            let basic_subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
+            let filter =
+                TargetFilter::Typed(TypedFilter::land().controller(land_controller.clone()));
             let mut found = HashSet::new();
-            for &id in state.battlefield.iter() {
+            for &id in crate::game::targeting::zone_object_ids(
+                state,
+                crate::types::zones::Zone::Battlefield,
+            )
+            .iter()
+            {
+                if !matches_target_filter(state, id, &filter, &filter_ctx) {
+                    continue;
+                }
                 if let Some(obj) = state.objects.get(&id) {
-                    let controller_matches = match land_controller {
-                        ControllerRef::You => obj.controller == controller,
-                        ControllerRef::Opponent => obj.controller != controller,
-                        ControllerRef::ScopedPlayer => {
-                            obj.controller == scoped_player_or_controller(ability, controller)
-                        }
-                        ControllerRef::TargetPlayer => target_player == Some(obj.controller),
-                        ControllerRef::ParentTargetController => ability
-                            .and_then(|ability| {
-                                crate::game::ability_utils::parent_target_controller(ability, state)
-                            })
-                            .is_some_and(|player| player == obj.controller),
-                        ControllerRef::DefendingPlayer => {
-                            crate::game::combat::defending_player_for_attacker(state, ctx.source)
-                                .is_some_and(|pid| pid == obj.controller)
-                        }
-                        // CR 613.1: Land controlled by the source's chosen player.
-                        ControllerRef::SourceChosenPlayer => {
-                            crate::game::game_object::source_chosen_player(state, ctx.source)
-                                .is_some_and(|pid| pid == obj.controller)
-                        }
-                        // CR 608.2c + CR 109.4: Land controlled by a chosen player.
-                        ControllerRef::ChosenPlayer { index } => ability
-                            .and_then(|a| a.chosen_players.get(*index as usize).copied())
-                            .is_some_and(|pid| pid == obj.controller),
-                        // CR 603.2 + CR 109.4: Land controlled by the triggering player.
-                        ControllerRef::TriggeringPlayer => {
-                            triggering_event_player(state).is_some_and(|pid| pid == obj.controller)
-                        }
-                    };
-                    if controller_matches && obj.card_types.core_types.contains(&CoreType::Land) {
-                        for subtype in &basic_subtypes {
-                            if obj.card_types.subtypes.iter().any(|s| s == subtype) {
-                                found.insert(*subtype);
-                            }
+                    for land_type in BasicLandType::all() {
+                        if obj
+                            .card_types
+                            .subtypes
+                            .iter()
+                            .any(|subtype| subtype == land_type.as_subtype_str())
+                        {
+                            found.insert(*land_type);
                         }
                     }
                 }
@@ -1978,13 +2040,26 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 508.1a: Count creatures the controller attacked with this turn.
-        QuantityRef::AttackedThisTurn => state
-            .attacking_creatures_this_turn
-            .get(&controller)
-            .copied()
-            .map(u32_to_i32_saturating)
-            .unwrap_or(0),
+        // CR 508.1a: Count creatures that attacked this turn. Declaration-time
+        // records are the authority for every scoped form so attackers that
+        // left the battlefield still count.
+        QuantityRef::AttackedThisTurn { scope, filter } => usize_to_i32_saturating(
+            state
+                .attacker_declarations_this_turn
+                .iter()
+                .filter(|record| {
+                    count_scope_actor_matches(state, scope, ctx, controller, record.lki.controller)
+                        && filter.as_ref().is_none_or(|filter| {
+                            matches_target_filter_on_attack_declaration_record(
+                                state,
+                                record,
+                                filter,
+                                &filter_ctx,
+                            )
+                        })
+                })
+                .count(),
+        ),
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
             if player.is_some_and(|p| p.descended_this_turn) {
@@ -2052,7 +2127,7 @@ fn resolve_ref(
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
-                    counter_added_actor_matches(state, actor, ctx, controller, record.actor)
+                    count_scope_actor_matches(state, actor, ctx, controller, record.actor)
                         && counters.matches(&record.counter_type)
                         && matches_target_filter_on_counter_added_record(
                             state,
@@ -2274,15 +2349,20 @@ fn matches_zone_card_filter(
     state: &GameState,
     obj_id: ObjectId,
     card_types: &[TypeFilter],
+    filter: Option<&TargetFilter>,
+    filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    if card_types.is_empty() {
-        return true;
+    if !card_types.is_empty() {
+        let matches_type = state.objects.get(&obj_id).is_some_and(|obj| {
+            card_types
+                .iter()
+                .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+        });
+        if !matches_type {
+            return false;
+        }
     }
-    state.objects.get(&obj_id).is_some_and(|obj| {
-        card_types
-            .iter()
-            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
-    })
+    filter.is_none_or(|filter| matches_target_filter(state, obj_id, filter, filter_ctx))
 }
 
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
@@ -2338,7 +2418,7 @@ fn count_scope_owner_matches(
     }
 }
 
-fn counter_added_actor_matches(
+fn count_scope_actor_matches(
     state: &GameState,
     scope: &CountScope,
     ctx: QuantityContext,
@@ -2623,6 +2703,47 @@ pub(crate) fn distinct_counter_kinds_among(
     kinds
 }
 
+/// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back
+/// counter effect ("Whenever a creature you control dies/leaves the battlefield,
+/// if it had one or more <X> counters on it, put that many <X> counters on …" —
+/// Reyhan, Last of the Abzan), resolve "that many" to the number of `<X>`
+/// counters the triggering object had as it left, read from its last-known
+/// information (the live object's counter map is empty per CR 122.2).
+///
+/// The counter kind `<X>` is taken from the *resolving effect* — a "put that
+/// many <X> counters" effect counts the `<X>` counters it had, so charge /
+/// −1/−1 / +1/+1 each resolve to their own kind rather than a hardcoded one.
+/// Returns `Some` only when (a) the resolving effect actually places counters
+/// (`AddCounter`/`PutCounter`/`PutCounterAll`), (b) the current trigger event is
+/// a `ZoneChanged` leaving the battlefield, and (c) the leaving object's LKI
+/// snapshot recorded at least one counter of that kind. A non-counter effect
+/// whose "that many" comes from the event or a preceding effect — "draw that
+/// many cards" (Whirlpool Drake) — never reaches this branch, so the
+/// `EventContextAmount` cascade resolves it via `last_effect_count` instead.
+fn event_context_counter_count_from_lki(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<i32> {
+    use crate::types::ability::Effect;
+    let counter_type = match ability.map(|a| &a.effect) {
+        Some(
+            Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. },
+        ) => counter_type,
+        _ => return None,
+    };
+    let crate::types::events::GameEvent::ZoneChanged {
+        object_id,
+        from: Some(crate::types::zones::Zone::Battlefield),
+        ..
+    } = state.current_trigger_event.as_ref()?
+    else {
+        return None;
+    };
+    let lki = state.lki_cache.get(object_id)?;
+    let count = counter_count_from_map(&lki.counters, Some(counter_type));
+    (count > 0).then_some(count)
+}
+
 pub(crate) fn counter_count_from_map(
     counters: &HashMap<CounterType, u32>,
     counter_type: Option<&CounterType>,
@@ -2773,14 +2894,12 @@ fn resolve_mana_symbols_in_mana_cost(
         .unwrap_or(0)
 }
 
-/// CR 208.3 + CR 113.6 + CR 400.7: Resolve a per-object scalar (power, toughness)
-/// through an `ObjectScope`, with LKI fallback for the source.
+/// CR 208.3 + CR 608.2h + CR 400.7: Resolve a per-object scalar (power, toughness)
+/// through an `ObjectScope`, with LKI fallback when the object left its zone.
 ///
 /// Single authority for `Power { scope }` / `Toughness { scope }` resolution
 /// (Π-6). `obj_extract` returns the property for a current object; `lki_extract`
-/// returns the same property from a Last Known Information snapshot. LKI fallback
-/// applies only to the source object — Target reads only the current state per
-/// CR 113.6 (a target's identity is captured on cast/announce).
+/// returns the same property from a Last Known Information snapshot.
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
@@ -2801,13 +2920,28 @@ where
             .and_then(&obj_extract)
             .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
             .unwrap_or(0),
+        // CR 608.2h: once a targeted object has left the battlefield, its power
+        // and toughness survive only as last known information. The object now
+        // in its new zone has had +1/+1 counters and continuous modifiers
+        // stripped (CR 122.2 / CR 613), so reading it live under-reports — Swords
+        // to Plowshares on a 3/3 with eight +1/+1 counters must gain 11 life, not
+        // 3. Prefer live battlefield state over a stale same-step LKI snapshot;
+        // otherwise use LKI, then fall back to live state for non-battlefield
+        // target-card reads that never had a battlefield LKI.
         ObjectScope::Target => targets
             .iter()
             .find_map(|t| match t {
-                TargetRef::Object(id) => state.objects.get(id),
+                TargetRef::Object(id) => Some(*id),
                 _ => None,
             })
-            .and_then(&obj_extract)
+            .map(|id| {
+                let live = state.objects.get(&id);
+                live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+                    .and_then(&obj_extract)
+                    .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
+                    .or_else(|| live.and_then(&obj_extract))
+                    .unwrap_or(0)
+            })
             .unwrap_or(0),
         ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
             .and_then(&obj_extract)
@@ -3381,6 +3515,12 @@ pub(crate) fn resolve_player_count(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
+    // CR 104.3: eliminated players are excluded from the generic player loop
+    // below (`!p.is_eliminated`), so count them on a dedicated path.
+    if matches!(filter, PlayerFilter::HasLostTheGame) {
+        return usize_to_i32_saturating(state.players.iter().filter(|p| p.is_eliminated).count());
+    }
+
     if let PlayerFilter::OpponentAttacked {
         subject,
         scope: AttackScope::ThisCombat,
@@ -3420,6 +3560,8 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentGainedLife => {
                             p.id != controller && p.life_gained_this_turn > 0
                         }
+                        // Handled by the early return above; unreachable here.
+                        PlayerFilter::HasLostTheGame => false,
                         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each
                         // opponent who was dealt combat damage this turn,
                         // optionally restricted to a matching source.
@@ -3713,13 +3855,174 @@ mod tests {
     #[test]
     fn resolve_attacked_this_turn_counts_creatures_attacked_with_by_controller() {
         let mut state = GameState::new_two_player(42);
-        state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
+        let attackers: Vec<_> = (0..3)
+            .map(|idx| {
+                let id = create_object(
+                    &mut state,
+                    CardId(100 + idx),
+                    PlayerId(0),
+                    format!("Attacker {idx}"),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().card_types.core_types =
+                    vec![CoreType::Creature];
+                (id, crate::game::combat::AttackTarget::Player(PlayerId(1)))
+            })
+            .collect();
+        crate::game::combat::declare_attackers(&mut state, &attackers, &mut Vec::new()).unwrap();
 
         let qty = QuantityExpr::Ref {
-            qty: QuantityRef::AttackedThisTurn,
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    #[test]
+    fn resolve_filtered_attacked_this_turn_uses_declaration_snapshot_after_attacker_leaves() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Goblin".to_string()];
+        }
+
+        let non_token = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Knight".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&non_token)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        crate::game::combat::declare_attackers(
+            &mut state,
+            &[
+                (
+                    token,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    non_token,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        state.objects.remove(&token);
+
+        let token_attackers = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Token]),
+                )),
+            },
+        };
+        let goblin_attackers = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature, TypeFilter::Subtype("Goblin".into())],
+                    controller: None,
+                    properties: vec![],
+                })),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &token_attackers, PlayerId(0), ObjectId(1)),
+            1
+        );
+        assert_eq!(
+            resolve_quantity(&state, &goblin_attackers, PlayerId(0), ObjectId(1)),
+            1
+        );
+    }
+
+    #[test]
+    fn resolve_global_attacked_this_turn_counts_all_players_attackers() {
+        use crate::types::game_state::{AttackDeclarationRecord, LKISnapshot};
+
+        let mut state = GameState::new_two_player(42);
+        let p0_attacker = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_attacker = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let creature_lki = |name: &str, controller: PlayerId| LKISnapshot {
+            name: name.to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
+            mana_value: 2,
+            controller,
+            owner: controller,
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: Vec::new(),
+            counters: HashMap::new(),
+        };
+
+        state.attacker_declarations_this_turn = vec![
+            AttackDeclarationRecord {
+                object_id: p0_attacker,
+                lki: creature_lki("Goblin", PlayerId(0)),
+                is_token: false,
+                is_commander: false,
+            },
+            AttackDeclarationRecord {
+                object_id: p1_attacker,
+                lki: creature_lki("Soldier", PlayerId(1)),
+                is_token: false,
+                is_commander: false,
+            },
+        ];
+
+        let global_creature_attackers = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::All,
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &global_creature_attackers, PlayerId(0), ObjectId(1)),
+            2,
+            "global creature attacker count must include every player's attackers"
+        );
     }
 
     #[test]
@@ -5436,6 +5739,47 @@ mod tests {
         );
     }
 
+    /// CR 106.4: `QuantityRef::UnspentMana` counts floating mana in the
+    /// controller's pool — `Some(color)` per-color, `None` total. Omnath, Locus
+    /// of Mana ("+1/+1 for each unspent green mana you have").
+    #[test]
+    fn resolve_quantity_unspent_mana() {
+        use crate::types::mana::{ManaType, ManaUnit};
+        let mut state = GameState::new_two_player(42);
+        // P0 has 3 green + 1 red floating; P1's pool is empty.
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Green,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        state.players[0]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+
+        let green = QuantityExpr::Ref {
+            qty: QuantityRef::UnspentMana {
+                color: Some(ManaColor::Green),
+            },
+        };
+        // Controller-scoped: P0 reads 3 green, P1 (empty pool) reads 0.
+        assert_eq!(
+            resolve_quantity(&state, &green, PlayerId(0), ObjectId(1)),
+            3
+        );
+        assert_eq!(
+            resolve_quantity(&state, &green, PlayerId(1), ObjectId(1)),
+            0
+        );
+        // `None` counts all floating mana (3 green + 1 red).
+        let any = QuantityExpr::Ref {
+            qty: QuantityRef::UnspentMana { color: None },
+        };
+        assert_eq!(resolve_quantity(&state, &any, PlayerId(0), ObjectId(1)), 4);
+    }
+
     /// CR 613.1: `CountScope::SourceChosenPlayer` resolves to the player
     /// persisted on the source via `ChosenAttribute::Player`, so CDA P/T can
     /// track any chosen-player zone.
@@ -5503,6 +5847,7 @@ mod tests {
                     zone,
                     card_types: Vec::new(),
                     scope: CountScope::SourceChosenPlayer,
+                    filter: None,
                 },
             };
             assert_eq!(
@@ -6548,6 +6893,25 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
     }
 
+    /// CR 104.3: `PlayerCount { HasLostTheGame }` counts eliminated players only.
+    #[test]
+    fn player_count_has_lost_the_game_counts_eliminated_players() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[1].is_eliminated = true;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+
+        state.players[2].is_eliminated = true;
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
+    }
+
     /// CR 119.2 + CR 700.1: `PlayerCount { OpponentLostLife }` counts only
     /// opponents whose `life_lost_this_turn > 0` — Belbe's mana count base.
     #[test]
@@ -6728,6 +7092,67 @@ mod tests {
         );
     }
 
+    /// Issue #2908: "an opponent controls at least N more [type] than you" —
+    /// existential GE with an Offset threshold. P0: 1 land, P1: 2 lands (only +1,
+    /// fails), P2: 3 lands (+2, qualifies) → PlayerCount == 1.
+    #[test]
+    fn resolve_player_count_controls_at_least_n_more_lands_than_you() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, PlayerRelation, TypeFilter, TypedFilter,
+        };
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let add_land = |state: &mut GameState, owner: PlayerId, id: u64| {
+            let land = create_object(
+                state,
+                CardId(id),
+                owner,
+                format!("Land {id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        };
+        add_land(&mut state, PlayerId(0), 910);
+        add_land(&mut state, PlayerId(1), 911);
+        add_land(&mut state, PlayerId(1), 912);
+        add_land(&mut state, PlayerId(2), 913);
+        add_land(&mut state, PlayerId(2), 914);
+        add_land(&mut state, PlayerId(2), 915);
+
+        let land_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Land));
+        let you_land =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You));
+
+        let at_least_two_more = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Opponent,
+                    filter: land_filter,
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter: you_land },
+                        }),
+                        offset: 2,
+                    }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &at_least_two_more, PlayerId(0), ObjectId(1)),
+            1,
+            "only P2 (3 lands >= 1+2) qualifies; P1 (2 lands) does not"
+        );
+    }
+
     /// CR 122.1f: discriminating coverage for Glissa's Retriever — "the number
     /// of opponents who have three or more poison counters". The per-candidate
     /// poison total must be read off each candidate player, NOT the controller.
@@ -6859,6 +7284,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
                 scope: CountScope::Controller,
+                filter: None,
             },
         };
 
@@ -7457,6 +7883,56 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn resolve_target_power_prefers_live_battlefield_object_over_stale_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut stale_lki = state.objects[&target].snapshot_public_characteristics();
+        stale_lki.power = Some(2);
+        stale_lki.toughness = Some(2);
+        state.lki_cache.insert(target, stale_lki);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: expr.clone(),
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            5,
+            "live battlefield target must win over same-step LKI from an earlier incarnation"
+        );
     }
 
     #[test]
@@ -9391,5 +9867,126 @@ mod tests {
 
         // 3 + 5 = 8 from LKI; pre-fix this returned 0 because obj.power was None.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 8);
+    }
+
+    fn add_basic_land(state: &mut GameState, controller: PlayerId, subtype: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.objects.len() as u64 + 100),
+            controller,
+            subtype.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push(subtype.to_string());
+        id
+    }
+
+    fn domain_expr_for(controller: ControllerRef) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::BasicLandTypeCount { controller },
+        }
+    }
+
+    fn domain_expr() -> QuantityExpr {
+        domain_expr_for(ControllerRef::You)
+    }
+
+    #[test]
+    fn domain_counts_distinct_basic_land_types() {
+        // CR 305.6: domain counts distinct basic land types, not land count.
+        let mut state = GameState::new_two_player(42);
+        add_basic_land(&mut state, PlayerId(0), "Forest");
+        add_basic_land(&mut state, PlayerId(0), "Forest"); // duplicate — still counts as 1
+        add_basic_land(&mut state, PlayerId(0), "Island");
+        let expr = domain_expr();
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+    }
+
+    #[test]
+    fn domain_phased_out_land_does_not_count() {
+        // CR 702.26b: a phased-out permanent is treated as though it does not
+        // exist — its land type must not contribute to domain.
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = GameState::new_two_player(42);
+        let plains = add_basic_land(&mut state, PlayerId(0), "Plains");
+        let island = add_basic_land(&mut state, PlayerId(0), "Island");
+        let mountain = add_basic_land(&mut state, PlayerId(0), "Mountain");
+        let expr = domain_expr();
+
+        // Three distinct types phased in → domain 3.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
+
+        // Phase out Mountain — domain must drop to 2.
+        state.objects.get_mut(&mountain).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+
+        // Also phase out Island — domain drops to 1 (only Plains remains).
+        state.objects.get_mut(&island).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+
+        // Opponent's phased-in land does not affect caster's domain either:
+        // this assertion isolates controller scope from the phasing check.
+        let _ = plains; // silence unused-variable warning
+        let opp_swamp = add_basic_land(&mut state, PlayerId(1), "Swamp");
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+        state.objects.get_mut(&opp_swamp).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    #[test]
+    fn domain_opponent_scope_uses_filter_phasing_choke_point() {
+        // CR 702.26b: when domain is scoped to opponents, an opponent's phased-out
+        // basic land type is excluded by `matches_target_filter`.
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = GameState::new_two_player(42);
+        add_basic_land(&mut state, PlayerId(0), "Plains");
+        add_basic_land(&mut state, PlayerId(1), "Swamp");
+        let mountain = add_basic_land(&mut state, PlayerId(1), "Mountain");
+        let expr = domain_expr_for(ControllerRef::Opponent);
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+        state.objects.get_mut(&mountain).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    /// CR 701.38 + CR 701.38d + CR 608.2c: `VoteCount` counts ballots, not
+    /// voters. A player granted multiple votes casts multiple ballots, so a
+    /// single player can contribute more than one to a choice's tally. Build a
+    /// ledger where P1 voted twice for choice 0 and assert the tally is 3
+    /// (P0 once + P1 twice), with choice 1 resolving to 0 (no ballots).
+    #[test]
+    fn vote_count_sums_ballots_not_voters() {
+        let mut state = GameState::new_two_player(42);
+        // (voter, choice_index): P0 → 0, P1 → 0, P1 → 0 (multi-vote player).
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+
+        let choice0 = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 0 },
+        };
+        let choice1 = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 1 },
+        };
+        // 3 ballots for choice 0 (votes, not the 2 distinct voters).
+        assert_eq!(
+            resolve_quantity(&state, &choice0, PlayerId(0), ObjectId(0)),
+            3
+        );
+        // No ballots for choice 1.
+        assert_eq!(
+            resolve_quantity(&state, &choice1, PlayerId(0), ObjectId(0)),
+            0
+        );
     }
 }

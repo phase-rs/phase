@@ -18,7 +18,7 @@ export function CascadeChoiceModal() {
 
   if (waitingFor?.type !== "CastOffer") return null;
   const kind = waitingFor.data.kind;
-  if (kind.type !== "Cascade" && kind.type !== "Discover") return null;
+  if (kind.type !== "Cascade" && kind.type !== "Discover" && kind.type !== "Ripple") return null;
   if (!canActForWaitingState) return null;
 
   if (kind.type === "Discover") {
@@ -28,6 +28,20 @@ export function CascadeChoiceModal() {
         hitCardId={kind.hit_card}
         missCount={kind.exiled_misses.length}
         promptKind="Discover"
+        dispatch={dispatch}
+      />
+    );
+  }
+
+  // CR 702.60a: Ripple — cast the revealed same-named card for free or decline
+  // (the rest go to the bottom of the library). Reuses the shared cast-offer body.
+  if (kind.type === "Ripple") {
+    return (
+      <CascadeChoiceContent
+        actionType="RippleChoice"
+        hitCardId={kind.hit_card}
+        missCount={kind.remaining_hits.length + kind.revealed_misses.length}
+        promptKind="Ripple"
         dispatch={dispatch}
       />
     );
@@ -53,10 +67,10 @@ function CascadeChoiceContent({
   sourceMv,
   dispatch,
 }: {
-  actionType: "CascadeChoice" | "DiscoverChoice";
+  actionType: "CascadeChoice" | "DiscoverChoice" | "RippleChoice";
   hitCardId: number;
   missCount: number;
-  promptKind: "Cascade" | "Discover";
+  promptKind: "Cascade" | "Discover" | "Ripple";
   sourceMv?: number;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
@@ -72,17 +86,24 @@ function CascadeChoiceContent({
           sourceMv,
           total: missCount + 1,
         })
-      : t("cascadeChoice.subtitleDiscover", {
-          name: obj.name,
-          missCount,
-        });
+      : promptKind === "Ripple"
+        ? t("cascadeChoice.subtitleRipple", {
+            name: obj.name,
+            total: missCount + 1,
+          })
+        : t("cascadeChoice.subtitleDiscover", {
+            name: obj.name,
+            missCount,
+          });
 
   return (
     <DialogShell
       eyebrow={
         promptKind === "Cascade"
           ? t("cascadeChoice.cascadeEyebrow")
-          : t("cascadeChoice.discoverEyebrow")
+          : promptKind === "Ripple"
+            ? t("cascadeChoice.rippleEyebrow")
+            : t("cascadeChoice.discoverEyebrow")
       }
       title={t("cascadeChoice.title", { name: obj.name })}
       subtitle={subtitle}

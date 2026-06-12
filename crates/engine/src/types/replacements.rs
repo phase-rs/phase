@@ -35,7 +35,9 @@ pub enum ReplacementEvent {
     ChangeZone,
     /// CR 614.1a: Replaces an object moving zones (post-move replacement).
     Moved,
-    /// CR 614.1a: Replaces one or more counters being placed on an object.
+    /// CR 614.1a + CR 122.1: Replaces one or more counters being placed on an
+    /// object or player.
+    #[serde(alias = "AddPlayerCounter")]
     AddCounter,
     /// CR 614.1a: Replaces one or more counters being removed from an object.
     RemoveCounter,
@@ -161,7 +163,7 @@ impl FromStr for ReplacementEvent {
             "Counter" => ReplacementEvent::Counter,
             "ChangeZone" => ReplacementEvent::ChangeZone,
             "Moved" => ReplacementEvent::Moved,
-            "AddCounter" => ReplacementEvent::AddCounter,
+            "AddCounter" | "AddPlayerCounter" => ReplacementEvent::AddCounter,
             "RemoveCounter" => ReplacementEvent::RemoveCounter,
             "CreateToken" => ReplacementEvent::CreateToken,
             "Tap" => ReplacementEvent::Tap,
@@ -220,6 +222,10 @@ mod tests {
     fn parse_promoted_replacement_events() {
         assert_eq!(
             ReplacementEvent::from_str("AddCounter").unwrap(),
+            ReplacementEvent::AddCounter
+        );
+        assert_eq!(
+            ReplacementEvent::from_str("AddPlayerCounter").unwrap(),
             ReplacementEvent::AddCounter
         );
         assert_eq!(

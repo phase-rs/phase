@@ -1,10 +1,12 @@
+#[cfg(test)]
+use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, CastManaSpentMetric,
-    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, FilterProp,
+    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, EffectScope, FilterProp,
     GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -222,7 +224,14 @@ pub fn build_chained_resolved(
         // CR 700.2d: When chaining multiple modes, append subsequent modes after
         // the current mode's own sub_ability chain (e.g., Cathartic Pyre mode 2's
         // "discard, then draw that many" must preserve the draw sub_ability).
-        if let Some(next_mode) = result {
+        if let Some(mut next_mode) = result {
+            // CR 700.2d + CR 700.2f + CR 608.2c: chained modes are independent
+            // instructions, not continuations. Tag the appended mode root as a
+            // `SequentialSibling` so resolution treats it as its own instruction
+            // (e.g. Dromoka's Command mode 3's `PutCounter` must resolve on its
+            // own target, NOT as a rider of mode 1's prevention shield). Within a
+            // single mode, then/comma sub-steps remain `ContinuationStep`.
+            next_mode.sub_link = SubAbilityLink::SequentialSibling;
             append_to_sub_chain(&mut resolved, next_mode);
         }
         result = Some(resolved);
@@ -927,21 +936,25 @@ pub fn validate_selected_targets(
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<(), EngineError> {
-    let minimum_targets = target_slots.iter().filter(|slot| !slot.optional).count();
-    if targets.len() < minimum_targets || targets.len() > target_slots.len() {
-        return Err(EngineError::InvalidAction(format!(
-            "Expected between {minimum_targets} and {} targets, got {}",
-            target_slots.len(),
-            targets.len()
-        )));
-    }
-
-    validate_target_prefix(target_slots, targets, constraints)
+    validate_selected_targets_inner(None, target_slots, targets, constraints)
 }
 
 pub fn validate_selected_targets_for_ability(
     state: &GameState,
     ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    targets: &[TargetRef],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    validate_selected_targets_inner(Some((state, ability)), target_slots, targets, constraints)
+}
+
+/// Shared body for the two `validate_selected_targets*` entry points —
+/// count-window validation lives here exactly once. With an ability context
+/// the prefix check is the spec-aware CR 608.2b re-validation against current
+/// game state; without one it checks against the stored slot snapshots.
+fn validate_selected_targets_inner(
+    ability_ctx: Option<(&GameState, &ResolvedAbility)>,
     target_slots: &[TargetSelectionSlot],
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
@@ -955,7 +968,12 @@ pub fn validate_selected_targets_for_ability(
         )));
     }
 
-    validate_target_prefix_for_ability(state, ability, target_slots, targets, constraints)
+    match ability_ctx {
+        Some((state, ability)) => {
+            validate_target_prefix_for_ability(state, ability, target_slots, targets, constraints)
+        }
+        None => validate_target_prefix(target_slots, targets, constraints),
+    }
 }
 
 fn validate_target_prefix(
@@ -1106,6 +1124,14 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 legal.into_iter().next()
             })
             .collect()
+    } else if let Some(src_leaf) = prevent_damage_source_slot_filter(&validated.effect).cloned() {
+        // CR 608.2b + CR 609.7a: A source-scoped `PreventDamage` carries its
+        // chosen source spell in `targets[0]`. `extract_target_filter_from_effect`
+        // returns `None` for its `Any` recipient, so the generic `None` arm below
+        // would fizzle-filter the spell to battlefield presence and drop it
+        // (the spell lives on the STACK). Re-validate against the source leaf
+        // (`InZone Stack`-aware) instead, preserving the spell target.
+        targeting::validate_targets_for_ability(state, &validated.targets, &src_leaf, &validated)
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
@@ -1169,6 +1195,41 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     validated
 }
 
+/// CR 609.7 + CR 601.2c: For a source-scoped `PreventDamage`
+/// ("prevent all damage target instant or sorcery spell would deal this turn"),
+/// surface the choosable source object as a target slot.
+///
+/// The effect's `damage_source_filter` is an `And` pairing a
+/// `ParentTargetSlot { index }` sentinel (which captures the chosen object at
+/// resolution, CR 609.7a) with the choosable `Typed`/stack-spell leaf. The
+/// sentinel cannot be enumerated by `find_legal_targets`, so we return the
+/// SIBLING leaf — the actual "instant or sorcery spell" filter that
+/// `targeting.rs::filter_targets_stack_spells` can enumerate on the stack.
+///
+/// Returns `None` for recipient-scoped or `ChosenDamageSource`/`IsChosenColor`
+/// ("by …" Arachnogenesis) prevents, so those are NOT diverted into a source
+/// target slot.
+fn prevent_damage_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
+    let Effect::PreventDamage {
+        damage_source_filter: Some(TargetFilter::And { filters }),
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    // Only an `And` that carries the `ParentTargetSlot` sentinel is a
+    // source-scoped capture; return the sibling choosable leaf.
+    if !filters
+        .iter()
+        .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
+    {
+        return None;
+    }
+    filters
+        .iter()
+        .find(|f| !matches!(f, TargetFilter::ParentTargetSlot { .. }))
+}
+
 fn collect_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1183,6 +1244,30 @@ fn collect_target_slots(
         if ability.context.additional_cost_paid {
             collect_target_slots(state, sub_ability, acc)?;
             return Ok(());
+        }
+    }
+
+    // CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` ("prevent all damage
+    // target instant or sorcery spell would deal this turn") surfaces the
+    // choosable source spell as a target slot. Declared FIRST (CR 601.2c
+    // declaration order). The generic path below cannot reach it —
+    // `target_filter()` returns the `Any` recipient and short-circuits to `None`
+    // — so we surface it here, mirroring the `CreateDamageReplacement` arm. We
+    // do NOT `return`: the generic recipient logic still runs, but for the
+    // source-scoped form `target == Any` so it adds nothing.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Some(src_leaf) = prevent_damage_source_slot_filter(&ability.effect) {
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, src_leaf, &acc.slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            acc.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
         }
     }
 
@@ -1308,7 +1393,7 @@ fn collect_target_slots(
         // filter so the player is chosen first (target declaration order matches
         // Oracle text order).
         if ability.target_choice_timing == TargetChoiceTiming::Stack
-            && effect_references_target_player(&ability.effect)
+            && ability_needs_companion_target_player_slot(ability)
         {
             let player_targets = targeting::find_legal_targets(
                 state,
@@ -1649,10 +1734,14 @@ fn effect_references_target_player(effect: &Effect) -> bool {
     match effect {
         Effect::PutCounterAll { target, .. }
         | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::DamageAll { target, .. }
-        | Effect::TapAll { target, .. }
-        | Effect::UntapAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -1661,6 +1750,18 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         }
         _ => false,
     }
+}
+
+fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool {
+    // Triggered abilities carry source_incarnation. Hellkite-style
+    // GainControlAll uses "that player" from the triggering event, not a
+    // declared target player, so surfacing a stack target here makes it fizzle.
+    if matches!(ability.effect, Effect::GainControlAll { .. })
+        && ability.source_incarnation.is_some()
+    {
+        return false;
+    }
+    effect_references_target_player(&ability.effect)
 }
 
 /// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
@@ -1736,7 +1837,11 @@ pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilte
 }
 
 fn attach_filter_needs_target_slot(filter: &TargetFilter) -> bool {
-    !filter.is_context_ref() && !matches!(filter, TargetFilter::LastCreated)
+    !filter.is_context_ref()
+        && !matches!(
+            filter,
+            TargetFilter::LastCreated | TargetFilter::LastRevealed
+        )
 }
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
@@ -1856,8 +1961,11 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
     match effect {
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
-        | Effect::TapAll { target, .. }
-        | Effect::UntapAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -1925,14 +2033,16 @@ fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::AddCounter { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. } => {
             quantity_expr_references_target_creature(amount)
         }
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
-        | Effect::TapAll { target, .. }
-        | Effect::UntapAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -2075,6 +2185,21 @@ fn collect_target_slot_specs(
         }
     }
 
+    // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot from
+    // `collect_target_slots` one-for-one so per-slot specs line up with the
+    // surfaced TargetSelectionSlots (the choosable source spell, declared first).
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Some(src_leaf) = prevent_damage_source_slot_filter(&ability.effect) {
+            let id = TargetInstanceId(*next_instance);
+            *next_instance += 1;
+            specs.push(TargetSlotSpec {
+                filter: src_leaf.clone(),
+                optional: ability.optional_targeting,
+                instance: id,
+            });
+        }
+    }
+
     // CR 701.12a: Mirror the ExchangeControl branch in `collect_target_slots`
     // so per-slot specs match the surfaced TargetSelectionSlots one-for-one
     // (SelfRef slots are auto-resolved and not surfaced).
@@ -2164,7 +2289,7 @@ fn collect_target_slot_specs(
         // `collect_target_slots` must have a matching spec here so subsequent
         // slot recomputation treats it correctly.
         if ability.target_choice_timing == TargetChoiceTiming::Stack
-            && effect_references_target_player(&ability.effect)
+            && ability_needs_companion_target_player_slot(ability)
         {
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
@@ -2340,6 +2465,49 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
         TargetFilter::Not { filter } => relative_controller_kind(filter),
         _ => None,
     }
+}
+
+/// CR 702.5a + CR 303.4: When `spec` is the host slot of an `Effect::Attach`
+/// whose `attachment` resolves to an object, return the host filter that object's
+/// Enchant keyword imposes, plus the attachment id/controller. `None` = no
+/// restriction (not an Attach, attachment unresolved, or aura_enchant_filter
+/// returned None: not an Aura / Aura with no Enchant keyword). No restriction ⇒
+/// ANY battlefield permanent is legal (CR 702.5a; mirrors the no-Enchant
+/// else-branch in sba::is_valid_attachment_target).
+fn attach_host_enchant_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &TargetSlotSpec,
+    selected_slots: &[Option<TargetRef>],
+) -> Option<(TargetFilter, ObjectId, PlayerId)> {
+    // Walk the effect + sub_ability chain (mirrors collect_target_slot_specs) to
+    // find the Attach whose host `target` filter is the one we're enumerating.
+    let mut current = Some(ability);
+    let mut attachment_filter: Option<&TargetFilter> = None;
+    while let Some(node) = current {
+        if let Effect::Attach { attachment, target } = &node.effect {
+            if target == &spec.filter {
+                attachment_filter = Some(attachment);
+                break;
+            }
+        }
+        current = node.sub_ability.as_deref();
+    }
+    let attachment_filter = attachment_filter?;
+
+    // Resolve the attachment (the moved Aura) to a concrete object id.
+    let attachment_id = match attachment_filter {
+        TargetFilter::SelfRef => ability.source_id,
+        TargetFilter::ParentTarget => selected_slots.iter().find_map(|sel| match sel {
+            Some(TargetRef::Object(id)) => Some(*id),
+            _ => None,
+        })?,
+        _ => return None,
+    };
+
+    let filter = crate::game::effects::change_targets::aura_enchant_filter(state, attachment_id)?;
+    let controller = state.objects.get(&attachment_id)?.controller;
+    Some((filter, attachment_id, controller))
 }
 
 fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
@@ -2582,6 +2750,24 @@ fn relative_filter_controller(
         .unwrap_or(ability.controller)
 }
 
+/// CR 115.4 + CR 601.2c: "other target" / "another target" filters require
+/// a different choice from the targets already announced for this spell/ability.
+fn target_filter_has_another_target_marker(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Another)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_another_target_marker)
+        }
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_has_another_target_marker(filter)
+        }
+        _ => false,
+    }
+}
+
 /// Compute the legal targets for one slot, then drop any object already chosen
 /// in a prior slot of the SAME instance of "target".
 ///
@@ -2654,6 +2840,29 @@ fn legal_targets_for_selected_slot(
         }
     };
 
+    // CR 702.5a + CR 303.4j: An Aura being attached may only go to a host it can
+    // legally enchant. Restrict offered hosts to those matching the moved aura's own
+    // Enchant filter; no Enchant keyword => no restriction (any host).
+    if let Some((enchant_filter, aura_id, aura_controller)) =
+        attach_host_enchant_filter(state, ability, spec, selected_slots)
+    {
+        let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+            aura_id,
+            aura_controller,
+        );
+        legal.retain(|t| match t {
+            TargetRef::Object(id) => {
+                crate::game::filter::matches_target_filter(state, *id, &enchant_filter, &ctx)
+            }
+            TargetRef::Player(pid) => crate::game::filter::player_matches_target_filter_in_state(
+                state,
+                &enchant_filter,
+                *pid,
+                Some(aura_controller),
+            ),
+        });
+    }
+
     // CR 601.2c + CR 115.3: within one instance of "target", the same object
     // can't be chosen twice. Remove objects already chosen in prior slots of
     // THIS instance. Prior slots of a DIFFERENT instance (separate "target") do
@@ -2669,6 +2878,15 @@ fn legal_targets_for_selected_slot(
         })
         .collect();
     legal.retain(|t| !matches!(t, TargetRef::Object(id) if already_in_instance.contains(id)));
+
+    // CR 115.4: "other target" / "another target" is a separate instance of
+    // "target" but must differ from every target already chosen for this
+    // spell/ability.
+    if target_filter_has_another_target_marker(&spec.filter) {
+        for prior in selected_slots.iter().flatten() {
+            legal.retain(|t| t != prior);
+        }
+    }
     legal
 }
 
@@ -3437,6 +3655,24 @@ fn assign_targets_recursive(
         return Ok(());
     }
 
+    // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot pushed
+    // by `collect_target_slots`. The chosen source spell is consumed into THIS
+    // node's `targets` (the PreventDamage HEAD node) BEFORE descending into the
+    // sub-chain, so the modal sub (mode 3's PutCounter) consumes its own target
+    // next. Slot order matches `collect_target_slots`: source slot first.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && prevent_damage_source_slot_filter(&ability.effect).is_some()
+    {
+        if let Some(target) = targets.get(*next_target) {
+            ability.targets.push(target.clone());
+            *next_target += 1;
+        } else if !ability.optional_targeting {
+            return Err(EngineError::InvalidAction(
+                "Missing required target".to_string(),
+            ));
+        }
+    }
+
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
     // `collect_target_slots` for effects whose filters reference
     // `ControllerRef::TargetPlayer` (DamageAll, PutCounterAll, etc.). The
@@ -3444,7 +3680,7 @@ fn assign_targets_recursive(
     // filter's `TargetPlayer` resolution at runtime (filter.rs) finds it.
     // Slot order matches `collect_target_slots`: player slot before primary.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && effect_references_target_player(&ability.effect)
+        && ability_needs_companion_target_player_slot(ability)
     {
         if let Some(target) = targets.get(*next_target) {
             ability.targets.push(target.clone());
@@ -3637,11 +3873,35 @@ fn assign_selected_slots_recursive(
         return Ok(());
     }
 
+    // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot — the
+    // modal cast pipeline drives the slots path, so the chosen source spell must
+    // be consumed into THIS node's `targets` here too, BEFORE descending into the
+    // (modal) sub-chain. Slot order matches `collect_target_slots`: source first.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && prevent_damage_source_slot_filter(&ability.effect).is_some()
+    {
+        let Some(selected_slot) = selected_slots.get(*next_slot) else {
+            return Err(EngineError::InvalidAction(
+                "Missing target selection".to_string(),
+            ));
+        };
+        match selected_slot {
+            Some(target) => ability.targets.push(target.clone()),
+            None if ability.optional_targeting => {}
+            None => {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            }
+        }
+        *next_slot += 1;
+    }
+
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
     // `collect_target_slots` for `ControllerRef::TargetPlayer` filters
     // (DamageAll, PutCounterAll, etc.). See `assign_targets_recursive`.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && effect_references_target_player(&ability.effect)
+        && ability_needs_companion_target_player_slot(ability)
     {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
             return Err(EngineError::InvalidAction(
@@ -3932,12 +4192,22 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         }
     }
 
+    // CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` head node consumes
+    // the chosen source spell into its own `targets[0]` — `collect_target_slots`
+    // pushes a source slot for it, and `assign_targets_recursive` consumes one
+    // target into this node BEFORE descending into the (modal) sub-chain.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && prevent_damage_source_slot_filter(&ability.effect).is_some()
+    {
+        return true;
+    }
+
     // CR 109.4 + CR 115.1: A node also acts as a target sink when its filter
     // references `ControllerRef::TargetPlayer` (DamageAll, PutCounterAll,
     // etc.) — `collect_target_slots` pushes a companion player slot for it,
     // and `assign_targets_recursive` consumes one target into this node.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && effect_references_target_player(&ability.effect)
+        && ability_needs_companion_target_player_slot(ability)
     {
         return true;
     }
@@ -4013,7 +4283,7 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     // CR 109.4: Companion player slot for `ControllerRef::TargetPlayer` filters
     // contributes one required slot (or zero when targeting is optional).
     let player_companion = if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && effect_references_target_player(&ability.effect)
+        && ability_needs_companion_target_player_slot(ability)
         && !ability.optional_targeting
     {
         1
@@ -4198,13 +4468,13 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
-        CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification, CountScope,
-        CounterTransferMode, DamageKindFilter, Duration, Effect, FilterProp, GameRestriction,
-        LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
-        ObjectScope, ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
-        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
-        UnlessPayModifier,
+        CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
+        ControllerRef, CountScope, CounterTransferMode, DamageKindFilter, Duration, Effect,
+        FilterProp, GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint,
+        MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticDefinition,
+        TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -4245,7 +4515,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4301,7 +4571,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTargetController,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -4489,7 +4759,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -4643,8 +4913,10 @@ mod tests {
         };
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .unless_pay(modifier.clone());
@@ -4677,7 +4949,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -4961,7 +5233,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5165,7 +5437,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: true,
+                    enter_tapped: crate::types::zones::EtbTapState::Tapped,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -5225,7 +5497,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5940,7 +6212,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -6108,7 +6380,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -6423,10 +6695,12 @@ mod tests {
             .tapped = true;
         let mut ability = per_opponent_gain_control_ability().sub_ability(
             ResolvedAbility::new(
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
                 vec![],
                 ObjectId(900),
@@ -6572,7 +6846,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             vec![],
@@ -6587,7 +6861,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -6698,6 +6972,39 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_search_target_player_library() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Player(PlayerId(0))),
+            "target opponent library search must not allow targeting yourself"
+        );
     }
 
     /// Issue #933: mass filters can declare a target only through a dynamic
@@ -6955,7 +7262,7 @@ mod tests {
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -7019,8 +7326,10 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
 
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: creature_filter.clone(),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(900),
@@ -7359,8 +7668,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7401,8 +7712,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7435,8 +7748,10 @@ mod tests {
             .push(crate::types::card_type::CoreType::Creature);
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7478,8 +7793,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7524,8 +7841,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::land()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![],
             ObjectId(10),
@@ -7564,8 +7883,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::land()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![],
             ObjectId(10),
@@ -8064,8 +8385,10 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 cant_regenerate: false,
             }),
-            single_target_mode(Effect::Tap {
+            single_target_mode(Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }),
         ];
         let descriptions = vec![
@@ -8103,8 +8426,10 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::creature()),
             cant_regenerate: false,
         });
-        mode.sub_ability = Some(Box::new(single_target_mode(Effect::Tap {
+        mode.sub_ability = Some(Box::new(single_target_mode(Effect::SetTapState {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         })));
         let abilities = vec![mode];
         let descriptions = vec!["Destroy then tap.".to_string()];
@@ -8138,8 +8463,10 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         spawn_creatures(&mut state, PlayerId(1), 1);
 
-        let mode = single_target_mode(Effect::Tap {
+        let mode = single_target_mode(Effect::SetTapState {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         });
         let abilities = vec![mode];
         let descriptions = vec!["Tap a creature.".to_string()];
@@ -8172,8 +8499,10 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         spawn_creatures(&mut state, PlayerId(0), 1);
 
-        let abilities = vec![single_target_mode(Effect::Tap {
+        let abilities = vec![single_target_mode(Effect::SetTapState {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         })];
 
         let (slots, labels) = build_target_slots_labelled(
@@ -8208,8 +8537,10 @@ mod tests {
         max: usize,
     ) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             source,
@@ -8363,6 +8694,106 @@ mod tests {
         );
     }
 
+    /// CR 115.4: Arc Trail class — "N damage to any target and M damage to any
+    /// other target" uses two instances of "target", but the second must differ
+    /// from the first.
+    #[test]
+    fn any_other_target_excludes_prior_cast_choices_across_instances() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let bear = create_creature(&mut state, PlayerId(1), CardId(1), "Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::Another]),
+                ),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let specs = target_slot_specs(&state, &ability);
+        let target_slots = build_target_slots(&state, &ability).expect("slots build");
+        assert_eq!(specs.len(), 2);
+
+        let prior = vec![Some(TargetRef::Object(bear))];
+        let slot1 = legal_targets_for_spec_slot(&state, &ability, &specs, &target_slots, 1, &prior);
+        assert!(
+            !slot1.contains(&TargetRef::Object(bear)),
+            "any other target must exclude the first chosen target"
+        );
+
+        let dup = vec![Some(TargetRef::Object(bear)), Some(TargetRef::Object(bear))];
+        assert!(
+            validate_selected_slots_with_specs(&state, &ability, &specs, &target_slots, &dup, &[],)
+                .is_err(),
+            "reusing the same object for both Arc Trail targets must be rejected"
+        );
+    }
+
+    /// CR 115.4 + CR 601.2c: typed "another target" filters use the same
+    /// prior-target exclusion as "any other target"; the difference is only the
+    /// candidate population.
+    #[test]
+    fn typed_another_target_excludes_prior_cast_choices_across_instances() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let bear = create_creature(&mut state, PlayerId(1), CardId(1), "Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Another]),
+                ),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let specs = target_slot_specs(&state, &ability);
+        let target_slots = build_target_slots(&state, &ability).expect("slots build");
+        assert_eq!(specs.len(), 2);
+
+        let prior = vec![Some(TargetRef::Object(bear))];
+        let slot1 = legal_targets_for_spec_slot(&state, &ability, &specs, &target_slots, 1, &prior);
+        assert!(
+            !slot1.contains(&TargetRef::Object(bear)),
+            "typed another-target slot must not offer the first chosen target"
+        );
+
+        let dup = vec![Some(TargetRef::Object(bear)), Some(TargetRef::Object(bear))];
+        assert!(
+            validate_selected_slots_with_specs(&state, &ability, &specs, &target_slots, &dup, &[],)
+                .is_err(),
+            "reusing the same creature for target creature and another target creature must be rejected"
+        );
+    }
+
     /// CR 115.1 + CR 601.2c: the `DifferentObjectControllers` constraint still
     /// rejects same-controller object pairs after the per-slot distinctness
     /// filter is in place (no regression — distinctness and the controller
@@ -8391,6 +8822,146 @@ mod tests {
             )
             .is_err(),
             "DifferentObjectControllers must still reject two P0-controlled objects"
+        );
+    }
+
+    /// CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` ("prevent all
+    /// damage target instant or sorcery spell would deal this turn") surfaces
+    /// exactly one target slot whose legal targets are the spell(s) on the
+    /// stack. Drives the real targeting pipeline — deleting the
+    /// `prevent_damage_source_slot_filter` arm in `collect_target_slots` makes
+    /// this fail.
+    #[test]
+    fn build_target_slots_surfaces_source_scoped_spell_slot() {
+        use crate::types::ability::{PreventionAmount, PreventionScope};
+        use crate::types::game_state::CastingVariant;
+        let mut state = GameState::new_two_player(42);
+        let dromoka = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dromoka's Command".into(),
+            Zone::Stack,
+        );
+        // An instant spell on the stack — the choosable source.
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".into(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Instant];
+
+        let source_filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 0 },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Instant)),
+                    ],
+                },
+            ],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(source_filter),
+            },
+            vec![],
+            dromoka,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("source slot must build");
+        assert_eq!(slots.len(), 1, "exactly one source-scope slot");
+        assert!(
+            slots[0].legal_targets.contains(&TargetRef::Object(spell)),
+            "the stack spell must be a legal source target, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// CR 115.1 + CR 613.1b: non-trigger mass gain-control effects whose
+    /// population filter references `target player` still need a stack target
+    /// slot for that player. `GainControlAll::target_filter()` intentionally
+    /// returns None because the field is not an object target slot, so this
+    /// regression drives the companion-player-slot fallback.
+    #[test]
+    fn gain_control_all_target_player_filter_surfaces_player_slot() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("player slot should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "GainControlAll needs exactly one player target slot"
+        );
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Player(PlayerId(1))),
+            "target player slot must offer P1, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// CR 700.2d + CR 608.2c: Chaining two modes via `build_chained_resolved`
+    /// appends the later mode as the earlier mode's `sub_ability` with
+    /// `sub_link == SequentialSibling` — chained modes are independent
+    /// instructions, not continuations.
+    #[test]
+    fn build_chained_resolved_tags_appended_mode_sequential_sibling() {
+        let mode_a = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mode_b = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let abilities = vec![mode_a, mode_b];
+        let chained =
+            build_chained_resolved(&abilities, &[0, 1], ObjectId(1), PlayerId(0)).unwrap();
+        let sub = chained
+            .sub_ability
+            .as_deref()
+            .expect("second mode appended as sub");
+        assert_eq!(
+            sub.sub_link,
+            SubAbilityLink::SequentialSibling,
+            "appended mode root must be tagged SequentialSibling"
         );
     }
 }

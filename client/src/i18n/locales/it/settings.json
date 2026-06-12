@@ -32,6 +32,12 @@
       "customUrl": "URL personalizzato",
       "none": "Nessuno"
     },
+    "commandZone": "Zona di comando",
+    "commandZoneOptions": {
+      "compact": "Compatto",
+      "inline": "In linea",
+      "auto": "Auto"
+    },
     "cardSizeOptions": {
       "small": "Piccolo",
       "medium": "Medio",

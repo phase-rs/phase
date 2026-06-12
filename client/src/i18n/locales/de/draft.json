@@ -44,7 +44,8 @@
     "endDraftConfirm": "Diesen Draft fuer alle beenden? Das kann nicht rueckgaengig gemacht werden."
   },
   "manaCurve": {
-    "title": "Manakurve"
+    "title": "Manakurve",
+    "bucketLabel": "Manawert {{bucket}}"
   },
   "pickTimer": {
     "label": "Pick-Timer",

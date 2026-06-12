@@ -88,7 +88,7 @@ fn synthesize_unearth_builds_graveyard_activated_sorcery_chain() {
 
     // CR 702.84a: activate only as a sorcery, only from the graveyard.
     assert_eq!(def.activation_zone, Some(Zone::Graveyard));
-    assert!(def.sorcery_speed, "activate only as a sorcery");
+    assert!(def.is_sorcery_speed(), "activate only as a sorcery");
 
     // CR 602.1a: the activation cost is the keyword mana cost (no exile cost —
     // Unearth returns the card as its effect, not as a cost).
@@ -443,7 +443,7 @@ fn real_unearth_card_synthesizes_reanimation_ability() {
                 )
         })
         .expect("a graveyard-activated reanimation ability must be synthesized");
-    assert!(def.sorcery_speed, "activate only as a sorcery");
+    assert!(def.is_sorcery_speed(), "activate only as a sorcery");
 
     assert!(
         !crate::game::coverage::card_face_has_unimplemented_parts(&face),

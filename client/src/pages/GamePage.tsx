@@ -53,10 +53,12 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
+import { FreeCastWindowModal } from "../components/modal/FreeCastWindowModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
 import { CastingVariantModal } from "../components/modal/CastingVariantModal.tsx";
 import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
+import { SpliceOfferModal } from "../components/modal/SpliceOfferModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
@@ -127,13 +129,21 @@ import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
-import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
+import {
+  getCastableZoneViewerTarget,
+  getWaitingForObjectChoiceIds,
+  type ZoneViewerTarget,
+} from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
   "--card-h": string;
 };
+
+function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
+  return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
+}
 
 /**
  * i18n keys for user-facing messages keyed by
@@ -707,6 +717,7 @@ function GamePageContent({
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const players = useGameStore((s) => s.gameState?.players);
   const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
@@ -744,9 +755,11 @@ function GamePageContent({
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
-    zone: "graveyard" | "exile";
+    zone: "graveyard" | "exile" | "library";
     playerId: number;
+    autoOpenKey?: string;
   } | null>(null);
+  const dismissedCastableZoneViewerKeyRef = useRef<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
     null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
   >(null);
@@ -873,11 +886,18 @@ function GamePageContent({
     }
   }, []);
 
-  // Auto-open graveyard/exile viewer when the engine is waiting for an object choice in that zone.
+  // Auto-open graveyard/exile viewer when the engine is waiting for an object
+  // choice in that zone, or when Priority surfaces cast/play actions on cards
+  // in a single graveyard/exile pile (Retrace, Flashback, etc.).
   useEffect(() => {
-    if (!objects) return;
+    if (!objects) {
+      dismissedCastableZoneViewerKeyRef.current = null;
+      return;
+    }
     const wf = engineWaitingFor;
-    if (!canActForWaitingState) return;
+    if (!canActForWaitingState) {
+      return;
+    }
 
     // Collect distinct (zone, owner) groupings so we don't trap the user in one
     // graveyard when the effect can target either player's graveyard (e.g. Soul-Guide Lantern).
@@ -894,9 +914,37 @@ function GamePageContent({
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
+      dismissedCastableZoneViewerKeyRef.current = null;
       setViewingZone(firstHit);
+      return;
     }
-  }, [canActForWaitingState, engineWaitingFor, objects]);
+
+    const castableTarget = getCastableZoneViewerTarget(
+      wf,
+      objects,
+      legalActionsByObject,
+    );
+    if (castableTarget) {
+      const autoOpenKey = castableZoneViewerAutoOpenKey(castableTarget);
+      if (dismissedCastableZoneViewerKeyRef.current !== autoOpenKey) {
+        setViewingZone({
+          zone: castableTarget.zone,
+          playerId: castableTarget.playerId,
+          autoOpenKey,
+        });
+      }
+      return;
+    }
+
+    dismissedCastableZoneViewerKeyRef.current = null;
+  }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
+
+  const handleZoneViewerClose = useCallback(() => {
+    if (viewingZone?.autoOpenKey) {
+      dismissedCastableZoneViewerKeyRef.current = viewingZone.autoOpenKey;
+    }
+    setViewingZone(null);
+  }, [viewingZone]);
 
   const handleDeclareCompanion = useCallback(
     (cardIndex: number | null) => {
@@ -1097,7 +1145,11 @@ function GamePageContent({
               size={pileSize}
               onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
             />
-            <LibraryPile playerId={activeOpponentId} size={pileSize} />
+            <LibraryPile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onView={() => setViewingZone({ zone: "library", playerId: activeOpponentId })}
+            />
             <GraveyardPile
               playerId={activeOpponentId}
               size={pileSize}
@@ -1135,7 +1187,11 @@ function GamePageContent({
                 size={pileSize}
                 onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
               />
-              <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
+              <LibraryPile
+                playerId={perspectivePlayerId}
+                size={pileSize}
+                onView={() => setViewingZone({ zone: "library", playerId: perspectivePlayerId })}
+              />
             </div>
           </div>
           <div
@@ -1314,14 +1370,6 @@ function GamePageContent({
       <DebugPanel />
       <ResolutionProgressOverlay />
 
-      {viewingZone && (
-        <ZoneViewer
-          zone={viewingZone.zone}
-          playerId={viewingZone.playerId}
-          onClose={() => setViewingZone(null)}
-        />
-      )}
-
       {preferencesOpen && (
         <PreferencesModal
           onClose={() => setPreferencesOpen(null)}
@@ -1393,8 +1441,14 @@ function GamePageContent({
         <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
+        <SpellbookDraftModal />
+        <FreeCastWindowModal />
         <ModalFaceModal />
         <MiracleRevealModal />
+        {waitingFor?.type === "SpliceOffer" &&
+          canActForWaitingState && (
+            <SpliceOfferModal />
+          )}
 
         {/* Scry/Dig/Surveil card choice modal */}
         <CardChoiceModal />
@@ -1471,6 +1525,16 @@ function GamePageContent({
             <ActivationCostOneOfChoiceModal />
           )}
       </DialogHost>
+
+      {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
+          paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
+      {viewingZone && (
+        <ZoneViewer
+          zone={viewingZone.zone}
+          playerId={viewingZone.playerId}
+          onClose={handleZoneViewerClose}
+        />
+      )}
 
       {waitingFor?.type === "CompanionReveal" &&
         waitingFor.data.player === playerId && (
@@ -2470,6 +2534,38 @@ function AbilityChoiceModal() {
         setPending(null);
       }}
       onClose={() => setPending(null)}
+    />
+  );
+}
+
+function SpellbookDraftModal() {
+  const { t } = useTranslation("game");
+  const canActForWaitingState = useCanActForWaitingState();
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const source = useGameStore((s) =>
+    waitingFor?.type === "SpellbookDraft"
+      ? s.gameState?.objects[waitingFor.data.source_id]
+      : undefined,
+  );
+
+  if (waitingFor?.type !== "SpellbookDraft") return null;
+  if (!canActForWaitingState) return null;
+
+  return (
+    <ChoiceModal
+      title={t("cardChoice.dig.title")}
+      subtitle={source?.name}
+      previewCardName={source?.name}
+      previewCardTypes={source?.card_types}
+      previewObjectId={waitingFor.data.source_id}
+      options={waitingFor.data.options.map((name) => ({
+        id: name,
+        label: name,
+      }))}
+      onChoose={(card) =>
+        dispatch({ type: "SubmitSpellbookDraft", data: { card } })
+      }
     />
   );
 }

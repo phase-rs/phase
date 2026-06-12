@@ -1,4 +1,5 @@
 import type {
+  GameAction,
   GameObject,
   GameState,
   ObjectId,
@@ -10,6 +11,7 @@ import {
   partitionByType,
   type GroupedPermanent,
 } from "./battlefieldProps";
+import { playOrCastActionsForObject } from "./cardActionChoice.ts";
 
 export interface PlayerBattlefieldView {
   creatures: GroupedPermanent[];
@@ -46,14 +48,53 @@ export function isOneOnOne(gameState: GameState | null): boolean {
 
 export function getPlayerZoneIds(
   gameState: GameState | null,
-  zone: "graveyard" | "exile",
+  zone: "graveyard" | "exile" | "library",
   playerId: PlayerId,
 ): ObjectId[] {
   if (!gameState) return [];
   if (zone === "graveyard") {
     return gameState.players[playerId]?.graveyard ?? [];
   }
+  if (zone === "library") {
+    // library[0] = top of library (engine convention from zones.rs). Returns
+    // the full ordered library; the library viewer filters to the cards the
+    // engine has revealed to the viewer (isLibraryCardRevealedToViewer) so
+    // unrevealed cards are never shown.
+    return gameState.players[playerId]?.library ?? [];
+  }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
+}
+
+/**
+ * Whether the engine has revealed a given library card's identity to `viewerId`.
+ *
+ * Mirrors the engine's library visibility (`crates/engine/src/game/visibility.rs`)
+ * using the explicit reveal sets — NEVER the card name. In single-player the
+ * client renders the raw, unredacted state (the `showAiHand` debug toggle depends
+ * on it), so `name !== "Hidden Card"` is always true and cannot be used to infer
+ * visibility; doing so leaks every opponent library card. This is the same
+ * pattern `OpponentHand` uses for opponent hand cards.
+ *
+ * Deliberately excludes `public_revealed_cards`: the engine does not un-redact
+ * library cards by that persistent memory set (a card revealed once and put back
+ * must not leak its new position).
+ */
+export function isLibraryCardRevealedToViewer(
+  gameState: GameState | null,
+  objectId: ObjectId,
+  viewerId: PlayerId,
+): boolean {
+  if (!gameState) return false;
+  // CR 701.20b: publicly revealed top cards (RevealTop, "play with the top card
+  // revealed") are visible to every player.
+  if (gameState.revealed_cards?.includes(objectId)) return true;
+  // CR 701.20e: a private "look at the top card" (Mishra's Bauble at an
+  // opponent's library; your own scry look) surfaces the peeked ids only to the
+  // looking player.
+  return (
+    gameState.private_look_player === viewerId &&
+    (gameState.private_look_ids?.includes(objectId) ?? false)
+  );
 }
 
 export function getWaitingForObjectChoiceIds(
@@ -94,6 +135,52 @@ export function getWaitingForObjectChoiceIds(
     default:
       return [];
   }
+}
+
+export type ZoneViewerTarget = {
+  zone: "graveyard" | "exile";
+  playerId: PlayerId;
+  objectIds: ObjectId[];
+};
+
+/**
+ * When the player has Priority and the engine surfaces play/cast actions on
+ * graveyard or exile cards (Retrace, Flashback, Adventure, etc.), return the
+ * sole zone pile to auto-open in `ZoneViewer`. Mirrors the object-choice
+ * auto-open grouping: only auto-open when every castable card lives in one
+ * zone+owner pile so we don't trap the player in the wrong graveyard.
+ */
+export function getCastableZoneViewerTarget(
+  waitingFor: WaitingFor | null | undefined,
+  objects: Record<ObjectId, GameObject> | undefined,
+  legalActionsByObject: Record<string, GameAction[]> | undefined,
+): ZoneViewerTarget | null {
+  if (waitingFor?.type !== "Priority" || !objects || !legalActionsByObject) {
+    return null;
+  }
+
+  const groups = new Set<string>();
+  let firstHit: ZoneViewerTarget | null = null;
+  const objectIds: ObjectId[] = [];
+
+  for (const key of Object.keys(legalActionsByObject)) {
+    const objectId = Number(key) as ObjectId;
+    if (playOrCastActionsForObject(legalActionsByObject, objectId).length === 0) {
+      continue;
+    }
+    const obj = objects[objectId];
+    if (!obj) continue;
+    if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
+
+    const zone: ZoneViewerTarget["zone"] =
+      obj.zone === "Graveyard" ? "graveyard" : "exile";
+    groups.add(`${zone}:${obj.owner}`);
+    objectIds.push(objectId);
+    if (!firstHit) firstHit = { zone, playerId: obj.owner, objectIds };
+  }
+
+  objectIds.sort((a, b) => a - b);
+  return groups.size === 1 ? firstHit : null;
 }
 
 export function buildPlayerBattlefieldView(

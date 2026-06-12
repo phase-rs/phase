@@ -5,18 +5,28 @@
 //! typed `QuantityRef` / `QuantityExpr` values. This is distinct from `oracle_util`,
 //! which provides raw text extraction primitives (number parsing, mana symbol
 //! counting, phrase matching).
+//!
+//! **Frozen for new grammar.** New quantity-phrase recognition belongs in
+//! `oracle_nom/quantity.rs` (the combinator grammar this module delegates
+//! to), not here — this module's remaining surface is the legacy semantic
+//! entry points (`parse_cda_quantity`, `parse_quantity_ref`,
+//! `parse_event_context_quantity`, `parse_for_each_clause`) and their
+//! context wiring. Adding a new phrase table or `tag()` alternative here
+//! re-creates the parallel-grammar split that the oracle-parser skill's
+//! "Where New Grammar Goes" section exists to prevent.
 
 use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, eof, opt, value};
+use nom::bytes::complete::{tag, take_till1, take_until};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
+use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::inject_controller_you;
 use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
@@ -90,6 +100,10 @@ pub(crate) fn parse_quantity_ref_with_context(
     }
 
     // Complex patterns requiring type phrase parsing or counter normalization.
+
+    if let Some(qty) = parse_sacrificed_permanents_this_turn_quantity(trimmed) {
+        return Some(qty);
+    }
 
     // CR 608.2c + CR 122.1: "the number of [kind] counter[s] removed this way"
     // is a dynamic amount from the preceding RemoveCounter effect, not an
@@ -315,6 +329,25 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
+        // CR 104.3: "players who have lost the game" (Rampant Frogantua quantity form).
+        if let Ok((remainder, ())) = value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>("players who have "),
+                    tag("player who has "),
+                )),
+                tag("lost the game"),
+            ),
+        )
+        .parse(rest)
+        {
+            if remainder.trim().is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::HasLostTheGame,
+                });
+            }
+        }
         // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
         // [this turn]". The trailing " this turn" suffix is optional because
         // upstream callers may strip durations before this parser sees the
@@ -400,6 +433,18 @@ pub(crate) fn parse_quantity_ref_with_context(
                 });
             }
         }
+        // CR 608.2c + CR 400.7: "the number of [filter] destroyed/sacrificed
+        // this way" — count from the tracked set populated by the preceding
+        // destroy/sacrifice in the sub_ability chain. Must run BEFORE
+        // `parse_type_phrase`, which would consume "creatures you controlled"
+        // and leave an unresolved "that were destroyed this way" tail.
+        // Class: Kaya's Wrath (issue #2943), Ceaseless Conflict, and any
+        // "equal to the number of … destroyed this way" lifegain phrasing.
+        if let Some(qty) =
+            parse_destroyed_or_sacrificed_this_way_quantity(&rest.to_ascii_lowercase())
+        {
+            return Some(qty);
+        }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
@@ -471,6 +516,7 @@ pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
         QuantityRef::ZoneCardCount {
             zone: ZoneRef::Hand,
             card_types,
+            filter: None,
             scope: CountScope::Controller,
         } if card_types.is_empty() => QuantityRef::HandSize {
             player: PlayerScope::Controller,
@@ -478,6 +524,7 @@ pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
         QuantityRef::ZoneCardCount {
             zone: ZoneRef::Graveyard,
             card_types,
+            filter: None,
             scope: CountScope::Controller,
         } if card_types.is_empty() => QuantityRef::GraveyardSize {
             player: PlayerScope::Controller,
@@ -691,6 +738,12 @@ pub(crate) fn parse_cda_quantity_with_context(
         return Some(QuantityExpr::Ref { qty });
     }
 
+    if let Ok((rest, expr)) = parse_owned_cards_in_zones_with_property_filter(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     if let Ok((rest, expr)) = parse_owned_cards_in_zones_quantity(text) {
         if rest.is_empty() {
             return Some(expr);
@@ -707,6 +760,7 @@ pub(crate) fn parse_cda_quantity_with_context(
                 zone: ZoneRef::Graveyard,
                 card_types: vec![],
                 scope: CountScope::Opponents,
+                filter: None,
             },
         });
     }
@@ -806,6 +860,132 @@ pub(crate) fn parse_cda_quantity_with_context(
     None
 }
 
+/// CR 701.21a: "the number of permanents you've sacrificed this turn" and typed
+/// variants ("the number of artifacts you've sacrificed this turn").
+fn parse_sacrificed_permanents_this_turn_quantity(text: &str) -> Option<QuantityRef> {
+    let trimmed = text.trim().trim_end_matches('.');
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the number of ")
+        .parse(trimmed)
+        .ok()?;
+    let (rest, filter) = parse_sacrificed_permanents_this_turn_filter(rest)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(QuantityRef::SacrificedThisTurn {
+        player: PlayerScope::Controller,
+        filter,
+    })
+}
+
+fn parse_sacrificed_permanents_this_turn_filter(input: &str) -> Option<(&str, TargetFilter)> {
+    let (suffix_rest, type_text) = take_until::<_, _, OracleError<'_>>(" you")
+        .parse(input)
+        .ok()?;
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" you"),
+        opt(tag("'ve")),
+        tag(" sacrificed this turn"),
+    )
+        .parse(suffix_rest)
+        .ok()?;
+    if type_text.trim() == "permanents" {
+        return Some((
+            rest,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                ..Default::default()
+            }),
+        ));
+    }
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return None;
+    }
+    Some((rest, filter))
+}
+
+// CR 604.3: "the total number of cards you own in exile and in your graveyard
+// that are Oozes or are named Slime Against Humanity" — type/name filters trail
+// the zone list rather than preceding "cards".
+fn parse_zone_card_that_are_filter_list(input: &str) -> OracleResult<'_, TargetFilter> {
+    fn parse_named_card_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+        let (rest, _) = tag("named ").parse(input)?;
+        let (rest, name) = alt((
+            terminated(take_until(" or are "), peek(tag(" or are "))),
+            terminated(take_until(" or "), peek(tag(" or "))),
+            take_till1(|c| c == '.' || c == ','),
+        ))
+        .parse(rest)?;
+        Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+                name: name.trim().to_string(),
+            }])),
+        ))
+    }
+
+    fn parse_type_card_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+        let (rest, filter) = nom_target::parse_type_filter_word(input)?;
+        Ok((rest, TargetFilter::Typed(TypedFilter::new(filter))))
+    }
+
+    let (mut rest, first) = alt((parse_named_card_filter, parse_type_card_filter)).parse(input)?;
+    let mut filters = vec![first];
+    loop {
+        let Ok((next_rest, _)) =
+            alt((tag::<_, _, OracleError<'_>>(" or are "), tag(" or "))).parse(rest)
+        else {
+            break;
+        };
+        let (after, next) =
+            alt((parse_named_card_filter, parse_type_card_filter)).parse(next_rest)?;
+        filters.push(next);
+        rest = after;
+    }
+    let filter = if filters.len() == 1 {
+        filters.remove(0)
+    } else {
+        TargetFilter::Or { filters }
+    };
+    Ok((rest, filter))
+}
+
+fn parse_owned_cards_in_zones_with_property_filter(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
+    let (rest, _) = alt((tag("cards"), tag("card"))).parse(rest)?;
+    let (rest, _) = tag(" you own in ").parse(rest)?;
+    let (rest, zones) = separated_list1(
+        alt((tag(" and in "), tag(", and in "), tag(", in "))),
+        preceded(opt(tag("your ")), nom_quantity::parse_zone_ref_singular),
+    )
+    .parse(rest)?;
+    let (rest, _) = tag(" that are ").parse(rest)?;
+    let (rest, filter) = parse_zone_card_that_are_filter_list(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    let (rest, _) = eof(rest)?;
+
+    let mut exprs: Vec<QuantityExpr> = zones
+        .into_iter()
+        .map(|zone| QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone,
+                card_types: Vec::new(),
+                filter: Some(filter.clone()),
+                scope: CountScope::Owner,
+            },
+        })
+        .collect();
+
+    let expr = if exprs.len() == 1 {
+        exprs.remove(0)
+    } else {
+        QuantityExpr::Sum { exprs }
+    };
+    Ok((rest, expr))
+}
+
 // CR 604.3: Characteristic-defining abilities can define power/toughness using
 // card-count quantities.
 // CR 404.2: Cards in graveyards and exile are scoped by owner, not controller.
@@ -830,6 +1010,7 @@ fn parse_owned_cards_in_zones_quantity(
                 zone,
                 card_types: card_types.clone(),
                 scope: CountScope::Owner,
+                filter: None,
             },
         })
         .collect();
@@ -1594,7 +1775,7 @@ fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFi
 ///
 /// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
 /// recognized suffix, then delegates the prefix to `parse_type_phrase`.
-fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+fn parse_destroyed_or_sacrificed_this_way_filter(lower: &str) -> Option<Option<TargetFilter>> {
     // Each suffix is tried in order; the first complete match wins.
     // Longer/more-specific suffixes must come before shorter ones so
     // "that was destroyed this way" is preferred over "destroyed this way".
@@ -1602,9 +1783,11 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
         " that was destroyed this way",
         " that were destroyed this way",
         " destroyed this way",
+        "destroyed this way",
         " that was sacrificed this way",
         " that were sacrificed this way",
         " sacrificed this way",
+        "sacrificed this way",
     ];
     for &suffix in suffixes {
         // terminated(take_until(suffix), tag(suffix)) parses the noun-phrase
@@ -1614,17 +1797,37 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
         if let Ok(("", filter_phrase)) = result {
             let (filter, remainder) =
                 crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
-            if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
-                return Some(QuantityRef::FilteredTrackedSetSize {
-                    filter: Box::new(filter),
-                });
+            if remainder.trim().is_empty() {
+                return Some(Some(filter));
             }
             // A suffix matched but the filter is trivial or the phrase
             // didn't fully consume — fall through to TrackedSetSize.
-            return None;
+            return Some(None);
         }
     }
     None
+}
+
+fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<QuantityRef> {
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+            })
+        }
+        _ => Some(QuantityRef::TrackedSetSize),
+    }
 }
 
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
@@ -1982,6 +2185,42 @@ fn parse_for_each_clause_with_they_controller(
         });
     }
 
+    // CR 104.3: "player(s) who have/has lost the game" (Rampant Frogantua).
+    if let Some(((), rest)) = nom_on_lower(clause, clause, |i| {
+        value(
+            (),
+            (
+                alt((tag("player "), tag("players "))),
+                alt((tag("who "), tag("that "))),
+                alt((tag("has "), tag("have "))),
+                tag("lost the game"),
+            ),
+        )
+        .parse(i)
+    }) {
+        if rest.is_empty() {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            });
+        }
+    }
+
+    // CR 106.4: "unspent [color] mana you have" (Omnath, Locus of Mana) — the
+    // amount of floating mana of that color (or any color) in the controller's
+    // pool. A bare color word is optional, so "unspent mana you have" counts
+    // all colors.
+    if let Some((color, rest)) = nom_on_lower(clause, clause, |i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("unspent ").parse(i)?;
+        let (i, color) = opt(nom_primitives::parse_color).parse(i)?;
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>(" ")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("mana you have").parse(i)?;
+        Ok((i, color))
+    }) {
+        if rest.trim().is_empty() {
+            return Some(QuantityRef::UnspentMana { color });
+        }
+    }
+
     // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
     // / "opponent who was dealt combat damage this turn". Mirrors the
     // lost-life / gained-life arms above, but consumes the full clause instead
@@ -2155,7 +2394,10 @@ fn parse_for_each_clause_with_they_controller(
     .parse(clause)
     {
         if rest.is_empty() {
-            return Some(QuantityRef::AttackedThisTurn);
+            return Some(QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            });
         }
     }
 
@@ -2642,13 +2884,19 @@ mod tests {
     }
 
     /// Collision guard: "creature you attacked WITH this turn" (the source-
-    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn`
+    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn { filter: None }`
     /// — the " with" subject distinguishes it from the player-population
     /// "opponents you attacked" phrase.
     #[test]
     fn creature_you_attacked_with_this_turn_stays_attacked_this_turn() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn);
+        assert_eq!(
+            qty,
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }
+        );
     }
 
     #[test]
@@ -2667,7 +2915,13 @@ mod tests {
     #[test]
     fn for_each_creature_you_attacked_with_this_turn_counts_attacking_creatures() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn);
+        assert_eq!(
+            qty,
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }
+        );
     }
 
     #[test]
@@ -2785,6 +3039,24 @@ mod tests {
                 panic!("Expected PlayerCount{{ControlsCount(creature+pt)}}, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn parse_cda_quantity_permanents_sacrificed_this_turn() {
+        let expr = parse_cda_quantity("the number of permanents you've sacrificed this turn")
+            .expect("should parse");
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::SacrificedThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Permanent],
+                        ..Default::default()
+                    }),
+                }
+            }
+        );
     }
 
     // A1 "one plus" path: the Offset arm wraps the inner PlayerCount unchanged
@@ -4108,6 +4380,7 @@ mod tests {
                 zone: ZoneRef::Hand,
                 card_types: vec![],
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
     }
@@ -4121,6 +4394,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![],
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
     }
@@ -4478,6 +4752,7 @@ mod tests {
                         zone,
                         card_types,
                         scope,
+                        filter: None,
                     },
             } => {
                 assert_eq!(zone, ZoneRef::Graveyard);
@@ -4507,6 +4782,7 @@ mod tests {
                         QuantityRef::ZoneCardCount {
                             zone,
                             card_types,
+                            filter: None,
                             scope,
                         },
                 } => {
@@ -4517,6 +4793,93 @@ mod tests {
                 other => panic!("expected ZoneCardCount segment, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn zone_card_filter_list_named_before_type_is_order_independent() {
+        let (_, filter) =
+            parse_zone_card_that_are_filter_list("named Slime Against Humanity or are Oozes")
+                .expect("reversed filter order must parse");
+        assert_slime_against_humanity_filter(&filter);
+    }
+
+    /// Slime Against Humanity: cards-with-filter suffix after zone list.
+    #[test]
+    fn issue_2370_slime_ooze_and_named_card_zone_count() {
+        let result = parse_cda_quantity(
+            "two plus the total number of cards you own in exile and in your graveyard that are Oozes or are named Slime Against Humanity",
+        )
+        .expect("slime quantity must parse");
+        let QuantityExpr::Offset { inner, offset } = result else {
+            panic!("expected Offset of 2 + zone count, got {result:?}");
+        };
+        assert_eq!(offset, 2);
+        let QuantityExpr::Sum { exprs: zones } = *inner else {
+            panic!("expected summed exile+graveyard counts");
+        };
+        assert_eq!(zones.len(), 2);
+        for expr in zones.iter() {
+            match expr {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            card_types,
+                            filter: Some(filter),
+                            scope,
+                            ..
+                        },
+                } => {
+                    assert_eq!(scope, &CountScope::Owner);
+                    assert!(card_types.is_empty());
+                    assert_slime_against_humanity_filter(filter);
+                }
+                other => panic!("expected ZoneCardCount, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn issue_2370_named_card_zone_count_is_order_independent() {
+        let result = parse_cda_quantity(
+            "the total number of cards you own in your graveyard that are named Slime Against Humanity or are Oozes",
+        )
+        .expect("named-first slime quantity must parse");
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types,
+                    filter: Some(filter),
+                    scope,
+                },
+        } = result
+        else {
+            panic!("expected filtered ZoneCardCount, got {result:?}");
+        };
+        assert_eq!(zone, ZoneRef::Graveyard);
+        assert_eq!(scope, CountScope::Owner);
+        assert!(card_types.is_empty());
+        assert_slime_against_humanity_filter(&filter);
+    }
+
+    fn assert_slime_against_humanity_filter(filter: &TargetFilter) {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert!(filters.iter().any(|filter| {
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.iter().any(|tf| matches!(tf, TypeFilter::Subtype(s) if s == "Ooze"))
+            )
+        }));
+        assert!(filters.iter().any(|filter| {
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if properties.iter().any(|prop| matches!(prop, FilterProp::Named { name } if name == "Slime Against Humanity"))
+            )
+        }));
     }
 
     #[test]
@@ -4869,6 +5232,27 @@ mod tests {
         );
     }
 
+    /// CR 104.3: "for each player who has lost the game" (Rampant Frogantua).
+    #[test]
+    fn parse_for_each_player_who_has_lost_the_game() {
+        let qty = parse_for_each_clause("player who has lost the game")
+            .expect("lost-game for-each clause must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            }
+        );
+        let number = parse_quantity_ref("the number of players who have lost the game")
+            .expect("lost-game number-of clause must parse");
+        assert_eq!(
+            number,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            }
+        );
+    }
+
     /// Extract the `controller` of an `Aggregate` filter for snapshot tests.
     fn aggregate_filter_controller(qty: &QuantityExpr) -> Option<ControllerRef> {
         match qty {
@@ -5089,6 +5473,55 @@ mod tests {
             },
         };
         assert_eq!(qty, expected);
+    }
+
+    /// CR 608.2c + CR 400.7: "the number of creatures you controlled that were
+    /// destroyed this way" (Kaya's Wrath, issue #2943) must lower to
+    /// `FilteredTrackedSetSize`, not `Effect::Unimplemented`. The for-each
+    /// path already handled this shape; the `parse_quantity_ref` "the number
+    /// of …" path must mirror it before `parse_type_phrase` strips the tail.
+    #[test]
+    fn parse_quantity_ref_creatures_you_controlled_destroyed_this_way() {
+        let qty = parse_quantity_ref(
+            "the number of creatures you controlled that were destroyed this way",
+        )
+        .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+                TargetFilter::Typed(ref tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "filter must require Creature"
+                    );
+                    assert!(
+                        tf.controller
+                            .as_ref()
+                            .is_some_and(|c| matches!(c, ControllerRef::You)),
+                        "filter must require controller=You"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Type-qualified "the number of … destroyed this way" via
+    /// `parse_quantity_ref` emits `FilteredTrackedSetSize` when the type
+    /// phrase restricts the tracked set.
+    #[test]
+    fn parse_quantity_ref_permanents_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty =
+            parse_quantity_ref("the number of permanents destroyed this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => {
+                assert!(
+                    matches!(filter.as_ref(), TargetFilter::Typed(_)),
+                    "expected typed permanent filter, got {filter:?}"
+                );
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
     }
 
     /// Same composite shape with "you controlled" — verifies the controller

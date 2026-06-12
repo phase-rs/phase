@@ -264,6 +264,7 @@
     "grantsProperty": "Concede una proprietà alla magia"
   },
   "zone": {
+    "commandZone": "Zona di comando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -283,6 +284,8 @@
     "graveyardShort": "CIM",
     "graveyardTitle": "Cimitero ({{count}})",
     "libraryAlt": "Grimorio",
+    "library": "Grimorio",
+    "libraryLower": "grimorio",
     "libraryCount_one": "Grimorio ({{count}} carta)",
     "libraryCount_other": "Grimorio ({{count}} carte)",
     "playFromTop": "Gioca {{name}} dalla cima del grimorio",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Scegli quanto pagare",
     "payAmount": "Paga {{value}} {{resource}}",
     "resourceEnergy": "energia",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "segnalini"
   },
   "hand": {
     "viewFullHand_one": "Vedi la mano completa ({{count}} carta)",
@@ -424,6 +428,7 @@
     "one": "un {{target}}",
     "nounPlayer": "giocatore",
     "nounNonlandPermanent": "permanente non Terra",
+    "nounSpell": "magia",
     "nounCreature": "creatura",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente bersaglio",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}} a meno che non ne paghi uno",
       "dontPay": "Non pagare",
       "takeEffect": "Subisci l'effetto"
+    },
+    "spliceOffer": {
+      "title": "Unire ad Arcano?",
+      "subtitle": "Scegli una carta da rivelare e unire a questa magia, oppure lanciala senza unire.",
+      "spliceCard": "Unisci {{name}}",
+      "decline": "Non unire",
+      "declineDescription": "Lancia la magia senza aggiungere il testo di un’altra carta.",
+      "unknownCard": "Carta #{{id}}"
     },
     "activationCost": {
       "title": "Scegli il costo di attivazione"
@@ -1165,6 +1178,10 @@
     "adventureTag": "(Avventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1175,6 +1192,11 @@
     "warpAltLabel": "Lancia con Warp",
     "warpAltSuffix": "(esiliata al passo finale)",
     "warpSubtitle": "Lancia {{name}} normalmente o usa il suo costo di Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Lancia normalmente",
+    "dashAltLabel": "Lancia con Dash",
+    "dashAltSuffix": "(ottiene rapidità, torna in mano al passo finale)",
+    "dashSubtitle": "Lancia {{name}} normalmente o usa il suo costo di Dash.",
     "evokeEyebrow": "Evocare",
     "evokeNormalLabel": "Lancia normalmente",
     "evokeAltLabel": "Lancia con Evocare",
@@ -1225,15 +1247,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascata",
     "discoverEyebrow": "Scoperta",
+    "rippleEyebrow": "Ripple",
     "title": "Lanciare {{name}}?",
     "subtitleCascade": "Cascata ha esiliato {{name}} (valore di mana sotto {{sourceMv}}). Lanciala senza pagare il suo costo di mana, o rifiuta e rimescola tutte le {{total}} carte esiliate in fondo al tuo grimorio.",
     "subtitleDiscover": "Scoperta ha esiliato {{name}}. Lanciala senza pagare il suo costo di mana, o mettila nella tua mano e rimescola le altre {{missCount}} carte esiliate in fondo al tuo grimorio.",
+    "subtitleRipple": "Ripple ha rivelato {{name}}. Lanciala senza pagare il suo costo di mana, oppure rifiuta e metti tutte le {{total}} carte rivelate in fondo al tuo grimorio in ordine casuale.",
     "castNamed": "Lancia {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "putIntoHand": "Metti in mano",
     "decline": "Rifiuta",
     "discoverDeclineSuffix": "(metti il resto in fondo)",
     "cascadeDeclineSuffix": "(rimescola tutte le carte esiliate in fondo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Lancio gratuito",
+    "title": "Lancia una magia gratuitamente",
+    "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
+    "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "castNamed": "Lancia {{name}}",
+    "castSuffix": "(senza pagare il suo costo di mana)",
+    "done": "Fatto",
+    "doneSuffix": "(smetti di lanciare magie in questo modo)"
   },
   "castingVariant": {
     "eyebrow": "Lancia",
@@ -1245,6 +1279,7 @@
     "variantEscape": "Lancia con Fuggire",
     "variantRetrace": "Lancia con Ripercorrere",
     "variantHarmonize": "Lancia con Armonizzare",
+    "variantMayhem": "Lancia con Mayhem",
     "variantFlashback": "Lancia con Flashback",
     "variantAftermath": "Lancia con Conseguenze",
     "variantGraveyardPermission": "Lancia dal cimitero",
@@ -1257,6 +1292,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantFuse": "Lancia con Fusione",
     "variantFallback": "Lancia con {{type}}"
   },
   "categoryChoice": {
@@ -1270,6 +1306,7 @@
     "eyebrow": "Scelta",
     "title": "Scegline uno",
     "subtitle": "Seleziona l'opzione da risolvere.",
+    "subtitleBinary": "Scegli una delle due opzioni qui sotto.",
     "optionFallback": "Opzione {{number}}"
   },
   "combatTax": {
@@ -1425,6 +1462,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferare",
     "proliferateSubtitle": "Scegli un numero qualsiasi di permanenti e giocatori con segnalini. Ogni bersaglio scelto riceve un altro segnalino di ciascun tipo già presente.",
+    "timeTravelTitle": "Viaggio Temporale",
+    "timeTravelRemoveSubtitle": "Scegli un numero qualsiasi di oggetti idonei da cui rimuovere un segnalino tempo.",
+    "timeTravelAddSubtitle": "Scegli un numero qualsiasi di oggetti idonei rimanenti a cui aggiungere un segnalino tempo.",
     "chooseObjectsTitle": "Scegli permanenti",
     "chooseObjectsSubtitle": "Scegli un numero qualsiasi di permanenti. Paghi un costo per ciascuno scelto.",
     "selectAll": "Tutti",
@@ -1444,7 +1484,9 @@
     "scopeMulti": "Scegli nuovi bersagli per la magia",
     "subtitle": "{{scope}}. Attuale: {{current}}",
     "confirm": "Conferma",
-    "badgeNewTarget": "Nuovo bersaglio"
+    "badgeNewTarget": "Nuovo bersaglio",
+    "slotLabel": "Bersaglio {{index}}: {{current}} → {{chosen}}",
+    "unselected": "invariato"
   },
   "separatePiles": {
     "chooserName": "Giocatore {{number}}",

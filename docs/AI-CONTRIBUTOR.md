@@ -117,6 +117,21 @@ If the contributor lacks `gh`, fall back to a plain `git clone` and tell them (i
 
 ---
 
+## 2.1. Sync your fork with upstream — every run
+
+Run this on **every** invocation, not just the first clone. A fork's `main` goes stale the moment upstream advances; working from a stale base produces spurious diffs against `origin/main`, risks textual merge-queue conflicts, and can revert other contributors' landed work. Always start from an up-to-date codebase.
+
+```bash
+git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/phase-rs/phase.git
+git fetch upstream main
+git checkout main && git merge --ff-only upstream/main   # fast-forward fork main to upstream
+git push origin main                                     # keep the fork's main in sync (best-effort)
+```
+
+If `git merge --ff-only` fails, your fork's `main` has diverged from upstream — do **not** force it. Proceed to §4 regardless: that step cuts your working branch directly from `upstream/main`, so a diverged fork `main` never contaminates your change.
+
+---
+
 ## 2.5. Bootstrap the repo (Developer track only)
 
 Run **once per fresh clone** before invoking `$engine-implementer`. This downloads MTGJSON, generates `client/public/card-data.json`, fetches the local copy of the Comprehensive Rules, installs frontend deps, and configures git hooks:
@@ -160,13 +175,26 @@ From the JSON, select a card where:
 
 Record the chosen card name. It will appear in the branch name, commit message, and PR title.
 
+### 3.1. Confirm the work isn't already in flight
+
+Before implementing, confirm no open PR already covers the selected card **or its core mechanic**. Duplicate PRs for the same issue waste reviewer and CI effort and one will lose the merge-queue race (recurring: two PRs adding the same crew/saddle contribution static, two adding the same prevention-recipient scope). Scan by card name *and* by mechanic — the keyword you would add may already be in flight under a different card:
+
+```bash
+gh pr list --repo phase-rs/phase --state open --search "<Card Name>" --json number,title,headRefName
+gh pr list --repo phase-rs/phase --state open --search "<keyword-or-mechanic>" --json number,title
+```
+
+If an open PR already implements the card or the core mechanic, **stop and report it to the human** rather than opening a duplicate — offer to review or extend the existing PR instead.
+
 ---
 
 ## 4. Implement with `$engine-implementer`
 
-Create a branch (with a collision guard so re-runs on the same fork don't fail):
+Base your branch on the **current upstream `main`**, not your fork's (possibly stale) `main`. A branch cut from a stale base shows spurious diffs against `origin/main`, risks textual merge-queue conflicts, and can revert other contributors' landed work. Fetch upstream first, then create the branch (with a collision guard so re-runs on the same fork don't fail):
 
 ```bash
+git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/phase-rs/phase.git
+git fetch upstream main
 slug="card/<slug-of-card-name>"
 n=2
 while git rev-parse --verify "refs/heads/$slug" >/dev/null 2>&1 \
@@ -174,8 +202,10 @@ while git rev-parse --verify "refs/heads/$slug" >/dev/null 2>&1 \
   slug="card/<slug-of-card-name>-$n"
   n=$((n + 1))
 done
-git checkout -b "$slug"
+git checkout -b "$slug" upstream/main   # cut from current upstream, not a stale fork main
 ```
+
+If your work spans more than a few minutes and upstream `main` advances, keep current with `git fetch upstream main && git merge --no-edit upstream/main` so the final diff contains only your change.
 
 Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAME>`:
 
@@ -197,7 +227,7 @@ Apply **all three** checks:
 
 1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
 2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure.
-3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.split_once`, etc.); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect. If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
+3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.rfind("…")`, `.split(`, `.split_once`, `.splitn`, etc. — `.rfind`/`.split` are not caught by `check-parser-combinators.sh`, so grep the diff for them by hand); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect; (i) **test discrimination** — does at least one test drive the real pipeline (`apply()` / scenario runner / cast harness) and FAIL if the fix were reverted? A test that only asserts parsed AST shape — an `assert_eq!` on a parsed `Effect` / `StaticMode` / `AbilityDefinition` without resolving it — is a shape test, not a regression test, and is the single most common gap on keyword and parser PRs; name it as a defect and require a discriminating runtime test before the PR opens. If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
 
 **If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
 
@@ -354,11 +384,16 @@ you can invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
 1. gh repo fork phase-rs/phase --clone --remote && cd phase
+1a. Sync your fork with upstream EVERY run (never work from a stale base):
+   git remote add upstream https://github.com/phase-rs/phase.git 2>/dev/null;
+   git fetch upstream main; git checkout main &&
+   git merge --ff-only upstream/main && git push origin main
 2. If I named a card, use it. Otherwise WebFetch
    https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json
    and pick a card with supported==false and small gap_count.
-3. git checkout -b card/<slug>  (if the branch already exists locally or on
-   origin, append "-2", "-3", etc. — see Step 4 in docs/AI-CONTRIBUTOR.md).
+3. git checkout -b card/<slug> upstream/main  (cut the branch from CURRENT
+   upstream/main, not stale fork main; if the branch already exists locally or
+   on origin, append "-2", "-3", etc. — see Step 4 in docs/AI-CONTRIBUTOR.md).
 4. Invoke the $engine-implementer skill to implement the card. Tell it: follow
    CLAUDE.md and AGENTS.md without exception, plan with engine-planner, review
    the plan with $review-engine-plan until clean, use nom combinators on first

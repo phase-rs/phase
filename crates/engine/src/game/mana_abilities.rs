@@ -1,13 +1,13 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
-    ManaProduction, ResolvedAbility, TargetFilter,
+    ManaProduction, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
+    REMOVE_COUNTER_COST_ANY_NUMBER,
 };
-#[cfg(test)]
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
-    PayCostKind, PendingManaAbility, ProductionOverride, WaitingFor,
+    PayCostKind, PayableResource, PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -447,6 +447,7 @@ pub fn activate_mana_ability(
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -513,6 +514,21 @@ pub(crate) fn mana_choice_prompt(
         }
         ManaProduction::ChoiceAmongExiledColors { source } => {
             let options = super::effects::mana::exiled_color_options(state, *source, source_id);
+            if options.len() > 1 {
+                Some(ManaChoicePrompt::SingleColor { options })
+            } else {
+                None
+            }
+        }
+        ManaProduction::AnyOneColorAmongPermanents { filter, .. } => {
+            // CR 106.1: Player chooses one of the colors among matching permanents they
+            // control.
+            let options = super::effects::mana::distinct_colors_among_permanents(
+                state, ability, source_id, filter,
+            )
+            .into_iter()
+            .map(|color| mana_color_to_type(&color))
+            .collect::<Vec<_>>();
             if options.len() > 1 {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
@@ -1014,7 +1030,7 @@ pub fn can_activate_mana_ability_now(
     .is_ok()
 }
 
-fn advance_mana_ability_activation(
+pub(super) fn advance_mana_ability_activation(
     state: &mut GameState,
     mut pending: PendingManaAbility,
     events: &mut Vec<GameEvent>,
@@ -1131,6 +1147,24 @@ fn advance_mana_ability_activation(
         }
     }
 
+    // CR 107.1c + CR 605.3a: "Remove any number of <type> counters" in a
+    // mana-ability cost requires choosing the count before costs are paid and
+    // mana is produced.
+    if pending.chosen_counter_count.is_none() {
+        if let Some(counter_type) = any_number_self_remove_counter_cost(&ability_def.cost) {
+            let max = removable_counter_count_for_mana_cost(state, pending.source_id, counter_type);
+            return Ok(WaitingFor::PayAmountChoice {
+                player: pending.player,
+                resource: PayableResource::Counters,
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: pending.source_id,
+                pending_mana_ability: Some(Box::new(pending)),
+            });
+        }
+    }
+
     // CR 605.3a + CR 602.2b + CR 601.2g-h + CR 107.4e: Resolve the mana
     // sub-cost payment before producing any mana or prompting for output
     // choices. If the current pool already offers multiple hybrid assignments,
@@ -1201,6 +1235,7 @@ fn advance_mana_ability_activation(
                 &mut pending.chosen_exiled.iter().copied(),
                 &mut pending.chosen_sacrificed_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
+                pending.chosen_counter_count,
             )?;
             // CR 603.2a + CR 603.2g + CR 605.3b: Cost-payment events (Tap,
             // Sacrifice, etc.) generated during a mana ability's cost step
@@ -1251,6 +1286,7 @@ fn advance_mana_ability_activation(
         &pending.chosen_exiled,
         &pending.chosen_sacrificed_battlefield,
         pending.chosen_mana_payment.as_deref(),
+        pending.chosen_counter_count,
         pending.cost_paid_object,
     )?;
     complete_mana_ability_activation(
@@ -1284,6 +1320,7 @@ fn pay_mana_ability_cost(
         &mut std::iter::empty(),
         &mut std::iter::empty(),
         None,
+        None,
     )
 }
 
@@ -1300,6 +1337,7 @@ fn resolve_mana_ability_with_selected_choices(
     exiled_battlefield: &[ObjectId],
     sacrificed_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
+    chosen_counter_count: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
@@ -1317,6 +1355,7 @@ fn resolve_mana_ability_with_selected_choices(
         &mut exiled,
         &mut sacrificed,
         chosen_hybrid_payment,
+        chosen_counter_count,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
@@ -1526,6 +1565,7 @@ fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     chosen_exiled: &mut K,
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
+    chosen_counter_count: Option<u32>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
@@ -1575,15 +1615,15 @@ where
         Some(AbilityCost::Discard {
             count,
             filter,
-            random,
-            self_ref,
+            selection,
+            self_scope,
         }) => {
-            if *random {
+            if selection.is_random() {
                 return Err(EngineError::InvalidAction(
                     "Unsupported random discard cost for mana ability".to_string(),
                 ));
             }
-            if *self_ref {
+            if self_scope.is_source_card() {
                 match crate::game::effects::discard::discard_as_cost(
                     state, source_id, player, events,
                 ) {
@@ -1613,10 +1653,10 @@ where
         // CR 118.3 + CR 605.3b: Self-sacrifice mana ability costs are paid
         // atomically before mana production. This is the Treasure / Eldrazi
         // Spawn / Lotus Petal shape.
-        Some(AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            ..
-        }) => {
+        Some(AbilityCost::Sacrifice(cost))
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
             if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
@@ -1628,10 +1668,19 @@ where
         // as a mana ability cost (Phyrexian Altar class). The interactive flow
         // has already captured the chosen permanents; verify each is still
         // legal and route through the sacrifice replacement pipeline.
-        Some(AbilityCost::Sacrifice { target, count })
-            if !matches!(target, TargetFilter::SelfRef) =>
+        Some(AbilityCost::Sacrifice(cost))
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && matches!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { .. }
+                ) =>
         {
-            for _ in 0..*count {
+            let crate::types::ability::SacrificeRequirement::Count { count } = cost.requirement
+            else {
+                unreachable!("guarded above");
+            };
+            let target = &cost.target;
+            for _ in 0..count {
                 let chosen_id = chosen_sacrificed_battlefield.next().ok_or_else(|| {
                     EngineError::InvalidAction(
                         "Missing sacrificed permanent selection for mana ability".to_string(),
@@ -1709,15 +1758,15 @@ where
                     AbilityCost::Discard {
                         count,
                         filter,
-                        random,
-                        self_ref,
+                        selection,
+                        self_scope,
                     } => {
-                        if *random {
+                        if selection.is_random() {
                             return Err(EngineError::InvalidAction(
                                 "Unsupported random discard cost for mana ability".to_string(),
                             ));
                         }
-                        if *self_ref {
+                        if self_scope.is_source_card() {
                             match crate::game::effects::discard::discard_as_cost(
                                 state, source_id, player, events,
                             ) {
@@ -1746,10 +1795,11 @@ where
                             }
                         }
                     }
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    } => {
+                    AbilityCost::Sacrifice(cost)
+                        if matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1) =>
+                    {
                         if super::static_abilities::player_cant_sacrifice_as_cost(
                             state, player, source_id,
                         ) {
@@ -1759,8 +1809,17 @@ where
                         }
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
-                    AbilityCost::Sacrifice { target, count } => {
-                        for _ in 0..*count {
+                    AbilityCost::Sacrifice(cost) => {
+                        let crate::types::ability::SacrificeRequirement::Count { count } =
+                            cost.requirement
+                        else {
+                            return Err(EngineError::InvalidAction(
+                                "Unsupported sacrifice cost requirement for mana ability"
+                                    .to_string(),
+                            ));
+                        };
+                        let target = &cost.target;
+                        for _ in 0..count {
                             let chosen_id =
                                 chosen_sacrificed_battlefield.next().ok_or_else(|| {
                                     EngineError::InvalidAction(
@@ -1808,18 +1867,30 @@ where
                         count,
                         counter_type,
                         target: None,
+                        ..
                     } => {
-                        if let Some(resolved) =
-                            super::effects::counters::resolve_counter_match_for_removal(
+                        let count = match *count {
+                            REMOVE_COUNTER_COST_ANY_NUMBER => {
+                                chosen_counter_count.ok_or_else(|| {
+                                    EngineError::InvalidAction(
+                                        "Missing counter count for mana ability".to_string(),
+                                    )
+                                })?
+                            }
+                            REMOVE_COUNTER_COST_ALL => removable_counter_count_for_mana_cost(
                                 state,
                                 source_id,
                                 counter_type,
-                            )
-                        {
-                            super::effects::counters::remove_counter_with_replacement(
-                                state, source_id, resolved, *count, events,
-                            );
-                        }
+                            ),
+                            count => count,
+                        };
+                        remove_counters_for_mana_cost(
+                            state,
+                            source_id,
+                            counter_type,
+                            count,
+                            events,
+                        );
                     }
                     // CR 605.3a + CR 601.2h + CR 107.4e: Mana sub-cost inside a
                     // Composite mana-ability cost (filter lands' `{W/U}, {T}`).
@@ -1928,10 +1999,12 @@ fn cost_resolves_without_choice(cost: &Option<AbilityCost>) -> bool {
 fn cost_component_choice_free(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
-        AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count,
-        } => *count == 1,
+        AbilityCost::Sacrifice(cost)
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
+            true
+        }
         AbilityCost::Composite { costs } => costs.iter().all(cost_component_choice_free),
         _ => false,
     }
@@ -2055,7 +2128,7 @@ fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType])
 /// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
 /// shards. Non-hybrid shards (single, Phyrexian, snow, colorless-hybrid,
 /// hybrid-Phyrexian, two-generic-hybrid, X) are routed through the same
-/// auto-pay rules the casting flow uses via `mana_payment::pay_cost`, but
+/// auto-pay rules the casting flow uses via `mana_payment::pay_from_pool`, but
 /// with the hybrid shards already resolved, the plan is unambiguous.
 ///
 /// Implementation: build a scratch cost with hybrid shards rewritten to
@@ -2178,7 +2251,9 @@ fn pay_mana_sub_cost(
             EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
         })?,
     };
-    let _ = spent;
+    if !spent.is_empty() || hybrid_plan.is_some() {
+        state.layers_dirty.mark_full();
+    }
     // CR 605.3b: The player's mana pool mutation is the public signal; no
     // dedicated event exists for ability mana payments. The pool-diff is
     // surfaced via the standard state-update machinery.
@@ -2203,6 +2278,89 @@ pub fn handle_pay_mana_ability_mana(
     let mut updated = pending.clone();
     updated.chosen_mana_payment = Some(payment.to_vec());
     advance_mana_ability_activation(state, updated, events)
+}
+
+fn any_number_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
+    match cost.as_ref()? {
+        AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+            counter_type,
+            target: None,
+            ..
+        } => Some(counter_type),
+        AbilityCost::Composite { costs } => costs.iter().find_map(|cost| match cost {
+            AbilityCost::RemoveCounter {
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                counter_type,
+                target: None,
+                ..
+            } => Some(counter_type),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn removable_counter_count_for_mana_cost(
+    state: &GameState,
+    source_id: ObjectId,
+    counter_type: &CounterMatch,
+) -> u32 {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return 0;
+    };
+    match counter_type {
+        CounterMatch::Any => obj.counters.values().copied().sum(),
+        CounterMatch::OfType(counter_type) => obj.counters.get(counter_type).copied().unwrap_or(0),
+    }
+}
+
+fn remove_counters_for_mana_cost(
+    state: &mut GameState,
+    source_id: ObjectId,
+    counter_type: &CounterMatch,
+    mut count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    match counter_type {
+        CounterMatch::OfType(counter_type) => {
+            super::effects::counters::remove_counter_with_replacement(
+                state,
+                source_id,
+                counter_type.clone(),
+                count,
+                events,
+            );
+        }
+        CounterMatch::Any => {
+            let counters: Vec<(CounterType, u32)> = state
+                .objects
+                .get(&source_id)
+                .map(|obj| {
+                    obj.counters
+                        .iter()
+                        .map(|(counter_type, count)| (counter_type.clone(), *count))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (counter_type, available) in counters {
+                if count == 0 {
+                    break;
+                }
+                let to_remove = available.min(count);
+                if to_remove > 0 {
+                    super::effects::counters::remove_counter_with_replacement(
+                        state,
+                        source_id,
+                        counter_type,
+                        to_remove,
+                        events,
+                    );
+                    count -= to_remove;
+                }
+            }
+        }
+    }
 }
 
 /// Tap a permanent as part of paying a mana ability cost.
@@ -2235,7 +2393,7 @@ fn tap_creature_cost_choice(
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = find_tap_creatures_cost(cost.as_ref()?)?;
+    let (count, filter) = super::casting::find_tap_creatures_cost(cost.as_ref()?)?;
     let creatures = state
         .battlefield
         .iter()
@@ -2271,14 +2429,6 @@ fn discard_cost_choice(
     let resolved = super::quantity::resolve_quantity(state, count, player, source_id).max(0);
     let cards = super::casting::find_eligible_discard_targets(state, player, source_id, filter);
     Some((resolved as usize, cards))
-}
-
-fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
-    match cost {
-        AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
-        AbilityCost::Composite { costs } => costs.iter().find_map(find_tap_creatures_cost),
-        _ => None,
-    }
 }
 
 /// CR 117.1 + CR 118.3: Match non-self `AbilityCost::Exile` shapes. Returns
@@ -2361,7 +2511,7 @@ fn prepare_deterministic_exile_cost_selection(
 }
 
 /// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
-/// for an `AbilityCost::Sacrifice { target: !SelfRef }` mana ability cost.
+/// for an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1))` mana ability cost.
 /// Delegates eligibility to the casting cost helper so mana and non-mana
 /// activation costs share the same battlefield/controller/filter semantics.
 fn sacrifice_cost_choice(
@@ -2383,8 +2533,8 @@ fn find_non_self_discard_cost(
         AbilityCost::Discard {
             count,
             filter,
-            self_ref: false,
-            random: false,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         } => Some((count, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard_cost),
         _ => None,
@@ -2550,8 +2700,8 @@ mod tests {
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, FilterProp,
         LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope,
-        PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -2619,7 +2769,7 @@ mod tests {
             state.players[player.0 as usize].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -3433,10 +3583,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
 
@@ -3491,10 +3638,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
@@ -3873,10 +4017,7 @@ mod tests {
             AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             }
         )));
@@ -3885,17 +4026,14 @@ mod tests {
 
         // Phyrexian Altar: sacrifice a (non-self) creature → requires a choice.
         assert!(!cost_resolves_without_choice(&Some(
-            AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                count: 1,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::creature()),
+                1
+            ))
         )));
         // Self-sacrifice of more than one is not the single-token shape.
         assert!(!cost_resolves_without_choice(&Some(
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 2,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 2))
         )));
         // Filter-land style mana sub-cost requires a payment choice.
         assert!(!cost_resolves_without_choice(&Some(
@@ -4034,13 +4172,10 @@ mod tests {
                         },
                     },
                     filter: None,
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         Arc::make_mut(&mut state.objects.get_mut(&led).unwrap().abilities).push(ability.clone());
@@ -4485,7 +4620,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4998,6 +5133,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -5059,6 +5195,7 @@ mod tests {
                 chosen_tappers: Vec::new(),
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
+                chosen_counter_count: None,
                 chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
@@ -5286,6 +5423,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -5386,6 +5524,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -6284,6 +6423,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -6364,6 +6504,7 @@ mod tests {
                     count: 1,
                     counter_type: CounterMatch::OfType(CounterType::Generic("mining".to_string())),
                     target: None,
+                    selection: crate::types::ability::CounterCostSelection::SingleObject,
                 },
             ],
         });
@@ -6431,6 +6572,88 @@ mod tests {
             remaining, 2,
             "Gemstone Mine must lose one mining counter per activation"
         );
+    }
+
+    #[test]
+    fn any_number_counter_mana_ability_prompts_and_removes_chosen_count() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8002),
+            player,
+            "Storage Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+            },
+        )
+        .expect("storage mana ability should prompt for a counter count");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(*resource, PayableResource::Counters);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 3);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 1 },
+        )
+        .expect("chosen counter count should resume mana production");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "any-number counter mana costs must remove only the chosen count"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 
     #[test]
@@ -6567,6 +6790,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -6849,10 +7073,10 @@ mod tests {
                 target: None,
             },
         )
-        .cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            count: 1,
-        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        )))
     }
 
     fn make_titans_nest_ability() -> AbilityDefinition {
@@ -7124,6 +7348,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7191,6 +7416,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7313,6 +7539,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7373,6 +7600,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7524,6 +7752,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,

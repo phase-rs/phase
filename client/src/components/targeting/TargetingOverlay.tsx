@@ -290,6 +290,11 @@ function inferTargetNoun(
     return t("targeting.nounTarget");
   }
   if (objectTargets.length === 0) return t("targeting.nounTarget");
+  // CR 112.1: Spells on the stack are not permanents; infer from zone so
+  // Counterspell-style targeting does not fall through to "nonland permanent".
+  if (objectTargets.every((obj) => obj.zone === "Stack")) {
+    return t("targeting.nounSpell");
+  }
   if (objectTargets.every((obj) => !obj.card_types.core_types.includes("Land"))) {
     return t("targeting.nounNonlandPermanent");
   }

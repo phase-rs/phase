@@ -9,6 +9,8 @@ use super::strategy_helpers::is_own_main_phase;
 use crate::deck_profile::DeckArchetype;
 use crate::features::DeckFeatures;
 use crate::zone_eval;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 /// Rewards playing spells on-curve (matching mana value to available mana),
 /// with stronger incentive in the early game (turns 1-4).
@@ -174,6 +176,8 @@ mod tests {
                 object_id: obj_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -213,6 +217,8 @@ mod tests {
                 object_id: obj_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -249,6 +255,8 @@ mod tests {
                 object_id: obj_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -286,6 +294,8 @@ mod tests {
                 object_id: obj_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),

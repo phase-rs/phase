@@ -372,6 +372,13 @@ pub enum GameEvent {
         counter_type: CounterType,
         count: u32,
     },
+    /// Digital-only Alchemy (no CR entry): a card's intensity increased by
+    /// `amount`. Emitted per affected card so consumers (triggers that watch for
+    /// intensifying, frontend animation) can see exactly which cards changed.
+    ObjectIntensified {
+        object_id: ObjectId,
+        amount: u32,
+    },
     /// CR 702.100b: A creature evolved because one or more +1/+1 counters were
     /// put on it as a result of its evolve ability resolving.
     Evolved {
@@ -385,6 +392,12 @@ pub enum GameEvent {
     TokenCreated {
         object_id: ObjectId,
         name: String,
+        /// CR 111.1: the object id of the ability/spell that created this token
+        /// (the creating effect's `source_id`). Lets consumers attribute a token
+        /// to its creator — e.g. "destroy all OTHER creatures" sparing only the
+        /// tokens the resolving spell itself made, distinct from tokens a
+        /// replacement effect produced during the same resolution.
+        source_id: ObjectId,
     },
     /// Digital-only: A card was conjured from outside the game into a zone.
     ObjectConjured {
@@ -397,6 +410,12 @@ pub enum GameEvent {
     PermanentSacrificed {
         object_id: ObjectId,
         player_id: PlayerId,
+    },
+    /// CR 613.1b: A continuous effect changed an object's controller in layer 2.
+    ControllerChanged {
+        object_id: ObjectId,
+        old_controller: PlayerId,
+        new_controller: PlayerId,
     },
     EffectResolved {
         kind: EffectKind,

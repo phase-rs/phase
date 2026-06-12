@@ -40,7 +40,6 @@ expression: "&ir"
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
@@ -53,7 +52,8 @@ expression: "&ir"
           "type": "SelfRef"
         },
         "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
-        "condition": null
+        "condition": null,
+        "destination_zone": "Battlefield"
       }
     }
   ],

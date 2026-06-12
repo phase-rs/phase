@@ -24,6 +24,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 /// Core regression: a no-mana-cost card can't be cast normally from hand, a real
 /// {0} card still can, and the no-mana-cost card is NOT bricked — its Suspend
@@ -100,6 +101,8 @@ fn inevitable_betrayal_no_mana_cost_blocks_normal_cast_but_keeps_suspend() {
         object_id: betrayal,
         card_id,
         targets: vec![],
+
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         res.is_err(),

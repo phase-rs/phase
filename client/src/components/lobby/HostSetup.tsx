@@ -8,6 +8,7 @@ import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStor
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { SelectField } from "../ui/SelectField";
 
 export type { AiSeatConfig };
 export type HostSettings = HostingSettings;
@@ -47,11 +48,11 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
 
-/** P2P's WebRTC mesh supports 2-4 peers (see `p2p-adapter.ts:165`). The
- * HostSetup UI clamps format player counts to this ceiling so multi-seat
- * formats like Commander can still be hosted while 6-player FreeForAll
- * can't advertise an unreachable configuration. */
-const P2P_MAX_PEERS = 4;
+/** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
+ * the host holds one connection per guest and fans out filtered state, which
+ * scales linearly. The ceiling here matches the engine's Free-for-All maximum
+ * (`format.rs` `free_for_all`, max_players 6) rather than a transport limit. */
+const P2P_MAX_PEERS = 6;
 
 /** Uppercase field label + optional hint wrapper (mirrors the design mockup's
  *  Host-setup `Field`). Pure presentation. */
@@ -344,10 +345,10 @@ export function HostSetup({
     }
   };
 
-  // Filter formats: P2P supports 2-4 peers via WebRTC mesh, so any format
-  // whose minimum is reachable from that ceiling is listable. Multi-seat
-  // formats that need more than 4 players (e.g. 6-player FreeForAll) are
-  // hidden here to avoid advertising a configuration we can't actually host.
+  // Filter formats: P2P supports 2-6 players (hub-and-spoke, see P2P_MAX_PEERS),
+  // so any format whose minimum is reachable from that ceiling is listable.
+  // Formats requiring more seats than the ceiling are hidden here to avoid
+  // advertising a configuration we can't actually host.
   const availableFormats = isP2P
     ? FORMAT_OPTIONS.filter(
         (f) => FORMAT_DEFAULTS[f.format].min_players <= P2P_MAX_PEERS,
@@ -410,11 +411,12 @@ export function HostSetup({
                 win: iOS/Android render touch-optimized pickers from <select>.
                 <optgroup>s mirror the engine's FormatGroup taxonomy. */}
             <Field label={t("hostSetup.format")} htmlFor="host-setup-format" hint={formatMeta?.description}>
-              <select
+              <SelectField
+                wrapperClassName="w-full"
                 id="host-setup-format"
                 value={selectedFormat}
                 onChange={(e) => handleFormatSelect(e.target.value as GameFormat)}
-                className={`${inp} min-h-[44px] cursor-pointer font-medium`}
+                className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
               >
                 {(Object.keys(GROUP_ORDER) as FormatGroup[])
                   .sort((a, b) => GROUP_ORDER[a] - GROUP_ORDER[b])
@@ -431,7 +433,7 @@ export function HostSetup({
                       </optgroup>
                     );
                   })}
-              </select>
+              </SelectField>
             </Field>
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
@@ -599,17 +601,19 @@ export function HostSetup({
                         {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
                       </button>
                       {aiSeat ? (
-                        <select
+                        <SelectField
+                          chevronSize="sm"
+                          wrapperClassName="ml-auto"
                           value={aiSeat.difficulty}
                           onChange={(e) => setAiDifficulty(seatIndex, e.target.value)}
-                          className="ml-auto rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] text-white outline-none"
+                          className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] text-white outline-none"
                         >
                           {DIFFICULTY_OPTIONS.map((d) => (
                             <option key={d} value={d} className="bg-[#0a0f1b] text-slate-100">
                               {d}
                             </option>
                           ))}
-                        </select>
+                        </SelectField>
                       ) : (
                         <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
                       )}

@@ -30,6 +30,7 @@ import type {
   ArtChainEntry,
   CardPreviewMode,
   CardSizePreference,
+  CommandZoneDisplay,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
@@ -37,6 +38,7 @@ import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
+import { SelectField } from "../ui/SelectField";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
@@ -62,6 +64,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
+const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
@@ -143,6 +146,7 @@ export function PreferencesModal({
   const language = usePreferencesStore((s) => s.language);
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
+  const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
@@ -150,6 +154,7 @@ export function PreferencesModal({
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
+  const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
@@ -301,6 +306,15 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
+                  <SettingGroup label={t("gameplay.commandZone")}>
+                    <SegmentedControl
+                      options={COMMAND_ZONE_DISPLAYS}
+                      value={commandZoneDisplay}
+                      onChange={setCommandZoneDisplay}
+                      renderLabel={(opt) => t(`gameplay.commandZoneOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
                   <SettingGroup label={t("gameplay.logDefault")}>
                     <SegmentedControl
                       options={LOG_DEFAULTS}
@@ -331,7 +345,8 @@ export function PreferencesModal({
                     }`}
                   >
                     <SettingGroup label={t("gameplay.boardBackground")}>
-                      <select
+                      <SelectField
+                        wrapperClassName="w-full"
                         value={boardBackground}
                         onChange={(e) => setBoardBackground(e.target.value)}
                         className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
@@ -345,7 +360,7 @@ export function PreferencesModal({
                             ))}
                           </optgroup>
                         ))}
-                      </select>
+                      </SelectField>
                       {boardBackground === "custom" && (
                         <input
                           type="url"
@@ -531,7 +546,8 @@ export function PreferencesModal({
 
                 <SettingsSection title={t("audioTheme.title")}>
                   <SettingGroup label={t("audioTheme.theme")}>
-                    <select
+                    <SelectField
+                      wrapperClassName="w-full"
                       value={audioThemeId}
                       onChange={(e) => handleThemeChange(e.target.value)}
                       className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
@@ -542,7 +558,7 @@ export function PreferencesModal({
                       {customThemeUrls.map((t) => (
                         <option key={t.id} value={t.id}>{t.id}</option>
                       ))}
-                    </select>
+                    </SelectField>
                   </SettingGroup>
 
                   <SettingGroup label={t("audioTheme.importTheme")}>

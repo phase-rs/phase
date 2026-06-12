@@ -264,6 +264,7 @@
     "grantsProperty": "Accorde une propriété au sort"
   },
   "zone": {
+    "commandZone": "Zone de commandement",
     "emblem": "Emblème",
     "emblemFallback": "Emblème",
     "commander": "Commandant",
@@ -283,6 +284,8 @@
     "graveyardShort": "CIM",
     "graveyardTitle": "Cimetière ({{count}})",
     "libraryAlt": "Bibliothèque",
+    "library": "Bibliothèque",
+    "libraryLower": "bibliothèque",
     "libraryCount_one": "Bibliothèque ({{count}} carte)",
     "libraryCount_other": "Bibliothèque ({{count}} cartes)",
     "playFromTop": "Jouer {{name}} depuis le dessus de la bibliothèque",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Choisir la quantité à payer",
     "payAmount": "Payer {{value}} {{resource}}",
     "resourceEnergy": "énergie",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "marqueurs"
   },
   "hand": {
     "viewFullHand_one": "Voir la main complète ({{count}} carte)",
@@ -424,6 +428,7 @@
     "one": "un(e) {{target}}",
     "nounPlayer": "joueur",
     "nounNonlandPermanent": "permanent non-terrain",
+    "nounSpell": "sort",
     "nounCreature": "créature",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanent ciblé",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}} à moins que vous ne payiez l'un",
       "dontPay": "Ne pas payer",
       "takeEffect": "Subir l'effet"
+    },
+    "spliceOffer": {
+      "title": "Imprégner d’arcane ?",
+      "subtitle": "Choisissez une carte à révéler et à imprégner dans ce sort, ou lancez-le sans imprégnation.",
+      "spliceCard": "Imprégner {{name}}",
+      "decline": "Ne pas imprégner",
+      "declineDescription": "Lancez le sort sans ajouter le texte d’une autre carte.",
+      "unknownCard": "Carte #{{id}}"
     },
     "activationCost": {
       "title": "Choisir le coût d'activation"
@@ -1165,6 +1178,10 @@
     "adventureTag": "(Aventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1175,6 +1192,11 @@
     "warpAltLabel": "Lancer avec Warp",
     "warpAltSuffix": "(exilé à l'étape de fin)",
     "warpSubtitle": "Lancez {{name}} normalement ou utilisez son coût de Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Lancer normalement",
+    "dashAltLabel": "Lancer avec Dash",
+    "dashAltSuffix": "(gagne la célérité, retourne en main à l’étape de fin)",
+    "dashSubtitle": "Lancez {{name}} normalement ou utilisez son coût de Dash.",
     "evokeEyebrow": "Évocation",
     "evokeNormalLabel": "Lancer normalement",
     "evokeAltLabel": "Lancer avec Évocation",
@@ -1225,15 +1247,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Découverte",
+    "rippleEyebrow": "Ripple",
     "title": "Lancer {{name}} ?",
     "subtitleCascade": "Cascade a exilé {{name}} (valeur de mana inférieure à {{sourceMv}}). Lancez-le sans payer son coût de mana, ou refusez et mélangez les {{total}} cartes exilées au-dessous de votre bibliothèque.",
     "subtitleDiscover": "Découverte a exilé {{name}}. Lancez-le sans payer son coût de mana, ou mettez-le dans votre main et mélangez les {{missCount}} autres cartes exilées au-dessous de votre bibliothèque.",
+    "subtitleRipple": "Ripple a révélé {{name}}. Lancez-le sans payer son coût de mana, ou refusez et placez les {{total}} cartes révélées au-dessous de votre bibliothèque dans un ordre aléatoire.",
     "castNamed": "Lancer {{name}}",
     "castSuffix": "(sans payer son coût de mana)",
     "putIntoHand": "Mettre en main",
     "decline": "Refuser",
     "discoverDeclineSuffix": "(mettre le reste en dessous)",
     "cascadeDeclineSuffix": "(mélanger toutes les cartes exilées en dessous)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Lancement gratuit",
+    "title": "Lancez un sort gratuitement",
+    "subtitle": "Choisissez un sort à lancer sans payer son coût de mana ({{remaining}} restant(s)). Valeur de mana totale restante : {{budget}}.",
+    "subtitleNoBudget": "Choisissez un sort à lancer sans payer son coût de mana ({{remaining}} restant(s)).",
+    "castNamed": "Lancer {{name}}",
+    "castSuffix": "(sans payer son coût de mana)",
+    "done": "Terminé",
+    "doneSuffix": "(arrêter de lancer des sorts de cette façon)"
   },
   "castingVariant": {
     "eyebrow": "Lancer",
@@ -1245,6 +1279,7 @@
     "variantEscape": "Lancer avec Évasion",
     "variantRetrace": "Lancer avec Recomposition",
     "variantHarmonize": "Lancer avec Harmonisation",
+    "variantMayhem": "Lancer avec Mayhem",
     "variantFlashback": "Lancer avec Flash-back",
     "variantAftermath": "Lancer avec Séquelles",
     "variantGraveyardPermission": "Lancer depuis le cimetière",
@@ -1257,6 +1292,7 @@
     "variantForetell": "Lancer depuis la Prédiction",
     "variantOverload": "Lancer avec Surcharge",
     "variantBestow": "Lancer avec Don",
+    "variantFuse": "Lancer avec Fusion",
     "variantFallback": "Lancer avec {{type}}"
   },
   "categoryChoice": {
@@ -1270,6 +1306,7 @@
     "eyebrow": "Choix",
     "title": "Choisissez l'un",
     "subtitle": "Sélectionnez l'option à résoudre.",
+    "subtitleBinary": "Choisissez l'une des deux options ci-dessous.",
     "optionFallback": "Option {{number}}"
   },
   "combatTax": {
@@ -1425,6 +1462,9 @@
   "proliferate": {
     "proliferateTitle": "Prolifération",
     "proliferateSubtitle": "Choisissez n'importe quel nombre de permanents et de joueurs ayant des marqueurs. Chaque cible choisie reçoit un marqueur de plus de chaque sorte déjà présente.",
+    "timeTravelTitle": "Voyage temporel",
+    "timeTravelRemoveSubtitle": "Choisissez n'importe quel nombre d'objets éligibles auxquels retirer un marqueur temps.",
+    "timeTravelAddSubtitle": "Choisissez n'importe quel nombre d'objets éligibles restants auxquels ajouter un marqueur temps.",
     "chooseObjectsTitle": "Choisir des permanents",
     "chooseObjectsSubtitle": "Choisissez n'importe quel nombre de permanents. Vous payez un coût pour chacun choisi.",
     "selectAll": "Tout",
@@ -1444,7 +1484,9 @@
     "scopeMulti": "Choisissez de nouvelles cibles pour le sort",
     "subtitle": "{{scope}}. Actuelle : {{current}}",
     "confirm": "Confirmer",
-    "badgeNewTarget": "Nouvelle cible"
+    "badgeNewTarget": "Nouvelle cible",
+    "slotLabel": "Cible {{index}} : {{current}} → {{chosen}}",
+    "unselected": "inchangée"
   },
   "separatePiles": {
     "chooserName": "Joueur {{number}}",

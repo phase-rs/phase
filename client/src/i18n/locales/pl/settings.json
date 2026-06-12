@@ -32,6 +32,12 @@
       "customUrl": "Niestandardowy URL",
       "none": "Brak"
     },
+    "commandZone": "Strefa dowodzenia",
+    "commandZoneOptions": {
+      "compact": "Kompaktowy",
+      "inline": "Wbudowany",
+      "auto": "Auto"
+    },
     "cardSizeOptions": {
       "small": "Małe",
       "medium": "Średnie",

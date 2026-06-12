@@ -131,6 +131,22 @@ describe("adapter boundary guardrails", () => {
     expect(isWaitingForHandled(waitingFor)).toBe(true);
   });
 
+  it("handles the splice offer waiting payload", () => {
+    const waitingFor: WaitingFor = {
+      type: "SpliceOffer",
+      data: {
+        player: 0,
+        pending_cast: {} as Extract<
+          WaitingFor,
+          { type: "SpliceOffer" }
+        >["data"]["pending_cast"],
+        eligible: [2],
+      },
+    };
+
+    expect(isWaitingForHandled(waitingFor)).toBe(true);
+  });
+
   it("keeps the frontend GameAction union in lockstep with the engine enum", () => {
     const root = repoRoot();
     const rustSource = readFileSync(resolve(root, "crates/engine/src/types/actions.rs"), "utf8");

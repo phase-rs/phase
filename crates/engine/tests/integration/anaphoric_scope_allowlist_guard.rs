@@ -156,14 +156,20 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "alpha brawl",
     "ambuscade",
     "angelic chorus",
+    "aradesh, the founder",
     "archdruid's charm",
+    "argivian cavalier",
     "assert perfection",
     "augury adept",
     "avatar destiny",
     "backlash",
+    "balduvian berserker",
     "banewasp affliction",
+    "barkweave crusher",
     "bartz and boko",
     "beastie beatdown",
+    "benalish faithbonder",
+    "benalish knight-counselor",
     "bite down on crime",
     "blood poet",
     "bottle golems",
@@ -175,11 +181,12 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "chastise",
     "circus of the sun",
     "clear shot",
+    "coalition skyknight",
+    "coalition warbrute",
     "common black removal",
     "conclave mentor",
     "consume",
     "consuming ferocity",
-    "crumble",
     "crush underfoot",
     "dark confidant",
     "dark tutelage",
@@ -194,6 +201,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "divine offering",
     "domri's ambush",
     "durkwood tracker",
+    "effie, fast learner",
     "electrosiphon",
     "electryte",
     "exile",
@@ -206,11 +214,14 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "gaze of pain",
     "ghastly death tyrant",
     "goblin crash pilot",
+    "goblin morale sergeant",
     "goblin sleigh ride",
     "goblin tinkerer",
     "gregor, shrewd magistrate",
     "grim contest",
     "grim feast",
+    "guardian of new benalia",
+    "hexbane tortoise",
     "hidetsugu and kairi",
     "horrid shadowspinner",
     "hotel of fears",
@@ -223,10 +234,12 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "kamahl's will",
     "karplusan yeti",
     "kefka, dancing mad",
+    "keldon flamesage",
     "knockout maneuver",
     "lagonna-band storyteller",
     "lammastide weave",
     "lifeblood hydra",
+    "linebreaker baloth",
     "living inferno",
     "lorcan, warlock collector",
     "lukka, coppercoat outcast",
@@ -270,7 +283,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "shriveling rot",
     "signature slam",
     "sister hospitaller",
-    "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
     "south wind avatar",
@@ -305,6 +317,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "vraska's stoneglare",
     "willow geist",
     "wolverine riders",
+    "yavimaya steelcrusher",
 ];
 
 /// Cards whose exported card data retains a runtime `ObjectScope::Demonstrative`
@@ -496,27 +509,30 @@ fn anaphoric_scope_set_is_frozen() {
     // them) moved 95 cards from this set into DEMONSTRATIVE_SCOPE_CARDS, and
     // Steadfast Armasaur's "its toughness" rebound to `Source` (the LKI-toughness
     // fix), taking the count 252 -> 156; the Optional_YouMay capture fix
-    // (#2277) then dropped "ian the reckless" to 155. The causative "may have"
-    // parser (#2313) then rebound Immersturm/Pandemonium to
-    // ParentObjectTargetController, taking the count to 153. If #512/#511 land,
-    // this shrinks further.
     // (#2277) then dropped "ian the reckless" to 155. The "may have" causative
     // optional fix (#2313) restructured the optional sub-effect of Pandemonium /
     // Immersturm ("...may have it deal damage equal to its power..."), letting the
     // anaphoric rebind resolve "its power" to `EventSource` (the entering
     // creature, CR 603.2) — the category-2 trigger-subject fix #512 anticipated —
-    // dropping both to 153. If #512/#511 land, this shrinks further.
+    // dropping both to 153. Enlist keyword synthesis then surfaced the tapped
+    // creature's power anaphor for 15 Enlist cards, taking the count to 168. If
+    // #512/#511 land, this shrinks further. Sly Spy added, taking count to 169.
+    // The ParentTargetController routing fix (#2741) let the anaphoric rebind
+    // resolve "its" to `Target` (the destroyed/exiled object, CR 608.2c) in
+    // "that X's controller gains life equal to its <stat>" for Crumble /
+    // Solitude, and the parser-grammar consolidation (PR #2802) reshaped Sly
+    // Spy's variant parse — dropping all three to 166.
     assert_eq!(
         observed.len(),
-        153,
-        "Expected exactly 153 cards retaining ObjectScope::Anaphoric (pronoun \
+        166,
+        "Expected exactly 166 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        153,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 153 cards."
+        166,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 166 cards."
     );
 }
 

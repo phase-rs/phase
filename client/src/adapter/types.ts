@@ -6,6 +6,9 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+// Engine masking sentinel emitted at the client boundary for hidden card faces.
+export const HIDDEN_CARD_NAME = "Hidden Card";
+
 // ── Attachment Target ────────────────────────────────────────────────────
 // Mirrors `engine::game::game_object::AttachTarget`. Auras may attach to a
 // permanent (`Object`) or to a player (`Player`, e.g. Curse cycle); Equipment
@@ -286,6 +289,7 @@ export type LibraryPosition =
 // only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
 // engine's `ExileCostSourceZone`).
 export type ExileCostSourceZone = "Hand" | "Graveyard";
+export type CounterCostSelection = "SingleObject" | "AmongObjects";
 
 // CR 118.3 + CR 601.2b + CR 605.3b: which action a `PayCost` selection applies
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
@@ -299,7 +303,7 @@ export type PayCostKind =
   // the modal only renders `choices`, so it is opaque pass-through here.
   | { type: "ExileMaterials"; materials: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
-  | { type: "RemoveCounter"; counter_type: CounterMatch }
+  | { type: "RemoveCounter"; counter_type: CounterMatch; count: number; selection: CounterCostSelection }
   | { type: "TapCreatures" }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
@@ -325,7 +329,7 @@ export type CoreType =
   | "Dungeon";
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
-export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise";
+export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
 export type RoomDoor = "Left" | "Right";
 
 /**
@@ -418,6 +422,7 @@ export type CastingVariant =
   | { type: "Escape" }
   | { type: "Retrace" }
   | { type: "Harmonize" }
+  | { type: "Mayhem" }
   | { type: "Flashback" }
   | { type: "Aftermath" }
   | {
@@ -442,7 +447,8 @@ export type CastingVariant =
   | { type: "Bestow" }
   | { type: "Awaken" }
   | { type: "Cleave" }
-  | { type: "MoreThanMeetsTheEye" };
+  | { type: "MoreThanMeetsTheEye" }
+  | { type: "Fuse" };
 
 export interface CastingVariantChoiceOption {
   variant: CastingVariant;
@@ -515,6 +521,12 @@ export type ChosenAttribute =
 
 export type CounterMoveChoice = {
   destination_id: ObjectId;
+  counter_type: CounterType;
+  count: number;
+};
+
+export type CounterCostChoice = {
+  object_id: ObjectId;
   counter_type: CounterType;
   count: number;
 };
@@ -712,6 +724,14 @@ export interface GameObject {
   available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  /**
+   * CR 114: Display-only provenance of the source that created this emblem
+   * (e.g. the planeswalker whose ultimate made it). The frontend renders the
+   * emblem as a small chip bearing the source's art crop and a "from <name>"
+   * label. Distinct from `printed_ref` — an emblem is not represented by that
+   * card (CR 114.5); this is purely presentational. Present only on emblems.
+   */
+  emblem_source?: { name: string; printed_ref?: PrintedRef | null } | null;
   /**
    * CR 111.1: Whether this object is a token (not a card). Independent of
    * `display_source`: a token-copy of a real card (Twinflame, Helm of the
@@ -1040,7 +1060,17 @@ export type CastOfferKind =
   | { type: "Madness"; object_id: ObjectId; cost: ManaCost }
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
-  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number };
+  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
+  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] }
+  | {
+      type: "FreeCastWindow";
+      candidates: ObjectId[];
+      remaining_casts: number;
+      remaining_mv_budget?: number;
+      filter: TargetFilter;
+      zones: Zone[];
+      exile_instead_of_graveyard?: boolean;
+    };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
@@ -1068,7 +1098,7 @@ export type WaitingFor =
       type: "ChooseXValue";
       data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
     }
-  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
+  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
@@ -1095,15 +1125,17 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
+  | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
+  | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Dash" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" } | { type: "Blitz" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -1154,7 +1186,7 @@ export type WaitingFor =
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
   // "unless they X or Y" punisher class.
   | { type: "UnlessPaymentChooseCost"; data: { player: PlayerId; costs: UnlessCost[]; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
-  | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown } }
+  | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
@@ -1202,6 +1234,9 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
+  | { type: "TimeTravelChoice"; data: { player: PlayerId; eligible: TargetRef[]; phase: "Remove" | "Add" } }
+  | { type: "AssistChoosePlayer"; data: { player: PlayerId; candidates: PlayerId[]; max_generic: number; convoke_mode?: ConvokeMode } }
+  | { type: "AssistPayment"; data: { caster: PlayerId; chosen: PlayerId; max_generic: number; convoke_mode?: ConvokeMode } }
   | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
@@ -1442,8 +1477,7 @@ export type GameAction =
   | { type: "PassPriority" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[] } }
-  | { type: "CastSpellWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode: CastPaymentMode } }
+  | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode?: CastPaymentMode } }
   | { type: "Foretell"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][]; bands?: ObjectId[][] } }
@@ -1472,32 +1506,29 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
+  | { type: "SubmitSpellbookDraft"; data: { card: string } }
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }
   | { type: "ChooseBranch"; data: { index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
+  | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseAlternativeCast"; data: { choice: { type: "Normal" } | { type: "Alternative" } } }
   | { type: "ChooseCastingVariant"; data: { index: number } }
   | { type: "KeepAllCopyTargets" }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
-  | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId } }
-  | { type: "CastSpellForFreeWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId; payment_mode: CastPaymentMode } }
-  | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "CastSpellAsMiracleWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; payment_mode: CastPaymentMode } }
-  | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "CastSpellAsMadnessWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; payment_mode: CastPaymentMode } }
+  | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId; payment_mode?: CastPaymentMode } }
+  | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode } }
+  | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode } }
   // CR 702.190a: Cast a spell from hand via the Sneak alternative cost during
   // the declare-blockers step, returning an unblocked attacker you control.
   // Applies to any card type; CR 702.190b enter-attacking-alongside is
   // handled engine-side for permanent spells only.
-  | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
-  | { type: "CastSpellAsSneakWithPaymentMode"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode: CastPaymentMode } }
-  | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
-  | { type: "CastSpellAsWebSlingingWithPaymentMode"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode: CastPaymentMode } }
+  | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
+  | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_object_id: ObjectId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice } }
@@ -1517,12 +1548,16 @@ export type GameAction =
   | { type: "CompanionToHand" }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
+  | { type: "RippleChoice"; data: { choice: CastChoice } }
+  | { type: "FreeCastWindowChoice"; data: { selection?: ObjectId } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
   | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
+  | { type: "CommitAssistPayment"; data: { generic: number } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: Phase[] } }
@@ -1530,6 +1565,7 @@ export type GameAction =
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
+  | { type: "ChooseRemoveCounterCostDistribution"; data: { distribution: CounterCostChoice[] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
@@ -1570,7 +1606,8 @@ export type ShardChoice =
 
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } };
+  | { type: "ManaGeneric"; data: { per_x: number } }
+  | { type: "Counters" };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }
@@ -1612,8 +1649,9 @@ export type GameEvent =
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
   | { type: "CounterAdded"; data: { object_id: ObjectId; counter_type: string; count: number } }
+  | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
   | { type: "CounterRemoved"; data: { object_id: ObjectId; counter_type: string; count: number } }
-  | { type: "TokenCreated"; data: { object_id: ObjectId; name: string } }
+  | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
@@ -1803,6 +1841,11 @@ export interface GameState {
   outside_game_cards_brought_in?: OutsideGameCardUse[];
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
+  /** CR 701.20e: ids the looker is privately peeking during a look-at-top
+   * window (Mishra's Bauble, scry looks). Visible only to `private_look_player`. */
+  private_look_ids?: ObjectId[];
+  /** CR 701.20e: the player to whom `private_look_ids` is visible (the looker). */
+  private_look_player?: PlayerId;
   restrictions?: GameRestriction[];
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;

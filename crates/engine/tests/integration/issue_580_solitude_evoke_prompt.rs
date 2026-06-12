@@ -8,7 +8,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::AbilityCost;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
-use engine::types::game_state::{AlternativeCastKeyword, WaitingFor};
+use engine::types::game_state::{AlternativeCastKeyword, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -77,6 +77,8 @@ fn solitude_cast_offers_evoke_when_both_costs_affordable() {
             object_id: solitude,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Solitude");
 
@@ -115,6 +117,8 @@ fn solitude_evoke_choice_prompts_exile_white_card_from_hand() {
             object_id: solitude,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Solitude");
     runner

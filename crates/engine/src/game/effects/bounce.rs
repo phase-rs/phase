@@ -1,7 +1,7 @@
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     BounceSelection, ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
@@ -139,6 +139,30 @@ pub fn resolve(
         })
         .collect();
 
+    // CR 115.6 + CR 601.2c + CR 608.2b: "Return up to one target ... " (Wrenn
+    // and Six +1, and every "up to N target" bounce). Such a bounce *requires
+    // targets* but allows zero to be chosen at stack time; per CR 115.6 it is
+    // targeted only if one or more targets were chosen. When the controller
+    // declined (chose zero), `targets` is empty by the player's choice — the
+    // effect resolves doing nothing. Without this guard the empty-target set
+    // falls through to the resolution-time zone-scan branches below, which
+    // re-prompt for a graveyard/battlefield card the player already declined.
+    // Mirrors the `ChangeZone` short-circuit in `change_zone.rs` (same CR 115.6
+    // class). `target_choice_timing == Resolution` is the genuinely-untargeted
+    // case (Skullwinder-class "that player returns a card"): targets are empty
+    // because no choice has been made *yet*, so it must reach the zone-scan.
+    if targets.is_empty()
+        && !non_targeting
+        && ability.targeting_is_optional()
+        && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // CR 115.1 + Whitemane Lion ruling (issue #563): Non-targeted
     // controller-scoped *battlefield* bounce. Oracle text like "return a
     // creature you control to its owner's hand" parses to a
@@ -172,7 +196,17 @@ pub fn resolve(
                 // CR 608.2d: empty pool — the effect does nothing.
             }
             1 => {
-                zones::move_to_zone(state, eligible[0], destination, events);
+                // CR 614.6: route through the pipeline so destination redirects
+                // fire. A single applicable redirect never prompts; a CR 616.1
+                // ordering choice (two simultaneous redirects) is parked by
+                // `move_object` itself — bail and let the replacement-choice
+                // resume path deliver the paused move.
+                let req = ZoneMoveRequest::effect(eligible[0], destination, ability.source_id);
+                if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
+                    zone_pipeline::move_object(state, req, events)
+                {
+                    return Ok(());
+                }
             }
             _ => {
                 // CR 608.2c + CR 608.2d: surface card selection scoped to the
@@ -190,7 +224,7 @@ pub fn resolve(
                     effect_kind: EffectKind::ChangeZone,
                     zone: Zone::Battlefield,
                     destination: Some(destination),
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_transformed: false,
                     enters_under_player: None,
                     enters_attacking: false,
@@ -248,7 +282,17 @@ pub fn resolve(
                 // not get to return anything."
             }
             1 => {
-                zones::move_to_zone(state, matching[0], destination, events);
+                // CR 614.6: route through the pipeline so destination redirects
+                // fire. A single applicable redirect never prompts; a CR 616.1
+                // ordering choice (two simultaneous redirects) is parked by
+                // `move_object` itself — bail and let the replacement-choice
+                // resume path deliver the paused move.
+                let req = ZoneMoveRequest::effect(matching[0], destination, ability.source_id);
+                if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
+                    zone_pipeline::move_object(state, req, events)
+                {
+                    return Ok(());
+                }
             }
             _ => {
                 // CR 608.2d: surface the card selection scoped to the chosen
@@ -266,7 +310,7 @@ pub fn resolve(
                     effect_kind: EffectKind::ChangeZone,
                     zone: Zone::Graveyard,
                     destination: Some(destination),
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_transformed: false,
                     enters_under_player: None,
                     enters_attacking: false,
@@ -299,18 +343,33 @@ pub fn resolve(
         // return-to-hand effects move targeted spell objects off the stack;
         // activated and triggered ability stack entries are not cards and are
         // intentionally excluded here.
+        // CR 614.6: route each targeted bounce through the pipeline so
+        // destination redirects fire. A single applicable redirect never
+        // prompts; a CR 616.1 ordering choice (two simultaneous redirects) is
+        // parked by `move_object` itself — bail and let the replacement-choice
+        // resume path deliver the paused move. Any remaining targets are
+        // abandoned (single-target is the dominant shape, and no parsed card
+        // combines a multi-target bounce with a double destination redirect).
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
-            zones::move_to_zone(state, obj_id, destination, events);
+        let move_dest = if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
+            Some(destination)
         } else if current_zone == Some(Zone::Stack) && destination == Zone::Hand {
-            if let Some(casting_variant) = stack_spell_casting_variant(state, obj_id) {
-                let stack_destination =
-                    if casting_variant.exiles_when_leaving_stack_for_any_reason() {
-                        Zone::Exile
-                    } else {
-                        destination
-                    };
-                zones::move_to_zone(state, obj_id, stack_destination, events);
+            stack_spell_casting_variant(state, obj_id).map(|casting_variant| {
+                if casting_variant.exiles_when_leaving_stack_for_any_reason() {
+                    Zone::Exile
+                } else {
+                    destination
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(move_dest) = move_dest {
+            let req = ZoneMoveRequest::effect(obj_id, move_dest, ability.source_id);
+            if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
+                zone_pipeline::move_object(state, req, events)
+            {
+                return Ok(());
             }
         }
     }
@@ -328,8 +387,9 @@ pub fn resolve(
 /// zone if `Effect::BounceAll.destination` is set.
 ///
 /// Mirrors `destroy::resolve_all` in shape: collect matching object IDs from
-/// the battlefield via `crate::game::filter::matches_target_filter`, then
-/// move each to the destination zone with `zones::move_to_zone`.
+/// the battlefield via `crate::game::filter::matches_target_filter`, then move
+/// each to the destination zone through the zone-change pipeline
+/// (`zone_pipeline::move_objects_simultaneously`) so destination redirects fire.
 ///
 /// CR 114.5: Emblems are not on the battlefield (they live in the command
 /// zone), so the battlefield scan naturally excludes them — no extra guard
@@ -419,7 +479,7 @@ pub fn resolve_all(
                 effect_kind: EffectKind::BounceAll,
                 zone: Zone::Battlefield,
                 destination: Some(destination),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_transformed: false,
                 enters_under_player: None,
                 enters_attacking: false,
@@ -431,26 +491,41 @@ pub fn resolve_all(
         }
     }
 
-    let mut bounced_ids = Vec::new();
-    for &obj_id in &matching {
-        // CR 400.3 + CR 400.7: Move each matching permanent to the
-        // destination zone. The single-bounce resolver runs the same
-        // `zones::move_to_zone` primitive — no replacement-pipeline detour
-        // is needed because mass-bounce events are not destruction events
-        // (CR 614.6 doesn't apply here).
-        let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if current_zone == Some(Zone::Battlefield) {
-            zones::move_to_zone(state, obj_id, destination, events);
-            bounced_ids.push(obj_id);
-        }
+    // CR 400.3 + CR 400.7 + CR 614.6: Route each matching permanent through the
+    // zone-change pipeline (the shared `move_objects_simultaneously` batch
+    // entry), not a raw `zones::move_to_zone`. The raw move never proposed a
+    // per-object ZoneChange, so `Moved` redirects watching the bounce
+    // destination ("if a creature would be returned to a hand, ..." /
+    // "would leave the battlefield, ..." class) silently never fired
+    // (PLAN §8 Risk #4). The previous justification — "mass-bounce events are
+    // not destruction events (CR 614.6 doesn't apply here)" — was wrong by
+    // citation: CR 614.6 governs replacement semantics generally and CR 614.1
+    // replacements watch zone-change *events*, not only destruction. The batch
+    // entry proposes each inner ZoneChange and consults those replacements
+    // before delivery, then stamps CR 603.10a co-departure over the subset that
+    // actually left the battlefield.
+    //
+    // CR 616.1: two simultaneous destination-redirects on one bounced permanent
+    // surface an ordering choice. `move_objects_simultaneously` parks it and the
+    // undelivered tail in `state.pending_batch_deliveries`; the
+    // replacement-choice resume path drains it. A single applicable redirect
+    // never prompts (the realistic path), so the common mass bounce never
+    // pauses. `state.last_effect_count` is set up front from the matched pool so
+    // it is correct even if the batch pauses mid-delivery.
+    state.last_effect_count = Some(matching.len() as i32);
+    let reqs: Vec<ZoneMoveRequest> = matching
+        .iter()
+        .map(|&obj_id| ZoneMoveRequest::effect(obj_id, destination, ability.source_id))
+        .collect();
+    if let BatchMoveResult::NeedsChoice =
+        zone_pipeline::move_objects_simultaneously(state, reqs, events)
+    {
+        // CR 616.1: a redirect ordering choice paused mid-batch; the prompt is
+        // parked and the tail stashed. Bail before `EffectResolved` so it is not
+        // emitted over the parked prompt; the resume path finishes the batch.
+        return Ok(());
     }
 
-    // CR 603.10a + CR 608.2f: Every permanent in this mass bounce left the
-    // battlefield as part of the same resolution event, so leaves-the-battlefield
-    // observers among the bounced group observe each other via last-known info.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &bounced_ids));
-
-    state.last_effect_count = Some(matching.len() as i32);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -495,6 +570,71 @@ mod tests {
 
         assert!(!state.battlefield.contains(&obj_id));
         assert!(state.players[1].hand.contains(&obj_id));
+    }
+
+    /// Fix-1 discriminating test (CR 614.1c): a self-scoped as-enters
+    /// replacement ("~ enters with a +1/+1 counter on it") must NOT match the
+    /// permanent's own battlefield DEPARTURE. Pre-fix the parsed def carried no
+    /// `destination_zone`, so a bounce to hand folded the counter into the
+    /// ZoneChange and applied phantom counters (+ CounterAdded) to the card in
+    /// its owner's hand.
+    #[test]
+    fn bounce_does_not_apply_own_enters_with_counter_replacement() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Giada".to_string(),
+            Zone::Battlefield,
+        );
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].hand.contains(&obj_id),
+            "bounce delivers to hand"
+        );
+        assert_eq!(
+            state.objects[&obj_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the bounced card — the as-enters def must not match a departure"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == obj_id
+            )),
+            "no CounterAdded event for the bounced card"
+        );
     }
 
     #[test]
@@ -641,7 +781,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Bounce {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 destination: None,
                 selection: BounceSelection::Targeted,
             },
@@ -1259,6 +1402,151 @@ mod tests {
         // one via EffectZoneChoice.
         assert!(state.battlefield.contains(&own_bear));
         assert!(state.battlefield.contains(&own_dragon));
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Battlefield,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert_eq!(*min_count, 1);
+                assert!(cards.contains(&own_bear));
+                assert!(cards.contains(&own_dragon));
+            }
+            other => panic!("expected EffectZoneChoice for non-targeted bounce, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 601.2c (issue #2389): A *targeted* "up to one target ...
+    /// from your graveyard" bounce (Wrenn and Six +1) whose controller chose
+    /// ZERO targets at stack time resolves doing nothing — it must NOT fall
+    /// through to the resolution-time graveyard zone-scan and re-prompt the
+    /// player who already declined. The discriminator vs the genuinely
+    /// non-targeted Skullwinder-class branch (which still prompts) is
+    /// `targeting_is_optional()`: true here (`multi_target.min == 0`), false for
+    /// Skullwinder's mandatory "target player" form.
+    #[test]
+    fn targeted_up_to_one_graveyard_bounce_declined_resolves_to_nothing() {
+        use crate::types::ability::{FilterProp, MultiTargetSpec, QuantityExpr, TypeFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Land],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        // Targeted "up to one target land card from your graveyard" with an
+        // empty target list — the controller declined during target selection.
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Land)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        assert!(
+            ability.targeting_is_optional(),
+            "up-to-one targeting must be optional"
+        );
+        let mut events = Vec::new();
+
+        let waiting_before = state.waiting_for.clone();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // No re-prompt: waiting_for is unchanged by the resolver.
+        assert_eq!(
+            state.waiting_for, waiting_before,
+            "declining the up-to-one target must NOT surface an EffectZoneChoice"
+        );
+        // The land stays in the graveyard — nothing was returned.
+        assert_eq!(
+            state.objects.get(&land).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "no card returned when zero targets were chosen"
+        );
+        assert!(!state.players[0].hand.contains(&land));
+    }
+
+    /// CR 115.1 + CR 608.2c: the zero-target short-circuit is only for
+    /// targeted "up to N target ..." bounce. Non-targeted at-resolution bounce
+    /// must still enumerate legal permanents even if it happens to carry
+    /// optional multi-target metadata.
+    #[test]
+    fn non_targeted_optional_bounce_still_prompts_at_resolution() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, TypeFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let own_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let own_dragon = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_bear, own_dragon] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
         match &state.waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,

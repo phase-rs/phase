@@ -212,7 +212,8 @@ fn has_extra_land_drop_static(face: &CardFace) -> bool {
 mod tests {
     use super::*;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, TriggerDefinition,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, SacrificeCost,
+        TriggerDefinition,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -283,7 +284,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -294,10 +295,7 @@ mod tests {
         ability.cost = Some(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         ability.sub_ability = Some(Box::new(put_in_play));

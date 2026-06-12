@@ -460,7 +460,7 @@ mod tests {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             vec![TargetRef::Player(PlayerId(1))],

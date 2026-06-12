@@ -22,7 +22,6 @@ expression: result
       "duration": null,
       "description": "{T}: Add {G}.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,

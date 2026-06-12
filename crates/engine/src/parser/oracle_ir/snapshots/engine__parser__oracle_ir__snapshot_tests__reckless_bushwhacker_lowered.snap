@@ -16,7 +16,6 @@ expression: "&lowered"
       "duration": null,
       "description": "Haste",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
@@ -75,7 +74,6 @@ expression: "&lowered"
         "duration": "UntilEndOfTurn",
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -97,7 +95,10 @@ expression: "&lowered"
       "valid_source": null,
       "description": "When ~ enters, if its surge cost was paid, other creatures you control get +1/+0 and gain haste until end of turn.",
       "constraint": null,
-      "condition": null,
+      "condition": {
+        "type": "CastVariantPaid",
+        "variant": "Surge"
+      },
       "batched": false
     }
   ],

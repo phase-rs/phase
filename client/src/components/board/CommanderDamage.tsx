@@ -5,6 +5,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { commanderDamageEntriesFor } from "../../viewmodel/commanderColumn.ts";
 
 interface CommanderDamageProps {
   playerId: PlayerId;
@@ -36,19 +37,10 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
     gameState?.format_config?.commander_damage_threshold ??
     DEFAULT_COMMANDER_DAMAGE_LETHAL;
 
-  const byAttacker = gameState?.derived?.commander_damage_by_attacker ?? {};
-  // Filter to entries inflicted on *this* player (the victim axis), then
-  // group by attacker for HUD rendering. The inner arrays are already
-  // per-commander thanks to engine-side partner handling.
-  const entriesForVictim: Array<{
-    attacker: string;
-    views: { commander: number; damage: number }[];
-  }> = [];
-  for (const [attackerKey, views] of Object.entries(byAttacker)) {
-    const forMe = views.filter((v) => v.victim === playerId && v.damage > 0);
-    if (forMe.length === 0) continue;
-    entriesForVictim.push({ attacker: attackerKey, views: forMe });
-  }
+  // Per-victim grouping lives in viewmodel/commanderColumn, shared with
+  // PlayerArea's column-visibility gate so the wrapper renders from the exact
+  // same set this component does (they previously drifted — see that module).
+  const entriesForVictim = gameState ? commanderDamageEntriesFor(gameState, playerId) : [];
 
   if (entriesForVictim.length === 0) return null;
 

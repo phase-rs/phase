@@ -225,7 +225,7 @@ pub fn linked_exile_cards_for_source(
         }
     }
 
-    state
+    let live: Vec<LinkedExileSnapshot> = state
         .exile_links
         .iter()
         .filter(|link| link.source_id == source_id)
@@ -238,7 +238,31 @@ pub fn linked_exile_cards_for_source(
                 })
             })
         })
-        .collect()
+        .collect();
+    if !live.is_empty() {
+        return live;
+    }
+
+    // CR 607.2b + CR 603.10e: The live links are gone (the source left the
+    // battlefield — e.g. sacrificed as its own ability's cost). Fall back to the
+    // persisted linked-exile LKI, filtered to cards STILL in exile so stale
+    // entries (cards that later left exile) contribute nothing.
+    state
+        .linked_exile_lki
+        .get(&source_id)
+        .map(|snapshots| {
+            snapshots
+                .iter()
+                .filter(|snap| {
+                    state
+                        .objects
+                        .get(&snap.exiled_id)
+                        .is_some_and(|obj| obj.zone == Zone::Exile)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently

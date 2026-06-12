@@ -68,6 +68,13 @@ export const CARD_PREVIEW_HOVER_DELAY_STEP = 50;
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
+/** How the command zone (commander card, tax, emblems, commander damage) is laid
+ *  out. "inline" = a bounded always-visible corner dock; "compact" = a collapsed
+ *  pile that expands to a popover on hover; "auto" = pick by viewport at use-site
+ *  (compact on short/narrow screens, inline otherwise). Resolved via
+ *  {@link useResolvedCommandZoneDisplay}, mirroring the `boardBackground`
+ *  "auto-wubrg" resolve-at-use-site precedent. */
+export type CommandZoneDisplay = "compact" | "inline" | "auto";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "manual";
 /** Which screen edge the resolving-stack panel docks to (and collapses toward).
@@ -139,6 +146,7 @@ function buildDefaultPreferences(): PreferencesState {
     audioThemeId: "planeswalker",
     customThemeUrls: [],
     battlefieldCardDisplay: "art_crop",
+    commandZoneDisplay: "auto",
     tapRotation: "mtga",
     spellPaymentMode: "auto",
     showKeywordStrip: true,
@@ -192,6 +200,8 @@ interface PreferencesState {
   audioThemeId: string;
   customThemeUrls: Array<{ id: string; url: string }>;
   battlefieldCardDisplay: BattlefieldCardDisplay;
+  /** Command-zone layout mode (inline dock / compact pile / auto-by-viewport). */
+  commandZoneDisplay: CommandZoneDisplay;
   tapRotation: TapRotation;
   spellPaymentMode: SpellPaymentMode;
   showKeywordStrip: boolean;
@@ -258,6 +268,7 @@ interface PreferencesActions {
   addCustomThemeUrl: (id: string, url: string) => void;
   removeCustomThemeUrl: (id: string) => void;
   setBattlefieldCardDisplay: (display: BattlefieldCardDisplay) => void;
+  setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
   setShowKeywordStrip: (show: boolean) => void;
@@ -371,6 +382,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           ...(state.audioThemeId === id ? { audioThemeId: "planeswalker" } : {}),
         })),
       setBattlefieldCardDisplay: (display) => set({ battlefieldCardDisplay: display }),
+      setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
@@ -467,7 +479,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 14,
+      version: 15,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -490,6 +502,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          prior fixed cursor-following behavior) via the shallow merge.
       // v13 → v14: Add cardPreviewHoverDelayMs; legacy stores default to 0
       //          (instant — the prior behavior) via the shallow merge.
+      // v14 → v15: Add commandZoneDisplay; legacy stores default to "auto"
+      //          via the shallow merge.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

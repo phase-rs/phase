@@ -1,3 +1,4 @@
+use crate::game::game_object::EmblemSource;
 use crate::game::zones::create_object;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
@@ -20,6 +21,19 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("CreateEmblem".into())),
     };
 
+    // CR 114: Capture display-only provenance from the ability's source (the
+    // planeswalker/spell that created the emblem) BEFORE borrowing the emblem
+    // mutably. The client renders the emblem as a chip bearing the source's art
+    // crop + name; an emblem has no art of its own (CR 114.5). Read here while
+    // the source still exists on the stack/battlefield — it may leave later.
+    let emblem_source = state
+        .objects
+        .get(&ability.source_id)
+        .map(|src| EmblemSource {
+            name: src.name.clone(),
+            printed_ref: src.printed_ref.clone(),
+        });
+
     // CR 114.1: Create emblem in command zone owned by the ability's controller
     let emblem_id = create_object(
         state,
@@ -35,6 +49,7 @@ pub fn resolve(
     // to admit command-zone objects, so the first trigger/static scan after
     // creation sees the emblem's abilities.
     obj.is_emblem = true;
+    obj.emblem_source = emblem_source;
     obj.static_definitions = statics.clone().into();
     obj.base_static_definitions = Arc::new(statics.clone());
     // CR 113.1c + CR 114.4: Install triggered abilities on the emblem so
@@ -61,7 +76,7 @@ mod tests {
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
 
     fn ninja_pump_static() -> StaticDefinition {
         StaticDefinition {
@@ -113,6 +128,52 @@ mod tests {
         assert_eq!(emblem.controller, PlayerId(0));
         assert_eq!(emblem.static_definitions.len(), 1);
         assert_eq!(emblem.base_static_definitions.len(), 1);
+    }
+
+    #[test]
+    fn create_emblem_captures_source_provenance() {
+        // CR 114: the emblem records its source's display name + printed_ref so
+        // the client can render the source's art crop as a chip. The emblem has
+        // no art of its own (CR 114.5), so this provenance is the only handle
+        // the display layer has on "where it came from".
+        use crate::types::card::PrintedCardRef;
+        let mut state = GameState::new_two_player(42);
+
+        // A planeswalker-style source on the battlefield with a printed ref.
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Jace, the Mind Sculptor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().printed_ref = Some(PrintedCardRef {
+            oracle_id: "jace-oracle".to_string(),
+            face_name: "Jace, the Mind Sculptor".to_string(),
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let emblem = state.objects.get(&state.command_zone[0]).unwrap();
+        let provenance = emblem
+            .emblem_source
+            .as_ref()
+            .expect("emblem records source provenance");
+        assert_eq!(provenance.name, "Jace, the Mind Sculptor");
+        assert_eq!(
+            provenance.printed_ref.as_ref().unwrap().oracle_id,
+            "jace-oracle"
+        );
     }
 
     #[test]
@@ -186,7 +247,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -277,5 +338,87 @@ mod tests {
         let count =
             crate::game::functioning_abilities::active_trigger_definitions(&state, emblem).count();
         assert_eq!(count, 1, "command-zone emblem trigger must be active");
+    }
+
+    /// CR 114.4 + CR 601.2b (issue #1355): Tamiyo, Field Researcher's emblem
+    /// installs a functioning `CastFromHandFree` static in the command zone.
+    #[test]
+    fn create_tamiyo_emblem_grants_hand_free_cast_permission() {
+        use crate::game::casting::{can_cast_object_now, effective_spell_cost};
+        use crate::parser::oracle_static::parse_static_line;
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        use std::sync::Arc;
+
+        let static_def = parse_static_line(
+            "You may cast spells from your hand without paying their mana costs.",
+        )
+        .expect("Tamiyo emblem static should parse");
+        assert!(
+            matches!(
+                static_def.mode,
+                StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                }
+            ),
+            "expected CastFromHandFree static, got {:?}",
+            static_def.mode
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![static_def],
+                triggers: Vec::new(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let emblem_id = state.command_zone[0];
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Counterspell".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), spell_id)
+            .expect("hand spell cost should compute");
+        assert!(
+            matches!(cost, ManaCost::NoCost),
+            "Tamiyo emblem should zero the hand spell's mana cost, got {cost:?}"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell_id));
+        assert_eq!(
+            crate::game::casting::hand_cast_free_permission_source(
+                &state,
+                PlayerId(0),
+                state.objects.get(&spell_id).unwrap(),
+            ),
+            Some((emblem_id, CastFrequency::Unlimited)),
+            "permission source should be the created emblem"
+        );
     }
 }

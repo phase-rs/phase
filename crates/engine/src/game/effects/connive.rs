@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
@@ -7,7 +8,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::zones::Zone;
 
 /// CR 701.50a: Connive — draw N cards, then discard N cards. For each nonland
@@ -21,8 +22,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 701.50e + CR 107.3i: Dynamic connive counts (e.g. creatures that died
+    // this turn) resolve at ability resolution via the shared quantity pipeline.
     let count = match &ability.effect {
-        Effect::Connive { count, .. } => *count,
+        Effect::Connive { count, .. } => {
+            resolve_quantity_with_targets(state, count, ability).max(0) as u32
+        }
         _ => 1,
     };
 
@@ -168,7 +173,9 @@ pub(crate) fn discard_all_and_count_nonlands(
     for &card_id in cards {
         let is_nonland = is_nonland_card(state, card_id);
         if let super::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-            super::discard::discard_as_cost(state, card_id, player, events)
+            super::discard::discard_caused_by_effect_with_source(
+                state, card_id, player, None, events,
+            )
         {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
@@ -211,20 +218,25 @@ pub(crate) fn add_connive_counters(
     }
 
     let proposed = ProposedEvent::AddCounter {
-        actor: state
-            .objects
-            .get(&conniver_id)
-            .map(|obj| obj.controller)
-            .unwrap_or(crate::types::player::PlayerId(0)),
-        object_id: conniver_id,
-        counter_type: CounterType::Plus1Plus1,
+        placement: CounterPlacement::Object {
+            actor: state
+                .objects
+                .get(&conniver_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(crate::types::player::PlayerId(0)),
+            object_id: conniver_id,
+            counter_type: CounterType::Plus1Plus1,
+        },
         count,
         applied: HashSet::new(),
     };
     if let ReplacementResult::Execute(ProposedEvent::AddCounter {
-        actor,
-        object_id,
-        counter_type,
+        placement:
+            CounterPlacement::Object {
+                actor,
+                object_id,
+                counter_type,
+            },
         count: final_count,
         ..
     }) = replacement::replace_event(state, proposed, events)
@@ -244,7 +256,7 @@ pub(crate) fn add_connive_counters(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -253,7 +265,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Connive {
                 target: TargetFilter::Any,
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
             },
             vec![TargetRef::Object(target)],
             source,

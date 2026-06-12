@@ -1596,7 +1596,31 @@ fn replace_all_words(haystack: &str, needle: &str, replacement: &str) -> String 
     result
 }
 
-// CR 201.4b: A card's Oracle text uses its name to refer to itself.
+/// Zone nouns that appear after a possessive in Oracle text ("your library", etc.).
+const POSSESSIVE_ZONE_NOUNS: &[&str] = &[
+    "library",
+    "hand",
+    "graveyard",
+    "battlefield",
+    "exile",
+    "stack",
+];
+
+/// Returns true when case-insensitively replacing `short_name` would rewrite a
+/// possessive zone phrase ("your library") rather than a card self-reference.
+fn of_short_name_collides_with_possessive_zone_phrase(text: &str, short_name: &str) -> bool {
+    let lower_short = short_name.to_ascii_lowercase();
+    if !POSSESSIVE_ZONE_NOUNS.contains(&lower_short.as_str()) {
+        return false;
+    }
+    let lower_text = text.to_ascii_lowercase();
+    POSSESSIVES.iter().any(|possessive| {
+        let phrase = format!("{possessive} {lower_short}");
+        nom_primitives::scan_contains(&lower_text, &phrase)
+    })
+}
+
+// CR 201.5: A card's Oracle text uses its name to refer to itself.
 /// Normalize all self-references in Oracle text to `~`.
 ///
 /// Handles full card name, Alchemy A- prefix, comma-based legendary short names
@@ -1715,7 +1739,11 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                 ]
                 .iter()
                 .any(|anchor| nom_primitives::scan_contains(&result.to_ascii_lowercase(), anchor));
-            if short_name.len() >= 3 && !is_common_english_word && !subtype_in_type_change_context {
+            if short_name.len() >= 3
+                && !is_common_english_word
+                && !subtype_in_type_change_context
+                && !of_short_name_collides_with_possessive_zone_phrase(&result, short_name)
+            {
                 result = replace_all_words(&result, short_name, "~");
             }
         }
@@ -2005,6 +2033,19 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Rosie Cotton enters", "Rosie Cotton of South Lane"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_preserves_possessive_zone_library() {
+        // CR 201.5: "Library of Leng" derives short name "Library", which must
+        // not rewrite the zone phrase "your library" on this card's replacement line.
+        assert_eq!(
+            normalize_card_name_refs(
+                "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
+                "Library of Leng"
+            ),
+            "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard."
         );
     }
 

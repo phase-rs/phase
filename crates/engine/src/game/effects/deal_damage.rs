@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::ability_utils::append_to_sub_chain;
+use crate::game::effects::player_counter;
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
 use crate::game::keywords;
@@ -18,8 +19,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::player::PlayerId;
+use crate::types::keywords::KeywordKind;
+use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
@@ -47,6 +48,24 @@ fn player_context_target(
             .map(TargetRef::Player);
     }
 
+    // CR 608.2c + CR 109.4: A "that player" / "its controller" anaphor bound to a
+    // chosen parent target (e.g. Star Athlete's "choose up to one target nonland
+    // permanent. Its controller may sacrifice it. If they don't, this creature
+    // deals 5 damage to that player.") has no referent when no target was chosen
+    // — "up to one target" with zero chosen. The damage must then do nothing.
+    // Resolve strictly from the chosen parent target so an absent referent yields
+    // `None` (no damage), rather than routing through `resolve_player_for_context_ref`
+    // whose event-context fallback would mis-deal the damage to the trigger
+    // source's own controller. The normal (target-chosen) path is unchanged:
+    // `resolve_player_for_context_ref` already resolves this case via
+    // `parent_target_controller` first. `ParentTargetOwner` is intentionally NOT
+    // routed here — it relies on its AttachedTo fallback for Aura phase triggers
+    // (Enslave's "enchanted creature deals 1 damage to its owner").
+    if matches!(target_filter, TargetFilter::ParentTargetController) {
+        return crate::game::ability_utils::parent_target_controller(ability, state)
+            .map(TargetRef::Player);
+    }
+
     if matches!(
         target_filter,
         TargetFilter::Controller
@@ -56,7 +75,6 @@ fn player_context_target(
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
-            | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
     ) {
@@ -103,14 +121,11 @@ impl DamageContext {
                 source_id,
                 KeywordKind::Infect,
             ),
-            combat_damage_poison: obj
-                .keywords
-                .iter()
-                .filter_map(|keyword| match keyword {
-                    Keyword::Toxic(amount) => Some(*amount),
-                    _ => None,
-                })
-                .sum(),
+            // CR 702.164b: total toxic value = sum of N over ALL effective toxic
+            // instances (printed + granted, on/off battlefield), matching the
+            // sibling effective-keyword flags above rather than reading printed
+            // `obj.keywords` directly.
+            combat_damage_poison: keywords::effective_total_toxic_value(state, source_id),
         })
     }
 
@@ -329,10 +344,60 @@ pub(crate) fn apply_damage_after_replacement(
         return DamageResult::Applied(0);
     };
 
+    // CR 120.10: Excess damage to a planeswalker/battle is measured against its
+    // loyalty/defense *before* this damage was dealt. Damage application removes
+    // those counters (clamping at 0), which destroys the pre-hit value, so capture
+    // it here before mutating. (Creatures mark — not clamp — damage, so their
+    // excess is reconstructed from `damage_marked` below.)
+    let (is_creature, is_planeswalker, is_battle, loyalty_before, defense_before) = match t {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .map(|obj| {
+                (
+                    obj.card_types.core_types.contains(&CoreType::Creature),
+                    obj.card_types.core_types.contains(&CoreType::Planeswalker),
+                    obj.card_types.core_types.contains(&CoreType::Battle),
+                    obj.loyalty,
+                    obj.defense,
+                )
+            })
+            .unwrap_or((false, false, false, None, None)),
+        TargetRef::Player(_) => (false, false, false, None, None),
+    };
+
     match t {
         TargetRef::Object(obj_id) => {
-            if ctx.has_wither || ctx.has_infect {
-                // CR 702.80 + CR 702.90: Wither/infect deals damage as -1/-1 counters.
+            if is_planeswalker {
+                // CR 120.3c + CR 306.8: Damage to a planeswalker removes that
+                // many loyalty counters. Routed through the single-authority
+                // resolver so replacement effects apply and obj.loyalty stays
+                // in sync with counters[Loyalty] (CR 306.5b).
+                super::counters::remove_counter_with_replacement(
+                    state,
+                    *obj_id,
+                    CounterType::Loyalty,
+                    actual_amount,
+                    events,
+                );
+            }
+
+            if is_battle {
+                // CR 120.3h + CR 310.6: Damage to a battle removes that many
+                // defense counters. Routed through the single-authority resolver
+                // so obj.defense stays in sync with counters[Defense] (CR 310.4c).
+                super::counters::remove_counter_with_replacement(
+                    state,
+                    *obj_id,
+                    CounterType::Defense,
+                    actual_amount,
+                    events,
+                );
+            }
+
+            if is_creature && (ctx.has_wither || ctx.has_infect) {
+                // CR 120.3d + CR 702.80 + CR 702.90: Wither/infect damage to a
+                // creature is dealt as -1/-1 counters.
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
                     let entry = target_obj
                         .counters
@@ -344,61 +409,14 @@ pub(crate) fn apply_damage_after_replacement(
                     }
                 }
                 crate::game::layers::mark_layers_full(state);
-            } else {
-                // Classify the target before mutating so the post-classification
-                // helper can take a fresh `&mut GameState` borrow.
-                enum DamageKind {
-                    Planeswalker,
-                    Battle,
-                    Creature,
-                }
-                let kind = state.objects.get(obj_id).map(|obj| {
-                    if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                        DamageKind::Planeswalker
-                    } else if obj.card_types.core_types.contains(&CoreType::Battle) {
-                        DamageKind::Battle
-                    } else {
-                        DamageKind::Creature
+            } else if is_creature {
+                if let Some(target_obj) = state.objects.get_mut(obj_id) {
+                    // CR 120.3e: Damage to a creature marks damage.
+                    target_obj.damage_marked += actual_amount;
+                    // CR 702.2b: Track deathtouch for SBA lethal-damage check.
+                    if ctx.has_deathtouch {
+                        target_obj.dealt_deathtouch_damage = true;
                     }
-                });
-                match kind {
-                    Some(DamageKind::Planeswalker) => {
-                        // CR 120.3c + CR 306.8: Damage to a planeswalker removes that
-                        // many loyalty counters. Routed through the single-authority
-                        // resolver so replacement effects apply and obj.loyalty
-                        // stays in sync with counters[Loyalty] (CR 306.5b).
-                        super::counters::remove_counter_with_replacement(
-                            state,
-                            *obj_id,
-                            CounterType::Loyalty,
-                            actual_amount,
-                            events,
-                        );
-                    }
-                    Some(DamageKind::Battle) => {
-                        // CR 120.3h + CR 310.6: Damage to a battle removes that many
-                        // defense counters. Routed through the single-authority
-                        // resolver so obj.defense stays in sync with counters[Defense]
-                        // (CR 310.4c).
-                        super::counters::remove_counter_with_replacement(
-                            state,
-                            *obj_id,
-                            CounterType::Defense,
-                            actual_amount,
-                            events,
-                        );
-                    }
-                    Some(DamageKind::Creature) => {
-                        if let Some(target_obj) = state.objects.get_mut(obj_id) {
-                            // CR 120.3e: Damage to a creature marks damage.
-                            target_obj.damage_marked += actual_amount;
-                            // CR 702.2b: Track deathtouch for SBA lethal-damage check.
-                            if ctx.has_deathtouch {
-                                target_obj.dealt_deathtouch_damage = true;
-                            }
-                        }
-                    }
-                    None => {}
                 }
             }
         }
@@ -416,9 +434,19 @@ pub(crate) fn apply_damage_after_replacement(
                 return DamageResult::Applied(0);
             }
             if ctx.has_infect {
-                // CR 702.90: Infect deals damage to players as poison counters.
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.poison_counters += actual_amount;
+                // CR 120.3b + CR 614.17: Infect deals damage to players as poison
+                // counters. Route through the player-counter replacement pipeline
+                // so "players can't get poison counters" / poison-doublers apply;
+                // the actor is the source's controller.
+                if !player_counter::add_player_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *player_id,
+                    PlayerCounterKind::Poison,
+                    actual_amount,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
                 }
             } else {
                 // CR 120.3a: Damage to a player causes life loss.
@@ -434,27 +462,40 @@ pub(crate) fn apply_damage_after_replacement(
                 && ctx.source_is_creature
                 && ctx.combat_damage_poison > 0
             {
-                // CR 702.164c: Toxic adds poison counters when a creature
-                // deals combat damage to a player.
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.poison_counters += ctx.combat_damage_poison;
+                // CR 120.3g + CR 702.164c + CR 614.17: Toxic adds poison counters
+                // when a creature deals combat damage to a player. Route through
+                // the player-counter replacement pipeline (prevention/doublers);
+                // the actor is the source's controller.
+                if !player_counter::add_player_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *player_id,
+                    PlayerCounterKind::Poison,
+                    ctx.combat_damage_poison,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
                 }
             }
         }
     }
 
-    // CR 120.10: Compute excess damage beyond lethal for creatures/planeswalkers.
+    // CR 120.10: Compute excess damage beyond lethal/loyalty/defense. If a
+    // permanent has multiple card types among creature, planeswalker, and battle,
+    // its excess damage is the greatest calculated amount among those types.
     let excess = match &t {
         TargetRef::Object(obj_id) => state
             .objects
             .get(obj_id)
-            .and_then(|obj| {
+            .map(|obj| {
+                let mut excess = 0;
+
                 if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    obj.toughness.map(|toughness| {
-                        // damage_marked already includes actual_amount
+                    if let Some(toughness) = obj.toughness {
+                        // damage_marked already includes actual_amount.
                         let damage_before = obj.damage_marked.saturating_sub(actual_amount);
                         let lethal = if ctx.has_deathtouch {
-                            // CR 702.2c: Any nonzero damage from deathtouch = lethal
+                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
                             if damage_before == 0 {
                                 1u32
                             } else {
@@ -463,21 +504,24 @@ pub(crate) fn apply_damage_after_replacement(
                         } else {
                             (toughness as u32).saturating_sub(damage_before)
                         };
-                        actual_amount.saturating_sub(lethal)
-                    })
-                } else if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    // CR 120.10: Excess for planeswalkers = damage beyond pre-hit loyalty.
-                    // Loyalty was already decremented, so reconstruct pre-hit value.
-                    let pre_loyalty = obj.loyalty.unwrap_or(0) + actual_amount;
-                    Some(actual_amount.saturating_sub(pre_loyalty))
-                } else if obj.card_types.core_types.contains(&CoreType::Battle) {
-                    // CR 120.10: Excess for battles = damage beyond pre-hit defense.
-                    // Defense was already decremented, so reconstruct pre-hit value.
-                    let pre_defense = obj.defense.unwrap_or(0) + actual_amount;
-                    Some(actual_amount.saturating_sub(pre_defense))
-                } else {
-                    Some(0)
+                        excess = excess.max(actual_amount.saturating_sub(lethal));
+                    }
                 }
+
+                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+                    // CR 120.10: Excess for a planeswalker = damage beyond the
+                    // loyalty it had before the damage was dealt (captured above,
+                    // since the loyalty counters have since been removed).
+                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Battle) {
+                    // CR 120.10: Excess for a battle = damage beyond the defense it
+                    // had before the damage was dealt (captured above).
+                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
+                }
+
+                excess
             })
             .unwrap_or(0),
         TargetRef::Player(_) => 0,
@@ -914,6 +958,9 @@ fn collect_matching_players(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != source_controller && p.life_gained_this_turn > 0
                     }
+                    // CR 104.5 / CR 800.4: Players who lost have left the game;
+                    // this filter is quantity-only and has no live damage recipient.
+                    PlayerFilter::HasLostTheGame => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
                     // who was dealt combat damage this turn, optionally
                     // restricted to a matching source.
@@ -1100,6 +1147,9 @@ pub fn resolve_each_player(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != ability.controller && p.life_gained_this_turn > 0
                     }
+                    // CR 104.5 / CR 800.4: Players who lost have left the game;
+                    // this filter is quantity-only and has no live damage recipient.
+                    PlayerFilter::HasLostTheGame => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
                     // who was dealt combat damage this turn, optionally
                     // restricted to a matching source.
@@ -1366,6 +1416,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability(3, vec![TargetRef::Object(obj_id)]);
         let mut events = Vec::new();
 
@@ -2152,6 +2209,108 @@ mod tests {
         );
     }
 
+    /// Issue #1670 (zero-target follow-up) — Star Athlete: "Whenever this
+    /// creature attacks, choose up to one target nonland permanent. Its
+    /// controller may sacrifice it. If they don't, this creature deals 5 damage
+    /// to that player." When zero targets are chosen ("up to one target"), the
+    /// "that player" anaphor has no referent, so the damage must do nothing
+    /// (CR 608.2c). It must NOT fall back through event-context to the attacking
+    /// creature's own controller (the pre-fix behavior this guards against).
+    #[test]
+    fn parent_target_controller_damage_no_ops_when_no_target_chosen() {
+        let mut state = GameState::new_two_player(42);
+        let star_athlete = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Star Athlete".to_string(),
+            Zone::Battlefield,
+        );
+        // The attacks trigger is live: its source is Star Athlete, controlled by
+        // PlayerId(0). Resolving ParentTargetController through event-context
+        // would therefore (wrongly) pick PlayerId(0) as "that player".
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![star_athlete],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        // Zero targets chosen for "up to one target nonland permanent".
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![],
+            star_athlete,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 20,
+            "no chosen target → no referent for 'that player'; the attacker's \
+             controller must not take the damage"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "no chosen target → the damage does nothing for any player"
+        );
+    }
+
+    /// Issue #1670 — companion positive case: when a nonland permanent IS chosen,
+    /// "that player" binds to that permanent's controller (CR 109.4) and the 5
+    /// damage is dealt to that player, not to the attacker's controller. Proves
+    /// the no-op fix above leaves the normal (target-chosen) path intact.
+    #[test]
+    fn parent_target_controller_damage_hits_chosen_permanents_controller() {
+        let mut state = GameState::new_two_player(42);
+        let star_athlete = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Star Athlete".to_string(),
+            Zone::Battlefield,
+        );
+        // The chosen "target nonland permanent" is controlled by PlayerId(1).
+        let chosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Chosen Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![star_athlete],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(chosen)],
+            star_athlete,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[1].life, 15,
+            "'that player' is the chosen permanent's controller (PlayerId(1)), who takes 5"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "the attacker's controller must not take the damage"
+        );
+    }
+
     #[test]
     fn lifelink_spell_damage_to_creature() {
         let mut state = GameState::new_two_player(42);
@@ -2164,6 +2323,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability_with_source(3, vec![TargetRef::Object(target_id)], source_id);
         let mut events = Vec::new();
 
@@ -2196,7 +2362,7 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: spell_id },
             vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Lifelink,
+                keyword: crate::types::keywords::Keyword::Lifelink,
             }],
             None,
         );
@@ -2224,6 +2390,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability_with_source(1, vec![TargetRef::Object(target_id)], source_id);
         let mut events = Vec::new();
 
@@ -2446,6 +2619,122 @@ mod tests {
         }
     }
 
+    /// CR 120.10: excess damage to a planeswalker = damage beyond the loyalty it
+    /// had before the hit. 6 damage to a 3-loyalty planeswalker → 3 excess. The
+    /// loyalty counter is removed (clamped at 0) before excess is computed, so the
+    /// pre-hit loyalty must be captured beforehand; reconstructing it as
+    /// `post_loyalty + damage` yields 0 excess for any overkill.
+    #[test]
+    fn excess_damage_to_planeswalker() {
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(3);
+            obj.counters.insert(CounterType::Loyalty, 3);
+        }
+        let ability = make_ability(6, vec![TargetRef::Object(pw_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let dmg_event = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .unwrap();
+        if let GameEvent::DamageDealt { excess, .. } = dmg_event {
+            assert_eq!(*excess, 3, "6 damage - 3 loyalty = 3 excess");
+        } else {
+            panic!("expected DamageDealt event");
+        }
+    }
+
+    /// CR 120.10: excess damage to a battle = damage beyond its defense before the
+    /// hit. 5 damage to a 2-defense battle → 3 excess.
+    #[test]
+    fn excess_damage_to_battle() {
+        let mut state = GameState::new_two_player(42);
+        let battle_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Siege".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battle_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.defense = Some(2);
+            obj.base_defense = Some(2);
+            obj.counters.insert(CounterType::Defense, 2);
+        }
+        let ability = make_ability(5, vec![TargetRef::Object(battle_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let dmg_event = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .unwrap();
+        if let GameEvent::DamageDealt { excess, .. } = dmg_event {
+            assert_eq!(*excess, 3, "5 damage - 2 defense = 3 excess");
+        } else {
+            panic!("expected DamageDealt event");
+        }
+    }
+
+    /// CR 120.3 + CR 120.10: a permanent with multiple listed card types gets
+    /// each applicable damage result, and its excess damage is the greatest
+    /// amount among the creature/planeswalker/battle calculations.
+    #[test]
+    fn damage_to_creature_planeswalker_applies_both_results_and_uses_greatest_excess() {
+        let mut state = GameState::new_two_player(42);
+        let permanent_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Gideon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&permanent_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.toughness = Some(5);
+            obj.loyalty = Some(3);
+            obj.counters.insert(CounterType::Loyalty, 3);
+        }
+        let ability = make_ability(6, vec![TargetRef::Object(permanent_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&permanent_id).unwrap();
+        assert_eq!(obj.damage_marked, 6, "creature damage must be marked");
+        assert_eq!(obj.loyalty, Some(0), "planeswalker loyalty must be removed");
+
+        let dmg_event = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .unwrap();
+        if let GameEvent::DamageDealt { excess, .. } = dmg_event {
+            assert_eq!(
+                *excess, 3,
+                "max(creature excess 1, planeswalker excess 3) = 3"
+            );
+        } else {
+            panic!("expected DamageDealt event");
+        }
+    }
+
     #[test]
     fn wither_spell_damage_applies_counters() {
         let mut state = GameState::new_two_player(42);
@@ -2458,6 +2747,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability_with_source(2, vec![TargetRef::Object(target_id)], source_id);
         let mut events = Vec::new();
 

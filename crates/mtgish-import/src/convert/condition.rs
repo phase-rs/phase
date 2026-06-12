@@ -9,8 +9,8 @@
 use engine::types::ability::{
     AbilityCondition, AdditionalCostPaymentSource, AggregateFunction, CardTypeSetSource,
     Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TypeFilter,
-    TypedFilter, ZoneRef,
+    QuantityExpr, QuantityRef, RenownSubject, StaticCondition, TargetFilter, TriggerCondition,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterMatch;
@@ -323,6 +323,11 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
         Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
             left_battlefield_trigger_condition(filter)?
         }
+        // CR 508.1a + CR 603.4: "if no [type] attacked this turn" — global
+        // absence of attackers (Charging Cinderhorn, Keldon Twilight).
+        Condition::NoPermanentsPassFilter(type_filter, prop_filter) => {
+            no_permanents_pass_filter_trigger(type_filter, prop_filter)?
+        }
 
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -537,6 +542,34 @@ fn left_battlefield_static_condition(filter: &Permanents) -> ConvResult<StaticCo
         lhs: left_battlefield_lhs(filter)?,
         comparator: Comparator::GE,
         rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
+/// CR 508.1a + CR 603.4: "if no [type] [passes property filter]" where the
+/// property is attack-history (`AttackedThisTurn`). Maps onto a global
+/// `AttackedThisTurn` quantity gate (Charging Cinderhorn, Keldon Twilight).
+fn no_permanents_pass_filter_trigger(
+    type_filter: &Permanents,
+    prop_filter: &Permanents,
+) -> ConvResult<TriggerCondition> {
+    if !matches!(prop_filter, Permanents::AttackedThisTurn) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "TriggerCondition",
+            needed_variant: format!(
+                "NoPermanentsPassFilter with property {prop_filter:?} (only AttackedThisTurn supported)"
+            ),
+        });
+    }
+    let filter = convert_permanents(type_filter)?;
+    Ok(TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::All,
+                filter: Some(filter),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
     })
 }
 
@@ -855,7 +888,9 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
             min_count: 2,
         },
         // CR 702.112a: "if ~ is renowned" — source-bound renowned check.
-        Permanents::IsRenowned => TriggerCondition::SourceIsRenowned,
+        Permanents::IsRenowned => TriggerCondition::IsRenowned {
+            subject: RenownSubject::Source,
+        },
         // CR 208.3 + CR 603.4: "if its mana value is X" — comparison against the
         // source's current mana value via QuantityComparison.
         Permanents::ManaValueIs(cmp) => {
@@ -1029,6 +1064,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Neighbor { .. } => "Neighbor",
         TargetFilter::AttachedTo => "AttachedTo",
         TargetFilter::LastCreated => "LastCreated",
+        TargetFilter::LastRevealed => "LastRevealed",
         TargetFilter::CostPaidObject => "CostPaidObject",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
@@ -1209,6 +1245,40 @@ fn permanent_filter_to_static(perm: &Permanent, pred: &Permanents) -> ConvResult
     }
 }
 
+/// CR 303.4 + CR 604.1 + CR 613.1g: Count Auras (or other enchanting
+/// permanents) attached to the source object for static P/T gates such as
+/// Timber Paladin's tiers.
+fn enchanted_by_count_static_condition(
+    cmp: &Comparison,
+    enchanting: &Permanents,
+) -> ConvResult<StaticCondition> {
+    let (comparator, rhs) = comparison_to_pair(cmp)?;
+    let enchanting_filter = convert_permanents(enchanting)?;
+    let count_filter = match enchanting_filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::AttachedToSource);
+            TargetFilter::Typed(tf)
+        }
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::AttachedToSource]),
+                ),
+            ],
+        },
+    };
+    Ok(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: count_filter,
+            },
+        },
+        comparator,
+        rhs,
+    })
+}
+
 /// Map a `Permanents` predicate (the second arg of `PermanentPassesFilter`)
 /// to a `StaticCondition` evaluated against the source object.
 fn source_permanent_filter_to_static(p: &Permanents) -> ConvResult<StaticCondition> {
@@ -1243,6 +1313,11 @@ fn source_permanent_filter_to_static(p: &Permanents) -> ConvResult<StaticConditi
         | Permanents::IsNonCardtype(_) => {
             let filter = crate::convert::filter::convert(p)?;
             StaticCondition::SourceMatchesFilter { filter }
+        }
+        // CR 303.4 + CR 604.1 + CR 613.1g: "~ is enchanted by exactly N
+        // Auras" / "N or more Auras" (Timber Paladin tiered static P/T gates).
+        Permanents::IsEnchantedByANumberOfEnchantingPermanents(cmp, enchanting) => {
+            enchanted_by_count_static_condition(cmp, enchanting)?
         }
         // Predicates we haven't mapped yet — surface as a gap so the report
         // pinpoints what to extend next.
@@ -1635,6 +1710,7 @@ pub fn convert_player_predicate_trigger(
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::Controller,
                     },
                 },
@@ -1924,6 +2000,7 @@ pub fn convert_player_predicate_ability(
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::Controller,
                     },
                 },
@@ -1966,7 +2043,10 @@ pub fn convert_player_predicate_ability(
             require_you_player(player, "Players::AttackedThisTurn (ability)")?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn,
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2250,6 +2330,7 @@ pub fn convert_player_predicate_static(
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::Controller,
                     },
                 },
@@ -2312,7 +2393,10 @@ pub fn convert_player_predicate_static(
             require_you_player(player, "Players::AttackedThisTurn (static)")?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn,
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -3271,12 +3355,48 @@ mod tests {
                         if properties.contains(&FilterProp::HasAttachment {
                             kind: engine::types::ability::AttachmentKind::Aura,
                             controller: None,
-                            exclude_source: false,
+                            exclude_source: engine::types::ability::SourceExclusion::Include,
                         })
                 ));
             }
             other => panic!("expected SourceMatchesFilter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enchanted_by_aura_count_lowers_to_quantity_comparison() {
+        let condition = Condition::PermanentPassesFilter(
+            Box::new(Permanent::ThisPermanent),
+            Box::new(Permanents::IsEnchantedByANumberOfEnchantingPermanents(
+                Box::new(Comparison::EqualTo(Box::new(GameNumber::Integer(2)))),
+                Box::new(Permanents::IsEnchantmentType(
+                    crate::schema::types::EnchantmentType::Aura,
+                )),
+            )),
+        );
+
+        let converted = convert_static(&condition).unwrap();
+
+        let StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = converted
+        else {
+            panic!("expected QuantityComparison, got {converted:?}");
+        };
+        assert_eq!(comparator, Comparator::EQ);
+        assert_eq!(rhs, QuantityExpr::Fixed { value: 2 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected ObjectCount lhs, got {lhs:?}");
+        };
+        let TargetFilter::Typed(TypedFilter { properties, .. }) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(properties.contains(&FilterProp::AttachedToSource));
     }
 
     #[test]

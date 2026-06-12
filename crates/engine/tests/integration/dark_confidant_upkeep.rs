@@ -42,7 +42,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -184,6 +184,8 @@ fn conclave_mentor_dies_trigger_gains_life_equal_to_its_power() {
             object_id: bolt,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Lightning Bolt");
     if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {

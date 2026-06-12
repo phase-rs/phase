@@ -10,6 +10,7 @@ use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -164,6 +165,8 @@ fn cast_zero_cost_bear_with_uncivil_unrest() -> (GameRunner, ObjectId) {
             object_id: bear,
             card_id: bear_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -256,6 +259,8 @@ fn cast_zero_cost_dog_with_tesak_unleash_grant() -> (GameRunner, ObjectId, Objec
             object_id: dog,
             card_id: dog_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 

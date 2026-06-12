@@ -16,7 +16,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -153,6 +153,8 @@ fn adventure_cast_stomp_from_hand() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -192,6 +194,8 @@ fn adventure_exile_on_resolve() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -257,6 +261,8 @@ fn adventure_countered_to_graveyard() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -338,6 +344,8 @@ fn adventure_cast_creature_from_exile() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast from exile should succeed");
 
@@ -398,6 +406,8 @@ fn bonecrusher_becomes_target_trigger() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast bolt should succeed");
 
@@ -475,6 +485,8 @@ fn stomp_damage_prevention_disabled() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -533,6 +545,8 @@ fn bonecrusher_full_flow() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -582,6 +596,8 @@ fn bonecrusher_full_flow() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast creature from exile should succeed");
 

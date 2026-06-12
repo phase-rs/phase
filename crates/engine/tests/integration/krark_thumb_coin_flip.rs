@@ -21,6 +21,7 @@ use engine::parser::parse_oracle_text;
 use engine::types::ability::{Effect, QuantityExpr, ReplacementPlayerScope};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -167,6 +168,8 @@ fn cast_and_resolve(
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 casts the flip spell");
 

@@ -81,7 +81,11 @@ impl CardDatabase {
     /// then alphabetically.
     pub fn search(&self, query: &CardSearchQuery) -> CardSearchResults {
         let needle = query.text.trim().to_lowercase();
-        let words: Vec<&str> = needle.split_whitespace().collect();
+        // Drop the bare "//" combined-name separator: it is punctuation, never a
+        // searchable term. Searching "Commit // Memory" tokenizes to
+        // ["commit", "//", "memory"]; the "//" would otherwise fail every
+        // face's haystack (split/DFC/Adventure faces are indexed individually).
+        let words: Vec<&str> = needle.split_whitespace().filter(|w| *w != "//").collect();
         let requested_colors: Vec<ManaColor> = query
             .colors
             .iter()
@@ -101,7 +105,7 @@ impl CardDatabase {
         for (key, face) in self.face_index.iter() {
             let name_lower = face.name.to_lowercase();
 
-            if !words.is_empty() && !text_matches(&name_lower, face, &words) {
+            if !words.is_empty() && !self.text_matches(&name_lower, face, &words) {
                 continue;
             }
             if !requested_colors.is_empty() {
@@ -197,17 +201,34 @@ impl CardDatabase {
             legalities,
         }
     }
-}
 
-/// Word-AND match across the card's name, oracle text, and type line — the
-/// fields Scryfall's default full-text search covers.
-fn text_matches(name_lower: &str, face: &CardFace, words: &[&str]) -> bool {
-    let mut haystack = name_lower.to_string();
-    if let Some(text) = &face.oracle_text {
-        haystack.push(' ');
-        haystack.push_str(&text.to_lowercase());
+    /// Word-AND match across the card's name, its sibling faces' names, and its
+    /// oracle text. Sibling names are folded in so a combined `A // B` query
+    /// matches each individual face: split/Aftermath/Fuse cards plus DFC,
+    /// Adventure, and MDFC are all indexed per-face, so without the sibling
+    /// names no single face's haystack contains every word of its combined
+    /// name. Siblings are enumerated layout-agnostically via
+    /// `scryfall_oracle_id` → `oracle_id_index` → `face_index`.
+    fn text_matches(&self, name_lower: &str, face: &CardFace, words: &[&str]) -> bool {
+        let mut haystack = name_lower.to_string();
+        if let Some(oid) = face.scryfall_oracle_id.as_deref() {
+            if let Some(keys) = self.oracle_id_index.get(oid) {
+                for key in keys {
+                    if let Some(sibling) = self.face_index.get(key) {
+                        if !sibling.name.eq_ignore_ascii_case(&face.name) {
+                            haystack.push(' ');
+                            haystack.push_str(&sibling.name.to_lowercase());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(text) = &face.oracle_text {
+            haystack.push(' ');
+            haystack.push_str(&text.to_lowercase());
+        }
+        words.iter().all(|w| haystack.contains(w))
     }
-    words.iter().all(|w| haystack.contains(w))
 }
 
 /// A card's colors per CR 105.2: the colors of its mana-cost symbols, plus any
@@ -532,6 +553,95 @@ mod tests {
         assert_eq!(
             bolt.legalities.get("modern").map(String::as_str),
             Some("legal")
+        );
+    }
+
+    /// A two-faced card (split/Aftermath/DFC) is indexed per-face, so searching
+    /// its combined `A // B` name must still match (and dedupe to one result)
+    /// via the sibling-name fold. Single-face searches still work, and the fold
+    /// does not produce cross-card false positives.
+    fn split_db() -> CardDatabase {
+        db_from(&[
+            (
+                "commit",
+                card(
+                    "Commit",
+                    "o-commit-memory",
+                    &["Blue"],
+                    3,
+                    "Instant",
+                    &["Blue"],
+                    "Put target spell or permanent into its owner's library second from the top.",
+                    json!({}),
+                    &["AKH"],
+                ),
+            ),
+            (
+                "memory",
+                card(
+                    "Memory",
+                    "o-commit-memory",
+                    &["Blue"],
+                    4,
+                    "Sorcery",
+                    &["Blue"],
+                    "Each player shuffles their hand and graveyard into their library, then draws seven cards.",
+                    json!({}),
+                    &["AKH"],
+                ),
+            ),
+            (
+                "lightning bolt",
+                card(
+                    "Lightning Bolt",
+                    "o-bolt",
+                    &["Red"],
+                    0,
+                    "Instant",
+                    &["Red"],
+                    "Lightning Bolt deals 3 damage to any target.",
+                    json!({}),
+                    &["LEA"],
+                ),
+            ),
+        ])
+    }
+
+    #[test]
+    fn split_card_matches_combined_name_and_dedupes() {
+        let res = split_db().search(&CardSearchQuery {
+            text: "Commit // Memory".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            res.results.len(),
+            1,
+            "combined name matches via sibling fold and dedupes by oracle id"
+        );
+    }
+
+    #[test]
+    fn split_card_single_face_search_still_matches() {
+        for face in ["commit", "memory"] {
+            let res = split_db().search(&CardSearchQuery {
+                text: face.into(),
+                ..Default::default()
+            });
+            assert_eq!(res.results.len(), 1, "single-face search '{face}' matches");
+        }
+    }
+
+    #[test]
+    fn sibling_fold_does_not_cross_match_unrelated_cards() {
+        // "commit" (a split face) + "lightning" (a different card) share no
+        // single card, so the sibling fold must not produce a false positive.
+        let res = split_db().search(&CardSearchQuery {
+            text: "commit lightning".into(),
+            ..Default::default()
+        });
+        assert!(
+            res.results.is_empty(),
+            "sibling fold only joins same-oracle faces, not arbitrary cards"
         );
     }
 }

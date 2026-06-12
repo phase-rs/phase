@@ -13,7 +13,9 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::statics::{BlockExceptionKind, StaticMode};
+use crate::types::statics::{
+    BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
+};
 use crate::types::zones::Zone;
 
 /// CR 702.19: Which trample variant applies to combat damage assignment.
@@ -467,16 +469,41 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         }
     }
 
-    // CR 506.5 + CR 508.1a: A creature with "can't attack alone" may be declared
-    // as an attacker only if it isn't the sole attacker. Two such creatures may
-    // attack together (CR 506.5 Example), so this only triggers at exactly one.
+    // CR 506.5 + CR 508.1c: CombatAlone(Attack, NeedsCompanion) — creature must
+    // NOT be the sole attacker ("can't attack alone"). Two such creatures may
+    // attack together (CR 506.5 Example), so only reject when exactly one attacker.
     if attacker_ids.len() == 1 {
         let id = attacker_ids[0];
         if let Some(obj) = state.objects.get(&id) {
-            if super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantAttackAlone)
-            {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                sd.mode
+                    == (StaticMode::CombatAlone {
+                        action: CombatAloneAction::Attack,
+                        requirement: CombatAloneRequirement::NeedsCompanion,
+                    })
+            }) {
                 return Err(format!("{id:?} can't attack alone (CR 506.5)"));
+            }
+        }
+    }
+
+    // CR 506.5 + CR 508.1c: CombatAlone(Attack, MustBeSole) — creature must BE
+    // the sole attacker ("can only attack alone"). Reject any multi-attacker
+    // declaration that includes such a creature.
+    if attacker_ids.len() > 1 {
+        for &id in attacker_ids {
+            if let Some(obj) = state.objects.get(&id) {
+                if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                    sd.mode
+                        == (StaticMode::CombatAlone {
+                            action: CombatAloneAction::Attack,
+                            requirement: CombatAloneRequirement::MustBeSole,
+                        })
+                }) {
+                    return Err(format!(
+                        "{id:?} can only attack alone — may not attack alongside other creatures (CR 506.5 + CR 508.1c)"
+                    ));
+                }
             }
         }
     }
@@ -590,6 +617,37 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
     blocker_restriction_statics_for(state, blocker_id)
         .next()
         .is_some()
+}
+
+/// CR 509.1b: Static abilities on the blocker (or on another source whose
+/// `affected` filter matches the blocker) that restrict which attackers it
+/// may block — e.g. "This creature can block only creatures with flying."
+fn blocker_block_allowed_statics_for<'a>(
+    state: &'a GameState,
+    blocker_id: ObjectId,
+) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
+    super::functioning_abilities::game_functioning_statics(state)
+        .filter(|(_, def)| matches!(def.mode, StaticMode::BlockRestriction { .. }))
+        .filter(move |(src, def)| match def.affected.as_ref() {
+            None => src.id == blocker_id,
+            Some(filter) => matches_target_filter(
+                state,
+                blocker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ),
+        })
+        .filter(move |(src, def)| {
+            def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    blocker_id,
+                )
+            })
+        })
 }
 
 /// CR 509.1c: Static abilities that force blockers onto `attacker_id` — e.g.
@@ -917,6 +975,23 @@ pub fn validate_blockers_for_player(
             ));
         }
 
+        // CR 509.1b: blocker-side "can block only <filter>" restrictions.
+        for (src, sd) in blocker_block_allowed_statics_for(state, blocker_id) {
+            let StaticMode::BlockRestriction { filter } = &sd.mode else {
+                continue;
+            };
+            if !matches_target_filter(
+                state,
+                attacker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ) {
+                return Err(format!(
+                    "{blocker_id:?} can block only creatures matching the block restriction"
+                ));
+            }
+        }
+
         blockers_per_attacker
             .entry(attacker_id)
             .or_default()
@@ -924,15 +999,18 @@ pub fn validate_blockers_for_player(
         *attackers_per_blocker.entry(blocker_id).or_default() += 1;
     }
 
-    // CR 506.5 + CR 509.1b: A creature with "can't block alone" may be declared
-    // as a blocker only if it isn't the sole creature this player declares as a
-    // blocker this step. Two such creatures may block together.
+    // CR 506.5 + CR 509.1b: CombatAlone(Block, NeedsCompanion) — creature must
+    // NOT be the sole blocker ("can't block alone"). Two such creatures may block together.
     if attackers_per_blocker.len() == 1 {
         let (&blocker_id, _) = attackers_per_blocker.iter().next().expect("len checked");
         if let Some(obj) = state.objects.get(&blocker_id) {
-            if super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantBlockAlone)
-            {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                sd.mode
+                    == (StaticMode::CombatAlone {
+                        action: CombatAloneAction::Block,
+                        requirement: CombatAloneRequirement::NeedsCompanion,
+                    })
+            }) {
                 return Err(format!("{blocker_id:?} can't block alone (CR 506.5)"));
             }
         }
@@ -1319,6 +1397,7 @@ pub fn compute_combat_tax(
                         attack_target.as_ref(),
                         filter,
                         source_obj.controller,
+                        source_obj.owner,
                     ) {
                         continue;
                     }
@@ -1574,7 +1653,15 @@ fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-fn must_attack_players_for_creature(state: &GameState, obj: &GameObject) -> Vec<PlayerId> {
+/// CR 508.1b: The players this creature is required to attack directly via a
+/// `StaticMode::MustAttackPlayer` static ("attacks ~ each combat if able"
+/// directed at a specific player). Single authority for the requirement; the
+/// declare-attackers validator enforces it and the AI candidate generator reuses
+/// it to steer a forced-legal assignment toward the required player.
+pub(crate) fn must_attack_players_for_creature(
+    state: &GameState,
+    obj: &GameObject,
+) -> Vec<PlayerId> {
     super::functioning_abilities::active_static_definitions(state, obj)
         .filter_map(|sd| match sd.mode {
             StaticMode::MustAttackPlayer { player } => Some(player),
@@ -1655,6 +1742,87 @@ pub fn has_banding(state: &GameState, object_id: ObjectId) -> bool {
         .is_some_and(|obj| obj.has_keyword(&Keyword::Banding))
 }
 
+fn bands_with_other_qualities(state: &GameState, object_id: ObjectId) -> Vec<&str> {
+    state
+        .objects
+        .get(&object_id)
+        .map(|obj| {
+            obj.keywords
+                .iter()
+                .filter_map(|keyword| match keyword {
+                    Keyword::BandsWithOther(quality) => Some(quality.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn object_matches_bands_with_other_quality(
+    state: &GameState,
+    object_id: ObjectId,
+    quality: &str,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if quality.eq_ignore_ascii_case("legend") {
+        return obj.card_types.supertypes.contains(&Supertype::Legendary);
+    }
+    obj.card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype.eq_ignore_ascii_case(quality))
+}
+
+fn has_bands_with_other_quality(state: &GameState, object_id: ObjectId, quality: &str) -> bool {
+    bands_with_other_qualities(state, object_id)
+        .into_iter()
+        .any(|other| other.eq_ignore_ascii_case(quality))
+}
+
+/// CR 702.22j/k: Damage-assignment control also applies to "bands with other"
+/// when the relevant blocker/attacker set contains a qualifying keyword-holder
+/// and another creature of the same quality.
+pub fn has_bands_with_other_damage_assignment_group(
+    state: &GameState,
+    creatures: &[ObjectId],
+) -> bool {
+    creatures.iter().any(|&holder| {
+        bands_with_other_qualities(state, holder)
+            .into_iter()
+            .any(|quality| {
+                object_matches_bands_with_other_quality(state, holder, quality)
+                    && creatures.iter().any(|&other| {
+                        other != holder
+                            && object_matches_bands_with_other_quality(state, other, quality)
+                    })
+            })
+    })
+}
+
+fn validate_bands_with_other_declaration(
+    state: &GameState,
+    members: &[ObjectId],
+) -> Result<(), String> {
+    if members.is_empty() {
+        return Err("empty bands-with-other declaration".to_string());
+    }
+    for &holder in members {
+        for quality in bands_with_other_qualities(state, holder) {
+            if object_matches_bands_with_other_quality(state, holder, quality)
+                && has_bands_with_other_quality(state, holder, quality)
+                && members
+                    .iter()
+                    .all(|&member| object_matches_bands_with_other_quality(state, member, quality))
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err("band must satisfy ordinary banding or a shared bands-with-other quality".to_string())
+}
+
 /// CR 702.22: Attackers sharing a `band_id` (declaration order preserved).
 pub fn band_members(combat: &CombatState, band_id: u32) -> Vec<&AttackerInfo> {
     combat
@@ -1667,7 +1835,8 @@ pub fn band_members(combat: &CombatState, band_id: u32) -> Vec<&AttackerInfo> {
 /// CR 702.22c/d: Validate explicit band declarations at declare attackers.
 /// Each band must contain only declared attackers (702.22c), share one attack
 /// target (702.22d), include at least one banding creature, and at most one
-/// non-banding creature (702.22c).
+/// non-banding creature (702.22c), or satisfy a "bands with other [quality]"
+/// declaration over a shared quality.
 pub fn validate_attack_band_declarations(
     state: &GameState,
     attacks: &[(ObjectId, AttackTarget)],
@@ -1713,12 +1882,15 @@ pub fn validate_attack_band_declarations(
             }
         }
 
-        if banding_count == 0 {
-            return Err(format!(
-                "band {band_index} must include at least one banding creature"
-            ));
-        }
-        if non_banding_count > 1 {
+        if banding_count == 0 || non_banding_count > 1 {
+            if validate_bands_with_other_declaration(state, members).is_ok() {
+                continue;
+            }
+            if banding_count == 0 {
+                return Err(format!(
+                    "band {band_index} must include at least one banding creature"
+                ));
+            }
             return Err(format!(
                 "band {band_index} has {non_banding_count} non-banding creatures (max 1)"
             ));
@@ -1994,6 +2166,19 @@ pub fn declare_attackers_with_bands(
         }
     }
 
+    // CR 508.1a + CR 608.2c: Snapshot declaration-time characteristics before
+    // later combat/SBA movement can make post-combat "attacked with <quality>"
+    // queries chase stale or missing live objects.
+    let attacker_declarations: Vec<_> = attacker_ids
+        .iter()
+        .filter_map(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| obj.snapshot_for_attack_declaration(*id))
+        })
+        .collect();
+
     // Populate CombatState with per-creature defending players and attack targets
     let mut attackers: Vec<AttackerInfo> = attacks
         .iter()
@@ -2070,6 +2255,9 @@ pub fn declare_attackers_with_bands(
     state
         .creatures_attacked_this_turn
         .extend(attacker_ids.iter().copied());
+    state
+        .attacker_declarations_this_turn
+        .extend(attacker_declarations);
     for (attacker_id, defending_player) in creature_attacked_defenders {
         state
             .creature_attacked_defenders_this_turn
@@ -2092,7 +2280,15 @@ pub fn declare_attackers(
     declare_attackers_with_bands(state, attacks, &[], events)
 }
 
-fn goading_players_for_creature(state: &GameState, creature_id: ObjectId) -> HashSet<PlayerId> {
+/// CR 701.15b: The set of players that have goaded `creature_id` — both the
+/// per-object `goaded_by` designations and any active `StaticMode::Goaded`
+/// effects affecting it. This is the single authority for "who goaded this
+/// creature"; the AI candidate generator reuses it to build a legal forced
+/// attack assignment that avoids each goaded creature's goader.
+pub(crate) fn goading_players_for_creature(
+    state: &GameState,
+    creature_id: ObjectId,
+) -> HashSet<PlayerId> {
     let mut players = state
         .objects
         .get(&creature_id)
@@ -2539,6 +2735,20 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     // controller per CR 509.1a) controls a land of the matching type.
     if is_landwalk_unblockable(state, attacker, blocker.controller) {
         return false;
+    }
+    // CR 509.1b: blocker-side "can block only <filter>" restrictions.
+    for (src, sd) in blocker_block_allowed_statics_for(state, blocker_id) {
+        let StaticMode::BlockRestriction { filter } = &sd.mode else {
+            continue;
+        };
+        if !matches_target_filter(
+            state,
+            attacker_id,
+            filter,
+            &FilterContext::from_source(state, src.id),
+        ) {
+            return false;
+        }
     }
     true
 }
@@ -2999,8 +3209,8 @@ mod tests {
 
     #[test]
     fn cant_attack_alone_rejects_sole_attacker() {
-        // CR 506.5 + CR 508.1a: a "can't attack alone" creature is illegal as the
-        // only attacker, but legal alongside another attacker.
+        // CR 506.5 + CR 508.1c: a CombatAlone(Attack, NeedsCompanion) creature is
+        // illegal as the only attacker, but legal alongside another attacker.
         let mut state = setup();
         let a = create_creature(&mut state, PlayerId(0), "Bonded Construct", 2, 2);
         state
@@ -3008,7 +3218,10 @@ mod tests {
             .get_mut(&a)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::CantAttackAlone));
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }));
         let b = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         assert!(validate_attackers(&state, &[a]).is_err());
@@ -3016,9 +3229,37 @@ mod tests {
     }
 
     #[test]
+    fn can_only_attack_alone_rejects_multi_attacker() {
+        // CR 506.5 + CR 508.1c: CombatAlone(Attack, MustBeSole) — the flagged
+        // creature can attack alone but is rejected when declared alongside another.
+        let mut state = setup();
+        let master = create_creature(&mut state, PlayerId(0), "Master of Cruelties", 1, 4);
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            }));
+        let companion = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let unflagged = create_creature(&mut state, PlayerId(0), "Elk", 2, 2);
+
+        // Sole attacker: legal.
+        assert!(validate_attackers(&state, &[master]).is_ok());
+        // With a companion: illegal.
+        assert!(validate_attackers(&state, &[master, companion]).is_err());
+        // Unflagged creature attacking alone: legal (restriction is not on it).
+        assert!(validate_attackers(&state, &[unflagged]).is_ok());
+        // Two unflagged creatures: legal.
+        assert!(validate_attackers(&state, &[unflagged, companion]).is_ok());
+    }
+
+    #[test]
     fn cant_block_alone_rejects_sole_blocker() {
-        // CR 506.5 + CR 509.1b: a "can't block alone" creature is illegal as the
-        // only blocker, but legal alongside another blocker.
+        // CR 506.5 + CR 509.1b: a CombatAlone(Block, NeedsCompanion) creature is
+        // illegal as the only blocker, but legal alongside another blocker.
         let mut state = setup();
         let atk1 = create_creature(&mut state, PlayerId(0), "Atk1", 2, 2);
         let atk2 = create_creature(&mut state, PlayerId(0), "Atk2", 2, 2);
@@ -3028,7 +3269,10 @@ mod tests {
             .get_mut(&lone)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::CantBlockAlone));
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }));
         let other = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
         state.combat = Some(CombatState {
@@ -3476,6 +3720,75 @@ mod tests {
         assert_eq!(combat.attackers[0].band_id, Some(1));
     }
 
+    fn add_wolf_subtype(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Wolf".to_string());
+    }
+
+    fn grant_bands_with_other_wolves(state: &mut GameState, id: ObjectId) {
+        add_wolf_subtype(state, id);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(Keyword::BandsWithOther("Wolf".to_string()));
+    }
+
+    #[test]
+    fn bands_with_other_declaration_assigns_shared_band_id() {
+        let mut state = setup();
+        let wolf_a = create_creature(&mut state, PlayerId(0), "Wolf A", 2, 2);
+        let wolf_b = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
+        grant_bands_with_other_wolves(&mut state, wolf_a);
+        add_wolf_subtype(&mut state, wolf_b);
+
+        let target = AttackTarget::Player(PlayerId(1));
+        declare_attackers_with_bands(
+            &mut state,
+            &[(wolf_a, target), (wolf_b, target)],
+            &[vec![wolf_a, wolf_b]],
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let combat = state.combat.as_ref().unwrap();
+        assert_eq!(combat.attackers[0].band_id, Some(1));
+        assert_eq!(combat.attackers[1].band_id, Some(1));
+    }
+
+    #[test]
+    fn bands_with_other_declaration_rejects_mixed_quality() {
+        let mut state = setup();
+        let wolf = create_creature(&mut state, PlayerId(0), "Wolf", 2, 2);
+        let bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        grant_bands_with_other_wolves(&mut state, wolf);
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .keywords
+            .push(Keyword::BandsWithOther("Wolf".to_string()));
+
+        let target = AttackTarget::Player(PlayerId(1));
+        let err = declare_attackers_with_bands(
+            &mut state,
+            &[(wolf, target), (bear, target)],
+            &[vec![wolf, bear]],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("banding creature"),
+            "expected mixed-quality bands-with-other declaration to fail, got: {err}"
+        );
+    }
+
     #[test]
     fn band_declaration_rejects_two_non_banding_members() {
         let mut state = setup();
@@ -3539,6 +3852,33 @@ mod tests {
                 .get(&blocker)
                 .is_some_and(|attackers| attackers.contains(&hero) && attackers.contains(&pegasus)),
             "blocker_to_attacker must list every propagated band member"
+        );
+    }
+
+    #[test]
+    fn bands_with_other_block_propagates_to_all_members() {
+        let mut state = setup();
+        let wolf_a = create_creature(&mut state, PlayerId(0), "Wolf A", 2, 2);
+        let wolf_b = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Soldier", 1, 1);
+        grant_bands_with_other_wolves(&mut state, wolf_a);
+        grant_bands_with_other_wolves(&mut state, wolf_b);
+
+        let target = AttackTarget::Player(PlayerId(1));
+        declare_attackers_with_bands(
+            &mut state,
+            &[(wolf_a, target), (wolf_b, target)],
+            &[vec![wolf_a, wolf_b]],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        declare_blockers(&mut state, &[(blocker, wolf_a)], &mut Vec::new()).unwrap();
+
+        let combat = state.combat.as_ref().unwrap();
+        assert!(combat.attackers.iter().all(|a| a.blocked));
+        assert_eq!(
+            combat.blocker_assignments.get(&wolf_b),
+            combat.blocker_assignments.get(&wolf_a)
         );
     }
 
@@ -5825,6 +6165,39 @@ mod tests {
     }
 
     #[test]
+    fn cant_attack_owner_blocks_only_owner_attack_target() {
+        let mut state = setup_multiplayer_combat(3);
+        let attacker = create_creature(&mut state, PlayerId(1), "Owner-Restricted Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.controller = PlayerId(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(crate::types::triggers::AttackTargetFilter::Owner)),
+            );
+        }
+
+        let mut owner_attack_state = state.clone();
+        let attacks_owner = declare_attackers(
+            &mut owner_attack_state,
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(attacks_owner.is_err());
+        assert!(attacks_owner
+            .unwrap_err()
+            .contains("can't attack Player(PlayerId(1))"));
+
+        let attacks_non_owner = declare_attackers(
+            &mut state,
+            &[(attacker, AttackTarget::Player(PlayerId(2)))],
+            &mut vec![],
+        );
+        assert!(attacks_non_owner.is_ok());
+    }
+
+    #[test]
     fn must_attack_player_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let attacker = create_creature(&mut state, PlayerId(0), "Lured Bear", 2, 2);
@@ -6006,6 +6379,54 @@ mod tests {
         assert!(validate_blockers(&state, &[(ground_blocker, attacker)]).is_err());
         // Flying creature can block (matches the exception filter)
         assert!(validate_blockers(&state, &[(flying_blocker, attacker)]).is_ok());
+    }
+
+    /// Issue #2364: Pinnacle Emissary Drone tokens carry "can block only
+    /// creatures with flying" — a blocker-side BlockRestriction, distinct
+    /// from attacker-side CantBeBlockedExceptBy.
+    #[test]
+    fn issue_2364_block_restriction_limits_blocker_to_flying_attackers() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{block_only_creatures_with_flying_filter, StaticMode};
+
+        let mut state = setup();
+        let ground_attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let flying_attacker = create_creature(&mut state, PlayerId(0), "Bird", 2, 2);
+        state
+            .objects
+            .get_mut(&flying_attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        let drone = create_creature(&mut state, PlayerId(1), "Drone", 1, 1);
+        {
+            let drone_obj = state.objects.get_mut(&drone).unwrap();
+            drone_obj.keywords.push(Keyword::Flying);
+            drone_obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::BlockRestriction {
+                    filter: block_only_creatures_with_flying_filter(),
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        assert!(
+            validate_blockers(&state, &[(drone, ground_attacker)]).is_err(),
+            "Drone must not block non-flying attackers"
+        );
+        assert!(
+            !can_block_pair(&state, drone, ground_attacker),
+            "can_block_pair must reject non-flying attacker"
+        );
+        assert!(
+            validate_blockers(&state, &[(drone, flying_attacker)]).is_ok(),
+            "Drone may block flying attackers"
+        );
+        assert!(
+            can_block_pair(&state, drone, flying_attacker),
+            "can_block_pair must accept flying attacker"
+        );
     }
 
     /// Issue #496: "can't be blocked except by three or more creatures" must

@@ -261,11 +261,13 @@ pub(crate) fn parse_compound_subject_rule_static(
     }
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    predicates.insert(0, first);
+    predicates.insert(0, (first, None));
     Some(
         predicates
             .into_iter()
-            .map(|predicate| lower_rule_static(predicate, affected.clone(), text))
+            .map(|(predicate, defended)| {
+                lower_rule_static(predicate, affected.clone(), text).attack_defended(defended)
+            })
             .collect(),
     )
 }
@@ -480,8 +482,9 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
         }
         defs.push(companion);
     }
-    for predicate in tail_predicates {
-        let mut companion = lower_rule_static(predicate, affected.clone(), text);
+    for (predicate, defended) in tail_predicates {
+        let mut companion =
+            lower_rule_static(predicate, affected.clone(), text).attack_defended(defended);
         if let Some(condition) = condition.clone() {
             companion = companion.condition(condition);
         }
@@ -705,6 +708,71 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
 /// conjunct's static(s) plus a `CantAttack` static sharing the same `affected`
 /// (and any `condition`).
 ///
+/// CR 508.1c / CR 509.1b: Decompose `"<continuous grant or restriction> and
+/// can't attack or block"` into the first conjunct's static(s) plus a
+/// `CantAttackOrBlock` static sharing the same `affected` set (and any
+/// shared condition).
+///
+/// Without this split the trailing combat lockout was dropped: Immovable Rod
+/// ("another target permanent loses all abilities and can't attack or block")
+/// and Fog on the Barrow-Downs parsed to only the leading clause, so the
+/// affected creature could still attack and block — the defining lockout
+/// effect was silently inert. Mirrors `try_split_and_cant_block`.
+///
+/// Registered before `try_split_and_cant_attack` so the combined "attack or
+/// block" phrase is consumed first; the bare-attack splitter's terminal guard
+/// would decline the "or block" tail anyway, but ordering is belt-and-suspenders.
+pub(crate) fn try_split_and_cant_attack_or_block(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe.
+        let (i, _) = alt((
+            tag::<_, _, VE>("and can't attack or block"),
+            tag::<_, _, VE>("and can\u{2019}t attack or block"),
+        ))
+        .parse(i)?;
+        // Optional trailing duration phrase.
+        let (i, _) = opt(alt((
+            tag::<_, _, VE>(" each combat"),
+            tag::<_, _, VE>(" this combat"),
+            tag::<_, _, VE>(" this turn"),
+        )))
+        .parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    // Only the bare, terminal "can't attack or block" maps to CantAttackOrBlock.
+    // A remaining tail is a different restriction — decline so we don't mis-split.
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(StaticMode::CantAttackOrBlock)
+        .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
 /// Without this split the trailing attacking restriction was dropped: Cagemail
 /// ("Enchanted creature gets +2/+2 and can't attack.") parsed to only the +2/+2
 /// grant, so the enchanted creature could still attack — the Aura's drawback
@@ -757,6 +825,84 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     let condition = defs[0].condition.clone();
     let mut companion = StaticDefinition::new(StaticMode::CantAttack)
         .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
+/// CR 508.1b + CR 508.1c: Decompose `"<grant or restriction>[,] and can't
+/// attack you [or planeswalkers you control]"` (the Vow cycle — Vow of
+/// Lightning, Duty, Flight, Torment, Wildness) into the first conjunct's
+/// static(s) plus a companion `CantAttack` static scoped to the Aura
+/// controller's side of the board, sharing the same `affected` set.
+///
+/// Without this split the trailing attack restriction was silently dropped:
+/// Vow of Lightning ("Enchanted creature gets +2/+2, has first strike, and
+/// can't attack you or planeswalkers you control.") parsed to only the +2/+2
+/// grant and first-strike keyword — the lockout that defines the Vow cycle
+/// was completely inert and the enchanted creature could freely attack its
+/// Aura's controller.
+///
+/// Registered before `try_split_and_cant_attack` so the more specific scoped
+/// phrase is consumed first; the bare-attack splitter's terminal guard would
+/// decline the " you …" tail anyway, but ordering is belt-and-suspenders.
+///
+/// Handles two scoped forms:
+/// - `"and can't attack you"` → `CantAttack` with `defended = Player`
+/// - `"and can't attack you or planeswalkers you control"` → `CantAttack`
+///   with `defended = PlayerOrPlaneswalker`
+pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_ascii_lowercase();
+
+    let (before, defended, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        let (i, _) = alt((
+            tag::<_, _, VE>("and can't attack"),
+            tag::<_, _, VE>("and can\u{2019}t attack"),
+        ))
+        .parse(i)?;
+        let (i, defended) = parse_cant_attack_defended_scope_nom(i)?;
+        let Some(defended) = defended else {
+            return Err(nom::Err::Error(OracleError::new(
+                i,
+                nom::error::ErrorKind::Tag,
+            )));
+        };
+        // Optional trailing duration phrase.
+        let (i, _) = opt(alt((
+            tag::<_, _, VE>(" each combat"),
+            tag::<_, _, VE>(" this combat"),
+            tag::<_, _, VE>(" this turn"),
+        )))
+        .parse(i)?;
+        Ok((i, defended))
+    })?;
+
+    // Terminal guard: decline unless the tail is empty (punctuation only).
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(StaticMode::CantAttack)
+        .affected(affected)
+        .attack_defended(Some(defended))
         .description(text.to_string());
     if let Some(condition) = condition {
         companion = companion.condition(condition);
@@ -835,16 +981,13 @@ pub(crate) fn try_split_and_cant_be_attached(text: &str) -> Option<Vec<StaticDef
 
 /// CR 602.5 + CR 603.2a: Decompose `"<grant or restriction> and [its] activated
 /// abilities can't be activated"` into the first conjunct's static(s) plus a
-/// `CantBeActivated` static (self-reference: the affected permanent's own
-/// activated abilities can't be activated by anyone).
+/// `CantBeActivated` static. The companion's `source_filter` is the first
+/// conjunct's host filter (e.g. `EnchantedBy`) — see the inline note below.
 ///
 /// Without this split the trailing activation prohibition was dropped: Viper's
 /// Kiss ("Enchanted creature gets -1/-1, and its activated abilities can't be
 /// activated.") parsed to only the -1/-1 grant, so the enchanted creature's
-/// activated abilities still worked. Mirrors `try_split_and_cant_block`;
-/// `CantBeActivated` is a struct `StaticMode` (not a `ContinuousModification`),
-/// built exactly like the standalone / Arrest-compound path
-/// (`who = AllPlayers, source_filter = SelfRef`) so it rides the same enforcement.
+/// activated abilities still worked. Mirrors `try_split_and_cant_block`.
 /// The "can't attack/block, and activated abilities can't be activated" compound
 /// (Arrest, Faith's Fetters) is handled by its own earlier branch.
 pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<StaticDefinition>> {
@@ -899,6 +1042,132 @@ pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<St
         .affected(affected)
         .description(text.to_string()),
     );
+    Some(defs)
+}
+
+/// CR 701.21: Decompose `"<grant or restriction> and can't be sacrificed"` into
+/// the first conjunct's static(s) plus an `Other("CantBeSacrificed")` static
+/// sharing the same `affected` set.
+///
+/// Without this split the trailing sacrifice prohibition was dropped: Assault
+/// Suit ("Equipped creature gets +2/+2, has haste, can't attack you or
+/// planeswalkers you control, and can't be sacrificed.") parsed without the
+/// `CantBeSacrificed` static, so the equipped creature could still be
+/// sacrificed — defeating the Equipment's political lock. Mirrors
+/// `try_split_and_cant_block`; `CantBeSacrificed` is a `StaticMode::Other(..)`
+/// host-prohibition (runtime-enforced in `game::sacrifice`), not a
+/// `ContinuousModification`, so the continuous-grant default drops it.
+pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe.
+        alt((
+            tag::<_, _, VE>("and can't be sacrificed"),
+            tag::<_, _, VE>("and can\u{2019}t be sacrificed"),
+        ))
+        .parse(i)
+    })?;
+
+    // Only the bare, terminal "can't be sacrificed" is a plain prohibition. A
+    // remaining tail ("unless …", "to …") is a qualified restriction owned by
+    // another branch — decline so we don't mis-split it.
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    defs.push(
+        StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+            .affected(affected)
+            .description(text.to_string()),
+    );
+    Some(defs)
+}
+
+/// CR 702.18a / CR 702.11a: Decompose `"<grant or restriction> and can't be the
+/// target of …"` into the first conjunct's static(s) plus the targeting
+/// restriction, sharing the same `affected` set.
+///
+/// Without this split the trailing targeting prohibition was dropped: Spectral
+/// Shield ("Enchanted creature gets +0/+2 and can't be the target of spells.")
+/// parsed to only the +0/+2 grant, so the enchanted creature could still be
+/// targeted — the Aura's entire protection was lost. Mirrors
+/// `try_split_and_cant_be_attached`; the descriptive "can't be the target …"
+/// form is a `CantBeTargeted` `StaticMode` (or Hexproof for the opponents-only
+/// scope — CR 702.11a), not a `ContinuousModification`, so the continuous-grant
+/// default drops it. Scope classification reuses `classify_cant_be_targeted`,
+/// matching the standalone dispatch so the "your opponents control" qualifier is
+/// preserved rather than collapsed into blanket Shroud.
+pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_ascii_lowercase();
+
+    let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe, and both the
+        // "target of …" and bare "targeted" phrasings.
+        alt((
+            tag::<_, _, VE>("and can't be the target"),
+            tag::<_, _, VE>("and can\u{2019}t be the target"),
+            tag::<_, _, VE>("and can't be targeted"),
+            tag::<_, _, VE>("and can\u{2019}t be targeted"),
+        ))
+        .parse(i)
+    })?;
+
+    // Classify the whole trailing clause exactly as the standalone dispatch does
+    // (`dispatch.rs`), so "… your opponents control" → Hexproof (CR 702.11a) and
+    // the unqualified form → blanket Shroud (CR 702.18a). Decline if the tail is
+    // not a recognized targeting restriction.
+    let targeting_clause = &lower[before.len()..];
+    let scope = crate::parser::oracle_keyword::classify_cant_be_targeted(targeting_clause)?;
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let companion = match scope {
+        // CR 702.11a: "… your opponents control" grants Hexproof so the
+        // permanent's own controller can still target it.
+        crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Hexproof,
+                }])
+                .description(text.to_string())
+        }
+        // CR 702.18a: blanket — can't be targeted by any player. Enforced in
+        // `targeting.rs::can_target` via the object's active static definitions.
+        crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+            StaticDefinition::new(StaticMode::CantBeTargeted)
+                .affected(affected)
+                .description(text.to_string())
+        }
+    };
+    defs.push(companion);
     Some(defs)
 }
 
@@ -1417,6 +1686,14 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
         }
     }
 
+    if let Ok((rest, (predicate, defended))) =
+        parse_combat_rule_static_predicate_with_defended_nom(predicate_text)
+    {
+        if rest.trim().is_empty() {
+            return Some(lower_rule_static(predicate, affected, text).attack_defended(defended));
+        }
+    }
+
     let predicate = parse_rule_static_predicate(predicate_text)?;
     // CR 502.3: Extract trailing condition for CantUntap statics (e.g., "as long as [condition]")
     if matches!(predicate, RuleStaticPredicate::CantUntap) {
@@ -1532,6 +1809,75 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         return Some(def);
     }
     None
+}
+
+/// CR 702.122c / 702.171a / 702.184a: nom parser for the crew/saddle/station
+/// power-contribution modifier predicate. Composes the named action-list prefix
+/// (which records the affected keyword actions) with the modifier tail.
+fn parse_crew_contribution_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, (CrewContributionKind, Vec<CrewAction>)> {
+    let (input, actions) = alt((
+        value(
+            vec![CrewAction::Saddle, CrewAction::Crew],
+            tag::<_, _, OracleError<'_>>("saddles mounts and crews vehicles"),
+        ),
+        value(
+            vec![CrewAction::Crew, CrewAction::Station],
+            tag("crews vehicles and stations permanents"),
+        ),
+        value(vec![CrewAction::Crew], tag("crews vehicles")),
+    ))
+    .parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, kind) = alt((
+        map(
+            (
+                tag::<_, _, OracleError<'_>>("as though its power were "),
+                nom_primitives::parse_number,
+                tag(" greater"),
+            ),
+            |(_, n, _)| CrewContributionKind::PowerDelta { delta: n as i32 },
+        ),
+        value(
+            CrewContributionKind::ToughnessInsteadOfPower,
+            tag("using its toughness rather than its power"),
+        ),
+    ))
+    .parse(input)?;
+    Ok((input, (kind, actions)))
+}
+
+/// CR 702.122c / 702.171a / 702.184a: "<subject> crews Vehicles [/ saddles
+/// Mounts / stations permanents] as though its power were N greater" or "…
+/// using its toughness rather than its power" — a continuous static that
+/// modifies the creature's contributed power when paying a crew/saddle/station
+/// cost (Reckoner Bankbuster, the "Roads" cycle, Giant Ox, Stoic Star-Captain).
+pub(crate) fn parse_crew_contribution_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (subject_lower, (kind, actions), rest) =
+        nom_primitives::scan_preceded(&lower, parse_crew_contribution_predicate_nom)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    let mode = StaticMode::CrewContribution { kind, actions };
+    // CR 613.1: a self-referential modifier lives directly on the creature's own
+    // `static_definitions` (read by `active_static_definitions`). A modifier
+    // granted to a group ("Each creature you control crews … as though its power
+    // were 2 greater", Stoic Star-Captain) must be propagated onto each affected
+    // creature via `AddStaticMode` so the same lookup observes it — mirroring how
+    // a granted `CantCrew` propagates.
+    let def = if matches!(affected, TargetFilter::SelfRef) {
+        StaticDefinition::new(mode).affected(affected)
+    } else {
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+    };
+    Some(def.description(text.to_string()))
 }
 
 /// Nom 8.0 parser for the combat-tax body.
@@ -1996,4 +2342,150 @@ pub(crate) fn try_parse_scoped_must_attack_block(
             })
             .collect(),
     )
+}
+
+/// CR 611.3a + CR 613.1f: Detect and split
+/// `"PRIMARY and FOREIGN_SUBJECT have/has/gains/gain KEYWORD [as long as COND]"`
+/// (including the inverted form `"As long as COND, PRIMARY and FOREIGN_SUBJECT …"`).
+///
+/// A "foreign subject" is any noun phrase parseable by `parse_continuous_subject_filter`
+/// that does NOT resolve to `SelfRef`. Example: "creatures you control have vigilance"
+/// after "~ gets +2/+2 and" — Angelic Field Marshal's Lieutenant ability.
+///
+/// Returns two `StaticDefinition`s: one for the primary (existing `affected`) plus a
+/// companion `Continuous` def for the foreign-subject keyword grant. Both inherit the
+/// same `StaticCondition` when present so the gate applies to both effects.
+///
+/// CR 109.5 + CR 611.3a: the condition binds each effect independently (CR 611.3a),
+/// but MTG print convention always states one condition for the whole clause, so both
+/// defs receive the same condition object.
+pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Normalize the inverted "As long as COND, EFFECT" orientation so the rest
+    // of the logic always operates on EFFECT with an optional separate COND.
+    let (effect_original, condition_text): (String, Option<String>) =
+        if let Some(split) = try_split_inverted_as_long_as(&tp) {
+            (
+                split.effect_text.clone(),
+                Some(split.condition_text.clone()),
+            )
+        } else if let Some((before, after)) = tp.split_around(" as long as ") {
+            (
+                before.original.trim().to_string(),
+                Some(after.original.trim().trim_end_matches('.').to_string()),
+            )
+        } else {
+            (text.to_string(), None)
+        };
+
+    let effect_lower = effect_original.to_lowercase();
+
+    // Scan for "and FOREIGN_SUBJECT verb KEYWORD" in the effect text.
+    // We try each grant verb and check every " and " position.
+    for verb in [" have ", " has ", " gains ", " gain "] {
+        let mut search_lower = effect_lower.as_str();
+        let mut search_offset = 0;
+        while let Some((before_and, subject_lower, keyword_lower)) =
+            nom_primitives::scan_preceded(search_lower, |input| {
+                let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(input)?;
+                let (after_subject, subject) = take_until(verb).parse(after_and)?;
+                let (after_verb, _) = tag::<_, _, OracleError<'_>>(verb).parse(after_subject)?;
+                Ok((after_verb, subject))
+            })
+        {
+            let and_pos = search_offset + before_and.len();
+
+            let subject_lower = subject_lower.trim();
+            if subject_lower.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Subject must resolve to a recognised non-SelfRef filter.
+            let companion_filter = match parse_continuous_subject_filter(subject_lower) {
+                Some(f) if !matches!(f, TargetFilter::SelfRef) => f,
+                _ => {
+                    search_offset = and_pos + "and ".len();
+                    search_lower = &effect_lower[search_offset..];
+                    continue;
+                }
+            };
+
+            // Keyword text is everything after the verb.
+            let kw_start = effect_lower.len() - keyword_lower.len();
+            if kw_start >= effect_original.len() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+            let keyword_text = effect_original[kw_start..].trim().trim_end_matches('.');
+            if keyword_text.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Parse keyword list into companion modifications.
+            let mut companion_mods = Vec::new();
+            for part in split_keyword_list(keyword_text) {
+                push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+            }
+            if companion_mods.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Primary text is everything before " and FOREIGN_SUBJECT".
+            let primary_text = effect_original[..and_pos].trim_end_matches(',').trim();
+            if primary_text.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Re-parse the primary with the condition included so the primary def
+            // already carries the condition object.
+            let primary_full = if let Some(ref cond) = condition_text {
+                format!("{primary_text} as long as {cond}.")
+            } else {
+                format!("{primary_text}.")
+            };
+            let mut primary_defs = parse_static_line_multi(&primary_full);
+            if primary_defs.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            for def in &mut primary_defs {
+                def.description = Some(text.to_string());
+            }
+
+            // Resolve the condition object for the companion.
+            let condition = condition_text.as_deref().and_then(|ct| {
+                parse_static_condition(ct).or(Some(StaticCondition::Unrecognized {
+                    text: ct.to_string(),
+                }))
+            });
+            let effective_condition =
+                condition.or_else(|| primary_defs.first().and_then(|d| d.condition.clone()));
+
+            let mut companion = StaticDefinition::continuous()
+                .affected(companion_filter)
+                .modifications(companion_mods)
+                .description(text.to_string());
+            if let Some(cond) = effective_condition {
+                companion.condition = Some(cond);
+            }
+
+            primary_defs.push(companion);
+            return Some(primary_defs);
+        }
+    }
+
+    None
 }

@@ -204,7 +204,12 @@ fn parse_cast_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
 fn supported_alternative_cast_cost(cost: &AbilityCost) -> bool {
     matches!(
         cost,
-        AbilityCost::Mana { .. } | AbilityCost::PayEnergy { .. }
+        AbilityCost::Mana { .. }
+            | AbilityCost::PayEnergy { .. }
+            // CR 701.59a + CR 118.9: Collect evidence N — Conspiracy Unraveler class.
+            | AbilityCost::CollectEvidence { .. }
+            // CR 702.122a: Remove counter as crew alternative cost (Heart of Kiran).
+            | AbilityCost::RemoveCounter { .. }
     )
 }
 
@@ -311,6 +316,162 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
             timing_permission: None,
         })
         .affected(affected)
+        .description(text.to_string())
+        .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
+/// CR 118.9 + CR 701.59a: Parse a collect-evidence alternative-cost grant static —
+/// "You may collect evidence N rather than pay the mana cost for [filter] spells
+/// you cast." (Conspiracy Unraveler class).
+/// Structural sibling of `parse_spells_alternative_cost` — same output shape
+/// (`CastWithAlternativeCost`), different cost verb prefix.
+/// Verified: CR 118.9 (docs/MagicCompRules.txt:1014), CR 701.59a.
+pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Prefix: "you may collect evidence N " — strip and capture amount.
+    let tp = nom_tag_tp(&tp, "you may collect evidence ")?;
+
+    // Parse the evidence amount (integer).
+    let (i_lower, amount) = nom_primitives::parse_number(tp.lower).ok()?;
+    let consumed = tp.lower.len() - i_lower.len();
+    // `trim_start` drops the leading space after the number, so the next tag
+    // matches "rather than pay " without a leading space.
+    let tp = TextPair::new(&tp.original[consumed..], i_lower).trim_start();
+
+    let cost = AbilityCost::CollectEvidence { amount };
+
+    // "rather than pay [the/its] mana cost for [filter] spells you cast".
+    let tp = nom_tag_tp(&tp, "rather than pay ")?;
+    let (subject_lower, _) = alt((
+        tag::<_, _, VE<'_>>("the mana cost for "),
+        tag("its mana cost for "),
+    ))
+    .parse(tp.lower)
+    .ok()?;
+    let consumed = tp.lower.len() - subject_lower.len();
+    let subject = TextPair::new(&tp.original[consumed..], subject_lower)
+        .trim_end_matches('.')
+        .trim_end();
+
+    let (_, type_prefix_lower) = alt((
+        terminated(
+            take_until::<_, _, VE<'_>>("spells you cast"),
+            tag("spells you cast"),
+        ),
+        terminated(
+            take_until::<_, _, VE<'_>>("spell you cast"),
+            tag("spell you cast"),
+        ),
+    ))
+    .parse(subject.lower)
+    .ok()?;
+
+    let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
+    let base_filter = if type_prefix_original.is_empty() {
+        TargetFilter::Typed(TypedFilter::card())
+    } else {
+        parse_type_phrase(type_prefix_original).0
+    };
+    let affected = apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new());
+
+    Some(
+        StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost,
+            timing_permission: None,
+        })
+        .affected(affected)
+        .description(text.to_string())
+        .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
+/// CR 118.9 + CR 702.29a + CR 702.122a: Parse alternative-keyword-cost grant static.
+/// "[As long as <cond>, ]You may [cost] rather than pay [card-ref's] [keyword] cost[s]."
+/// An optional leading "As long as <cond>," gate (New Perspectives) is split off via
+/// `try_split_inverted_as_long_as` and attached as a `StaticCondition`.
+/// Verified: CR 702.29a (docs/MagicCompRules.txt:4202),
+///           CR 702.122a (docs/MagicCompRules.txt:4870),
+///           CR 118.9 (docs/MagicCompRules.txt:1014).
+pub(crate) fn parse_alternative_keyword_cost(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // CR 611.3a: An optional leading "As long as <cond>, <body>" gate (New
+    // Perspectives) — split it off, parse the body, then attach the condition.
+    if let Some(split) = try_split_inverted_as_long_as(&tp) {
+        let def = parse_alternative_keyword_cost_body(&split.effect_text)?;
+        // CR 601.3d: refuse to emit an unconditional grant when the gate is
+        // unrecognized — that would be strictly more permissive than printed.
+        return parse_static_condition(&split.condition_text)
+            .map(|condition| def.condition(condition).description(text.to_string()));
+    }
+
+    parse_alternative_keyword_cost_body(text)
+}
+
+/// Parse the body of an alternative-keyword-cost grant (no leading conditional):
+/// "You may [cost] rather than pay [card-ref's] [keyword] cost[s]."
+fn parse_alternative_keyword_cost_body(text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Must start with "you may ".
+    let tp = nom_tag_tp(&tp, "you may ")?;
+
+    // Cost text: everything up to " rather than pay ".
+    let (after_cost_lower, cost_lower) = take_until::<_, _, VE<'_>>(" rather than pay ")
+        .parse(tp.lower)
+        .ok()?;
+    let cost_len = cost_lower.len();
+    let cost_text = tp.original[..cost_len].trim();
+    // Strip optional "pay " prefix (e.g., "pay {0}" → "{0}") using a nom combinator.
+    let cost_text_clean = opt(tag::<_, _, VE<'_>>("pay "))
+        .parse(cost_text)
+        .map(|(rest, _)| rest)
+        .unwrap_or(cost_text);
+
+    let cost = parse_oracle_cost(cost_text_clean);
+    if matches!(cost, AbilityCost::Unimplemented { .. }) {
+        return None;
+    }
+
+    // Position after " rather than pay ".
+    let after_cost = TextPair::new(&tp.original[cost_len..], after_cost_lower);
+    let after_cost = nom_tag_tp(&after_cost, " rather than pay ")?;
+
+    // Keyword remainder: "[optional-possessive][keyword] cost[s]". Scan for the
+    // keyword word + "cost" marker (the possessive prefix, e.g. "heart of
+    // kiran's ", is structurally irrelevant — the keyword identifies the class).
+    let kw_lower = after_cost.lower.trim_end_matches('.').trim();
+
+    let keyword = if nom_primitives::scan_contains(kw_lower, "cycling cost") {
+        KeywordKind::Cycling
+    } else if nom_primitives::scan_contains(kw_lower, "crew cost") {
+        KeywordKind::Crew
+    } else {
+        return None;
+    };
+
+    // Frequency: detect "the first card you [keyword] each turn" pattern.
+    let frequency = if nom_primitives::scan_contains(kw_lower, "first card you cycle each turn") {
+        Some(CastFrequency::OncePerTurn)
+    } else {
+        None
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::AlternativeKeywordCost {
+            keyword,
+            cost,
+            frequency,
+        })
         .description(text.to_string())
         .active_zones(vec![Zone::Battlefield]),
     )

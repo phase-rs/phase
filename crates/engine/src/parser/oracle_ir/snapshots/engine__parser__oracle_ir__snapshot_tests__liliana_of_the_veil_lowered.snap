@@ -24,7 +24,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[+1]: Each player discards a card.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -63,7 +62,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[−2]: Target player sacrifices a creature.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -117,7 +115,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -127,7 +124,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"

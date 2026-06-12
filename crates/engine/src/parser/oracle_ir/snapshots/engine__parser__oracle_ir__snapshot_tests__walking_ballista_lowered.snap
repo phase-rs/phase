@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 585
 expression: "&lowered"
 ---
 {
@@ -30,7 +29,6 @@ expression: "&lowered"
       "duration": null,
       "description": "{4}: Put a +1/+1 counter on ~.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
@@ -55,13 +53,13 @@ expression: "&lowered"
           "type": "OfType",
           "data": "P1P1"
         },
-        "target": null
+        "target": null,
+        "selection": "SingleObject"
       },
       "sub_ability": null,
       "duration": null,
       "description": "Remove a +1/+1 counter from ~: It deals 1 damage to any target.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
@@ -93,7 +91,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -106,7 +103,8 @@ expression: "&lowered"
         "type": "SelfRef"
       },
       "description": "~ enters with X +1/+1 counters on it.",
-      "condition": null
+      "condition": null,
+      "destination_zone": "Battlefield"
     }
   ],
   "extractedKeywords": []

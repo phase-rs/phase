@@ -13,6 +13,7 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
+import { SelectField } from "../ui/SelectField";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
 
@@ -214,10 +215,11 @@ export function AiOpponentConfig({
         </div>
         <label className="flex flex-col gap-1">
           <span className="text-xs text-slate-400">{t("aiOpponent.archetype")}</span>
-          <select
+          <SelectField
+            wrapperClassName="w-full"
             value={archetypeFilter}
             onChange={(e) => setArchetypeFilter(e.target.value as AiArchetypeFilter)}
-            className={`rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm font-medium ${archetypeAccent(
+            className={`w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm font-medium ${archetypeAccent(
               archetypeFilter === "Any" ? null : (archetypeFilter as DeckArchetype),
             )}`}
           >
@@ -226,7 +228,7 @@ export function AiOpponentConfig({
                 {opt}
               </option>
             ))}
-          </select>
+          </SelectField>
         </label>
 
         <label className="flex flex-col gap-1">
@@ -322,10 +324,11 @@ function AiSeatPanel({
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
-        <select
+        <SelectField
+          wrapperClassName="w-full"
           value={effectiveSelection}
           onChange={(e) => onDeckChange(e.target.value as AiDeckSelection)}
-          className="rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
+          className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
         >
           <option value={AI_DECK_RANDOM}>{t("aiOpponent.deckRandomCount", { count: filteredDecks.length })}</option>
           {deckOptions.map((d) => {
@@ -339,13 +342,14 @@ function AiSeatPanel({
               </option>
             );
           })}
-        </select>
+        </SelectField>
       </label>
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>
         <div className="relative">
-          <select
+          <SelectField
+            wrapperClassName="w-full"
             value={seat.difficulty}
             onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
             disabled={cedhMode}
@@ -359,7 +363,7 @@ function AiSeatPanel({
                 {t(`aiDifficulty.levels.${item.id}`)}
               </option>
             ))}
-          </select>
+          </SelectField>
           {cedhMode && (
             <span
               aria-label="cEDH"

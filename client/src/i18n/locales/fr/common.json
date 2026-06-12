@@ -71,7 +71,9 @@
     "seatsOccupied": "{{occupied}}/{{total}} sièges occupés",
     "startGame": "Démarrer la partie",
     "startNow": "Démarrer maintenant",
-    "fillWithAi": "Compléter avec des IA"
+    "fillWithAi": "Compléter avec des IA",
+    "joinLinkCopied": "Lien d'invitation copié",
+    "copyJoinLink": "Copier le lien d'invitation : {{joinShare}}"
   },
   "grantDebug": {
     "heading": "Bac à sable : permissions de débogage",

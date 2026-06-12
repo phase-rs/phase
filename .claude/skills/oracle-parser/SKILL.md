@@ -98,25 +98,60 @@ If any answer is wrong, **stop and refactor before moving on.**
 
 ## 2. Architecture Overview
 
-### Parse Pipeline
+### Parse Pipeline — Document-Level Two-Phase (parse → IR → lower)
+
+`parse_oracle_text()` (oracle.rs, near the bottom of the file) is the public
+entry point and a **thin wrapper** over two phases: `parse_oracle_ir()` (IR
+production) followed by `lower_oracle_ir()` (IR lowering). Diagnostics flow
+through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
 
 ```
 Oracle text (from MTGJSON)
     ↓
-strip_reminder_text()           — remove (parenthesized text)
+parse_oracle_ir()               — oracle.rs: the priority router (see §3)
+    ├─ normalize_card_name_refs()   — card name / "this creature" → ~ (once, at entry)
+    ├─ pre-parsers (before the line loop): Saga chapters [oracle_saga.rs],
+    │     Attraction visit lines [oracle_attraction.rs], Class levels
+    │     [oracle_class.rs], Leveler LEVEL blocks [oracle_level.rs],
+    │     Spacecraft "N+ |" thresholds [oracle_spacecraft.rs], Strive cost
+    ├─ per line: strip_reminder_text(), then classify by priority slot (§3)
     ↓
-normalize_self_refs()           — card name / "this creature" → ~
+OracleDocIr                     — oracle_ir/doc.rs: Vec<OracleItemIr> + diagnostics.
+    │                             Core variants carry typed IR (EffectChainIr,
+    │                             TriggerIr, StaticIr, ReplacementIr); PreLowered
+    │                             variants carry already-assembled engine types.
     ↓
-parse_oracle_text()             — classify line by priority (see §3)
+lower_oracle_ir()               — oracle.rs: exhaustive match on each OracleItemIr
+    ↓                             (core IR → dedicated lowering fn; PreLowered → identity)
+ParsedAbilities                 — abilities / triggers / statics / replacements /
+                                  keywords / casting options + parse_warnings
+```
+
+Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full slot table):
+
+```
     ├─ Keywords-only            → keyword extraction
     ├─ "When/Whenever/At"       → parse_trigger_line()        [oracle_trigger.rs]
     ├─ Contains ":"             → activated ability parsing     [oracle_cost.rs + oracle_effect/]
-    ├─ is_static_pattern()      → parse_static_line()          [oracle_classifier.rs → oracle_static.rs]
+    ├─ is_static_pattern()      → parse_static_line()          [oracle_classifier.rs → oracle_static/]
     ├─ is_replacement_pattern() → parse_replacement_line()     [oracle_classifier.rs → oracle_replacement.rs]
     ├─ Imperative verb          → parse_effect_chain()         [oracle_effect/]
     ├─ dispatch_line_nom()      → parse_effect_chain_with_context() [oracle_dispatch.rs → oracle_effect/]
     └─ Fallback                 → Effect::Unimplemented
 ```
+
+### IR Layer — `oracle_ir/`
+
+| Sub-module | Purpose |
+|-----------|---------|
+| `ast.rs` | All parser AST types (`ParsedEffectClause`, `ClauseAst`, modal/loyalty AST — moved here from `oracle_effect/types.rs`, `oracle_modal.rs`, `oracle.rs`) |
+| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr` |
+| `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
+| `diagnostic.rs` | `OracleDiagnostic` — structured parse warnings |
+| `effect_chain.rs` | `EffectChainIr` + lowering for spell/ability effect chains |
+| `trigger.rs` | `TriggerIr` + lowering |
+| `static_ir.rs` | `StaticIr` + lowering |
+| `replacement.rs` | `ReplacementIr` + lowering |
 
 ### Nom Combinator Layer — `oracle_nom/`
 
@@ -130,16 +165,20 @@ All parser branches delegate atomic parsing to shared nom 8.0 combinators:
 | `duration.rs` | Duration phrase combinators ("until end of turn", etc.) |
 | `condition.rs` | Condition phrase combinators ("if", "unless", "as long as") |
 | `filter.rs` | Filter property combinators (zone, type, controller, "with") |
-| `error.rs` | `OracleResult` type, `parse_or_unimplemented` error boundary |
-| `context.rs` | `ParseContext` for stateful parsing |
+| `error.rs` | `OracleError` / `OracleResult` type aliases, `oracle_err` error constructor. Parse-failure authority is `Effect::unimplemented(name, fragment)` (`types/ability.rs`) — never hand-construct `Effect::Unimplemented { .. }` literals |
+| `context.rs` | Re-export shim for `ParseContext` (canonical home: `oracle_ir/context.rs`) |
 | `bridge.rs` | `nom_on_lower`, `nom_on_lower_required`, `nom_parse_lower` — mixed-case bridging |
+| `enchant.rs` | "Enchant {filter}" attachment-restriction combinators |
+| `return_as_aura.rs` | "return ~ ... attached to" / return-as-Aura combinators |
 
-### Two-Phase Parse/Lower Architecture
+### Two-Phase Parse/Lower Architecture (clause level)
 
-The parser uses a two-phase approach: **parse → AST → lower → Effect**.
+Within the effect branch, the parser uses the same two-phase approach at clause
+granularity: **parse → AST → lower → Effect**.
 
 ```
 parse_effect_clause()                    — entry point (oracle_effect/mod.rs)
+  → clause_shell::peel_clause()          — strip structural slots first (see below)
   → parse_clause_ast()                   — classify sentence shape → ClauseAst
   → lower_clause_ast()                   — convert AST to Effect
     → lower_subject_predicate_ast()      — for SubjectPredicate clauses
@@ -148,6 +187,45 @@ parse_effect_clause()                    — entry point (oracle_effect/mod.rs)
         → parse_imperative_family_ast()  — classify verb family (imperative.rs)
         → lower_imperative_family_ast()  — convert to Effect
 ```
+
+### Clause Shell — Structural Slot Peeling (`clause_shell.rs`)
+
+**This is the destination architecture for structural slots.** Phase 2 of the
+no-text-swallowing refactor (see `data/parser-swallow-progress.md`) inverts
+slot-consumption responsibility: instead of every body parser recognizing AND
+consuming surrounding structural slots inline (and silently dropping them when
+it forgets — the swallowing bug class), `peel_clause(text)` recursively strips
+slot-bearing prefixes/suffixes off the clause, accumulating them into a
+`ClauseContext` (synthesized attributes). The bare imperative remainder is
+handed to the existing body parsers, and the context is applied back onto the
+parsed result (`apply_optional`, `duration()`, `condition()`), so no recognized
+slot can be dropped.
+
+**Slots live in the shell today:**
+- **Optional** — `"you may [verb]"` → `ClauseContext.optional` (CR 608.2d), with
+  a specialized-phrase blocklist (`is_specialized_you_may_phrase`) for "you may"
+  constructions whose dedicated body parsers need the full surface form
+  (alt-costs, impulse-draw permission, causative "have", retarget, Dig
+  keep-from-among, specialized reveals).
+- **Duration** — trailing duration suffix → `ClauseContext.duration`, delegating
+  to `strip_trailing_duration` so the suffix table stays single-source (with an
+  `is_specialized_duration_carrier` guard for parsers that need the suffix as a
+  disambiguation signal, e.g. impulse-draw vs `CastFromZone`).
+- **Leading condition** — `"if [cond], [effect]"` → `ClauseContext.condition`,
+  delegating to `strip_leading_general_conditional` (which routes through
+  `parse_inner_condition`).
+
+**Call site:** `parse_effect_clause()` in `oracle_effect/mod.rs` (single peel
+point; `oracle_trigger.rs` and `oracle_effect/subject.rs` reference the peel
+in comments where their behavior depends on it). If the peeled variant lands
+in `Unimplemented`, the original text is retried — the shell is conservative.
+
+**Rule for new work:** when adding handling for a new *structural* slot type
+(durations, optional clauses, conditions, and future siblings like APNAP order
+or activation limits), migrate it into the shell rather than adding another
+per-callsite `strip_*` pass: add a field on `ClauseContext`, a branch in
+`peel_inner`, an `apply_*` method, and remove the linear `strip_*` calls at the
+body-parser call sites. Do not add new inline slot consumption to body parsers.
 
 ### Parser Dispatch Architecture
 
@@ -163,31 +241,82 @@ parse_effect_clause()                    — entry point (oracle_effect/mod.rs)
 
 ## 3. Parsing Priority System
 
-Lines in `parse_oracle_text()` are classified in this exact order. **First match wins.**
+Lines in `parse_oracle_ir()` (oracle.rs) are classified slot by slot. **First
+match wins — the binding order is the SOURCE ORDER of the slots in the line
+loop, NOT the numeric labels.** The labels are historical and non-monotonic
+(`8b (early)` runs before `0`; loyalty `11` runs before the `3x` keyword-line
+slots). When inserting a new slot, place it by evaluation position and grep
+`// Priority` in oracle.rs to see the live order; the table below mirrors that
+grep in evaluation order (one row per `// Priority <label>:` comment — the CI
+gate `scripts/check-skill-doc.sh` asserts the row count matches the code).
 
-| Priority | Pattern | Router | Module |
-|----------|---------|--------|--------|
-| 1 | Keywords-only line (comma-separated) | Keyword extraction | `oracle.rs` |
-| 2 | `"Enchant {filter}"` | Skipped (external) | — |
-| 3 | `"Equip {cost}"` / `"Equip — {cost}"` | `try_parse_equip()` | `oracle.rs` |
-| 4 | `"Choose one/two —"` (modal) | Bullet parsing | `oracle_modal.rs` |
-| 5 | Planeswalker loyalty `[+N]/[-N]/[0]:` | `try_parse_loyalty_line()` | `oracle.rs` |
-| 6 | Contains `":"` with cost prefix | Activated ability | `oracle_cost.rs` |
-| 7 | Starts with `"When"` / `"Whenever"` / `"At"` | `parse_trigger_line()` | `oracle_trigger.rs` |
-| 8 | `is_static_pattern()` matches | `parse_static_line()` | `oracle_static.rs` |
-| 9 | `is_replacement_pattern()` matches | `parse_replacement_line()` | `oracle_replacement.rs` |
-| 10 | Card is Instant/Sorcery + imperative | `parse_effect_chain()` | `oracle_effect/` |
-| 11 | Roman numeral (saga chapter) | Skipped | — |
-| 12 | Keyword cost line (kicker, etc.) | Skipped (MTGJSON handles) | — |
-| 13 | Ability word prefix (`"Landfall —"`) | Strip prefix, re-classify from P7 | `oracle.rs` |
-| 14a | `dispatch_line_nom()` — effect candidates | `parse_effect_chain_with_context()` | `oracle.rs` |
-| 15 | Fallback | `Effect::Unimplemented` | — |
+Before the line loop, `parse_oracle_ir` runs **pre-parsers** that consume whole
+line ranges: Saga chapters, Attraction visit lines, Class level sections (early
+return), Leveler LEVEL blocks, Spacecraft `N+ |` thresholds, and the Strive
+cost scan. Consumed line indices are skipped by the loop.
 
-### `is_static_pattern()` detects:
-`"gets +"`, `"gets -"`, `"get +"`, `"get -"`, `"have "`, `"has "`, `"can't be blocked"`, `"can't attack"`, `"can't block"`, `"enchanted "`, `"equipped "`, `"all creatures "`, `"enters with "`, `"cost {"`, and more. Check the function for the full list.
+Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 
-### `is_replacement_pattern()` detects:
-`"as ~ enters"`, `"enters tapped"`, `"if damage would be dealt"`, `"instead"`.
+| Label | Pattern | Router | Module |
+|-------|---------|--------|--------|
+| `14` | Line empty after reminder-text + "X can't be 0." stripping (stamps `min_x_value` on the previous ability first) | skip | `oracle.rs` |
+| `8b (early)` | "As an additional cost to cast this spell …" (non-Defiler) — must precede static classifiers that match embedded "this spell costs {N} less" tails | `parse_additional_cost_line()` → `result.additional_cost` | `oracle_casting.rs` |
+| `0` | Semicolon-separated keyword line ("Defender; reach"); colon guard excludes activated abilities | per-part keyword extraction | `oracle.rs` |
+| `1` | Modal block: "Choose one —" header + mode lines, or Spree + `+` lines (consumes multiple lines) | `parse_oracle_block()` + `lower_oracle_block()` | `oracle_modal.rs` |
+| — | "Equip {cost}" / "Equip — {cost}" (not "Equipped …"); "Crew N" with trailing cadence sentence | `try_parse_equip()`, `parse_crew_keyword()` | `oracle.rs` |
+| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `extract_keyword_line()` | `oracle_keyword.rs` |
+| `2` | "Enchant {filter}" | skip (handled externally) | — |
+| — | Commander-permission / deck-construction copy-limit sentences (skip); named equip "<Name> — Equip {cost}" | `try_parse_equip()` | `oracle.rs` |
+| `11` | Planeswalker loyalty `+N:` / `−N:` / `0:` / `[+N]:` (runs here despite the label) | `try_parse_loyalty_line()` | `oracle.rs` |
+| — | Granted-quoted statics: `is_granted_static_line()` ("enchanted/equipped/all/… has/gains \"…\"" ), incl. compound can't-win/lose split | `parse_static_line_with_graveyard_keyword_continuation()` | `oracle_static/` |
+| `3b` | "To solve — {condition}" (CR 719.1) | `parse_solve_condition()` → `result.solve_condition` | `oracle_special.rs` |
+| `3c` | "Channel — {cost}, Discard this card: {effect}" | activated-ability build | `oracle.rs` |
+| `3d` | "Boast — {cost}: {effect}" (implicit attacked-this-turn + once-per-turn restrictions, CR 702.142a) | activated-ability build | `oracle.rs` |
+| `3e` | "Exhaust — {cost}: {effect}" (implicit activate-only-once, CR 702.177a) | activated-ability build | `oracle.rs` |
+| `3f` | "Forecast — {cost}: {effect}" (hand-only, your upkeep, once per turn, CR 702.57a-b) | activated-ability build | `oracle.rs` |
+| `4` | Activated ability — contains `":"` with cost-like prefix | `find_activated_colon()` + `parse_activated_ability_definition()` | `oracle_cost.rs` + `oracle_effect/` |
+| `5-pre` | Trigger-framed "… enters with [counters] on it" — CR 614.1c replacement despite When/Whenever framing | `parse_replacement_line()` | `oracle_replacement.rs` |
+| `5-6` | Triggered abilities — `has_trigger_prefix()` (When/Whenever/At); compound triggers produce multiple `TriggerDefinition`s (CR 603.2) | `parse_trigger_line()` | `oracle_trigger.rs` |
+| `6b` | Ability-word-prefixed activated/trigger lines ("Threshold — {T}: …", "Heroic — Whenever …") — must precede static/replacement gates | strip word + re-route | `oracle.rs` |
+| `6c-defiler` | Defiler cycle: "As an additional cost to cast [color] permanent spells, you may pay N life. Those spells cost {C} less…" — static, not self-cost | `parse_defiler_cost_reduction()` | `oracle_special.rs` |
+| `6c-altcost` | "You may pay X rather than pay the mana cost for [filter] spells you cast" (CR 118.9; Fist of Suns class) | `parse_spells_alternative_cost()` | `oracle_static/cost_mod.rs` |
+| `6c-altcost-b` | "You may cast [filter] by paying {X} rather than paying their mana costs" (Primal Prayers) | `parse_cast_spells_alternative_cost_multi()` | `oracle_static/cost_mod.rs` |
+| `6c-altcost-c` | "You may collect evidence N rather than pay …" (Conspiracy Unraveler class) | `parse_collect_evidence_alt_cost()` | `oracle_static/cost_mod.rs` |
+| `6c-altcost-d` | "For each {C} in a cost, you may pay 2 life rather than pay that mana" (K'rrik class, CR 107.4f) | static-line parse | `oracle_static/` |
+| `6c-altcost-e` | "You may [cost] rather than pay [keyword] cost[s]" (New Perspectives / Heart of Kiran class) | `parse_alternative_keyword_cost()` | `oracle_static/cost_mod.rs` |
+| `6d` | Compound "enters tapped and doesn't untap during your untap step" — decomposed into ETB-tapped replacement (CR 614.1c) + CantUntap static (CR 502.3) | both parsers run | `oracle.rs` |
+| `7` | Static/continuous patterns — `is_static_pattern()`; spell lines with explicit durations and damage verbs are deferred to `9`; copy-replacement lines route to the replacement parser first | `parse_static_line_multi()` family | `oracle_classifier.rs` → `oracle_static/` |
+| `8` | Replacement patterns — `is_replacement_pattern()`; one paragraph can yield multiple ETB replacements | `parse_replacement_line()` | `oracle_classifier.rs` → `oracle_replacement.rs` |
+| `8c` | Leyline clause "If this card is in your opening hand, you may begin the game with it on the battlefield" (CR 103.6) | `parse_begin_game_clause()` | `oracle.rs` |
+| `8c-strive` | Strive lines — skip (cost extracted by the pre-loop scan) | skip | `oracle.rs` |
+| — | Casting restrictions ("Cast this spell only …"), spell casting options, die-roll tables (`try_parse_die_roll_table`, consumes header + table lines), Suspend/Specialize/Harmonize/Mayhem keyword-cost extraction | various | `oracle_casting.rs`, `oracle_special.rs`, `oracle_keyword.rs` |
+| `8f` | Kicker / Multikicker / Replicate cost lines — before the spell catch-all so they don't become Unimplemented | keyword extraction | `oracle.rs` |
+| `9` | Card is Instant/Sorcery → imperative spell body | `parse_effect_chain()` | `oracle_effect/` |
+| — | Flashback-equal-to-mana-cost, Commander ninjutsu, Escape em-dash, Cumulative upkeep keyword extraction | keyword extraction | `oracle.rs` / `oracle_keyword.rs` |
+| `12` | Roman numeral chapters (saga) | skip (pre-parsed) | — |
+| `13` | Keyword cost lines (`is_keyword_cost_line`) — extract parameterized keyword (e.g. "Morph {2}{B}") then skip | `parse_keyword_from_oracle()` | `oracle_keyword.rs` |
+| `13b` | Kicker/Multikicker leftovers | skip (handled by keywords) | — |
+| `13c` | Vehicle tier lines "N+ \| keyword(s)" | skip | `oracle_classifier.rs` |
+| `13d` | "Activate only…" constraint line | skip | — |
+| `13e` | "X can't be 0." annotation → `min_x_value` on previous ability | defensive fallback | `oracle.rs` |
+| `14` | Ability word prefix ("Landfall —") — strip, map known words to typed conditions, re-classify the body | `strip_ability_word_with_name()` + `ability_word_to_condition()` | `oracle.rs` |
+| `14a` | Nom fallback dispatch — try effect, trigger, static, and replacement sub-parsers | `dispatch_line_nom()` | `oracle_dispatch.rs` |
+| `15` | Final fallback | `Effect::Unimplemented` with diagnostic trace | — |
+
+### `is_static_pattern()` — `oracle_classifier.rs`
+Gates Priority `7`. Returns false for `target`-leading lines, then matches
+`STATIC_CONTAINS_PATTERNS` (word-boundary scan: "gets +", "have ", "can't
+attack", "nonland ", "you may spend mana as though", …), `STATIC_PREFIX_PATTERNS`,
+and `is_static_compound_pattern()` (graveyard/top-of-library/exile cast
+permissions, "spells can't be cast", flash grants, …). Check the constants in
+`oracle_classifier.rs` for the full lists.
+
+### `is_replacement_pattern()` — `oracle_classifier.rs`
+Gates Priority `8`. Matches `REPLACEMENT_CONTAINS_PATTERNS` ("would ",
+"prevent all", "enters tapped/untapped/prepared", "enter as a copy of",
+"become a copy of"), trailing " enter tapped/untapped", counter-prohibition
+phrases (CR 614.17), and `is_replacement_compound_pattern()` (as-enters-choose,
+enters/escapes + counter, tapped-for-mana + instead, madness discard).
 
 ---
 
@@ -231,23 +360,31 @@ Predicate types — `PredicateAst`:
 | `Restriction` | "can't", "cannot" | "can't attack or block" |
 | `ImperativeFallback` | None of the above | Falls back to imperative parsing |
 
-Imperative family dispatch — `ImperativeFamilyAst`:
+Imperative family dispatch — `ImperativeFamilyAst` (oracle_ir/ast.rs). The enum
+has three layers of variants: direct families, `Structured(ImperativeAst)`
+wrapping the structured families (`Numeric`, `Targeted`, `SearchCreation`,
+`HandReveal`, `Choose`, `Utility`), and a tail of keyword-action leaves
+(`Explore`, `Connive`, `Investigate`, `Learn`, `Manifest`, `Proliferate`,
+`Populate`, `Goad`, `RollDie`, `VentureIntoDungeon`, …):
 
 | Family | Sub-parser | Verb patterns |
 |--------|-----------|---------------|
 | `CostResource` | `parse_cost_resource_ast()` | add mana, pay life, deal damage |
 | `ZoneCounter` | `parse_zone_counter_ast()` | destroy, exile, counter, put counter |
-| `Numeric` | `parse_numeric_imperative_ast()` | draw, gain life, lose life, pump, scry, surveil, mill |
-| `Targeted` | `parse_targeted_action_ast()` | tap, untap, sacrifice, discard, return, fight, gain control |
-| `SearchCreation` | `parse_search_and_creation_ast()` | search library, dig, create token, copy token |
-| `HandReveal` | `parse_hand_reveal_ast()` | look at hand, reveal hand, reveal top |
-| `Choose` | `parse_choose_ast()` | target-only, named choice, reveal hand filter |
+| `Structured(Numeric)` | `parse_numeric_imperative_ast()` | draw, gain life, lose life, pump, scry, surveil, mill |
+| `Structured(Targeted)` | `parse_targeted_action_ast()` | tap, untap, sacrifice, discard, return, fight, gain control |
+| `Structured(SearchCreation)` | `parse_search_and_creation_ast()` | search library, dig, create token, copy token |
+| `Structured(HandReveal)` | `parse_hand_reveal_ast()` | look at hand, reveal hand, reveal top |
+| `Structured(Choose)` | `parse_choose_ast()` | target-only, named choice, reveal hand filter |
+| `Structured(Utility)` | `parse_utility_imperative_ast()` | prevent, regenerate, copy, transform, attach |
 | `Shuffle` | `parse_shuffle_ast()` | shuffle, shuffle into library |
 | `Put` | `parse_put_ast()` | put into/on top of |
-| `Utility` | `parse_utility_imperative_ast()` | prevent, regenerate, copy, transform, attach |
-| `YouMay` | "you may" prefix | Wraps inner effect |
+| `YouMay` | "you may" prefix | Wraps inner effect (generic optionals are peeled earlier by `clause_shell`) |
 
-Dispatch order: CostResource → ZoneCounter → Numeric → Targeted → SearchCreation → Explore/Proliferate → Shuffle → HandReveal → Choose → Put → YouMay.
+Approximate dispatch order in `parse_imperative_family_ast()`: keyword-grant
+intercepts → CostResource → ZoneCounter → Numeric → Targeted → SearchCreation →
+Utility → Shuffle → HandReveal → Choose → keyword-action leaves → Put → YouMay.
+Read the function for the binding order before inserting a new family.
 
 ### 4c. Clause Splitting & Continuations
 
@@ -295,18 +432,24 @@ Before parsing, `normalize_self_refs()` replaces the card's name and phrases lik
 
 ```
 oracle_effect/
-├── mod.rs          — Orchestrator: parse_effect_chain(), parse_effect_clause(), compound detection
-├── conditions.rs   — Leading condition splitting and AbilityCondition extraction helpers
-├── imperative.rs   — Imperative verb family parsing: parse_*_ast() + lower_*_ast()
-├── search.rs       — Search/seek parsing helpers: search filters, seek details, destinations
-├── subject.rs      — Subject-predicate parsing: try_parse_subject_predicate_ast()
-├── sequence.rs     — Clause boundary splitting and continuation absorption
-├── token.rs        — Token creation: "create a 1/1 white Spirit token with flying"
-├── animation.rs    — Animation/become: "becomes a 3/3 creature with flying"
-├── counter.rs      — Counter mechanics: put/remove/move/double counters
-├── mana.rs         — Mana production and spend restrictions
-└── types.rs        — All AST type definitions (ClauseAst, ImperativeFamilyAst, etc.)
+├── mod.rs                — Orchestrator: parse_effect_chain(), parse_effect_clause(), compound detection
+├── conditions.rs         — Leading condition splitting, AbilityCondition extraction, condition bridges
+├── imperative.rs         — Imperative verb family parsing: parse_*_ast() + lower_*_ast()
+├── lower.rs              — Clause lowering helpers: strip_trailing_duration / strip_leading_duration
+│                           (the live duration suffix/prefix tables), damage-player scopes
+├── search.rs             — Search/seek parsing helpers: search filters, seek details, destinations
+├── subject.rs            — Subject-predicate parsing: try_parse_subject_predicate_ast()
+├── sequence.rs           — Clause boundary splitting and continuation absorption
+├── token.rs              — Token creation: "create a 1/1 white Spirit token with flying"
+├── animation.rs          — Animation/become: "becomes a 3/3 creature with flying"
+├── become_copy_except.rs — Shared ", except <body>" clause for copy effects (CR 707.9 + CR 613.1a)
+├── counter.rs            — Counter mechanics: put/remove/move/double counters
+└── mana.rs               — Mana production and spend restrictions
 ```
+
+AST type definitions (`ClauseAst`, `ImperativeFamilyAst`, `ParsedEffectClause`,
+etc.) live in `oracle_ir/ast.rs` — the former `oracle_effect/types.rs` was
+moved there as part of the IR layer.
 
 ### Subject-Predicate Parsing — `subject.rs`
 
@@ -366,22 +509,49 @@ Predicate hierarchy: `try_parse_subject_continuous_clause()` → `try_parse_subj
 
 ## 6. Other Parser Modules
 
-| Module | Purpose | Invoked at Priority |
-|--------|---------|-------------------|
-| `oracle_classifier.rs` | Shared line-classification helpers: trigger prefixes, static/replacement detection, special routing heuristics. Called by `oracle.rs`, `oracle_dispatch.rs`, and class parsing. | Priority router support |
-| `oracle_dispatch.rs` | Nom fallback dispatch for effect/static/replacement candidates before `Unimplemented`. | P14a |
-| `oracle_special.rs` | Router-adjacent helpers for solve conditions, Defiler two-line statics, die-roll tables, static self-ref normalization, and keyword-line parsing (Escape/Harmonize/Cumulative Upkeep). | Priority router support |
-| `oracle_trigger.rs` | Trigger parsing: subject + event decomposition, constraint parsing (OncePerTurn, OncePerGame). Uses `parse_trigger_subject()` → `try_parse_event()` pipeline. | P7 |
-| `oracle_static.rs` | Static ability parsing: turn-condition handling (prefix "During your turn" and suffix "during your turn"), continuous modifications via `parse_continuous_modifications()`. | P8 |
-| `oracle_replacement.rs` | Replacement effects: priority-ordered pattern matching (as-enters-choose before shock-land before fast-land, etc.), builder pattern with `ReplacementDefinition::new()`. | P9 |
-| `oracle_condition.rs` | Restriction conditions: source/control/graveyard/hand/event conditions for "Cast only if..." / "Activate only if..." patterns. | Used by P6, P8 |
-| `oracle_cost.rs` | Ability cost parsing: mana costs, tap/sacrifice/discard costs, `parse_single_cost()` for individual cost components. | P6 |
-| `oracle_keyword.rs` | Keyword extraction: comma-separated keyword lists, parameterized keywords (ward, kicker), keyword grants. | P1, P12 |
-| `oracle_casting.rs` | Casting options/restrictions: additional costs ("As an additional cost"), alternative costs, timing restrictions (flash, sorcery speed), `scan_timing_restrictions()`. | Pre-P1 |
-| `oracle_modal.rs` | Modal spell parsing: "Choose N" headers, bullet mode collection, loyalty ability dispatch, `parse_oracle_block()` for block-level parsing. | P4, P5 |
+| Module | Purpose | Invoked at Slot |
+|--------|---------|-----------------|
+| `oracle_classifier.rs` | Shared line-classification helpers: trigger prefixes (`has_trigger_prefix`), **`is_static_pattern()` (~line 398)**, **`is_replacement_pattern()`**, granted-static and vehicle-tier detection. Called by `oracle.rs`, `oracle_dispatch.rs`, and class parsing. | Gates for `5-6`, `7`, `8`, `13c` |
+| `oracle_dispatch.rs` | Nom fallback dispatch for effect/static/replacement candidates before `Unimplemented`. | `14a` |
+| `clause_shell.rs` | Structural-slot peeling (`peel_clause` / `ClauseContext`) — see §2. Destination for all new structural slot handling (optional, duration, leading condition today). | Inside `parse_effect_clause()` |
+| `oracle_special.rs` | Router-adjacent helpers for solve conditions, Defiler two-line statics, die-roll tables, static self-ref normalization, and keyword-line parsing (Escape/Harmonize/Cumulative Upkeep). | `3b`, `6c-defiler`, die-roll slot |
+| `oracle_trigger.rs` | Trigger parsing: subject + event decomposition, constraint parsing (OncePerTurn, OncePerGame). Uses `parse_trigger_subject()` → `try_parse_event()` pipeline. | `5-6` |
+| `oracle_static/` | **Directory** — static ability parsing split into submodules (see below). Entry: `parse_static_line()` / `parse_static_line_multi()` in `mod.rs` / `shared.rs`, internally two-phase (`parse_static_line_ir` → `lower_static_ir`). | `7` |
+| `oracle_replacement.rs` | Replacement effects: priority-ordered pattern matching (as-enters-choose before shock-land before fast-land, etc.), builder pattern with `ReplacementDefinition::new()`. | `8`, `5-pre` |
+| `oracle_condition.rs` | Restriction conditions: source/control/graveyard/hand/event conditions for "Cast only if..." / "Activate only if..." patterns. | Used by `4` and casting-restriction lines |
+| `oracle_cost.rs` | Ability cost parsing: mana costs, tap/sacrifice/discard costs, `parse_single_cost()` for individual cost components. | `4` |
+| `oracle_keyword.rs` | Keyword extraction: comma-separated keyword lists, parameterized keywords (ward, kicker), keyword grants. | `0`, `1b`, `13` + keyword-cost slots |
+| `oracle_casting.rs` | Casting options/restrictions: additional costs ("As an additional cost"), alternative costs, timing restrictions (flash, sorcery speed), `scan_timing_restrictions()`. | `8b (early)` + casting-restriction slot |
+| `oracle_modal.rs` | Modal spell parsing: "Choose N" headers, bullet mode collection, `parse_oracle_block()` for block-level parsing. | `1` |
+| `oracle_vote.rs` | Council's-dilemma / Will-of-the-Council vote blocks (CR 701.38): "each player votes for A or B" + per-vote effects. | Within `9` and trigger bodies |
+| `oracle_separate_piles.rs` | Pile-separation shape (CR 700.3): "separates ... into two piles" three-sentence form. | Within `9` |
 | `oracle_class.rs` | Class card parsing (level-gated abilities). | Special pre-parse |
 | `oracle_level.rs` | Leveler card parsing (LEVEL N-M power/toughness ranges). | Special pre-parse |
 | `oracle_saga.rs` | Saga chapter parsing (roman numeral → chapter effects). | Special pre-parse |
+| `oracle_attraction.rs` | Attraction visit abilities and numbered visit lines (CR 717.5 + CR 702.159a). | Special pre-parse |
+| `oracle_spacecraft.rs` | Spacecraft pipe-delimited threshold lines "N+ \| body" → charge-counter-gated statics/triggers/abilities (CR 721). | Special pre-parse |
+
+### The `oracle_static/` Directory Split
+
+The former single-file `oracle_static.rs` is now a directory. `mod.rs` owns the
+public `parse_static_line()` (two-phase: `parse_static_line_ir` →
+`lower_static_ir`), a shared `prelude`, and the re-export surface. Submodules:
+
+| Sub-module | What lives here |
+|-----------|----------------|
+| `dispatch.rs` | `parse_static_line_inner` — the priority-ordered static-pattern dispatch |
+| `shared.rs` | `parse_static_line_multi`, compound-line splitting, cross-submodule helpers |
+| `anthem.rs` | P/T modification statics: "get +1/+1", dynamic/base P/T, "where X is" binding |
+| `keyword_grant.rs` | Keyword/ability grants: `parse_continuous_modifications()`, quoted-ability grants, graveyard keyword grants |
+| `evasion.rs` | Combat statics: can't-block/attack splits, block exceptions, must-attack |
+| `restriction.rs` | Casting/activation prohibitions: `strip_casting_prohibition_subject()`, cast-and-activate-only-during |
+| `cost_mod.rs` | Cost modification statics: alternative costs, cost payment prohibitions |
+| `type_change.rs` | Type-changing statics: "is a", "becomes", additive type clauses |
+| `cda.rs` | Characteristic-defining abilities |
+| `grammar.rs` | Shared static-line grammar combinators |
+| `static_helpers.rs` | Misc static construction helpers |
+| `loyalty.rs` | Loyalty-related static helpers |
+| `mana_transform.rs` | Mana-type transformation statics (retain-unspent-mana, etc.) |
 
 ### Event-Context References
 
@@ -419,15 +589,49 @@ Predicate hierarchy: `try_parse_subject_continuous_clause()` → `try_parse_subj
 | `oracle_nom/primitives.rs` | Numbers (digits, English words, articles), mana symbols/costs, colors, counter types, P/T modifiers, roman numerals, `parse_article_number` (word-boundary guard — prevents "another" → "a"), `scan_at_word_boundaries`, `scan_contains` | Parsing any atomic Oracle text element |
 | `oracle_nom/target.rs` | Target phrase combinators, controller suffix, color prefix, combat status, self-reference, event-context refs | Parsing "target X" or type descriptions in nom pipelines |
 | `oracle_nom/quantity.rs` | Quantity expressions, quantity refs, "equal to" patterns, "for each" patterns | Parsing counts and dynamic amounts in nom pipelines |
-| `oracle_nom/duration.rs` | Duration phrases ("until end of turn", "for as long as ~", "until your next turn") | Parsing effect durations |
+| `oracle_nom/duration.rs` | Duration phrase combinators (`parse_duration`, `parse_optional_duration`, `parse_cast_snapshot_suffix`) | Parsing inline duration phrases in nom pipelines — but see the duration doctrine below for where NEW duration patterns go |
 | `oracle_nom/condition.rs` | `parse_condition` (prefix + inner), `parse_inner_condition` (**single authority** for all game-state conditions) | Parsing "if/unless/as long as" — ALWAYS delegate here |
 | `oracle_nom/filter.rs` | Zone filters, controller filters, property filters ("tapped", "attacking", "with flying", "with a +1/+1 counter") | Parsing object property constraints |
-| `oracle_nom/error.rs` | `OracleResult` type alias, `parse_or_unimplemented` (nom `VerboseError` → `Effect::Unimplemented` with diagnostic trace), `option_to_nom` (adapt Option → nom alt chain) | Error handling at parser dispatch boundaries |
+| `oracle_nom/error.rs` | `OracleError` / `OracleResult` type aliases, `oracle_err` (error constructor for hand-rolled combinators). For "parser couldn't handle this", use `Effect::unimplemented(name, fragment)` from `types/ability.rs` — the single authority; literal `Effect::Unimplemented { .. }` construction is gated for new code | Error handling at parser dispatch boundaries |
 | `oracle_nom/bridge.rs` | `nom_on_lower` (run nom on lowercase, map consumed bytes back to original-case remainder), `nom_on_lower_required` (Result variant), `nom_parse_lower` (discard remainder) | Bridging mixed-case Oracle text to lowercase nom combinators |
 | `oracle_nom/context.rs` | `ParseContext` (subject, quantity_ref, card_name, in_trigger, in_replacement) | Threading parse state across combinator boundaries |
 | `oracle_util.rs` | `TextPair` (dual original/lowercase slices with `strip_prefix`/`strip_suffix`), `parse_number` wrapper, mana symbol parsing, `strip_reminder_text`, `normalize_card_name_refs`, possessive/pronoun matching (`contains_possessive`, `contains_object_pronoun`, `starts_with_possessive`), `match_phrase_variants`, `merge_or_filters`, `SELF_REF_TYPE_PHRASES`, `SELF_REF_PARSE_ONLY_PHRASES` | Case-bridging structural ops, shared string utilities, phrase matching |
 | `oracle_target.rs` | `parse_target` (full target extraction), `parse_type_phrase` (type descriptions without "target"), `parse_player_reference`, `parse_event_context_ref`, `parse_zone_suffix` | High-level target/filter extraction from Oracle text |
-| `oracle_quantity.rs` | `parse_quantity_ref` (semantic interpretation), `parse_cda_quantity` (CDAs), `parse_for_each_clause` ("for each [filter]") | Semantic quantity interpretation from Oracle text |
+| `oracle_quantity.rs` | **Frozen legacy fall-through** — `parse_quantity_ref` (semantic interpretation), `parse_cda_quantity` (CDAs), `parse_for_each_clause` ("for each [filter]") | Existing call sites only. Do NOT add new `QuantityRef` recognition here — it goes in `oracle_nom/quantity.rs` (see doctrine below) |
+
+### Where New Grammar Goes — Single-Authority Doctrine
+
+Each grammar axis has exactly one home for NEW pattern recognition. Adding a
+pattern anywhere else creates a second authority that will drift:
+
+- **Durations** — one grammar. Two duration tables exist today:
+  `oracle_nom/duration.rs::parse_duration` (the nom combinator grammar) and
+  `oracle_effect/lower.rs::strip_trailing_duration` (+ `strip_leading_duration`)
+  — the suffix/prefix tables that the clause shell and the static/effect
+  parsers actually run against, and the richer of the two ("for the rest of
+  the game", "until ~ leaves the battlefield", mid-clause durations).
+  Consolidation into `oracle_nom/duration.rs` is planned; **until that port
+  happens, new duration patterns go in `strip_trailing_duration`'s table in
+  `oracle_effect/lower.rs`** (and `strip_leading_duration` for leading forms),
+  so the clause shell picks them up for free. Do not add a third recognizer.
+- **`QuantityRef` recognition** — new dynamic-quantity phrases go in
+  `oracle_nom/quantity.rs` (`parse_quantity_ref` combinator and friends),
+  never in `oracle_quantity.rs`, which is frozen legacy fall-through.
+- **Type phrases / targets** — new type-phrase and target work composes the
+  `oracle_nom/target.rs` combinators. `oracle_target.rs` remains the
+  high-level extraction surface, but its building blocks are the nom
+  combinators — extend those, not bespoke string logic.
+- **Conditions** — `parse_inner_condition` in `oracle_nom/condition.rs` is the
+  single condition recognizer (output type: `StaticCondition`). Its output is
+  adapted into other condition layers by three bridges that MUST be kept
+  exhaustive when `StaticCondition` gains variants:
+  `static_condition_to_trigger_condition` (`oracle_trigger.rs`),
+  `static_condition_to_ability_condition` (`oracle_effect/conditions.rs`), and
+  `static_condition_to_restriction_condition` (`oracle_condition.rs`). A new
+  `StaticCondition` variant that is silently unconvertible in a bridge is a
+  swallow bug waiting to surface.
+- **Structural slots** (optional, duration, leading condition, future siblings)
+  — `clause_shell.rs` (see §2). New slot types migrate into the shell.
 
 **Damage-player routing** (`oracle_effect/mod.rs`) — exact player-set phrases in damage effects have a dedicated helper path:
 
@@ -489,10 +693,13 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - Counter mechanics → `counter.rs`
 - Mana production → `mana.rs`
 - Continuation/absorption → `sequence.rs`
+- Structural slot (optional / duration / leading condition) → `clause_shell.rs` (see §2)
+- Duration phrase → `strip_trailing_duration` table in `oracle_effect/lower.rs` (see §7 doctrine)
+- Dynamic quantity → `oracle_nom/quantity.rs` (never `oracle_quantity.rs`)
 - Trigger → `oracle_trigger.rs`
-- Static → `oracle_static.rs`
+- Static → `oracle_static/` (dispatch in `dispatch.rs`, category submodules per §6)
 - Replacement → `oracle_replacement.rs`
-- Routing gate → `is_static_pattern()` / `is_replacement_pattern()` in `oracle.rs`
+- Routing gate → `is_static_pattern()` / `is_replacement_pattern()` in `oracle_classifier.rs` (~line 398)
 
 **Phase 2 — Add the Pattern**
 - [ ] Write the parser test FIRST
@@ -509,11 +716,11 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Check `parse_effect_chain()` for special chaining
 
 **Phase 5 — Routing**
-- [ ] Update `is_static_pattern()` or `is_replacement_pattern()` if text is routed to the wrong parser
+- [ ] Update `is_static_pattern()` or `is_replacement_pattern()` in `oracle_classifier.rs` if text is routed to the wrong parser
 
 **Phase 6 — Tests & Verification**
 - [ ] Parser unit tests for each new pattern
-- [ ] Snapshot test: `crates/engine/tests/oracle_parser.rs`
+- [ ] Snapshot tests: `oracle_ir/snapshot_tests.rs` (IR + lowered parity, insta), plus per-module `snapshot_tests.rs` in `oracle_static/`
 - [ ] `cargo coverage` — Unimplemented count should decrease
 - [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
@@ -655,63 +862,33 @@ Use `--warning-detector <detector>` for broad-family triage and `--warning-patte
 
 After completing work using this skill:
 
-1. **Verify references** with the script below
-2. **Update the priority table** (§3) if parsing order changed
+1. **Verify references** by running `./scripts/check-skill-doc.sh`
+2. **Update the priority table** (§3) if slots were added/removed/renamed in `parse_oracle_ir` — the gate compares the table against the `// Priority <label>:` comments
 3. **Update the AST family tables** (§4b) if new families or continuations were added
 4. **Update the deep dive** (§5) if new sub-modules were added to `oracle_effect/`
-5. **Update the module catalog** (§6) if new `oracle_*.rs` modules were added
+5. **Update the module catalog** (§6) if new `oracle_*.rs` modules or `oracle_static/` submodules were added
 
-### Verification Script
+### Verification Gate — `scripts/check-skill-doc.sh`
+
+The verification script lives at `scripts/check-skill-doc.sh` and **runs in CI**
+(rust-lint job, alongside the parser combinator gate), so this document cannot
+silently drift from the source tree. It asserts three invariant families:
+
+1. **Paths** — every parser file/directory documented here exists.
+2. **Anchor symbols** — the load-bearing functions named in this document
+   (`parse_oracle_ir`, `lower_oracle_ir`, `peel_clause`, `parse_inner_condition`,
+   the three condition bridges, `strip_trailing_duration`, …) still live in the
+   documented files.
+3. **Priority table sync** — the §3 table's labeled-row count equals the number
+   of `// Priority <label>:` slot comments in `oracle.rs`, and every label that
+   appears in code appears in the table. Cosmetic doc edits don't trip it;
+   adding, removing, or renaming a slot without updating §3 does.
 
 ```bash
-rg -q "fn parse_oracle_text" crates/engine/src/parser/oracle.rs && \
-rg -q "fn is_static_pattern" crates/engine/src/parser/oracle_classifier.rs && \
-rg -q "fn is_replacement_pattern" crates/engine/src/parser/oracle_classifier.rs && \
-rg -q "fn dispatch_line_nom" crates/engine/src/parser/oracle_dispatch.rs && \
-rg -q "fn parse_effect_chain" crates/engine/src/parser/oracle_effect/mod.rs && \
-rg -q "fn parse_effect_clause" crates/engine/src/parser/oracle_effect/mod.rs && \
-rg -q "fn parse_imperative_effect" crates/engine/src/parser/oracle_effect/mod.rs && \
-rg -q "fn split_leading_conditional" crates/engine/src/parser/oracle_effect/conditions.rs && \
-rg -q "fn strip_leading_general_conditional" crates/engine/src/parser/oracle_effect/conditions.rs && \
-rg -q "fn parse_search_library_details" crates/engine/src/parser/oracle_effect/search.rs && \
-rg -q "fn parse_seek_details" crates/engine/src/parser/oracle_effect/search.rs && \
-rg -q "fn parse_search_destination" crates/engine/src/parser/oracle_effect/search.rs && \
-rg -q "fn strip_subject_clause" crates/engine/src/parser/oracle_effect/subject.rs && \
-rg -q "fn try_parse_subject_predicate_ast" crates/engine/src/parser/oracle_effect/subject.rs && \
-rg -q "fn try_parse_targeted_controller_gain_life" crates/engine/src/parser/oracle_effect/subject.rs && \
-rg -q "fn parse_imperative_family_ast" crates/engine/src/parser/oracle_effect/imperative.rs && \
-rg -q "fn parse_numeric_imperative_ast" crates/engine/src/parser/oracle_effect/imperative.rs && \
-rg -q "fn parse_zone_counter_ast" crates/engine/src/parser/oracle_effect/imperative.rs && \
-rg -q "fn split_clause_sequence" crates/engine/src/parser/oracle_effect/sequence.rs && \
-rg -q "fn parse_followup_continuation_ast" crates/engine/src/parser/oracle_effect/sequence.rs && \
-rg -q "fn try_parse_token" crates/engine/src/parser/oracle_effect/token.rs && \
-rg -q "fn parse_animation_spec" crates/engine/src/parser/oracle_effect/animation.rs && \
-rg -q "fn try_parse_put_counter" crates/engine/src/parser/oracle_effect/counter.rs && \
-rg -q "fn try_parse_add_mana_effect" crates/engine/src/parser/oracle_effect/mana.rs && \
-rg -q "fn parse_target" crates/engine/src/parser/oracle_target.rs && \
-rg -q "fn parse_type_phrase" crates/engine/src/parser/oracle_target.rs && \
-rg -q "fn parse_number" crates/engine/src/parser/oracle_util.rs && \
-rg -q "fn contains_possessive" crates/engine/src/parser/oracle_util.rs && \
-rg -q "fn contains_object_pronoun" crates/engine/src/parser/oracle_util.rs && \
-rg -q "fn match_phrase_variants" crates/engine/src/parser/oracle_util.rs && \
-rg -q "fn parse_trigger_line" crates/engine/src/parser/oracle_trigger.rs && \
-rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static.rs && \
-rg -q "fn parse_replacement_line" crates/engine/src/parser/oracle_replacement.rs && \
-rg -q "fn parse_inner_condition" crates/engine/src/parser/oracle_nom/condition.rs && \
-rg -q "pub fn parse_number" crates/engine/src/parser/oracle_nom/primitives.rs && \
-rg -q "pub fn parse_number_or_x" crates/engine/src/parser/oracle_nom/primitives.rs && \
-rg -q "pub fn parse_color" crates/engine/src/parser/oracle_nom/primitives.rs && \
-rg -q "pub fn parse_mana_cost" crates/engine/src/parser/oracle_nom/primitives.rs && \
-rg -q "fn parse_or_unimplemented" crates/engine/src/parser/oracle_nom/error.rs && \
-rg -q "pub type OracleResult" crates/engine/src/parser/oracle_nom/error.rs && \
-rg -q "pub fn nom_on_lower" crates/engine/src/parser/oracle_nom/bridge.rs && \
-rg -q "pub fn scan_at_word_boundaries" crates/engine/src/parser/oracle_nom/primitives.rs && \
-test -f crates/engine/src/parser/oracle_keyword.rs && \
-test -f crates/engine/src/parser/oracle_casting.rs && \
-test -f crates/engine/src/parser/oracle_modal.rs && \
-test -f crates/engine/src/parser/oracle_class.rs && \
-test -f crates/engine/src/parser/oracle_level.rs && \
-test -f crates/engine/src/parser/oracle_saga.rs && \
-echo "✓ oracle-parser skill references valid" || \
-echo "✗ STALE — update skill references"
+./scripts/check-skill-doc.sh   # exit 0 = doc in sync; non-zero lists drift
 ```
+
+When the gate fails: update the relevant section here (not the script's
+expectations) unless the code change itself was wrong. When documenting a new
+slot, give it a `| \`label\` |` row in §3; unlabeled interleaved handlers use
+`| — |` rows, which the gate ignores.

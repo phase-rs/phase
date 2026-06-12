@@ -41,6 +41,7 @@ Two gates lead every review; apply them before the rest.
 ### Engine Logic
 
 - Verify every new or moved `// CR <rule>` by checking `docs/MagicCompRules.txt`; the cited rule must actually describe the code.
+- Compound CR annotations are the project's documented convention, **not** format violations: `CR X + CR Y` for interacting rules, `CR X / CR Y` for alternatives, and range/subpart forms like `CR 702.45a/b` (see CLAUDE.md "MTG Comprehensive Rules Annotations"). Do not flag the `+` / `/` / range forms as malformed or as regex violations — Gemini routinely raises these and they should be refuted, not echoed. Only flag a CR citation whose base number does not resolve in `docs/MagicCompRules.txt`, or one that does not describe the annotated code.
 - Check reuse of building blocks in `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, `game/zones.rs`, and `game/targeting.rs`.
 - Keep game logic in the engine. If player-visible state was added, verify multiplayer filtering.
 - For non-battlefield zones, player-scoped queries usually use `owner`, not `controller`.

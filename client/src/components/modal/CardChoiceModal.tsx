@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { motion, Reorder } from "framer-motion";
+import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -9,6 +9,8 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import type {
+  CounterMatch,
+  CounterType,
   ExileCostSourceZone,
   GameObject,
   ManaCost,
@@ -23,6 +25,7 @@ import type {
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
@@ -37,12 +40,23 @@ import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.t
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
-
-type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
-type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
-type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
-type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
-type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
+import {
+  CoinFlipKeepModal,
+  DigModal,
+  RevealModal,
+  ScryModal,
+  SurveilModal,
+} from "./cardChoice/libraryModals.tsx";
+import {
+  CHOICE_CARD_IMAGE_CLASS,
+  CostActionFooter,
+  EFFECT_ZONE_ACTION_LABEL_KEYS,
+  EFFECT_ZONE_BADGE_KEYS,
+  EFFECT_ZONE_VISUAL_CLASSES,
+  canAssignDistinctCardTypes,
+  searchChoiceSubtitle,
+  type EffectZoneMode,
+} from "./cardChoice/shared.tsx";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<WaitingFor, { type: "SearchPartitionChoice" }>;
 type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
@@ -66,132 +80,6 @@ type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
 type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
-const CHOICE_CARD_IMAGE_CLASS = "";
-
-type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield";
-
-const EFFECT_ZONE_VISUAL_CLASSES: Record<EffectZoneMode, { ring: string; overlay: string; badge: string }> = {
-  Sacrifice: {
-    ring: "ring-red-400/80",
-    overlay: "bg-red-500/20",
-    badge: "bg-red-500/90",
-  },
-  Topdeck: {
-    ring: "ring-sky-300/80",
-    overlay: "bg-sky-500/20",
-    badge: "bg-sky-500/90",
-  },
-  Hand: {
-    ring: "ring-sky-300/80",
-    overlay: "bg-sky-500/20",
-    badge: "bg-sky-500/90",
-  },
-  Battlefield: {
-    ring: "ring-emerald-400/80",
-    overlay: "bg-emerald-500/20",
-    badge: "bg-emerald-500/90",
-  },
-};
-
-const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
-  Sacrifice: "cardChoice.effectZone.labelConfirm",
-  Topdeck: "cardChoice.effectZone.labelTop",
-  Hand: "cardChoice.effectZone.labelReturn",
-  Battlefield: "cardChoice.effectZone.labelPut",
-};
-
-const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
-  Sacrifice: "cardChoice.badges.sacrifice",
-  Topdeck: "cardChoice.badges.put",
-  Hand: "cardChoice.badges.return",
-  Battlefield: "cardChoice.badges.put",
-};
-
-function CostActionFooter({
-  onCancel,
-  children,
-}: {
-  onCancel: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="mx-auto flex w-full max-w-xl flex-col gap-2 sm:flex-row">
-      <div className="flex-1">
-        <CancelButton onClick={onCancel} />
-      </div>
-      <div className="flex-1">
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function canAssignDistinctCardTypes(
-  objects: Record<ObjectId, GameObject | undefined>,
-  selectedIds: ObjectId[],
-  categories: string[],
-): boolean {
-  if (selectedIds.length === 0) return true;
-  if (selectedIds.length > categories.length) return false;
-
-  const cardOptions = selectedIds
-    .map((id) => {
-      const obj = objects[id];
-      if (!obj) return null;
-      return categories
-        .map((category, index) =>
-          obj.card_types.core_types.includes(category) ? index : -1,
-        )
-        .filter((index) => index >= 0);
-    });
-
-  if (cardOptions.some((options) => !options || options.length === 0)) {
-    return false;
-  }
-
-  const sortedOptions = [...cardOptions]
-    .filter((options): options is number[] => Array.isArray(options))
-    .sort((a, b) => a.length - b.length);
-  const used = new Array(categories.length).fill(false);
-
-  const assign = (idx: number): boolean => {
-    if (idx === sortedOptions.length) return true;
-    for (const categoryIndex of sortedOptions[idx]) {
-      if (used[categoryIndex]) continue;
-      used[categoryIndex] = true;
-      if (assign(idx + 1)) return true;
-      used[categoryIndex] = false;
-    }
-    return false;
-  };
-
-  return assign(0);
-}
-
-function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"game">): string {
-  const constraint = data.constraint;
-  const opts = { count: data.count };
-
-  if (constraint?.type === "MatchEachFilter") {
-    return data.up_to
-      ? t("cardChoice.search.subtitleMatchUpTo", opts)
-      : t("cardChoice.search.subtitleMatchExact", opts);
-  }
-  if (constraint?.type === "DistinctQualities") {
-    return data.up_to
-      ? t("cardChoice.search.subtitleDistinctUpTo", opts)
-      : t("cardChoice.search.subtitleDistinctExact", opts);
-  }
-  if (constraint?.type === "TotalManaValue") {
-    return data.up_to
-      ? t("cardChoice.search.subtitleManaValueUpTo", opts)
-      : t("cardChoice.search.subtitleManaValueExact", opts);
-  }
-
-  return data.up_to
-    ? t("cardChoice.search.subtitleUpTo", opts)
-    : t("cardChoice.search.subtitleExact", opts);
-}
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -343,6 +231,14 @@ export function CardChoiceModal() {
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
+    case "TimeTravelChoice":
+      if (!canActForWaitingState) return null;
+      return (
+        <ProliferateModal
+          data={waitingFor.data}
+          variant={waitingFor.data.phase === "Add" ? "timeTravelAdd" : "timeTravelRemove"}
+        />
+      );
     case "ChooseObjectsSelection":
       if (!canActForWaitingState) return null;
       return (
@@ -429,436 +325,6 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
               >
                 {isSelected ? t("cardChoice.badges.selected") : t("cardChoice.badges.choose")}
               </span>
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Scry Modal ──────────────────────────────────────────────────────────────
-
-// ── Reorderable Top Choice (shared by Scry + Surveil) ────────────────────────
-//
-// Scry (CR 701.22a) and Surveil (CR 701.25a) are the same operation: look at the
-// top N cards, keep any number on top "in any order", and send the rest to a
-// "rest" zone (bottom of library for scry, graveyard for surveil). This shared
-// modal lets the player both choose which cards stay on top and drag them into
-// the desired draw order. The submitted `SelectCards` payload is the ordered
-// keep-on-top set — the engine routes every unlisted card to the rest zone.
-function ReorderableTopChoice({
-  cards,
-  title,
-  subtitle,
-  keepLabel,
-  restLabel,
-  reorderHint,
-  keepTone,
-}: {
-  cards: ObjectId[];
-  title: string;
-  subtitle: string;
-  keepLabel: string;
-  restLabel: string;
-  reorderHint: string;
-  keepTone: "emerald" | "blue";
-}) {
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  // Full left-to-right order; also the top-to-bottom order of the kept cards.
-  const [order, setOrder] = useState<ObjectId[]>(cards);
-  // Cards moved off the top (to bottom of library / graveyard).
-  const [restSet, setRestSet] = useState<Set<ObjectId>>(new Set());
-
-  const toggleRest = useCallback((id: ObjectId) => {
-    setRestSet((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const handleConfirm = useCallback(() => {
-    // Kept cards, in drag order, are sent as the keep-on-top set.
-    const keep = order.filter((id) => !restSet.has(id));
-    dispatch({ type: "SelectCards", data: { cards: keep } });
-  }, [dispatch, order, restSet]);
-
-  if (!objects) return null;
-
-  const overlayWidthClassName =
-    cards.length <= 1
-      ? "max-w-[22rem] sm:max-w-[26rem] lg:max-w-[30rem]"
-      : cards.length === 2
-        ? "max-w-[30rem] sm:max-w-[38rem] lg:max-w-[46rem]"
-        : "max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]";
-
-  const keepRing =
-    keepTone === "emerald"
-      ? "ring-emerald-400/70 hover:shadow-[0_0_16px_rgba(100,220,150,0.3)]"
-      : "ring-blue-400/70 hover:shadow-[0_0_16px_rgba(100,150,255,0.3)]";
-  const keepBtn = keepTone === "emerald" ? "bg-emerald-500/80" : "bg-blue-500/80";
-  const keepBadge = keepTone === "emerald" ? "bg-emerald-500/90" : "bg-blue-500/90";
-
-  // 1-based draw position among the kept cards (top of library = 1).
-  const keepOrder = order.filter((id) => !restSet.has(id));
-
-  return (
-    <ChoiceOverlay
-      title={title}
-      subtitle={subtitle}
-      maxWidthClassName={overlayWidthClassName}
-      footer={<ConfirmButton onClick={handleConfirm} />}
-    >
-      <Reorder.Group
-        as="div"
-        axis="x"
-        values={order}
-        onReorder={setOrder}
-        className="mx-auto flex min-h-0 flex-1 items-center justify-center gap-2 overflow-x-auto px-1 py-2 lg:gap-3"
-      >
-        {order.map((id) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isRest = restSet.has(id);
-          const position = keepOrder.indexOf(id) + 1;
-          return (
-            <Reorder.Item
-              key={id}
-              as="div"
-              value={id}
-              className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
-              whileDrag={{ scale: 1.05, zIndex: 20 }}
-            >
-              <div
-                className={`relative rounded-lg ring-2 transition ${
-                  isRest ? "opacity-50 ring-red-400/70" : keepRing
-                }`}
-                {...hoverProps(id)}
-              >
-                <CardImage
-                  {...objectImageProps(obj)}
-                  size="normal"
-                  className={CHOICE_CARD_IMAGE_CLASS}
-                />
-                {!isRest && (
-                  <div
-                    className={`pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white ${keepBadge}`}
-                  >
-                    {position}
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => toggleRest(id)}
-                className={`rounded-full px-3 py-1 text-xs font-bold text-white transition ${
-                  isRest ? "bg-red-500/80" : keepBtn
-                }`}
-              >
-                {isRest ? restLabel : keepLabel}
-              </button>
-            </Reorder.Item>
-          );
-        })}
-      </Reorder.Group>
-      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">{reorderHint}</p>
-    </ChoiceOverlay>
-  );
-}
-
-function ScryModal({ data }: { data: ScryChoice["data"] }) {
-  const { t } = useTranslation("game");
-  return (
-    <ReorderableTopChoice
-      // Remount on a new card set so drag order / toggles reset between
-      // back-to-back scry choices (matches Dig/Search reset-on-data pattern).
-      key={data.cards.join("-")}
-      cards={data.cards}
-      title={t("cardChoice.scry.title")}
-      subtitle={t("cardChoice.scry.subtitle", { count: data.cards.length })}
-      keepLabel={t("cardChoice.badges.top")}
-      restLabel={t("cardChoice.badges.bottom")}
-      reorderHint={t("cardChoice.reorderHint")}
-      keepTone="emerald"
-    />
-  );
-}
-
-// ── Coin Flip Keep Modal (Krark's Thumb) ────────────────────────────────────
-
-function CoinFlipKeepModal({ data }: { data: CoinFlipKeepChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-
-  const keepFlip = useCallback(
-    (index: number) => {
-      dispatch({
-        type: "SelectCoinFlips",
-        data: { keep_indices: [index] },
-      });
-    },
-    [dispatch],
-  );
-
-  return (
-    <ChoiceOverlay
-      title={t("coinFlip.keep.title")}
-      subtitle={t("coinFlip.keep.subtitle")}
-    >
-      <div className="flex items-center justify-center gap-6 py-4">
-        {data.results.map((won, index) => (
-          <motion.button
-            key={index}
-            className="flex flex-col items-center gap-2 rounded-lg p-3 ring-2 ring-transparent transition hover:ring-emerald-400/80 hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-            initial={{ opacity: 0, y: 40, scale: 0.85 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            transition={{ delay: 0.1 + index * 0.08, duration: 0.3 }}
-            whileHover={{ scale: 1.05, y: -4 }}
-            onClick={() => keepFlip(index)}
-          >
-            <span
-              className={`flex h-16 w-16 items-center justify-center rounded-full text-sm font-bold ${
-                won
-                  ? "bg-amber-400/90 text-amber-950"
-                  : "bg-slate-500/80 text-slate-100"
-              }`}
-            >
-              {won ? t("coinFlip.keep.heads") : t("coinFlip.keep.tails")}
-            </span>
-            <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-              {t("coinFlip.buttons.keep")}
-            </span>
-          </motion.button>
-        ))}
-      </div>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Dig Modal ───────────────────────────────────────────────────────────────
-
-function DigModal({ data }: { data: DigChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const isUpTo = data.up_to ?? false;
-  const selectableSet = new Set(data.selectable_cards ?? data.cards);
-
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.keep_count) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.keep_count],
-  );
-
-  const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(selected) },
-    });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  const isReorderOnly =
-    data.kept_destination === "Library" &&
-    data.rest_destination === "Library" &&
-    data.keep_count === data.cards.length;
-
-  const isReady = isUpTo
-    ? selected.size <= data.keep_count
-    : selected.size === data.keep_count;
-
-  const destLabel =
-    data.kept_destination === "Library"
-      ? t("cardChoice.dig.destinationTop")
-      : data.kept_destination === "Battlefield"
-      ? t("cardChoice.dig.destinationBattlefield")
-      : t("cardChoice.dig.destinationHand");
-
-  const title = isReorderOnly
-    ? t("cardChoice.dig.titleReorder")
-    : t("cardChoice.dig.title");
-  const subtitle = isReorderOnly
-    ? t("cardChoice.dig.subtitleReorder", { count: data.cards.length })
-    : isUpTo
-      ? t("cardChoice.dig.subtitleUpTo", { count: data.keep_count, destination: destLabel })
-      : t("cardChoice.dig.subtitleExact", { count: data.keep_count, destination: destLabel });
-  const confirmLabel = isReorderOnly
-    ? t("cardChoice.buttons.confirmOrder", { selected: selected.size, count: data.keep_count })
-    : t("cardChoice.buttons.confirmCount", { selected: selected.size, count: data.keep_count });
-
-  return (
-    <ChoiceOverlay
-      title={title}
-      subtitle={subtitle}
-      footer={
-        <ConfirmButton
-          onClick={handleConfirm}
-          disabled={!isReady}
-          label={confirmLabel}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          const isSelectable = selectableSet.has(id);
-          const selectedOrder = Array.from(selected).indexOf(id) + 1;
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-emerald-400/80"
-                  : isSelectable
-                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-                    : "opacity-40 cursor-not-allowed"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{
-                opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.3,
-                y: 0,
-                scale: 1,
-              }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
-              onClick={() => isSelectable && toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
-                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {isReorderOnly ? selectedOrder : t("cardChoice.badges.keep")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Surveil Modal ───────────────────────────────────────────────────────────
-
-function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
-  const { t } = useTranslation("game");
-  return (
-    <ReorderableTopChoice
-      // Remount on a new card set so drag order / toggles reset between
-      // back-to-back surveil choices (matches Dig/Search reset-on-data pattern).
-      key={data.cards.join("-")}
-      cards={data.cards}
-      title={t("cardChoice.surveil.title")}
-      subtitle={t("cardChoice.surveil.subtitle", { count: data.cards.length })}
-      keepLabel={t("cardChoice.badges.keep")}
-      restLabel={t("cardChoice.badges.graveyard")}
-      reorderHint={t("cardChoice.reorderHint")}
-      keepTone="blue"
-    />
-  );
-}
-
-// ── Reveal Modal ─────────────────────────────────────────────────────────────
-
-function RevealModal({ data }: { data: RevealChoice["data"] }) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-  const isOptional = data.optional === true;
-
-  const handleConfirm = useCallback(() => {
-    if (selected !== null) {
-      dispatch({
-        type: "SelectCards",
-        data: { cards: [selected] },
-      });
-    }
-  }, [dispatch, selected]);
-
-  // CR 701.20a: Optional reveals (reveal-lands like Port Town) offer a
-  // "decline" path — dispatch an empty selection so the engine's RevealChoice
-  // handler runs the source's decline branch (e.g., Tap SelfRef).
-  const handleDecline = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: [] },
-    });
-  }, [dispatch]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={isOptional ? t("cardChoice.reveal.titleReveal") : t("cardChoice.reveal.titleOpponentHand")}
-      subtitle={isOptional ? t("cardChoice.reveal.subtitleReveal") : t("cardChoice.reveal.subtitleChoose")}
-      footer={
-        <div className="flex gap-2">
-          {isOptional && <ConfirmButton onClick={handleDecline} label={t("cardChoice.buttons.decline")} />}
-          <ConfirmButton onClick={handleConfirm} disabled={selected === null} />
-        </div>
-      }
-    >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected === id;
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-emerald-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(isSelected ? null : id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
-                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.choose")}
-                  </span>
-                </div>
-              )}
             </motion.button>
           );
         })}
@@ -1843,6 +1309,11 @@ function ReturnToHandModal({ data }: { data: PayCost["data"] }) {
 
 function RemoveCounterModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
+  const isAmongObjects =
+    data.kind.type === "RemoveCounter" && data.kind.selection === "AmongObjects";
+  if (isAmongObjects) {
+    return <RemoveCounterDistributionCostModal data={data} />;
+  }
   return (
     <PermanentCostModal
       data={data}
@@ -1850,10 +1321,157 @@ function RemoveCounterModal({ data }: { data: PayCost["data"] }) {
       title={t("cardChoice.removeCounter.title")}
       subtitle={t("cardChoice.removeCounter.subtitle")}
       label={t("cardChoice.removeCounter.label")}
+      maxSelections={isAmongObjects ? data.count : 1}
+      minSelections={isAmongObjects ? data.min_count : 1}
+      labelCount={isAmongObjects ? data.count : 1}
       selectedClassName="z-10 ring-2 ring-violet-300/80"
       overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20"
       badgeClassName="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white"
     />
+  );
+}
+
+function removableCounterCostEntries(
+  obj: GameObject,
+  counterType: CounterMatch,
+): [CounterType, number][] {
+  if (counterType.type === "OfType") {
+    const count = obj.counters[counterType.data] ?? 0;
+    return count > 0 ? [[counterType.data, count]] : [];
+  }
+  return Object.entries(obj.counters)
+    .filter((entry): entry is [CounterType, number] => typeof entry[1] === "number" && entry[1] > 0);
+}
+
+function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [amounts, setAmounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    setAmounts({});
+  }, [data]);
+
+  if (data.kind.type !== "RemoveCounter") return null;
+  if (!objects) return null;
+
+  const counterKind = data.kind;
+  const requiredCount = data.kind.count;
+  const assigned = Object.values(amounts).reduce((sum, amount) => sum + amount, 0);
+  const remaining = requiredCount - assigned;
+  const isReady = assigned === requiredCount;
+
+  const amountKey = (id: ObjectId, counterType: CounterType) => `${id}:${counterType}`;
+
+  const setAmount = (id: ObjectId, counterType: CounterType, value: number, max: number) => {
+    setAmounts((prev) => ({
+      ...prev,
+      [amountKey(id, counterType)]: Math.max(0, Math.min(max, value)),
+    }));
+  };
+
+  const handleConfirm = () => {
+    if (!isReady) return;
+    const distribution = data.choices
+      .flatMap((id) => {
+        const obj = objects[id];
+        if (!obj) return [];
+        return removableCounterCostEntries(obj, counterKind.counter_type).map(([counterType]) => ({
+          object_id: id,
+          counter_type: counterType,
+          count: amounts[amountKey(id, counterType)] ?? 0,
+        }));
+      })
+      .filter((choice) => choice.count > 0);
+    dispatch({
+      type: "ChooseRemoveCounterCostDistribution",
+      data: { distribution },
+    });
+  };
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.removeCounter.title")}
+      subtitle={t("cardChoice.removeCounter.subtitle")}
+      footer={
+        <CostActionFooter onCancel={() => dispatch({ type: "CancelCast" })}>
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.labelCount", {
+              label: t("cardChoice.removeCounter.label"),
+              selected: assigned,
+              count: requiredCount,
+            })}
+          />
+        </CostActionFooter>
+      }
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const entries = removableCounterCostEntries(obj, counterKind.counter_type);
+          const selectedAmount = entries.reduce(
+            (sum, [counterType]) => sum + (amounts[amountKey(id, counterType)] ?? 0),
+            0,
+          );
+          return (
+            <motion.div
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: selectedAmount > 0 ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              <div className="absolute inset-x-2 bottom-2 flex flex-col gap-1 rounded-lg bg-gray-950/85 px-2 py-1">
+                {entries.map(([counterType, maxAmount]) => {
+                  const key = amountKey(id, counterType);
+                  const amount = amounts[key] ?? 0;
+                  return (
+                    <div key={key} className="flex items-center justify-center gap-2">
+                      {counterKind.counter_type.type === "Any" && (
+                        <span className="w-14 truncate text-xs font-semibold text-gray-200">
+                          {formatCounterType(counterType)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="h-7 w-7 rounded-full bg-gray-700 text-sm font-bold text-white disabled:opacity-40"
+                        onClick={() => setAmount(id, counterType, amount - 1, maxAmount)}
+                        disabled={amount <= 0}
+                      >
+                        -
+                      </button>
+                      <span className="w-8 text-center text-sm font-bold text-white">
+                        {amount}
+                      </span>
+                      <button
+                        type="button"
+                        className="h-7 w-7 rounded-full bg-gray-700 text-sm font-bold text-white disabled:opacity-40"
+                        onClick={() => setAmount(id, counterType, amount + 1, maxAmount)}
+                        disabled={remaining <= 0 || amount >= maxAmount}
+                      >
+                        +
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
   );
 }
 
@@ -1863,6 +1481,9 @@ function PermanentCostModal({
   title,
   subtitle,
   label,
+  minSelections,
+  maxSelections,
+  labelCount,
   selectedClassName,
   overlayClassName,
   badgeClassName,
@@ -1872,6 +1493,9 @@ function PermanentCostModal({
   title: string;
   subtitle: string;
   label: string;
+  minSelections?: number;
+  maxSelections?: number;
+  labelCount?: number;
   selectedClassName: string;
   overlayClassName: string;
   badgeClassName: string;
@@ -1881,6 +1505,9 @@ function PermanentCostModal({
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const minCount = minSelections ?? data.count;
+  const maxCount = maxSelections ?? data.count;
+  const confirmCount = labelCount ?? data.count;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -1888,13 +1515,13 @@ function PermanentCostModal({
         const next = new Set(prev);
         if (next.has(id)) {
           next.delete(id);
-        } else if (next.size < data.count) {
+        } else if (next.size < maxCount) {
           next.add(id);
         }
         return next;
       });
     },
-    [data.count],
+    [maxCount],
   );
 
   const handleConfirm = useCallback(() => {
@@ -1910,7 +1537,7 @@ function PermanentCostModal({
 
   if (!objects) return null;
 
-  const isReady = selected.size === data.count;
+  const isReady = selected.size >= minCount && selected.size <= maxCount;
 
   return (
     <ChoiceOverlay
@@ -1918,7 +1545,7 @@ function PermanentCostModal({
       subtitle={subtitle}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.labelCount", { label, selected: selected.size, count: data.count })} />
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.labelCount", { label, selected: selected.size, count: confirmCount })} />
         </CostActionFooter>
       }
     >

@@ -52,7 +52,16 @@ export interface CloudSyncProvider {
   signIn(provider: SyncAuthProvider): Promise<void>;
   signOut(): Promise<void>;
   identity(): SyncIdentity | null;
-  /** Read the remote envelope, or null if the account has never synced. */
+  /**
+   * Cheap metadata-only read — the revision marker + timestamp, never the
+   * payload. null if the account has never synced. This is the routine
+   * change-detection path: `syncNow` compares `revision` against its last-seen
+   * value and only falls through to the full `pull()` when reconciliation
+   * actually needs the envelope body. Reading the 8-byte revision must not cost
+   * the whole backup over the wire on every sync trigger.
+   */
+  pullMeta(): Promise<RemoteMeta | null>;
+  /** Read the full remote envelope, or null if the account has never synced. */
   pull(): Promise<RemoteSnapshot | null>;
   /**
    * Write the envelope with optimistic concurrency. `expectedRevision` is the

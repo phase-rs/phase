@@ -4,6 +4,7 @@ use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -68,6 +69,19 @@ const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 /// flashback + recast, Eternal Witness reanimate chain) while preventing the
 /// thousands-of-iterations pathology observed in #563.
 const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
+
+fn pick_lowest_value_sacrifices(
+    state: &GameState,
+    cards: &[ObjectId],
+    count: usize,
+) -> Vec<ObjectId> {
+    let mut scored: Vec<_> = cards
+        .iter()
+        .map(|&id| (id, evaluate_card_value(state, id)))
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().take(count).map(|(id, _)| id).collect()
+}
 
 /// Choose the best action for the AI player given the current game state.
 ///
@@ -328,6 +342,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTarget { target: None })
         }
 
+        // CR 701.21a: Mandatory spell-effect sacrifices (Deadly Brew, Edict
+        // riders) must pick a legal permanent — an empty SelectCards fails
+        // validation when `count > 0` and `up_to` is false.
+        WaitingFor::EffectZoneChoice {
+            cards,
+            count,
+            up_to,
+            effect_kind: engine::types::ability::EffectKind::Sacrifice,
+            ..
+        } if !cards.is_empty() && !*up_to && *count > 0 => Some(GameAction::SelectCards {
+            cards: pick_lowest_value_sacrifices(state, cards, *count),
+        }),
+
         // Selection states: empty selection is a valid "choose nothing".
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
@@ -501,6 +528,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
+        // Spellbook draft: pick the first card in the list.
+        WaitingFor::SpellbookDraft { options, .. } => options
+            .first()
+            .map(|card| GameAction::SubmitSpellbookDraft { card: card.clone() }),
+
         // Damage source choice: pick the first option.
         WaitingFor::DamageSourceChoice { options, .. } => options
             .first()
@@ -532,6 +564,20 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 702.60a: Ripple — decline as the default; candidates explore casting.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { .. },
+            ..
+        } => Some(GameAction::RippleChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
+        // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
+        // window (cast nothing) as the conservative default; the candidate
+        // generator still explores casting each eligible spell.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { .. },
+            ..
+        } => Some(GameAction::FreeCastWindowChoice { selection: None }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
         // the candidate generator still explores repeating.
         WaitingFor::RepeatDecision { .. } => {
@@ -704,6 +750,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ProliferateChoice { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),
         }),
+
+        // CR 701.56a: Time travel — default to changing nothing this phase
+        // (an empty selection is legal: "choose any number").
+        WaitingFor::TimeTravelChoice { .. } => Some(GameAction::SelectTargets {
+            targets: Vec::new(),
+        }),
+
+        // CR 702.132a: Assist — default to not seeking help (decline the offer)
+        // and, if asked to contribute, contribute nothing.
+        WaitingFor::AssistChoosePlayer { .. } => {
+            Some(GameAction::ChooseAssistPlayer { player: None })
+        }
+        WaitingFor::AssistPayment { .. } => Some(GameAction::CommitAssistPayment { generic: 0 }),
 
         // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
@@ -945,6 +1004,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // for exhaustive match. ManaPayment is a pending-cast state.
         WaitingFor::ManaPayment { .. }
         | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PayCost {
             resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
@@ -1435,6 +1495,25 @@ pub(crate) fn deterministic_choice(
         }
     }
 
+    if let WaitingFor::EffectZoneChoice {
+        cards,
+        count,
+        up_to,
+        effect_kind,
+        ..
+    } = &state.waiting_for
+    {
+        if matches!(effect_kind, engine::types::ability::EffectKind::Sacrifice)
+            && !cards.is_empty()
+            && !*up_to
+            && *count > 0
+        {
+            return Some(GameAction::SelectCards {
+                cards: pick_lowest_value_sacrifices(state, cards, *count),
+            });
+        }
+    }
+
     if let WaitingFor::SearchChoice {
         cards,
         count,
@@ -1604,7 +1683,7 @@ pub(crate) fn deterministic_choice(
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
             engine::types::ability::AdditionalCost::Optional {
-                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                cost: engine::types::ability::AbilityCost::Sacrifice(_),
                 ..
             } => false, // Conservative: don't sacrifice unless search says so
             engine::types::ability::AdditionalCost::Optional {
@@ -1936,7 +2015,9 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{CategoryChooserScope, TargetFilter, TargetRef, TypedFilter};
+    use engine::types::ability::{
+        CategoryChooserScope, EffectKind, TargetFilter, TargetRef, TypedFilter,
+    };
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
@@ -1987,7 +2068,7 @@ mod tests {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -2747,6 +2828,8 @@ mod tests {
                 current: Some(original_target),
                 legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
             }],
+            effect_kind: EffectKind::CopySpell,
+            effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
         };
 
@@ -2773,6 +2856,8 @@ mod tests {
                     legal_alternatives: vec![TargetRef::Object(ObjectId(12))],
                 },
             ],
+            effect_kind: EffectKind::CopySpell,
+            effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
         };
 
@@ -2799,6 +2884,8 @@ mod tests {
                 current: None,
                 legal_alternatives: vec![first_target.clone(), TargetRef::Object(ObjectId(11))],
             }],
+            effect_kind: EffectKind::CopySpell,
+            effect_source_id: Some(ObjectId(20)),
             current_slot: 0,
         };
 
@@ -3022,7 +3109,7 @@ mod tests {
                         generic: 2,
                     },
                 }],
-                repeatable: true,
+                repeatability: engine::types::ability::AdditionalCostRepeatability::Repeatable,
             },
             times_kicked: 0,
             pending_cast: Box::new(pending),

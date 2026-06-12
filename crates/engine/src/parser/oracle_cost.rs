@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::combinator::{all_consuming, map, rest, value};
+use nom::combinator::{all_consuming, map, opt, rest, value};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
@@ -18,8 +18,9 @@ use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, BeholdCostAction, CostReduction, FilterProp, PlayerScope, QuantityExpr,
-    QuantityRef, TargetFilter, TypedFilter,
+    AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
+    QuantityExpr, QuantityRef, SacrificeCost, TargetFilter, TypedFilter, EXILE_COST_X,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -126,7 +127,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
     #[allow(clippy::needless_range_loop)]
     for i in 0..costs.len() {
         match &costs[i] {
-            AbilityCost::Sacrifice { .. } => last_verb = Some(PrecedingVerb::Sacrifice),
+            AbilityCost::Sacrifice(_) => last_verb = Some(PrecedingVerb::Sacrifice),
             AbilityCost::Exile { zone, .. } => {
                 last_verb = Some(PrecedingVerb::Exile { zone: *zone })
             }
@@ -143,10 +144,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 }
                 match last_verb.unwrap() {
                     PrecedingVerb::Sacrifice => {
-                        costs[i] = AbilityCost::Sacrifice {
-                            target: filter,
-                            count: 1,
-                        };
+                        costs[i] = AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
                     }
                     PrecedingVerb::Exile { zone } => {
                         costs[i] = AbilityCost::Exile {
@@ -242,18 +240,26 @@ fn parse_remove_counter_quantity_and_kind(
     ))
     .parse(input)
     {
-        return Some((u32::MAX, counter_type));
+        return Some((REMOVE_COUNTER_COST_ALL, counter_type));
     }
-    // CR 601.2b / CR 602.2b: "any number of" is a casting/activation-time
-    // variable choice. u32::MAX lets the runtime clamp to the actual count via
-    // saturating subtraction.
+    // CR 601.2b / CR 602.2b: "any number of" requires a count choice just
+    // like literal X, but stays a separate sentinel for parser/data clarity.
     if let Ok((_, counter_type)) = all_consuming(preceded(
         tag::<_, _, E<'_>>("any number of "),
         parse_remove_counter_kind,
     ))
     .parse(input)
     {
-        return Some((u32::MAX, counter_type));
+        return Some((REMOVE_COUNTER_COST_ANY_NUMBER, counter_type));
+    }
+    // CR 601.2b: "X" is a variable cost announced before target selection.
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        alt((tag::<_, _, E<'_>>("x "), tag("X "))),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((REMOVE_COUNTER_COST_X, counter_type));
     }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
@@ -272,12 +278,25 @@ fn parse_remove_counter_quantity_and_kind(
     .map(|(_, counter_type)| (1, counter_type))
 }
 
-fn parse_remove_counter_target(target_text: &str) -> Option<TargetFilter> {
+fn parse_remove_counter_target(target_text: &str) -> (Option<TargetFilter>, CounterCostSelection) {
+    let (target_text, selection) = pair(opt(tag::<_, _, nom::error::Error<&str>>("among ")), rest)
+        .parse(target_text)
+        .map(|(_, (among, target_text))| {
+            (
+                target_text,
+                if among.is_some() {
+                    CounterCostSelection::AmongObjects
+                } else {
+                    CounterCostSelection::SingleObject
+                },
+            )
+        })
+        .unwrap_or((target_text, CounterCostSelection::SingleObject));
     let (target, remainder) = parse_target(target_text);
     if !remainder.trim().is_empty() || matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
-        return None;
+        return (None, CounterCostSelection::SingleObject);
     }
-    Some(target)
+    (Some(target), selection)
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
@@ -326,10 +345,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             value((), alt((tag("~"), tag("cardname"), tag("this ")))).parse(i)
         });
         if is_self.is_some() {
-            return AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            };
+            return AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
         }
         // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
         // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
@@ -340,10 +356,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             let target_phrase = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_phrase);
             if remainder.trim().is_empty() {
-                return AbilityCost::Sacrifice {
-                    target: filter,
-                    count: u32::MAX,
-                };
+                return AbilityCost::Sacrifice(SacrificeCost::count(filter, u32::MAX));
             }
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
@@ -368,10 +381,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             (1, stripped.to_string())
         };
         let (filter, _) = parse_target(&format!("target {}", filter_text));
-        return AbilityCost::Sacrifice {
-            target: filter,
-            count: use_count,
-        };
+        return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
     }
 
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
@@ -475,16 +485,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
         if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         if rest_lower == "your hand" {
@@ -495,8 +505,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     },
                 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
@@ -513,8 +523,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 return AbilityCost::Discard {
                     count,
                     filter: Some(filter),
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 };
             }
         }
@@ -522,15 +532,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: n as i32 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         return AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         };
     }
 
@@ -552,6 +562,54 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 zone: Some(Zone::Library),
                 filter: None,
             };
+        }
+        // CR 107.3a + CR 118.8: "Exile X card(s) from your graveyard" — variable
+        // count announced during casting (Harvest Pyre). Ordered before the typed
+        // `parse_type_phrase` arm, which cannot represent a bare zone with no filter.
+        if let Some(((), rest_after_x)) =
+            nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
+        {
+            let after_lower = rest_after_x.to_lowercase();
+            if nom_on_lower(rest_after_x, &after_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count: EXILE_COST_X,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
+        }
+        // CR 118.8: "Exile N card(s) from your graveyard" without a type filter.
+        if let Some((count, after_count)) = parse_number(&rest_lower) {
+            let after_count_lower = after_count.trim_start().to_lowercase();
+            if nom_on_lower(after_count.trim_start(), &after_count_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
         }
         let count = parse_number(&rest_lower).map(|(n, _)| n).unwrap_or(1);
         let filter_start = parse_number(rest)
@@ -580,17 +638,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("remove ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if scan_contains(&rest_lower, "counter") {
-            let (counter_phrase, target) = pair(
+            let (counter_phrase, target, selection) = pair(
                 terminated(take_until::<_, _, E<'_>>(" from "), tag(" from ")),
                 nom::combinator::rest,
             )
             .parse(rest_lower.as_str())
             .ok()
             .map_or(
-                (rest_lower.as_str(), None),
+                (
+                    rest_lower.as_str(),
+                    None,
+                    CounterCostSelection::SingleObject,
+                ),
                 |(_, split): (&str, (&str, &str))| {
                     let (before_from, target_text) = split;
-                    (before_from.trim(), parse_remove_counter_target(target_text))
+                    let (target, selection) = parse_remove_counter_target(target_text);
+                    (before_from.trim(), target, selection)
                 },
             );
             if let Some((count, counter_type)) =
@@ -600,6 +663,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     count,
                     counter_type,
                     target,
+                    selection,
                 };
             }
         }
@@ -656,12 +720,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // "Forage" — exile three cards from graveyard or sacrifice a Food (CR 701.61)
+    // "Forage" — exile three cards from your graveyard or sacrifice a Food
+    // (CR 701.61a). A modal cost: both ways are offered, so a player who can't
+    // exile three cards can still forage by sacrificing a Food (and vice versa).
     if lower == "forage" {
-        return AbilityCost::Exile {
-            count: 3,
-            zone: Some(Zone::Graveyard),
-            filter: None,
+        return AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Exile {
+                    count: 3,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::permanent().subtype("Food".to_string())),
+                    1,
+                )),
+            ],
         };
     }
 
@@ -690,6 +764,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Unattach;
+    }
+
+    // "reveal your hand" — reveal the controller's entire hand.
+    // CR 701.20a: Reveal means show to all players. Used as alternative cost
+    // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
+    // Verified: CR 701.20 (docs/MagicCompRules.txt:3430).
+    if nom_on_lower(text, &lower, |i| {
+        value((), tag("reveal your hand")).parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::RevealHand {
+                target: TargetFilter::SelfRef,
+                card_filter: TargetFilter::Any,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+            }),
+        };
     }
 
     // "Reveal this card from your hand" — reveal self cost
@@ -840,8 +934,31 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         _ => return None, // Only generic mana reduction supported
     };
 
-    // Strip " less to activate for each " or " less to cast for each "
     let after_mana = after_mana.trim_start();
+
+    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
+    // "... less to cast if [condition]". The reduction is a flat {amount_per}
+    // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
+    // form; if the "if " marker is present but the condition does not parse,
+    // return None so the clause stays a loud gap (coverage honesty) rather than
+    // silently mis-parsing.
+    if let Some(((), cond_text)) = nom_on_lower(after_mana, after_mana, |i| {
+        value(
+            (),
+            alt((tag("less to activate if "), tag("less to cast if "))),
+        )
+        .parse(i)
+    }) {
+        let cond_text = cond_text.trim().trim_end_matches('.').trim();
+        let condition = super::oracle_condition::parse_restriction_condition(cond_text)?;
+        return Some(CostReduction {
+            amount_per,
+            count: QuantityExpr::Fixed { value: 1 },
+            condition: Some(condition),
+        });
+    }
+
+    // Strip " less to activate for each " or " less to cast for each "
     let ((), after_less) = nom_on_lower(after_mana, after_mana, |i| {
         value(
             (),
@@ -859,6 +976,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         return Some(CostReduction {
             amount_per,
             count: QuantityExpr::Ref { qty },
+            condition: None,
         });
     }
 
@@ -873,6 +991,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         },
+        condition: None,
     })
 }
 
@@ -1201,6 +1320,41 @@ mod tests {
         assert!(parse_or_separated_mana_costs("{G} or {W} and pay 1 life").is_none());
     }
 
+    // Tests for issue #2394: Marath, Will of the Wild - variable X counter removal
+    #[test]
+    fn parse_remove_x_counters_uses_x_sentinel() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("X +1/+1 counters")
+            .expect("should parse X counter removal");
+
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_X,
+            "X should be encoded as the X sentinel"
+        );
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_remove_numeric_counters_uses_actual_value() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("3 +1/+1 counters")
+            .expect("should parse numeric counter removal");
+
+        assert_eq!(count, 3, "numeric value should be preserved");
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_any_number_of_counters_uses_any_number_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("any number of +1/+1 counters")
+                .expect("should parse 'any number of' counter removal");
+
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_ANY_NUMBER,
+            "'any number of' should be encoded separately from literal X"
+        );
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
     #[test]
     fn cost_untap() {
         assert_eq!(parse_oracle_cost("{Q}"), AbilityCost::Untap);
@@ -1289,10 +1443,7 @@ mod tests {
     fn cost_sacrifice_self() {
         assert_eq!(
             parse_oracle_cost("Sacrifice ~"),
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
         );
     }
 
@@ -1323,7 +1474,8 @@ mod tests {
     #[test]
     fn cost_sacrifice_creature() {
         match parse_oracle_cost("Sacrifice a creature") {
-            AbilityCost::Sacrifice { target, .. } => {
+            AbilityCost::Sacrifice(cost) => {
+                let target = &cost.target;
                 assert!(matches!(
                     target,
                     TargetFilter::Typed(ref tf) if matches!(tf.get_primary_type(), Some(TypeFilter::Creature))
@@ -1336,10 +1488,13 @@ mod tests {
     #[test]
     fn cost_sacrifice_any_number_nonland_permanents() {
         match parse_oracle_cost("Sacrifice any number of nonland permanents") {
-            AbilityCost::Sacrifice { target, count } => {
-                assert_eq!(count, u32::MAX);
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { count: u32::MAX }
+                );
                 assert!(matches!(
-                    target,
+                    cost.target,
                     TargetFilter::Typed(ref tf)
                         if tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Non(_)))
                 ));
@@ -1351,10 +1506,13 @@ mod tests {
     #[test]
     fn cost_sacrifice_x_squirrels() {
         match parse_oracle_cost("Sacrifice X Squirrels") {
-            AbilityCost::Sacrifice { target, count } => {
-                assert_eq!(count, u32::MAX);
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { count: u32::MAX }
+                );
                 assert!(matches!(
-                    target,
+                    cost.target,
                     TargetFilter::Typed(ref tf)
                         if tf
                             .type_filters
@@ -1364,6 +1522,30 @@ mod tests {
             }
             other => panic!("Expected Sacrifice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cost_exile_x_cards_from_graveyard() {
+        assert_eq!(
+            parse_oracle_cost("Exile X cards from your graveyard"),
+            AbilityCost::Exile {
+                count: EXILE_COST_X,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_exile_two_cards_from_graveyard() {
+        assert_eq!(
+            parse_oracle_cost("Exile two cards from your graveyard"),
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }
+        );
     }
 
     #[test]
@@ -1492,8 +1674,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1508,8 +1690,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::Typed(TypedFilter::creature())),
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1523,8 +1705,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 2 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1536,8 +1718,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             }
         );
     }
@@ -1553,8 +1735,8 @@ mod tests {
                     },
                 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1565,7 +1747,7 @@ mod tests {
             AbilityCost::Composite { costs } => {
                 assert_eq!(costs.len(), 3);
                 assert_eq!(costs[0], AbilityCost::Tap);
-                assert!(matches!(costs[2], AbilityCost::Sacrifice { .. }));
+                assert!(matches!(costs[2], AbilityCost::Sacrifice(_)));
             }
             other => panic!("Expected Composite, got {:?}", other),
         }
@@ -1880,9 +2062,11 @@ mod tests {
                 count,
                 counter_type,
                 target: Some(TargetFilter::Typed(filter)),
+                selection,
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(counter_type, CounterMatch::Any);
+                assert_eq!(selection, CounterCostSelection::SingleObject);
                 assert_eq!(filter.controller, Some(ControllerRef::You));
                 assert!(
                     filter
@@ -1898,6 +2082,32 @@ mod tests {
     }
 
     #[test]
+    fn cost_remove_x_counters_from_among_creatures_you_control() {
+        match parse_oracle_cost("Remove X counters from among creatures you control") {
+            AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target: Some(TargetFilter::Typed(filter)),
+                selection,
+            } => {
+                assert_eq!(count, REMOVE_COUNTER_COST_X);
+                assert_eq!(counter_type, CounterMatch::Any);
+                assert_eq!(selection, CounterCostSelection::AmongObjects);
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|filter| matches!(filter, TypeFilter::Creature)),
+                    "expected creature filter, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => panic!("Expected from-among RemoveCounter cost, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_remove_counter_from_self_stays_source_cost() {
         assert_eq!(
             parse_oracle_cost("Remove a +1/+1 counter from ~"),
@@ -1905,6 +2115,7 @@ mod tests {
                 count: 1,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -1914,11 +2125,12 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Remove any number of storage counters from ~"),
             AbilityCost::RemoveCounter {
-                count: u32::MAX,
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
                     "storage".to_string()
                 ),),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -1928,11 +2140,12 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Remove any number of charge counters from ~"),
             AbilityCost::RemoveCounter {
-                count: u32::MAX,
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
                     "charge".to_string()
                 ),),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -1942,9 +2155,10 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Remove any number of counters from ~"),
             AbilityCost::RemoveCounter {
-                count: u32::MAX,
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type: CounterMatch::Any,
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -2040,5 +2254,62 @@ mod tests {
             }
             other => panic!("Expected OneOf, got {:?}", other),
         }
+    }
+
+    /// CR 602.2b + CR 601.2f: the conditional flat form "costs {N} less to activate if
+    /// [condition]" parses to a `CostReduction` with `count = Fixed(1)` and a
+    /// `condition` gate (Esquire of the King, Razorlash Transmogrant, …) — the
+    /// previously-dropped `Effect:this` clause.
+    #[test]
+    fn cost_reduction_conditional_flat_form_carries_condition() {
+        let def = try_parse_cost_reduction(
+            "this ability costs {2} less to activate if you control a legendary creature",
+        )
+        .expect("conditional cost reduction should parse");
+        assert_eq!(def.amount_per, 2);
+        assert_eq!(def.count, QuantityExpr::Fixed { value: 1 });
+        assert!(
+            def.condition.is_some(),
+            "the 'if [condition]' gate must be captured, got {:?}",
+            def.condition
+        );
+
+        // "if you're <something the condition parser doesn't model>" must NOT
+        // silently mis-parse: an unrecognized condition yields no reduction
+        // (stays a loud gap) rather than an unconditional one.
+        assert!(
+            try_parse_cost_reduction(
+                "this ability costs {2} less to activate if the moon is gibbous"
+            )
+            .is_none(),
+            "unparseable condition must not produce an (unconditional) reduction"
+        );
+    }
+
+    #[test]
+    fn cost_reduction_conditional_opponent_nonbasic_lands() {
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {4} less to activate if an opponent controls four or more nonbasic lands",
+        )
+        .expect("opponent nonbasic land gate should parse");
+        assert_eq!(reduction.amount_per, 4);
+        assert_eq!(reduction.count, QuantityExpr::Fixed { value: 1 });
+        assert!(reduction.condition.is_some());
+    }
+
+    /// Regression: the "for each" scaling form is unchanged and carries no
+    /// condition.
+    #[test]
+    fn cost_reduction_for_each_form_unconditional() {
+        let def = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each artifact you control",
+        )
+        .expect("for-each cost reduction should still parse");
+        assert_eq!(def.amount_per, 1);
+        assert_eq!(def.condition, None, "for-each form is unconditional");
+        assert!(
+            !matches!(def.count, QuantityExpr::Fixed { .. }),
+            "for-each count is a dynamic ref, not Fixed"
+        );
     }
 }

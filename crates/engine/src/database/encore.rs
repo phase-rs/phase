@@ -35,12 +35,22 @@ pub fn synthesize_encore(face: &mut CardFace) {
     let abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
-        .filter_map(|keyword| match keyword {
-            Keyword::Encore(cost) => Some(encore_ability(cost.clone())),
-            _ => None,
-        })
+        .filter_map(encore_ability_for_keyword)
         .collect();
     face.abilities.extend(abilities);
+}
+
+/// CR 702.141a + CR 604.1: Standalone keyword→ability builder so the Encore
+/// activated ability can be synthesized both at card-build time
+/// (`synthesize_encore`) and on the fly for runtime-granted Encore (the
+/// graveyard activated-ability gather in `casting.rs`). Mirrors the
+/// `cycling_ability_for_keyword` precedent. Returns `None` for non-Encore
+/// keywords.
+pub(crate) fn encore_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinition> {
+    match keyword {
+        Keyword::Encore(cost) => Some(encore_ability(cost.clone())),
+        _ => None,
+    }
 }
 
 /// CR 702.141a + CR 602.1a: Build the activated ability

@@ -23,13 +23,13 @@ pub fn resolve(
         Effect::RevealHand {
             card_filter,
             count,
-            random,
+            selection,
             choice_optional,
             ..
         } => (
             card_filter.clone(),
             count.clone(),
-            *random,
+            selection.is_random(),
             *choice_optional,
         ),
         _ => (TargetFilter::Any, None, false, false),
@@ -135,7 +135,7 @@ mod tests {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             vec![TargetRef::Player(target_player)],
@@ -258,7 +258,7 @@ mod tests {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
                 count: Some(crate::types::ability::QuantityExpr::Fixed { value: 1 }),
-                random: true,
+                selection: crate::types::ability::CardSelectionMode::Random,
                 choice_optional: false,
             },
             vec![TargetRef::Player(PlayerId(1))],

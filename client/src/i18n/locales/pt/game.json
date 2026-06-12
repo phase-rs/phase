@@ -264,6 +264,7 @@
     "grantsProperty": "Concede uma propriedade à mágica"
   },
   "zone": {
+    "commandZone": "Zona de comando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -283,6 +284,8 @@
     "graveyardShort": "CEM",
     "graveyardTitle": "Cemitério ({{count}})",
     "libraryAlt": "Grimório",
+    "library": "Grimório",
+    "libraryLower": "grimório",
     "libraryCount_one": "Grimório ({{count}} carta)",
     "libraryCount_other": "Grimório ({{count}} cartas)",
     "playFromTop": "Jogue {{name}} do topo do grimório",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Escolher a quantia a pagar",
     "payAmount": "Pagar {{value}} {{resource}}",
     "resourceEnergy": "energia",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "marcadores"
   },
   "hand": {
     "viewFullHand_one": "Ver mão completa ({{count}} carta)",
@@ -424,6 +428,7 @@
     "one": "um {{target}}",
     "nounPlayer": "jogador",
     "nounNonlandPermanent": "permanente que não seja terreno",
+    "nounSpell": "feitiço",
     "nounCreature": "criatura",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente alvo",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
       "takeEffect": "Aceitar o Efeito"
+    },
+    "spliceOffer": {
+      "title": "Unir com Arcano?",
+      "subtitle": "Escolha uma carta para revelar e unir a esta mágica, ou conjure sem unir.",
+      "spliceCard": "Unir {{name}}",
+      "decline": "Não Unir",
+      "declineDescription": "Conjure a mágica sem adicionar o texto de outra carta.",
+      "unknownCard": "Carta #{{id}}"
     },
     "activationCost": {
       "title": "Escolher Custo de Ativação"
@@ -1165,6 +1178,10 @@
     "adventureTag": "(Aventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1175,6 +1192,11 @@
     "warpAltLabel": "Conjurar com Warp",
     "warpAltSuffix": "(exilada na etapa final)",
     "warpSubtitle": "Conjure {{name}} normalmente ou use seu custo de Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Conjurar Normalmente",
+    "dashAltLabel": "Conjurar com Dash",
+    "dashAltSuffix": "(ganha ímpeto, volta para a mão na etapa final)",
+    "dashSubtitle": "Conjure {{name}} normalmente ou use seu custo de Dash.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Conjurar Normalmente",
     "evokeAltLabel": "Conjurar com Evocar",
@@ -1225,15 +1247,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascata",
     "discoverEyebrow": "Descobrir",
+    "rippleEyebrow": "Ripple",
     "title": "Conjurar {{name}}?",
     "subtitleCascade": "Cascata exilou {{name}} (valor de mana abaixo de {{sourceMv}}). Conjure-a sem pagar seu custo de mana, ou recuse e embaralhe todas as {{total}} cartas exiladas no fundo de seu grimório.",
     "subtitleDiscover": "Descobrir exilou {{name}}. Conjure-a sem pagar seu custo de mana, ou coloque-a em sua mão e embaralhe as outras {{missCount}} cartas exiladas no fundo de seu grimório.",
+    "subtitleRipple": "Ripple revelou {{name}}. Conjure-a sem pagar seu custo de mana, ou recuse e coloque todas as {{total}} cartas reveladas no fundo de seu grimório em ordem aleatória.",
     "castNamed": "Conjurar {{name}}",
     "castSuffix": "(sem pagar seu custo de mana)",
     "putIntoHand": "Colocar na mão",
     "decline": "Recusar",
     "discoverDeclineSuffix": "(colocar o restante no fundo)",
     "cascadeDeclineSuffix": "(embaralhar todas as cartas exiladas no fundo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Conjuração grátis",
+    "title": "Conjure uma mágica de graça",
+    "subtitle": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
+    "subtitleNoBudget": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
+    "castNamed": "Conjurar {{name}}",
+    "castSuffix": "(sem pagar seu custo de mana)",
+    "done": "Concluído",
+    "doneSuffix": "(pare de conjurar mágicas desta forma)"
   },
   "castingVariant": {
     "eyebrow": "Conjurar",
@@ -1245,6 +1279,7 @@
     "variantEscape": "Conjurar com Escapar",
     "variantRetrace": "Conjurar com Refazer",
     "variantHarmonize": "Conjurar com Harmonizar",
+    "variantMayhem": "Conjurar com Mayhem",
     "variantFlashback": "Conjurar com Flashback",
     "variantAftermath": "Conjurar com Sequência",
     "variantGraveyardPermission": "Conjurar do Cemitério",
@@ -1257,6 +1292,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantFuse": "Conjurar com Fusão",
     "variantFallback": "Conjurar com {{type}}"
   },
   "categoryChoice": {
@@ -1270,6 +1306,7 @@
     "eyebrow": "Escolha",
     "title": "Escolha uma",
     "subtitle": "Selecione a opção a resolver.",
+    "subtitleBinary": "Escolha uma das duas opções abaixo.",
     "optionFallback": "Opção {{number}}"
   },
   "combatTax": {
@@ -1425,6 +1462,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferar",
     "proliferateSubtitle": "Escolha qualquer número de permanentes e jogadores com marcadores. Cada alvo escolhido recebe mais um marcador de cada tipo já presente.",
+    "timeTravelTitle": "Viagem no Tempo",
+    "timeTravelRemoveSubtitle": "Escolha qualquer número de objetos elegíveis para remover um marcador temporal.",
+    "timeTravelAddSubtitle": "Escolha qualquer número de objetos elegíveis restantes para adicionar um marcador temporal.",
     "chooseObjectsTitle": "Escolher Permanentes",
     "chooseObjectsSubtitle": "Escolha qualquer número de permanentes. Você paga um custo por cada um escolhido.",
     "selectAll": "Todos",
@@ -1444,7 +1484,9 @@
     "scopeMulti": "Escolha novos alvos para a mágica",
     "subtitle": "{{scope}}. Atual: {{current}}",
     "confirm": "Confirmar",
-    "badgeNewTarget": "Novo alvo"
+    "badgeNewTarget": "Novo alvo",
+    "slotLabel": "Alvo {{index}}: {{current}} → {{chosen}}",
+    "unselected": "inalterado"
   },
   "separatePiles": {
     "chooserName": "Jogador {{number}}",

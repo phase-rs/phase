@@ -414,6 +414,9 @@ fn build_rarity_map(mtgjson_path: &std::path::Path) -> HashMap<String, BTreeSet<
 struct TokenSourceMetadata {
     related_token_ids: BTreeSet<String>,
     source_printing_ids: BTreeSet<String>,
+    /// Alchemy spellbook list (order-preserving; MTGJSON lists are already sorted
+    /// by the source). A `Vec` rather than a set so the presented order is stable.
+    spellbook: Vec<String>,
 }
 
 fn build_token_source_metadata(
@@ -446,7 +449,10 @@ fn build_token_source_metadata(
             continue;
         };
         for card in set_file.data.cards {
-            if card.related_cards.tokens.is_empty() && card.identifiers.scryfall_id.is_none() {
+            if card.related_cards.tokens.is_empty()
+                && card.related_cards.spellbook.is_empty()
+                && card.identifiers.scryfall_id.is_none()
+            {
                 continue;
             }
             let key = card
@@ -458,6 +464,10 @@ fn build_token_source_metadata(
             entry
                 .related_token_ids
                 .extend(card.related_cards.tokens.into_iter());
+            // Alchemy spellbook: keep the first non-empty list seen for the face.
+            if entry.spellbook.is_empty() && !card.related_cards.spellbook.is_empty() {
+                entry.spellbook = card.related_cards.spellbook;
+            }
             if let Some(id) = card.identifiers.scryfall_id {
                 entry.source_printing_ids.insert(id);
             }
@@ -470,6 +480,7 @@ fn stamp_token_source_metadata(face: &mut CardFace, map: &HashMap<String, TokenS
     if let Some(metadata) = map.get(&face.name.to_lowercase()) {
         face.metadata.related_token_ids = metadata.related_token_ids.iter().cloned().collect();
         face.metadata.source_printing_ids = metadata.source_printing_ids.iter().cloned().collect();
+        face.metadata.spellbook = metadata.spellbook.clone();
     }
 }
 

@@ -13,13 +13,16 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
+use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr, TargetFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaColor, ManaPip, ManaRestriction, ManaType};
+use crate::types::mana::{
+    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaType, PaymentContext,
+};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
@@ -77,7 +80,7 @@ pub enum ManaSourcePenalty {
     /// Examples: Mana Confluence (1), Starting Town (1).
     PaysLifeOnActivation { fixed_amount: Option<u16> },
 
-    /// CR 605.3b + CR 701.21: Cost contains an `AbilityCost::Sacrifice { .. }`
+    /// CR 605.3b + CR 701.21: Cost contains an `AbilityCost::Sacrifice(_)`
     /// component — bare or nested in a `Composite`, for any target filter. The
     /// activation sacrifices a permanent (the source itself OR another), so the
     /// sacrifice is irreversible and the activation is never rewindable.
@@ -241,7 +244,7 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
 /// `Sacrifice` nested inside a `Composite`, for any target filter.
 fn cost_includes_sacrifice(cost: &Option<AbilityCost>) -> bool {
     fn is_sac(c: &AbilityCost) -> bool {
-        matches!(c, AbilityCost::Sacrifice { .. })
+        matches!(c, AbilityCost::Sacrifice(_))
     }
     match cost {
         Some(AbilityCost::Composite { costs }) => costs.iter().any(is_sac),
@@ -521,18 +524,20 @@ pub fn display_land_mana_pips(
             // chosen color"), show both available mana choices.
             ManaProduction::ChosenColor {
                 fixed_alternative, ..
-            } => {
-                if let Some(color) = fixed_alternative {
-                    push(&mut pips, ManaPip::Color(*color));
+            } => match (fixed_alternative, obj.chosen_color()) {
+                (None, None) => {
+                    push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec()));
                 }
-                match obj.chosen_color() {
-                    Some(color) => push(&mut pips, ManaPip::Color(color)),
-                    None if fixed_alternative.is_none() => {
-                        push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec()));
+                _ => {
+                    for mana_type in
+                        chosen_color_mana_type_options(state, object_id, *fixed_alternative)
+                    {
+                        if let Some(color) = mana_type_to_color(mana_type) {
+                            push(&mut pips, ManaPip::Color(color));
+                        }
                     }
-                    None => {}
                 }
-            }
+            },
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
                 let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
@@ -598,10 +603,20 @@ pub fn display_land_mana_pips(
             // permanents you control".
             ManaProduction::DistinctColorsAmongPermanents { filter } => {
                 let colors = super::effects::mana::distinct_colors_among_permanents(
-                    state, None, controller, object_id, filter,
+                    state, None, object_id, filter,
                 );
                 if !colors.is_empty() {
                     push(&mut pips, ManaPip::CombinationOfColors(colors));
+                }
+            }
+            // CR 106.1: Determine distinct colors among matching permanents to display
+            // pips.
+            ManaProduction::AnyOneColorAmongPermanents { filter, .. } => {
+                let colors = super::effects::mana::distinct_colors_among_permanents(
+                    state, None, object_id, filter,
+                );
+                if !colors.is_empty() {
+                    push(&mut pips, ManaPip::OneOfColors(colors));
                 }
             }
             // CR 603.7c + CR 106.3: Resolves only inside a TapsForMana
@@ -749,10 +764,25 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 // CR 601.2g: After total cost is determined, the player has a chance to
 // activate mana abilities before paying. Affordability must reflect what the
 // player COULD pay manually, not only what the engine could auto-tap.
+fn mana_ability_allowed_for_payment(
+    restrictions: &[ManaSpendRestriction],
+    state: &GameState,
+    object_id: ObjectId,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> bool {
+    let Some(ctx) = payment_context else {
+        return true;
+    };
+    super::effects::mana::resolve_restrictions(restrictions, state, object_id)
+        .iter()
+        .all(|restriction| restriction.allows(ctx))
+}
+
 pub(crate) fn feasible_mana_capacity(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
 ) -> u32 {
     let Some(obj) = state.objects.get(&object_id) else {
         return 0;
@@ -783,7 +813,20 @@ pub(crate) fn feasible_mana_capacity(
             }
             // CR 604: Static activation restrictions ("only during your
             // upkeep", etc.) must hold — mirrors `is_active_tap_mana_ability`.
-            activation_condition_satisfied(state, controller, object_id, *idx, ability)
+            if !activation_condition_satisfied(state, controller, object_id, *idx, ability) {
+                return false;
+            }
+            // CR 106.6: Restricted mana only counts toward this spell when
+            // the restriction permits it (issue #2011: Eldrazi Temple).
+            match &*ability.effect {
+                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+                    restrictions,
+                    state,
+                    object_id,
+                    payment_context,
+                ),
+                _ => false,
+            }
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
@@ -826,6 +869,331 @@ pub(crate) fn feasible_mana_capacity(
         None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
         None => 0,
     }
+}
+
+/// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
+/// castability gate's colored-shard coverage check (issue #583 / #1234).
+#[derive(Debug, Clone)]
+enum ActivatableManaProfileKind {
+    Exact(Vec<ManaType>),
+    AnyOneColor { count: u32, options: Vec<ManaType> },
+    AnyCombination { count: u32, options: Vec<ManaType> },
+    CombinationChoices(Vec<Vec<ManaType>>),
+}
+
+#[derive(Debug, Clone)]
+struct ActivatableManaProfile {
+    object_id: ObjectId,
+    kind: ActivatableManaProfileKind,
+}
+
+fn resolved_production_count(
+    produced: &ManaProduction,
+    state: &GameState,
+    resolved: &crate::types::ability::ResolvedAbility,
+) -> u32 {
+    super::effects::mana::resolve_mana_types_for_ability(produced, state, resolved).len() as u32
+}
+
+fn profile_kind_from_production(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    produced: &ManaProduction,
+    resolved: &crate::types::ability::ResolvedAbility,
+) -> Option<ActivatableManaProfileKind> {
+    match produced {
+        ManaProduction::ChoiceAmongCombinations { options } => {
+            Some(ActivatableManaProfileKind::CombinationChoices(
+                options
+                    .iter()
+                    .map(|combo| combo.iter().map(mana_color_to_type).collect())
+                    .collect(),
+            ))
+        }
+        ManaProduction::AnyOneColor { color_options, .. } => {
+            Some(ActivatableManaProfileKind::AnyOneColor {
+                count: resolved_production_count(produced, state, resolved),
+                options: color_options.iter().map(mana_color_to_type).collect(),
+            })
+        }
+        ManaProduction::AnyCombination { color_options, .. } => {
+            Some(ActivatableManaProfileKind::AnyCombination {
+                count: resolved_production_count(produced, state, resolved),
+                options: color_options.iter().map(mana_color_to_type).collect(),
+            })
+        }
+        ManaProduction::ChosenColor {
+            fixed_alternative, ..
+        } => {
+            let count = resolved_production_count(produced, state, resolved);
+            let options = chosen_color_mana_type_options(state, object_id, *fixed_alternative);
+            if options.is_empty() {
+                return None;
+            }
+            if count <= 1 && options.len() == 1 {
+                Some(ActivatableManaProfileKind::Exact(options))
+            } else {
+                Some(ActivatableManaProfileKind::AnyOneColor { count, options })
+            }
+        }
+        ManaProduction::OpponentLandColors { .. }
+        | ManaProduction::AnyTypeProduceableBy { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::AnyInCommandersColorIdentity { .. }
+        | ManaProduction::AnyOneColorAmongPermanents { .. } => {
+            let options = mana_options_from_production(state, controller, object_id, produced);
+            if options.is_empty() {
+                return None;
+            }
+            Some(ActivatableManaProfileKind::AnyOneColor {
+                count: resolved_production_count(produced, state, resolved),
+                options,
+            })
+        }
+        ManaProduction::DistinctColorsAmongPermanents { .. } => {
+            let types =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, resolved);
+            if types.is_empty() {
+                None
+            } else {
+                Some(ActivatableManaProfileKind::Exact(types))
+            }
+        }
+        ManaProduction::TriggerEventManaType => None,
+        _ => {
+            let types =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, resolved);
+            if types.is_empty() {
+                None
+            } else {
+                Some(ActivatableManaProfileKind::Exact(types))
+            }
+        }
+    }
+}
+
+fn activatable_mana_profiles_for_object(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> Vec<ActivatableManaProfile> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    if obj.zone != Zone::Battlefield || obj.controller != controller {
+        return Vec::new();
+    }
+
+    obj.abilities
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, ability)| {
+            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+                return None;
+            }
+            if !mana_abilities::can_activate_mana_ability_now(
+                state, controller, object_id, idx, ability,
+            ) {
+                return None;
+            }
+            if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
+                return None;
+            }
+            let Effect::Mana {
+                produced,
+                restrictions,
+                ..
+            } = &*ability.effect
+            else {
+                return None;
+            };
+            if !mana_ability_allowed_for_payment(restrictions, state, object_id, payment_context) {
+                return None;
+            }
+            let resolved =
+                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+            profile_kind_from_production(state, object_id, controller, produced, &resolved)
+                .map(|kind| ActivatableManaProfile { object_id, kind })
+        })
+        .collect()
+}
+
+fn collect_activatable_mana_profiles(
+    state: &GameState,
+    player: PlayerId,
+    exclude: Option<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> Vec<ActivatableManaProfile> {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| Some(**id) != exclude)
+        .flat_map(|&id| activatable_mana_profiles_for_object(state, id, player, payment_context))
+        .collect()
+}
+
+fn shard_payment_options(shard: ManaCostShard) -> Option<Vec<ManaType>> {
+    use super::mana_payment::{shard_to_mana_type, ShardRequirement};
+    Some(match shard_to_mana_type(shard) {
+        ShardRequirement::Single(mana_type) => vec![mana_type],
+        ShardRequirement::Hybrid(a, b) => vec![a, b],
+        ShardRequirement::TwoGenericHybrid(mana_type) => vec![mana_type, ManaType::Colorless],
+        ShardRequirement::ColorlessHybrid(mana_type) => vec![ManaType::Colorless, mana_type],
+        ShardRequirement::Phyrexian(mana_type) => vec![mana_type],
+        ShardRequirement::HybridPhyrexian(a, b) => vec![a, b],
+        ShardRequirement::TwoGenericHybridPhyrexian(mana_type) => {
+            vec![mana_type, ManaType::Colorless]
+        }
+        ShardRequirement::Snow | ShardRequirement::TwoOrMoreColorSource | ShardRequirement::X => {
+            return None;
+        }
+    })
+}
+
+fn group_profiles_by_object(
+    profiles: Vec<ActivatableManaProfile>,
+) -> Vec<(ObjectId, Vec<ActivatableManaProfileKind>)> {
+    use std::collections::HashMap;
+    let mut grouped: HashMap<ObjectId, Vec<ActivatableManaProfileKind>> = HashMap::new();
+    for profile in profiles {
+        grouped
+            .entry(profile.object_id)
+            .or_default()
+            .push(profile.kind);
+    }
+    grouped.into_iter().collect()
+}
+
+fn apply_profile_kind(
+    profile: &ActivatableManaProfileKind,
+    requirements: &[Vec<ManaType>],
+) -> Option<(Vec<Vec<ManaType>>, u32)> {
+    match profile {
+        ActivatableManaProfileKind::Exact(types) => {
+            let mut remaining = requirements.to_vec();
+            for mana_type in types {
+                let pos = remaining.iter().position(|opts| opts.contains(mana_type))?;
+                remaining.remove(pos);
+            }
+            Some((remaining, types.len() as u32))
+        }
+        ActivatableManaProfileKind::AnyOneColor { count, options } => {
+            options.iter().find_map(|&color| {
+                combination_assign(*count, std::slice::from_ref(&color), requirements)
+            })
+        }
+        ActivatableManaProfileKind::AnyCombination { count, options } => {
+            combination_assign(*count, options, requirements)
+        }
+        ActivatableManaProfileKind::CombinationChoices(choices) => {
+            choices.iter().find_map(|choice| {
+                apply_profile_kind(
+                    &ActivatableManaProfileKind::Exact(choice.clone()),
+                    requirements,
+                )
+            })
+        }
+    }
+}
+
+fn assign_profiles_to_requirements(
+    objects: &[(ObjectId, Vec<ActivatableManaProfileKind>)],
+    object_index: usize,
+    requirements: Vec<Vec<ManaType>>,
+) -> Option<u32> {
+    if requirements.is_empty() {
+        return Some(0);
+    }
+    if object_index >= objects.len() {
+        return None;
+    }
+    if let Some(consumed) =
+        assign_profiles_to_requirements(objects, object_index + 1, requirements.clone())
+    {
+        return Some(consumed);
+    }
+    for profile in &objects[object_index].1 {
+        if let Some((remaining, consumed)) = apply_profile_kind(profile, &requirements) {
+            if let Some(rest) =
+                assign_profiles_to_requirements(objects, object_index + 1, remaining)
+            {
+                return Some(consumed + rest);
+            }
+        }
+    }
+    None
+}
+
+fn combination_assign(
+    count: u32,
+    options: &[ManaType],
+    requirements: &[Vec<ManaType>],
+) -> Option<(Vec<Vec<ManaType>>, u32)> {
+    if requirements.is_empty() {
+        // All shards are covered; any leftover `count` is simply surplus mana
+        // the player never produces (or lets drain). Rejecting over-production
+        // here would falsely mark e.g. a power-3 combination source as unable
+        // to pay a two-shard cost.
+        return Some((Vec::new(), 0));
+    }
+    if count == 0 {
+        return None;
+    }
+    for (index, payment_options) in requirements.iter().enumerate() {
+        for &color in payment_options {
+            if !options.contains(&color) {
+                continue;
+            }
+            let mut next_requirements = requirements.to_vec();
+            next_requirements.remove(index);
+            if let Some((remaining, inner)) =
+                combination_assign(count - 1, options, &next_requirements)
+            {
+                return Some((remaining, 1 + inner));
+            }
+        }
+    }
+    None
+}
+
+fn assign_profiles_to_shards(
+    profiles: &[ActivatableManaProfile],
+    shards: &[ManaCostShard],
+) -> Option<u32> {
+    let requirements: Vec<Vec<ManaType>> = shards
+        .iter()
+        .filter_map(|shard| shard_payment_options(*shard))
+        .collect();
+    if requirements.len() != shards.len() {
+        return None;
+    }
+    let grouped = group_profiles_by_object(profiles.to_vec());
+    assign_profiles_to_requirements(&grouped, 0, requirements)
+}
+
+/// CR 117.1d + CR 601.2g: Whether residual mana shards could be paid by
+/// activating currently legal mana abilities (non-tap sources like Vivi
+/// Ornitier's {0} combination mana, Lion's Eye Diamond, etc.).
+///
+/// Returns `(covered, consumed_pips)` where `consumed_pips` is the total mana
+/// produced by activations used for shard coverage — callers must subtract
+/// this from generic capacity to avoid double-counting one activation.
+pub(crate) fn can_cover_shards_with_activatable_mana(
+    state: &GameState,
+    player: PlayerId,
+    exclude: Option<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
+    shards: &[ManaCostShard],
+) -> (bool, u32) {
+    if shards.is_empty() {
+        return (true, 0);
+    }
+    let profiles = collect_activatable_mana_profiles(state, player, exclude, payment_context);
+    assign_profiles_to_shards(&profiles, shards)
+        .map(|consumed| (true, consumed))
+        .unwrap_or((false, 0))
 }
 
 fn land_mana_options(
@@ -1055,6 +1423,37 @@ pub(crate) fn activation_condition_satisfied(
     .is_ok()
 }
 
+/// CR 106.1: Resolve the mana-type option set for `ChosenColor` production.
+///
+/// Gate lands ("Add {B} or one mana of the chosen color") carry a
+/// `fixed_alternative` alongside the as-enters chosen color — both are legal
+/// outputs once the color is chosen. Pure chosen-color producers (Utopia Sprawl)
+/// with no color chosen yet fall back to all five colors so preview and
+/// mana-source analysis paths surface a non-empty set.
+pub(crate) fn chosen_color_mana_type_options(
+    state: &GameState,
+    object_id: ObjectId,
+    fixed_alternative: Option<ManaColor>,
+) -> Vec<ManaType> {
+    let mut options = Vec::new();
+    if let Some(fixed) = fixed_alternative {
+        options.push(mana_color_to_type(&fixed));
+    }
+    if let Some(chosen) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.chosen_color())
+    {
+        let chosen_type = mana_color_to_type(&chosen);
+        if !options.contains(&chosen_type) {
+            options.push(chosen_type);
+        }
+    } else if fixed_alternative.is_none() {
+        return ManaColor::ALL.iter().map(mana_color_to_type).collect();
+    }
+    options
+}
+
 fn mana_options_from_production(
     state: &GameState,
     controller: PlayerId,
@@ -1084,15 +1483,11 @@ fn mana_options_from_production(
             }
             options
         }
-        // CR 106.1a: Resolve the source permanent's chosen color. If the
-        // permanent has no chosen color yet (e.g., still in library / sideboard
-        // preview), return empty so it isn't offered as a mana source.
-        ManaProduction::ChosenColor { .. } => state
-            .objects
-            .get(&object_id)
-            .and_then(|obj| obj.chosen_color())
-            .map(|color| vec![mana_color_to_type(&color)])
-            .unwrap_or_default(),
+        // CR 106.1: Resolve chosen-color production, including the fixed-color
+        // alternative on Gate lands ("Add {B} or one mana of the chosen color").
+        ManaProduction::ChosenColor {
+            fixed_alternative, ..
+        } => chosen_color_mana_type_options(state, object_id, *fixed_alternative),
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
         ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
         // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
@@ -1151,12 +1546,17 @@ fn mana_options_from_production(
         // you control". Delegates to the shared resolver so the cost-payment path
         // and direct activation see identical option sets.
         ManaProduction::DistinctColorsAmongPermanents { filter } => {
-            super::effects::mana::distinct_colors_among_permanents(
-                state, None, controller, object_id, filter,
-            )
-            .iter()
-            .map(mana_color_to_type)
-            .collect()
+            super::effects::mana::distinct_colors_among_permanents(state, None, object_id, filter)
+                .iter()
+                .map(mana_color_to_type)
+                .collect()
+        }
+        // CR 106.1: Determine available mana options from colors among matching permanents.
+        ManaProduction::AnyOneColorAmongPermanents { filter, .. } => {
+            super::effects::mana::distinct_colors_among_permanents(state, None, object_id, filter)
+                .iter()
+                .map(mana_color_to_type)
+                .collect()
         }
         // CR 603.7c + CR 106.3: "add one mana of any type that land produced"
         // resolves only inside a triggered ability (TapsForMana). For the mana
@@ -1500,7 +1900,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChosenAttribute, ManaContribution, QuantityExpr,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, ManaContribution,
+        QuantityExpr, SacrificeCost,
     };
     use crate::types::identifiers::CardId;
 
@@ -1865,6 +2266,68 @@ mod tests {
     }
 
     #[test]
+    fn gate_land_fixed_or_chosen_exposes_both_mana_options() {
+        // Issue #2933: Black Dragon Gate — `{T}: Add {B} or one mana of the
+        // chosen color` must surface both Black and the as-enters chosen color
+        // in activatable land mana options (not just the chosen color).
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(42);
+        let gate = create_object(
+            &mut state,
+            CardId(347),
+            PlayerId(0),
+            "Black Dragon Gate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&gate).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(ManaColor::Red));
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::ChosenColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            contribution: ManaContribution::Base,
+                            fixed_alternative: Some(ManaColor::Black),
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let options = activatable_land_mana_options(&state, gate, PlayerId(0));
+        let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
+        assert!(
+            types.contains(&ManaType::Black),
+            "Gate land must offer printed {{B}}, got {types:?}"
+        );
+        assert!(
+            types.contains(&ManaType::Red),
+            "Gate land must offer chosen color Red, got {types:?}"
+        );
+        assert_eq!(types.len(), 2, "expected exactly two distinct options");
+
+        assert_eq!(
+            chosen_color_mana_type_options(&state, gate, Some(ManaColor::Black)),
+            vec![ManaType::Black, ManaType::Red]
+        );
+        assert!(source_could_produce_two_or_more_colors(
+            &state,
+            gate,
+            PlayerId(0)
+        ));
+    }
+
+    #[test]
     fn conditional_mana_blocked_without_supporting_land() {
         let mut state = GameState::new_two_player(42);
         let verge = add_verge_land(
@@ -2082,10 +2545,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         let obj = state.objects.get_mut(&treasure).unwrap();
@@ -2357,10 +2817,10 @@ mod tests {
     #[test]
     fn krark_clan_ironworks_classifies_as_sacrifices() {
         use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
-        let ability = mana_ability_with_cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-            count: 1,
-        });
+        let ability = mana_ability_with_cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            1,
+        )));
         assert_eq!(
             mana_ability_penalty(&ability),
             ManaSourcePenalty::Sacrifices,
@@ -2377,10 +2837,10 @@ mod tests {
         let ability = mana_ability_with_cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    1,
+                )),
             ],
         });
         assert_eq!(
@@ -2399,10 +2859,7 @@ mod tests {
         let ability = mana_ability_with_cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         assert_eq!(

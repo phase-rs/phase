@@ -199,6 +199,9 @@ pub struct SetRelatedCards {
     pub tokens: Vec<String>,
     #[serde(default)]
     pub reverse_related: Vec<String>,
+    /// Alchemy spellbook — the fixed list of card names this card can draft from.
+    #[serde(default)]
+    pub spellbook: Vec<String>,
 }
 
 /// Load and deserialize an AtomicCards.json file.

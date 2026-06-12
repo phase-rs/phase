@@ -45,6 +45,11 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
         alt((
             value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
             value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
+            value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+            // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
+            // Wire Surgeons (encore) grant activated graveyard keywords.
+            value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
+            value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
         ))
         .parse(i)
     })?
@@ -307,7 +312,25 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         }
         return Some(def);
     }
-
+    // Pattern 3: "[type] cards in/from [your zone] have [keyword]"
+    // CR 702.81a (Retrace): Grants a casting keyword to cards in a specific zone.
+    // Six grants retrace to nonland permanent cards in your graveyard.
+    // Emits a Continuous static with AddKeyword so the off-zone keyword-grant
+    // path (`effective_off_zone_keywords`) sees the grant and the card becomes
+    // castable from the graveyard.
+    {
+        let (base_filter, rest) = parse_type_phrase(subject);
+        if rest.trim().is_empty() && target_filter_is_your_graveyard(&base_filter) {
+            let mut def = StaticDefinition::continuous()
+                .affected(base_filter)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(text.to_string());
+            if let Some(condition) = condition.clone() {
+                def = def.condition(condition);
+            }
+            return Some(def);
+        }
+    }
     None
 }
 
@@ -573,6 +596,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::AssignDamageFromToughness);
     }
 
+    // CR 701.15b: Positive goaded designation on token anaphors and compound
+    // statics ("The tokens are goaded for the rest of the game", Life of the
+    // Party; "Enchanted creature … is goaded").
+    if nom_primitives::scan_contains(unquoted_lower.as_str(), "is goaded")
+        || nom_primitives::scan_contains(unquoted_lower.as_str(), "are goaded")
+    {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        });
+    }
+
     // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
     // type" predicate — the Changeling-class type grant when it appears as
     // one conjunct in an Aura/Equipment compound static ("Enchanted creature
@@ -615,6 +649,38 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     }
     if let Some(toughness) = parse_base_toughness_mod(&unquoted_text) {
         modifications.push(ContinuousModification::SetToughness { value: toughness });
+    }
+
+    // CR 509.1b + CR 613.4b: "can't be blocked [this turn] and has/have base power
+    // and toughness N/N" — the restriction conjunct precedes the base-PT conjunct.
+    // `extract_keyword_clause` only recovers the trailing conjunct, so scan the
+    // leading restriction explicitly (Atomic Microsizer).
+    if let Some((restriction_text, _)) =
+        nom_primitives::scan_split_at_phrase(&unquoted_lower, |i| {
+            (
+                tag("and "),
+                alt((tag("has"), tag("have"))),
+                tag(" base power"),
+            )
+                .parse(i)
+        })
+    {
+        let restriction_text = restriction_text.trim();
+        if let Some(modes) = parse_restriction_modes(restriction_text) {
+            for mode in modes {
+                if static_mode_needs_grant_propagation(&mode)
+                    && !modifications.iter().any(|existing| {
+                        matches!(
+                            existing,
+                            ContinuousModification::AddStaticMode { mode: existing_mode }
+                                if *existing_mode == mode
+                        )
+                    })
+                {
+                    modifications.push(ContinuousModification::AddStaticMode { mode });
+                }
+            }
+        }
     }
 
     for modification in parse_quoted_ability_modifications(text_stripped) {
@@ -851,7 +917,11 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
 
 /// CR 702: Split a keyword list like "flying and first strike" into individual keywords.
 pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
-    let text = text.trim().trim_end_matches('.');
+    // Strip both trailing periods and trailing commas. A comma tail arises when
+    // `strip_quoted_segments` removes `and "Whenever..."` from the end of a list
+    // like "has first strike, trample, haste, and \"Whenever...\""— the connector
+    // `, and` is dropped but the comma after the last bare keyword remains.
+    let text = text.trim().trim_end_matches(['.', ',']).trim();
     // Split on ", and/or ", ", and ", " and ", or ", " — longest-match-first
     // ordering prevents ", and " from consuming the prefix of ", and/or ".
     let mut parts: Vec<&str> = Vec::new();

@@ -334,7 +334,7 @@ mod tests {
             effect_kind: engine::types::ability::EffectKind::ChangeZone,
             zone: Zone::Hand,
             destination: Some(Zone::Battlefield),
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,

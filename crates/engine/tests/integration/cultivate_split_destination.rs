@@ -90,7 +90,7 @@ fn discriminator_cultivate_splits_battlefield_and_hand() {
         } => {
             assert_eq!(*primary_count, 1);
             assert_eq!(*primary_destination, Zone::Battlefield);
-            assert!(*primary_enter_tapped);
+            assert!(primary_enter_tapped.is_tapped());
             assert_eq!(*rest_destination, Zone::Hand);
             assert!(cards.contains(&forest) && cards.contains(&mountain));
         }

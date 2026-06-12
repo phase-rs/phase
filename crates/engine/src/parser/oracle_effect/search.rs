@@ -169,9 +169,12 @@ pub(super) fn parse_search_library_details(
     // CR 701.23a + CR 608.2c: Detect cultivate-class split destinations ("put
     // one onto the battlefield tapped and the other into your hand"). Only the
     // single-filter case carries a split; multi-filter chains handle their own
-    // destinations via the interleaved-ChangeZone lowering.
+    // destinations via the interleaved-ChangeZone lowering. Scan the full effect
+    // chain when available so Final Parting's destination clause in a sibling
+    // chunk still populates `split` on the search effect.
+    let split_scan = ctx.effect_chain_full_lower.as_deref().unwrap_or(lower);
     let split = if extra_filters.is_empty() {
-        detect_search_split_destination(lower)
+        detect_search_split_destination(split_scan)
     } else {
         None
     };
@@ -414,6 +417,16 @@ fn parse_search_filter_with_extras(
         return filters;
     }
 
+    // CR 701.23a: A disjunctive series ("a X card, a Y card, or a Z card")
+    // describes ONE card matching any listed property — try the disjunction
+    // split before the conjunction split so it isn't mis-classified as N separate
+    // cards (count + MatchEachFilter). parse_search_filter_disjunction returns
+    // None for <2 disjunction segments, so "and"-lists and single filters fall
+    // through to the conjunction path unchanged.
+    if let Some(or_filter) = parse_search_filter_disjunction(tail, ctx) {
+        return (or_filter, Vec::new());
+    }
+
     // Split on `" and a "` / `" and an "` / `" and basic "` at filter-region
     // boundaries only. The "and basic" branch preserves the supertype prefix so
     // the downstream filter parser sees e.g. `"basic plains card"` intact.
@@ -615,7 +628,10 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("target opponent's "),
                 ),
-                value(TargetFilter::Player, tag("target player's ")),
+                value(
+                    TargetFilter::Typed(TypedFilter::default()),
+                    tag("target player's "),
+                ),
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("an opponent's "),
@@ -1061,6 +1077,198 @@ fn search_filter_all_land_subtype_branches(filter: &TargetFilter) -> bool {
     }
 }
 
+/// The two structural axes of a search-filter disjunction. Replaces the
+/// flat 7-variant `Disjunction` cluster — every consumer site checks
+/// `connector` (Or vs AndOr) and `leading` (article shape) independently,
+/// which is what the parameterized form exposes directly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Connector {
+    Or,
+    AndOr,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Leading {
+    A,
+    An,
+    Basic,
+    None,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Disjunction {
+    connector: Connector,
+    leading: Leading,
+}
+
+// Leading-article dispatch on a single alt() — also reused by the
+// comma-member peel below to recover the article-stripped (or supertype)
+// form of each enumerated member.
+fn parse_leading_article(i: &str) -> nom::IResult<&str, Leading, OracleError<'_>> {
+    alt((
+        value(Leading::A, tag::<_, _, OracleError<'_>>("a ")),
+        value(Leading::An, tag::<_, _, OracleError<'_>>("an ")),
+        value(Leading::Basic, tag::<_, _, OracleError<'_>>("basic ")),
+        value(Leading::None, tag::<_, _, OracleError<'_>>("")),
+    ))
+    .parse(i)
+}
+
+// CR 701.23a: recover one co-equal disjunctive member into its own segment.
+// Strips a leading article ("a"/"an") but preserves "basic" as a supertype.
+fn push_peeled_member<'a>(member: &'a str, segments: &mut Vec<&'a str>) {
+    let m = member.trim().trim_end_matches(',').trim_end();
+    if m.is_empty() {
+        return;
+    }
+    let cleaned = strip_search_member_leading(m);
+    if !cleaned.is_empty() {
+        segments.push(cleaned);
+    }
+}
+
+fn strip_search_member_leading(member: &str) -> &str {
+    match parse_leading_article(member) {
+        Ok((rest, Leading::Basic)) => {
+            let start = member.len() - rest.len() - "basic ".len();
+            &member[start..]
+        }
+        Ok((rest, _)) => rest,
+        Err(_) => member,
+    }
+}
+
+fn parse_search_named_member(member: &str) -> Option<TargetFilter> {
+    parse_search_named_filter(strip_search_member_leading(member.trim()))
+}
+
+fn parse_comma_member_start(input: &str) -> OracleResult<'_, ()> {
+    let input = input.trim_start();
+    let input = strip_search_member_leading(input);
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("card named ")),
+        value((), parse_bare_search_disjunction_right),
+    ))
+    .parse(input)
+}
+
+fn split_next_comma_member(region: &str) -> Option<(&str, &str)> {
+    region.match_indices(',').find_map(|(idx, _)| {
+        let after_comma = &region[idx + 1..];
+        parse_comma_member_start(after_comma)
+            .is_ok()
+            .then(|| (&region[..idx], after_comma.trim_start()))
+    })
+}
+
+// CR 701.23a: a left segment may itself enumerate co-members the upstream comma
+// split did not break out. Peel each delimiter comma into its own flat segment
+// without shredding comma-bearing card names in "card named X" members.
+fn peel_comma_members<'a>(region: &'a str, segments: &mut Vec<&'a str>) {
+    let mut remaining = region.trim();
+    while !remaining.is_empty() {
+        if let Some((member, rest)) = split_next_comma_member(remaining) {
+            push_peeled_member(member, segments);
+            remaining = rest;
+        } else {
+            push_peeled_member(remaining, segments);
+            break;
+        }
+    }
+}
+
+// CR 202.3: comparator words following a bare " or " form a numeric bound
+// ("3 or less", "X or higher"), never a disjunction terminator. Negative-
+// lookahead guard for split_terminal_or.
+fn parse_comparator_word(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("less"),
+            tag("greater"),
+            tag("more"),
+            tag("fewer"),
+            tag("higher"),
+            tag("lower"),
+        )),
+    )
+    .parse(input)
+}
+
+// CR 701.23a: split a disjunctive series at its TERMINAL connector, returning
+// the left side, the final member, and which connector matched. " and/or "
+// takes precedence over a bare " or "; a bare " or " introducing a comparator
+// word ("3 or less") is skipped so it never terminates the series.
+fn split_terminal_or(region: &str) -> Option<(&str, &str, Connector)> {
+    let mut last: Option<(&str, &str, Connector)> = None;
+    // rightmost " and/or "
+    let mut cursor = region;
+    while let Ok((after, _)) = take_until::<_, _, OracleError<'_>>(" and/or ").parse(cursor) {
+        let after_conn = &after[" and/or ".len()..];
+        let before_final = &region[..region.len() - after.len()];
+        let final_member = &region[region.len() - after_conn.len()..];
+        last = Some((before_final, final_member, Connector::AndOr));
+        cursor = after_conn;
+    }
+    // rightmost NON-comparator bare " or "
+    let mut cursor = region;
+    while let Ok((after, _)) = take_until::<_, _, OracleError<'_>>(" or ").parse(cursor) {
+        let after_conn = &after[" or ".len()..];
+        if peek(parse_comparator_word).parse(after_conn).is_err() {
+            let before_final = &region[..region.len() - after.len()];
+            let final_member = &region[region.len() - after_conn.len()..];
+            match last {
+                Some((_, _, Connector::AndOr)) => {}
+                Some((prev_before, _, _)) if prev_before.len() >= before_final.len() => {}
+                _ => last = Some((before_final, final_member, Connector::Or)),
+            }
+        }
+        cursor = after_conn;
+    }
+    last.map(|(b, f, c)| (b.trim(), f.trim(), c))
+}
+
+// CR 701.23a: front-gate for the comma-series disjunction class ("a X, a Y, or
+// a Z" — count 1, one choice among co-equal filters). Fires deterministically
+// BEFORE the greedy bare-or loop so an intra-member union or a comma-bearing
+// card name is split correctly. Returns None (defer to the loop) for simple
+// non-comma 2-way disjunctions and for "and/or" comma enumerations.
+fn detect_comma_series_or(filter_region: &str) -> Option<Vec<&str>> {
+    // Scope to the comma-series class; simple 2-way disjunctions stay on the loop.
+    // structural: not dispatch (comma-presence scope gate)
+    if !filter_region.as_bytes().contains(&b',') {
+        return None;
+    }
+    let (before_final, final_member, connector) = split_terminal_or(filter_region)?;
+
+    // Article-tolerant card-head guard: the final member must be a co-equal card
+    // filter — either "card named X" (anchored, no article) or, after stripping a
+    // leading article, a bare "<head> card(s)". "basic" is preserved (supertype).
+    // This strip MUST match push_peeled_member's strip so guard and peeler agree.
+    let head = strip_search_member_leading(final_member);
+    if parse_search_named_member(final_member).is_none()
+        && parse_bare_search_disjunction_right(head).is_err()
+    {
+        return None;
+    }
+
+    // and/or-comma defer: "X, Y, and/or Z" enumerations are handled by the loop's
+    // existing and/or gate; keep the per-type comparator form on the type path.
+    if connector == Connector::AndOr && before_final.as_bytes().contains(&b',') {
+        // structural: not dispatch (comma-in-left enumeration)
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    // CR 201.2: a named left segment's comma belongs to the card name — keep whole.
+    if parse_search_named_member(before_final).is_some() {
+        push_peeled_member(before_final, &mut segments);
+    } else {
+        peel_comma_members(before_final, &mut segments);
+    }
+    push_peeled_member(final_member, &mut segments);
+
+    (segments.len() >= 2).then_some(segments)
+}
+
 /// Split a single search-filter expression on disjunctive filter boundaries:
 /// `"basic land card or a Gate card"`, `"instant card or a card with flash"`,
 /// and bare subtype forms like `"Mountain or Cave card"`.
@@ -1071,26 +1279,11 @@ fn search_filter_all_land_subtype_branches(filter: &TargetFilter) -> bool {
 /// and canonical core unions such as `"instant or sorcery card"` on the
 /// existing suffix/type-phrase paths.
 fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
-    /// The two structural axes of a search-filter disjunction. Replaces the
-    /// flat 7-variant `Disjunction` cluster — every consumer site checks
-    /// `connector` (Or vs AndOr) and `leading` (article shape) independently,
-    /// which is what the parameterized form exposes directly.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum Connector {
-        Or,
-        AndOr,
-    }
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum Leading {
-        A,
-        An,
-        Basic,
-        None,
-    }
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    struct Disjunction {
-        connector: Connector,
-        leading: Leading,
+    // CR 701.23a: comma-series disjunctions are split deterministically here, ahead
+    // of the greedy bare-or loop, so intra-member unions and comma-bearing card
+    // names are not mis-split into a multi-card conjunction.
+    if let Some(segments) = detect_comma_series_or(filter_region) {
+        return segments;
     }
 
     // Sub-combinator that dispatches the leading-article axis on a single
@@ -1102,13 +1295,7 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
     ) -> impl Parser<&'a str, Output = Disjunction, Error = OracleError<'a>> {
         move |i: &'a str| {
             let (i, _) = tag::<_, _, OracleError<'a>>(connector_tag).parse(i)?;
-            let (i, leading) = alt((
-                value(Leading::A, tag::<_, _, OracleError<'a>>("a ")),
-                value(Leading::An, tag::<_, _, OracleError<'a>>("an ")),
-                value(Leading::Basic, tag::<_, _, OracleError<'a>>("basic ")),
-                value(Leading::None, tag::<_, _, OracleError<'a>>("")),
-            ))
-            .parse(i)?;
+            let (i, leading) = parse_leading_article(i)?;
             Ok((i, Disjunction { connector, leading }))
         }
     }
@@ -1164,7 +1351,13 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             break;
         }
 
-        segments.push(before.trim());
+        // CR 201.2: a named member's comma belongs to the card name
+        // ("Halvar, God of Battle") — never peel it. Otherwise peel co-members.
+        if parse_search_named_member(before).is_some() {
+            push_peeled_member(before, &mut segments);
+        } else {
+            peel_comma_members(before, &mut segments);
+        }
         remaining = if disjunction.leading == Leading::Basic {
             // "basic" is a supertype, not an article — recover it into the
             // right segment so the type-phrase parser sees "basic <type>".
@@ -2389,7 +2582,27 @@ fn parse_search_split_destination(input: &str) -> OracleResult<'_, SearchDestina
         SearchDestinationSplit {
             primary_destination: Zone::Battlefield,
             primary_count,
-            primary_enter_tapped: tapped.is_some(),
+            primary_enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                tapped.is_some(),
+            ),
+            rest_destination,
+        },
+    ))
+}
+
+fn parse_zone_pair_search_split(input: &str) -> OracleResult<'_, SearchDestinationSplit> {
+    let (input, primary_count) = nom_primitives::parse_number(input)?;
+    let (input, primary_destination) = parse_choice_partition_destination(input)?;
+    let (input, _) = tag(" and ").parse(input)?;
+    let (input, _) = opt(tag("put ")).parse(input)?;
+    let (input, _) = parse_rest_cards_reference(input)?;
+    let (input, rest_destination) = parse_choice_partition_destination(input)?;
+    Ok((
+        input,
+        SearchDestinationSplit {
+            primary_destination,
+            primary_count,
+            primary_enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(false),
             rest_destination,
         },
     ))
@@ -2400,7 +2613,15 @@ fn parse_search_split_destination(input: &str) -> OracleResult<'_, SearchDestina
 /// when the cultivate-class grammar matches, else `None` so the caller falls
 /// back to single-zone destination handling.
 fn detect_search_split_destination(lower: &str) -> Option<SearchDestinationSplit> {
-    scan_preceded(lower, "put ", parse_search_split_destination).map(|(split, _)| split)
+    scan_preceded(lower, "put ", parse_search_split_destination)
+        .or_else(|| scan_preceded(lower, "put ", parse_zone_pair_search_split))
+        .map(|(split, _)| split)
+}
+
+/// Whether `lower` is a standalone put-destination clause already handled by a
+/// preceding `SearchLibrary { split: Some(_) }` effect (Final Parting class).
+pub(super) fn is_zone_pair_search_split_clause(lower: &str) -> bool {
+    scan_preceded(lower, "put ", parse_zone_pair_search_split).is_some()
 }
 
 pub(super) fn parse_search_destination(lower: &str) -> Zone {
@@ -2563,7 +2784,7 @@ mod tests {
             .expect("cultivate must populate a SearchDestinationSplit");
         assert_eq!(split.primary_destination, Zone::Battlefield);
         assert_eq!(split.primary_count, 1);
-        assert!(split.primary_enter_tapped);
+        assert!(split.primary_enter_tapped.is_tapped());
         assert_eq!(split.rest_destination, Zone::Hand);
     }
 
@@ -2581,6 +2802,38 @@ mod tests {
         assert_eq!(split.primary_count, 2);
         assert_eq!(split.primary_destination, Zone::Battlefield);
         assert_eq!(split.rest_destination, Zone::Hand);
+    }
+
+    #[test]
+    fn final_parting_lowers_to_hand_graveyard_split() {
+        let details = parse_search_library_details(
+            "search your library for two cards. put one into your hand and the other into your graveyard. then shuffle",
+            &mut ParseContext::default(),
+        );
+        let split = details
+            .split
+            .expect("Final Parting must populate a SearchDestinationSplit");
+        assert_eq!(split.primary_destination, Zone::Hand);
+        assert_eq!(split.primary_count, 1);
+        assert!(!split.primary_enter_tapped.is_tapped());
+        assert_eq!(split.rest_destination, Zone::Graveyard);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
+    fn zone_pair_split_lowers_to_exile_and_library_bottom() {
+        let details = parse_search_library_details(
+            "search your library for two cards. put one into exile and the other on the bottom of your library. then shuffle",
+            &mut ParseContext::default(),
+        );
+        let split = details
+            .split
+            .expect("zone-pair split must populate a SearchDestinationSplit");
+        assert_eq!(split.primary_destination, Zone::Exile);
+        assert_eq!(split.primary_count, 1);
+        assert!(!split.primary_enter_tapped.is_tapped());
+        assert_eq!(split.rest_destination, Zone::Library);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
     }
 
     #[test]
@@ -2623,7 +2876,10 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert!(details.target_player.is_some());
-        assert_eq!(details.target_player.unwrap(), TargetFilter::Player);
+        let TargetFilter::Typed(target_player) = details.target_player.unwrap() else {
+            panic!("expected typed target-player library owner");
+        };
+        assert_eq!(target_player.controller, None);
     }
 
     #[test]
@@ -2635,6 +2891,15 @@ mod tests {
         );
         assert!(details.target_player.is_some());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    #[test]
+    fn search_that_players_library_without_context_does_not_surface_player_target() {
+        let details = parse_search_library_details(
+            "search that player's library for a card with the same name as that permanent",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.target_player, None);
     }
 
     #[test]
@@ -3756,6 +4021,236 @@ mod tests {
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
     }
 
+    /// CR 701.23a: an intra-member union ("instant or sorcery") inside a
+    /// comma-series disjunction must flatten into the single co-equal `Or` — one
+    /// choice among {Instant ∨ Sorcery ∨ Legendary ∨ Saga}, count 1. A non-empty
+    /// `extra_filters` here is the count:2 MatchEachFilter deadlock this fix
+    /// removes (demanding one instant/sorcery AND one legendary/saga card).
+    #[test]
+    fn search_intra_member_union_flattens_to_single_choice_or() {
+        let details = parse_search_library_details(
+            "search your library for an instant or sorcery card, a legendary card, or a saga card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "intra-member union must not produce a multi-card conjunction: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::None
+        );
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            4,
+            "intra-member union must flatten to 4 co-equal branches: {filters:?}"
+        );
+        assert!(
+            filters
+                .iter()
+                .all(|f| !matches!(f, TargetFilter::Or { .. })),
+            "every branch must be flat (no nested Or): {filters:?}"
+        );
+
+        let has_type = |ty: &TypeFilter| {
+            filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(typed) if typed.type_filters.contains(ty)
+                )
+            })
+        };
+        assert!(
+            has_type(&TypeFilter::Instant),
+            "missing Instant: {filters:?}"
+        );
+        assert!(
+            has_type(&TypeFilter::Sorcery),
+            "missing Sorcery: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasSupertype { value: Supertype::Legendary }
+                ))
+            )),
+            "missing Legendary supertype branch: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.get_subtype() == Some("Saga")
+            )),
+            "missing Saga subtype branch: {filters:?}"
+        );
+    }
+
+    /// CR 201.2: a comma-bearing card name ("Halvar, God of Battle") in a
+    /// disjunctive series must NOT be shredded on its internal comma — the name
+    /// stays intact and the series resolves to exactly two co-equal branches.
+    #[test]
+    fn search_named_member_with_comma_in_name_not_shredded() {
+        let details = parse_search_library_details(
+            "search your library for a card named Halvar, God of Battle or an Equipment card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "named disjunction must not produce a multi-card conjunction: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "named disjunction must be exactly two branches (name not shredded): {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Named { name } if name == "Halvar, God of Battle"
+                ))
+            )),
+            "expected intact \"Halvar, God of Battle\" name branch: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.get_subtype() == Some("Equipment")
+            )),
+            "expected Equipment branch: {filters:?}"
+        );
+    }
+
+    /// CR 201.2 + CR 701.23a: a comma-bearing named card can appear in the middle
+    /// of a comma-series disjunction. Only delimiter commas split the series; the
+    /// comma inside the card name remains part of the `Named` filter.
+    #[test]
+    fn search_middle_named_member_with_comma_in_name_not_shredded() {
+        let details = parse_search_library_details(
+            "search your library for a legendary card, a card named Halvar, God of Battle, or an Equipment card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "comma-series disjunction must stay one choice, not required extras: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected three co-equal branches without name shredding: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasSupertype { value: Supertype::Legendary }
+                ))
+            )),
+            "expected Legendary branch: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Named { name } if name == "Halvar, God of Battle"
+                ))
+            )),
+            "expected intact named branch: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.get_subtype() == Some("Equipment")
+            )),
+            "expected Equipment branch: {filters:?}"
+        );
+    }
+
+    /// CR 201.2 + CR 701.23a: the comma-series front gate must recognize a final
+    /// named member even when it has a leading article.
+    #[test]
+    fn search_final_named_member_with_leading_article_splits_as_disjunction() {
+        let details = parse_search_library_details(
+            "search your library for an Equipment card, or a card named Halvar, God of Battle, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(details.extra_filters.is_empty());
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "expected Equipment or named card: {filters:?}"
+        );
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(typed) if typed.get_subtype() == Some("Equipment")
+        )));
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Halvar, God of Battle"
+            ))
+        )));
+    }
+
+    /// CR 202.3: the "X, Y, and/or Z ... with mana value N or less" form must
+    /// DEFER from the comma-series front-gate (an `and/or` enumeration with a
+    /// comma in the left side) and the bare " or less" must never terminate the
+    /// series. This guards the defer path, not the front-gate: the load-bearing
+    /// invariant is that nothing is shredded into a garbage `less` filter or a
+    /// spurious required `extra_filters` entry.
+    #[test]
+    fn search_andor_comparator_series_defers_without_shredding() {
+        let details = parse_search_library_details(
+            "search your library for artifact, creature, and/or enchantment cards with mana value 1 or less, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "and/or comparator series must not produce required extra filters: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        // No branch may be a bare comparator-word garbage filter (the bug this
+        // guards): assert no subtype or Named branch is the comparator word.
+        if let TargetFilter::Or { filters } = &details.filter {
+            assert!(
+                filters.iter().all(|f| !matches!(
+                    f,
+                    TargetFilter::Typed(typed) if typed.get_subtype() == Some("less")
+                        || typed.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::Named { name } if name == "less"
+                        ))
+                )),
+                "comparator word must not become a garbage filter branch: {filters:?}"
+            );
+        }
+    }
+
     // Issue #458: "search ... for up to that many land cards" — Scapeshift.
     // CR 608.2c: "that many" back-references the count produced by the earlier
     // sacrifice instruction in the same resolution. `parse_quantity_ref` maps
@@ -3887,6 +4382,106 @@ mod tests {
         assert_filter_has_color(&details.extra_filters[0], ManaColor::Green);
         assert_filter_has_color(&details.extra_filters[1], ManaColor::Blue);
         assert_eq!(details.multi_destination, Zone::Graveyard);
+    }
+
+    /// CR 701.23a: Search for Glory — "a snow permanent card, a legendary card,
+    /// or a Saga card" is a single choice among three co-equal filters, NOT
+    /// three required picks. Must lower to count 1 + `Or` of three branches with
+    /// no `MatchEachFilter` selection constraint and no extra filters.
+    #[test]
+    fn search_for_glory_disjunctive_series_is_single_choice_or() {
+        let details = parse_search_library_details(
+            "search your library for a snow permanent card, a legendary card, or a saga card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "disjunctive series must not produce extra (required) filters: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::None
+        );
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected 3 disjunctive branches: {filters:?}"
+        );
+
+        // Branch 0: snow permanent.
+        let TargetFilter::Typed(snow) = &filters[0] else {
+            panic!("expected typed snow branch, got {:?}", filters[0]);
+        };
+        assert!(
+            snow.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Snow
+                }
+            )),
+            "first branch should carry Snow supertype: {snow:?}"
+        );
+
+        // Branch 1: legendary.
+        let TargetFilter::Typed(legendary) = &filters[1] else {
+            panic!("expected typed legendary branch, got {:?}", filters[1]);
+        };
+        assert!(
+            legendary.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary
+                }
+            )),
+            "second branch should carry Legendary supertype: {legendary:?}"
+        );
+
+        // Branch 2: Saga subtype.
+        let TargetFilter::Typed(saga) = &filters[2] else {
+            panic!("expected typed Saga branch, got {:?}", filters[2]);
+        };
+        assert_eq!(saga.get_subtype(), Some("Saga"));
+    }
+
+    /// CR 701.23a (GAP2 coverage): the comma-member peel must recover the
+    /// `basic` supertype on a non-land mixed series — "a basic land card, a
+    /// plains card, or a saga card" lowers to an `Or` of three branches with the
+    /// first carrying `Basic` + `Land`.
+    #[test]
+    fn search_basic_leading_disjunctive_series_recovers_supertype() {
+        let details = parse_search_library_details(
+            "search your library for a basic land card, a plains card, or a saga card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(details.extra_filters.is_empty());
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected 3 disjunctive branches: {filters:?}"
+        );
+
+        let TargetFilter::Typed(basic_land) = &filters[0] else {
+            panic!("expected typed basic land branch, got {:?}", filters[0]);
+        };
+        assert!(basic_land.type_filters.contains(&TypeFilter::Land));
+        assert!(
+            basic_land.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Basic
+                }
+            )),
+            "first branch should carry Basic supertype: {basic_land:?}"
+        );
     }
 
     /// CR 701.23a + CR 205.3i: "a land card of each basic land type" is a
@@ -4346,6 +4941,41 @@ mod tests {
         // `bare_search_disjunction_allowed` — right must look like a card).
         let segments = split_filter_disjunctions("Mountain or Cave card");
         assert_eq!(segments, vec!["Mountain", "Cave card"]);
+    }
+
+    #[test]
+    fn split_terminal_or_preserves_and_or_precedence() {
+        let (before, final_member, connector) =
+            split_terminal_or("artifact card and/or creature card or enchantment card")
+                .expect("terminal connector");
+        assert_eq!(connector, Connector::AndOr);
+        assert_eq!(before, "artifact card");
+        assert_eq!(final_member, "creature card or enchantment card");
+    }
+
+    #[test]
+    fn split_comma_series_middle_named_member_keeps_name_comma() {
+        let segments = split_filter_disjunctions(
+            "legendary card, a card named Halvar, God of Battle, or Equipment card",
+        );
+        assert_eq!(
+            segments,
+            vec![
+                "legendary card",
+                "card named Halvar, God of Battle",
+                "Equipment card",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_comma_series_final_named_member_strips_article() {
+        let segments =
+            split_filter_disjunctions("Equipment card, or a card named Halvar, God of Battle");
+        assert_eq!(
+            segments,
+            vec!["Equipment card", "card named Halvar, God of Battle"]
+        );
     }
 
     /// M7 backward-compat: a serialized JSON snapshot using the legacy

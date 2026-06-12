@@ -18,7 +18,6 @@ expression: result
       "duration": null,
       "description": "Counter target spell.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,

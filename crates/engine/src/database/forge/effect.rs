@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    ControllerRef, Effect, ManaProduction, PtValue, QuantityExpr, TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectScope, ManaProduction, PtValue, QuantityExpr, TapStateChange,
+    TargetFilter, TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -258,7 +259,7 @@ fn translate_put_counter(
         .to_lowercase();
     let count = resolve_quantity(params, "CounterNum", resolver);
     let target = resolve_target(params, "ValidTgts");
-    Ok(Effect::AddCounter {
+    Ok(Effect::PutCounter {
         counter_type,
         count,
         target,
@@ -341,13 +342,21 @@ fn translate_destroy_all(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
 // CR 701.26a: Tap target permanent.
 fn translate_tap(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
-    Ok(Effect::Tap { target })
+    Ok(Effect::SetTapState {
+        target,
+        scope: EffectScope::Single,
+        state: TapStateChange::Tap,
+    })
 }
 
-// CR 701.26a: Untap target permanent.
+// CR 701.26b: Untap target permanent.
 fn translate_untap(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
-    Ok(Effect::Untap { target })
+    Ok(Effect::SetTapState {
+        target,
+        scope: EffectScope::Single,
+        state: TapStateChange::Untap,
+    })
 }
 
 // CR 400.7: Move objects between zones.
@@ -367,7 +376,7 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
     })
 }
@@ -513,7 +522,7 @@ fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError>
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
     })
 }

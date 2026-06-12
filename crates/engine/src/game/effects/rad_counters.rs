@@ -58,8 +58,26 @@ pub fn resolve(
                 ProposedEvent::Mill { count, .. } => (*count as usize).min(library_before.len()),
                 _ => 0,
             };
+            // CR 728.1: `milled_ids` is fixed by the post-replacement count
+            // against the pre-mill library snapshot (`library_before`), so it
+            // identifies the correct top-N cards regardless of where delivery
+            // ultimately routes them. The life-loss loop below reads each card's
+            // type from `state.objects` (zone-independent).
             let ids: Vec<_> = library_before.into_iter().take(final_count).collect();
-            crate::game::effects::mill::apply_mill_after_replacement(state, event, events)?;
+            // CR 616.1: a per-card Moved ordering choice parks the prompt
+            // (`state.waiting_for` set, `pending_replacement` holding the
+            // paused card's move, tail in `pending_batch_deliveries`). Bail
+            // like `mill::resolve` does: continuing into the life-loss loop
+            // would propose `LifeLoss` replacement events while the parked
+            // choice is pending and could overwrite `pending_replacement`,
+            // ghosting the paused milled card. The CR 728.1 life-loss /
+            // rad-removal tail is dropped on this parked path — reachable only
+            // with two simultaneous graveyard redirects active while rad
+            // counters trigger; accepted and documented rather than threaded
+            // through the batch resume.
+            if !crate::game::effects::mill::apply_mill_after_replacement(state, event, events)? {
+                return Ok(());
+            }
             ids
         }
         ReplacementResult::Prevented => {

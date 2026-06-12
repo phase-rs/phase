@@ -17,6 +17,8 @@ use super::effect_classify::{extract_target_filter, targets_creatures_only};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::stack_awareness::assess_spell_impact;
 use super::strategy_helpers::{targetable_threat_value, untapped_opponent_blocker_value};
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct EffectTimingPolicy;
 
@@ -369,6 +371,8 @@ mod tests {
                 object_id: ObjectId(0),
                 card_id: CardId(1),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -412,6 +416,8 @@ mod tests {
                 object_id: ObjectId(0),
                 card_id: CardId(1),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -454,6 +460,8 @@ mod tests {
                 object_id: ObjectId(0),
                 card_id: CardId(1),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),

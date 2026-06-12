@@ -1,6 +1,6 @@
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 
-export type BattlefieldRowType = "creatures" | "lands" | "support" | "other";
+export type BattlefieldRowType = "creatures" | "lands" | "support" | "planeswalkers" | "other";
 export type GroupRenderMode = "single" | "staggered" | "expanded" | "collapsed";
 
 export const GROUP_COLLAPSE_THRESHOLD = 5;

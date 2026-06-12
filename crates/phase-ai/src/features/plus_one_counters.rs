@@ -1,7 +1,7 @@
 //! Plus-one counters feature — structural detection over a deck's typed AST.
 //!
 //! Parser AST verification — VERIFIED:
-//! - `Effect::AddCounter { counter_type: CounterType, count: QuantityExpr, target }` at
+//! - `Effect::PutCounter { counter_type: CounterType, count: QuantityExpr, target }` at
 //!   `crates/engine/src/types/ability.rs:2201-2207`. CR 122.1a: +1/+1 counters add
 //!   to power and toughness.
 //! - `Effect::PutCounter { counter_type, count, target }` at `ability.rs:2425-2431`.
@@ -174,7 +174,7 @@ fn compute_commitment(
 
 /// True if this ability places a +1/+1 counter on something.
 ///
-/// Matches `Effect::AddCounter`, `Effect::PutCounter`, and `Effect::PutCounterAll`
+/// Matches `Effect::PutCounter` and `Effect::PutCounterAll`
 /// where `counter_type == CounterType::Plus1Plus1`. Checks the ability's full effect chain via
 /// `collect_chain_effects`. Excludes loyalty counters, -1/-1 counters, lore
 /// counters, etc. CR 122.1a.
@@ -245,7 +245,6 @@ pub(crate) fn face_is_counter_payoff(face: &engine::types::card::CardFace) -> bo
 /// True if the effect places a +1/+1 counter. CR 122.1a.
 fn effect_places_plus_one_counter(e: &&Effect) -> bool {
     match e {
-        Effect::AddCounter { counter_type, .. } => counter_type == &CounterType::Plus1Plus1,
         Effect::PutCounter { counter_type, .. } => counter_type == &CounterType::Plus1Plus1,
         Effect::PutCounterAll { counter_type, .. } => counter_type == &CounterType::Plus1Plus1,
         _ => false,
@@ -397,7 +396,7 @@ mod tests {
     fn add_counter_ability(counter_type: &str) -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Activated,
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: parse_counter_type(counter_type),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,

@@ -31,6 +31,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::speed::effective_speed;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -85,6 +86,8 @@ fn cast_and_resolve(runner: &mut engine::game::scenario::GameRunner, hand_card: 
             object_id: hand_card,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Spikeshell Harrier should succeed");
     runner.advance_until_stack_empty();

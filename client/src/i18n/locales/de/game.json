@@ -264,6 +264,7 @@
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft"
   },
   "zone": {
+    "commandZone": "Kommandozone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",
@@ -283,6 +284,8 @@
     "graveyardShort": "FH",
     "graveyardTitle": "Friedhof ({{count}})",
     "libraryAlt": "Bibliothek",
+    "library": "Bibliothek",
+    "libraryLower": "Bibliothek",
     "libraryCount_one": "Bibliothek ({{count}} Karte)",
     "libraryCount_other": "Bibliothek ({{count}} Karten)",
     "playFromTop": "{{name}} von oben aus der Bibliothek spielen",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Wähle die zu zahlende Menge",
     "payAmount": "{{value}} {{resource}} bezahlen",
     "resourceEnergy": "Energie",
-    "resourceMana": "Mana"
+    "resourceMana": "Mana",
+    "resourceCounters": "Marken"
   },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",
@@ -424,6 +428,7 @@
     "one": "eine {{target}}",
     "nounPlayer": "Spieler",
     "nounNonlandPermanent": "bleibende Nichtländer-Karte",
+    "nounSpell": "Spruch",
     "nounCreature": "Kreatur",
     "nounPlaneswalker": "Planeswalker",
     "nounTargetPermanent": "bleibende Karte als Ziel",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}}, sofern du nicht eines bezahlst",
       "dontPay": "Nicht bezahlen",
       "takeEffect": "Den Effekt hinnehmen"
+    },
+    "spliceOffer": {
+      "title": "An Arkan koppeln?",
+      "subtitle": "Wähle eine Karte, die du vorzeigst und in diesen Zauberspruch einkoppelst, oder wirke ohne Kopplung.",
+      "spliceCard": "{{name}} einkoppeln",
+      "decline": "Nicht einkoppeln",
+      "declineDescription": "Wirke den Zauberspruch, ohne den Text einer anderen Karte hinzuzufügen.",
+      "unknownCard": "Karte #{{id}}"
     },
     "activationCost": {
       "title": "Aktivierungskosten wählen"
@@ -1165,6 +1178,10 @@
     "adventureTag": "(Abenteuer)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1175,6 +1192,11 @@
     "warpAltLabel": "Mit Warp wirken",
     "warpAltSuffix": "(wird im Endschritt ins Exil geschickt)",
     "warpSubtitle": "Wirke {{name}} normal oder nutze seine Warp-Kosten.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Normal wirken",
+    "dashAltLabel": "Mit Dash wirken",
+    "dashAltSuffix": "(erhält Eile, kehrt im Endschritt auf die Hand zurück)",
+    "dashSubtitle": "Wirke {{name}} normal oder nutze seine Dash-Kosten.",
     "evokeEyebrow": "Herbeirufen",
     "evokeNormalLabel": "Normal wirken",
     "evokeAltLabel": "Mit Herbeirufen wirken",
@@ -1225,15 +1247,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Kaskade",
     "discoverEyebrow": "Entdecken",
+    "rippleEyebrow": "Ripple",
     "title": "{{name}} wirken?",
     "subtitleCascade": "Kaskade hat {{name}} ins Exil geschickt (Manawert unter {{sourceMv}}). Wirke es, ohne seine Manakosten zu bezahlen, oder lehne ab und mische alle {{total}} ins Exil geschickten Karten unter deine Bibliothek.",
     "subtitleDiscover": "Entdecken hat {{name}} ins Exil geschickt. Wirke es, ohne seine Manakosten zu bezahlen, oder nimm es auf deine Hand und mische die anderen {{missCount}} ins Exil geschickten Karten unter deine Bibliothek.",
+    "subtitleRipple": "Ripple hat {{name}} aufgedeckt. Wirke es, ohne seine Manakosten zu bezahlen, oder lehne ab und lege alle {{total}} aufgedeckten Karten in zufälliger Reihenfolge unter deine Bibliothek.",
     "castNamed": "{{name}} wirken",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
     "putIntoHand": "Auf die Hand nehmen",
     "decline": "Ablehnen",
     "discoverDeclineSuffix": "(den Rest unter die Bibliothek legen)",
     "cascadeDeclineSuffix": "(alle ins Exil geschickten Karten unter die Bibliothek mischen)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Kostenlos wirken",
+    "title": "Wirke einen Zauberspruch kostenlos",
+    "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "castNamed": "{{name}} wirken",
+    "castSuffix": "(ohne seine Manakosten zu bezahlen)",
+    "done": "Fertig",
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",
@@ -1245,6 +1279,7 @@
     "variantEscape": "Mit Entrinnen wirken",
     "variantRetrace": "Mit Zurückverfolgen wirken",
     "variantHarmonize": "Mit Harmonisieren wirken",
+    "variantMayhem": "Mit Mayhem wirken",
     "variantFlashback": "Mit Flashback wirken",
     "variantAftermath": "Mit Nachwirkung wirken",
     "variantGraveyardPermission": "Aus dem Friedhof wirken",
@@ -1257,6 +1292,7 @@
     "variantForetell": "Aus Vorhersagen wirken",
     "variantOverload": "Mit Überladen wirken",
     "variantBestow": "Mit Verleihen wirken",
+    "variantFuse": "Mit Verschmelzen wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
   "categoryChoice": {
@@ -1270,6 +1306,7 @@
     "eyebrow": "Wahl",
     "title": "Wähle eines",
     "subtitle": "Wähle die Option zum Auflösen.",
+    "subtitleBinary": "Wähle eine der beiden Optionen unten.",
     "optionFallback": "Option {{number}}"
   },
   "combatTax": {
@@ -1425,6 +1462,9 @@
   "proliferate": {
     "proliferateTitle": "Wuchern",
     "proliferateSubtitle": "Wähle eine beliebige Anzahl bleibender Karten und Spieler mit Marken. Jedes gewählte Ziel erhält eine weitere Marke jeder Art, die bereits dort vorhanden ist.",
+    "timeTravelTitle": "Zeitreise",
+    "timeTravelRemoveSubtitle": "Wähle eine beliebige Anzahl gültiger Objekte, von denen eine Zeitmarke entfernt werden soll.",
+    "timeTravelAddSubtitle": "Wähle eine beliebige Anzahl verbleibender gültiger Objekte, auf die eine Zeitmarke gelegt werden soll.",
     "chooseObjectsTitle": "Bleibende Karten wählen",
     "chooseObjectsSubtitle": "Wähle eine beliebige Anzahl bleibender Karten. Du zahlst für jede gewählte Karte Kosten.",
     "selectAll": "Alle",
@@ -1444,7 +1484,9 @@
     "scopeMulti": "Wähle neue Ziele für den Zauberspruch",
     "subtitle": "{{scope}}. Aktuell: {{current}}",
     "confirm": "Bestätigen",
-    "badgeNewTarget": "Neues Ziel"
+    "badgeNewTarget": "Neues Ziel",
+    "slotLabel": "Ziel {{index}}: {{current}} → {{chosen}}",
+    "unselected": "unverändert"
   },
   "separatePiles": {
     "chooserName": "Spieler {{number}}",

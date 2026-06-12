@@ -264,6 +264,7 @@
     "grantsProperty": "Otorga una propiedad al hechizo"
   },
   "zone": {
+    "commandZone": "Zona de mando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -283,6 +284,8 @@
     "graveyardShort": "CE",
     "graveyardTitle": "Cementerio ({{count}})",
     "libraryAlt": "Biblioteca",
+    "library": "Biblioteca",
+    "libraryLower": "biblioteca",
     "libraryCount_one": "Biblioteca ({{count}} carta)",
     "libraryCount_other": "Biblioteca ({{count}} cartas)",
     "playFromTop": "Juega {{name}} desde la parte superior de la biblioteca",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Elige la cantidad a pagar",
     "payAmount": "Pagar {{value}} {{resource}}",
     "resourceEnergy": "energía",
-    "resourceMana": "maná"
+    "resourceMana": "maná",
+    "resourceCounters": "contadores"
   },
   "hand": {
     "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
@@ -424,6 +428,7 @@
     "one": "un(a) {{target}}",
     "nounPlayer": "jugador",
     "nounNonlandPermanent": "permanente que no sea tierra",
+    "nounSpell": "hechizo",
     "nounCreature": "criatura",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente objetivo",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}} a menos que pagues uno",
       "dontPay": "No pagar",
       "takeEffect": "Aceptar el efecto"
+    },
+    "spliceOffer": {
+      "title": "¿Empalmar con arcano?",
+      "subtitle": "Elige una carta para revelar y empalmar en este hechizo, o lánzalo sin empalmar.",
+      "spliceCard": "Empalmar {{name}}",
+      "decline": "No empalmar",
+      "declineDescription": "Lanza el hechizo sin añadir el texto de otra carta.",
+      "unknownCard": "Carta #{{id}}"
     },
     "activationCost": {
       "title": "Elegir coste de activación"
@@ -1165,6 +1178,10 @@
     "adventureTag": "(Aventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1175,6 +1192,11 @@
     "warpAltLabel": "Lanzar con Distorsión",
     "warpAltSuffix": "(se exilia en el paso final)",
     "warpSubtitle": "Lanza {{name}} normalmente o usa su coste de Distorsión.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Lanzar normalmente",
+    "dashAltLabel": "Lanzar con Dash",
+    "dashAltSuffix": "(gana prisa, vuelve a la mano en el paso final)",
+    "dashSubtitle": "Lanza {{name}} normalmente o usa su coste de Dash.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Lanzar normalmente",
     "evokeAltLabel": "Lanzar con Evocar",
@@ -1225,15 +1247,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascada",
     "discoverEyebrow": "Descubrir",
+    "rippleEyebrow": "Ripple",
     "title": "¿Lanzar {{name}}?",
     "subtitleCascade": "Cascada exilió {{name}} (valor de maná inferior a {{sourceMv}}). Lánzala sin pagar su coste de maná, o rechaza y baraja las {{total}} cartas exiliadas hacia el fondo de tu biblioteca.",
     "subtitleDiscover": "Descubrir exilió {{name}}. Lánzala sin pagar su coste de maná, o ponla en tu mano y baraja las otras {{missCount}} cartas exiliadas hacia el fondo de tu biblioteca.",
+    "subtitleRipple": "Ripple reveló {{name}}. Lánzala sin pagar su coste de maná, o rehúsa y pon las {{total}} cartas reveladas en el fondo de tu biblioteca en orden aleatorio.",
     "castNamed": "Lanzar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
     "putIntoHand": "Poner en la mano",
     "decline": "Rechazar",
     "discoverDeclineSuffix": "(pon el resto en el fondo)",
     "cascadeDeclineSuffix": "(baraja todas las cartas exiliadas hacia el fondo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Lanzamiento gratis",
+    "title": "Lanza un hechizo gratis",
+    "subtitle": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
+    "subtitleNoBudget": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
+    "castNamed": "Lanzar {{name}}",
+    "castSuffix": "(sin pagar su coste de maná)",
+    "done": "Listo",
+    "doneSuffix": "(deja de lanzar hechizos de esta forma)"
   },
   "castingVariant": {
     "eyebrow": "Lanzar",
@@ -1245,6 +1279,7 @@
     "variantEscape": "Lanzar con Evadir",
     "variantRetrace": "Lanzar con Retrazar",
     "variantHarmonize": "Lanzar con Armonizar",
+    "variantMayhem": "Lanzar con Mayhem",
     "variantFlashback": "Lanzar con Flashback",
     "variantAftermath": "Lanzar con Secuela",
     "variantGraveyardPermission": "Lanzar desde el cementerio",
@@ -1257,6 +1292,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantFuse": "Lanzar con Fusión",
     "variantFallback": "Lanzar con {{type}}"
   },
   "categoryChoice": {
@@ -1270,6 +1306,7 @@
     "eyebrow": "Elección",
     "title": "Elige una",
     "subtitle": "Selecciona la opción a resolver.",
+    "subtitleBinary": "Elige una de las dos opciones siguientes.",
     "optionFallback": "Opción {{number}}"
   },
   "combatTax": {
@@ -1425,6 +1462,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferar",
     "proliferateSubtitle": "Elige cualquier número de permanentes y jugadores con contadores. Cada objetivo elegido recibe un contador más de cada tipo que ya tenga.",
+    "timeTravelTitle": "Viaje en el Tiempo",
+    "timeTravelRemoveSubtitle": "Elige cualquier número de objetos elegibles de los que retirar un contador de tiempo.",
+    "timeTravelAddSubtitle": "Elige cualquier número de objetos elegibles restantes a los que añadir un contador de tiempo.",
     "chooseObjectsTitle": "Elegir permanentes",
     "chooseObjectsSubtitle": "Elige cualquier número de permanentes. Pagas un coste por cada uno elegido.",
     "selectAll": "Todos",
@@ -1444,7 +1484,9 @@
     "scopeMulti": "Elige nuevos objetivos para el hechizo",
     "subtitle": "{{scope}}. Actual: {{current}}",
     "confirm": "Confirmar",
-    "badgeNewTarget": "Nuevo objetivo"
+    "badgeNewTarget": "Nuevo objetivo",
+    "slotLabel": "Objetivo {{index}}: {{current}} → {{chosen}}",
+    "unselected": "sin cambios"
   },
   "separatePiles": {
     "chooserName": "Jugador {{number}}",

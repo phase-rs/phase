@@ -88,18 +88,21 @@ pub(crate) fn apply_paid(
     source_id: crate::types::identifiers::ObjectId,
     count: u32,
     events: &mut Vec<GameEvent>,
-) {
-    if count > 0 {
-        super::counters::add_counter_with_replacement(
+) -> bool {
+    record_outcome(state, source_id, TributeOutcome::Paid);
+    if count > 0
+        && !super::counters::add_counter_with_replacement(
             state,
             actor,
             source_id,
             crate::types::counter::CounterType::Plus1Plus1,
             count,
             events,
-        );
+        )
+    {
+        return false;
     }
-    record_outcome(state, source_id, TributeOutcome::Paid);
+    true
 }
 
 /// Apply the declined outcome: persist `TributeOutcome::Declined` so the

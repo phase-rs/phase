@@ -4,12 +4,17 @@
 use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
-use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility, TapStateChange,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::{BendingType, GameEvent};
-use engine::types::game_state::{CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{
@@ -89,8 +94,8 @@ fn test_generic_animate_does_not_register_earthbend() {
 
     let ability = ResolvedAbility::new(
         Effect::Animate {
-            power: Some(4),
-            toughness: Some(4),
+            power: Some(PtValue::Fixed(4)),
+            toughness: Some(PtValue::Fixed(4)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target: TargetFilter::None,
@@ -827,7 +832,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: true,
+            enter_tapped: engine::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -842,7 +847,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1163,7 +1168,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: true,
+            enter_tapped: engine::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -1178,7 +1183,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1231,8 +1236,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let animate_ability = ResolvedAbility {
         effect: Effect::Animate {
-            power: Some(2),
-            toughness: Some(2),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target: TargetFilter::Typed(engine::types::ability::TypedFilter {
@@ -1246,8 +1251,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(search_ability)),
         ..ResolvedAbility::new(
             Effect::Animate {
-                power: Some(2),
-                toughness: Some(2),
+                power: Some(PtValue::Fixed(2)),
+                toughness: Some(PtValue::Fixed(2)),
                 types: vec!["Creature".to_string()],
                 remove_types: vec![],
                 target: TargetFilter::Typed(engine::types::ability::TypedFilter {
@@ -1788,8 +1793,10 @@ fn shock_land_replacement() -> engine::types::ability::ReplacementDefinition {
     );
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     );
     ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -1983,7 +1990,7 @@ fn build_earthbend_ability(
             owner_library: false,
             enter_transformed: false,
             enters_under: Some(ControllerRef::You),
-            enter_tapped: true,
+            enter_tapped: engine::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -2036,8 +2043,8 @@ fn build_earthbend_ability(
 
     let mut animate = ResolvedAbility::new(
         Effect::Animate {
-            power: Some(0),
-            toughness: Some(0),
+            power: Some(PtValue::Fixed(0)),
+            toughness: Some(PtValue::Fixed(0)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target: animate_target,
@@ -2248,7 +2255,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             face_down_profile: None,
         },
         vec![TargetRef::Object(land_id)],
@@ -2353,6 +2360,8 @@ fn earthbending_lesson_returned_tapped_after_dies_e2e() {
             object_id: lesson_id,
             card_id,
             targets: vec![mountain_id],
+
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("cast Earthbending Lesson");
@@ -2483,7 +2492,7 @@ fn earthbend_registers_dies_or_exiled_delayed_trigger_on_target() {
         } => {
             assert_eq!(*destination, Zone::Battlefield);
             assert!(
-                *enter_tapped,
+                enter_tapped.is_tapped(),
                 "Inner ChangeZone must carry enter_tapped=true"
             );
             assert_eq!(

@@ -271,8 +271,7 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     description: &str,
 ) -> Option<StaticDefinition> {
     let condition_lower = split.condition_text.to_lowercase();
-    let condition_tp = TextPair::new(&split.condition_text, &condition_lower);
-    let affected = parse_attached_subject_is_legendary(&condition_tp)?;
+    let affected = parse_attached_subject_qualifier(&condition_lower)?;
 
     let effect_lower = split.effect_text.to_lowercase();
     let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
@@ -281,30 +280,25 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     parse_continuous_gets_has(predicate.original, affected, description)
 }
 
-pub(crate) fn parse_attached_subject_is_legendary(
-    condition: &TextPair<'_>,
-) -> Option<TargetFilter> {
-    let (rest, attachment_prop) = if let Some(rest) = nom_tag_tp(condition, "equipped ") {
-        (rest, FilterProp::EquippedBy)
-    } else {
-        (
-            nom_tag_tp(condition, "enchanted ")?,
-            FilterProp::EnchantedBy,
-        )
-    };
-    let rest = nom_tag_tp(&rest, "creature is legendary")?;
-    if !rest.original.trim().is_empty() {
+/// Parse the attached-subject qualifier of an inverted grant
+/// ("enchanted/equipped creature is `<characteristic>`") into the `affected`
+/// `TargetFilter` for the enchanted/equipped permanent.
+///
+/// Delegates to the canonical attached-subject predicate machinery
+/// (`oracle_nom::condition::parse_attached_subject_is_filter`) so the full
+/// characteristic class is covered — color (`HasColor`), type/subtype, and the
+/// `legendary`/`basic` supertypes — not just `legendary`. Previously only
+/// `"creature is legendary"` was recognized; every other characteristic fell
+/// through to the generic inverted rewrite, which left `affected = SelfRef`
+/// (the Aura/Equipment itself), so the grant never reached the host (#2818).
+pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<TargetFilter> {
+    let (rest, filter) =
+        crate::parser::oracle_nom::condition::parse_attached_subject_is_filter(condition_lower)
+            .ok()?;
+    if !rest.trim().is_empty() {
         return None;
     }
-
-    Some(TargetFilter::Typed(TypedFilter::creature().properties(
-        vec![
-            attachment_prop,
-            FilterProp::HasSupertype {
-                value: Supertype::Legendary,
-            },
-        ],
-    )))
+    Some(filter)
 }
 
 pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
@@ -329,6 +323,9 @@ pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
 pub(crate) enum GraveyardGrantedKeywordKind {
     Flashback,
     Escape,
+    Mayhem,
+    Scavenge,
+    Encore,
 }
 
 impl GraveyardGrantedKeywordKind {
@@ -340,6 +337,14 @@ impl GraveyardGrantedKeywordKind {
             GraveyardGrantedKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
             }
+            // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
+            GraveyardGrantedKeywordKind::Mayhem => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
+            }
+            // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
+            // keywords share `KeywordKind::Unknown`, so match the variant directly.
+            GraveyardGrantedKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
+            GraveyardGrantedKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
         }
     }
 }
@@ -463,10 +468,125 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
         .collect()
 }
 
+/// CR 611.3 + CR 613.1: Split a static line into its sentence segments, then
+/// parse each as an independent continuous static. Returns `Some(defs)` only
+/// when the line splits into 2+ segments and EVERY segment yields at least one
+/// `StaticDefinition` — i.e. the line is genuinely a sequence of sibling
+/// statics (dual-subject anthems and their relatives). When any segment is
+/// non-static prose (or there is only one sentence) this returns `None`, so the
+/// single-sentence pipeline keeps ownership of the line.
+///
+/// Each segment is re-entered through `parse_static_line_multi_inner` so that a
+/// sentence which itself decomposes (e.g. "<grant> and can't block") still
+/// emits all of its own statics. Recursion terminates because a single-sentence
+/// segment produces only one `split_static_sentences` segment, which fails the
+/// 2+ guard.
+fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
+    let segments = split_static_sentences(text);
+    if segments.len() < 2 {
+        return None;
+    }
+    // CR 611.3a: A sentence that opens with a back-referential connector
+    // ("Otherwise", "Then", "Instead") is a continuation whose meaning depends
+    // on the prior clause's condition (Hunter's Blowgun's ". Otherwise, it has
+    // reach." gates on `Not(<head condition>)`; the same holds for "as long
+    // as"-gated alternatives). Splitting these into independent statics would
+    // drop the complement condition, so defer the whole line to the dedicated
+    // attached-subject / otherwise handlers downstream.
+    if segments
+        .iter()
+        .skip(1)
+        .any(|segment| segment_is_back_referential_continuation(segment))
+    {
+        return None;
+    }
+    let mut defs = Vec::new();
+    for segment in &segments {
+        let segment_defs = parse_static_line_multi_inner(segment);
+        if segment_defs.is_empty() {
+            // A non-static sentence (or one the static pipeline can't classify)
+            // means this isn't a pure sibling-static line — defer the whole
+            // line to the single-sentence fallback rather than emitting a
+            // partial result that silently drops the unparsed sentence.
+            return None;
+        }
+        defs.extend(segment_defs);
+    }
+    Some(defs)
+}
+
+/// CR 611.3a: Recognize a sentence whose leading connector binds it to the
+/// preceding clause's condition rather than standing on its own. Such a sentence
+/// must not be split off as an independent static.
+fn segment_is_back_referential_continuation(segment: &str) -> bool {
+    let lower = segment.to_lowercase();
+    let result: OracleResult<'_, &str> =
+        alt((tag("otherwise"), tag("instead"), tag("then "))).parse(lower.as_str());
+    result.is_ok()
+}
+
+/// Split a static line on sentence boundaries (`.` followed by whitespace or
+/// end-of-input), tracking `{…}` mana-symbol and quote nesting so a period
+/// inside a quoted granted ability or a mana symbol never ends a sentence. Each
+/// returned segment keeps its terminating period and is trimmed; empty segments
+/// are dropped.
+fn split_static_sentences(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut brace_depth = 0usize;
+    let mut in_double_quote = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        match ch {
+            '{' if !in_double_quote => brace_depth += 1,
+            '}' if !in_double_quote => brace_depth = brace_depth.saturating_sub(1),
+            '"' => in_double_quote = !in_double_quote,
+            // A sentence ends at a period that is followed by whitespace or
+            // end-of-input. A period directly followed by a non-space (e.g. an
+            // ellipsis or a decimal that MTG static text never uses) is kept
+            // inside the current segment.
+            '.' if brace_depth == 0
+                && !in_double_quote
+                && chars.peek().is_none_or(|next| next.is_whitespace()) =>
+            {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => {}
+        }
+    }
+    let trailing = current.trim();
+    if !trailing.is_empty() {
+        segments.push(trailing.to_string());
+    }
+    segments
+}
+
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 611.3 + CR 613.1: A static ability whose Oracle text is several
+    // independent sentences (each a self-contained continuous effect) defines
+    // each sentence as its own continuous effect with its own affected set.
+    // Dual-subject anthems are the canonical class — e.g. Flowering of the
+    // White Tree ("Legendary creatures you control get +2/+1 and have ward {1}.
+    // Nonlegendary creatures you control get +1/+1."), Intangible Virtue
+    // siblings, Glorious Anthem variants, the *-Tribute supertype pairs. Without
+    // this split the single-sentence pipeline parses the first sentence,
+    // swallows the period, and drops every following sentence. Split into
+    // sentence segments and parse each independently; only adopt the split when
+    // there are 2+ segments and EVERY segment yields at least one static, which
+    // restricts the path to genuine sibling-static lines and leaves trailing
+    // non-static prose to the single-sentence fallback below.
+    if let Some(defs) = parse_multi_sentence_statics(&stripped) {
+        return defs;
+    }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
     // activate abilities only during {your | their own} turn(s)". Emits both
@@ -508,19 +628,26 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
-    // CR 506.5 + CR 508.1a + CR 509.1b: "can't attack or block alone" (Mogg
-    // Flunkies) imposes both the attack-alone and block-alone restrictions.
+    // CR 506.5 + CR 508.1c + CR 509.1b: "can't attack or block alone" (Mogg
+    // Flunkies) imposes both CombatAlone(Attack,NeedsCompanion) and
+    // CombatAlone(Block,NeedsCompanion).
     if let Some((_, AloneCombatRestriction::AttackOrBlock, rest)) =
         nom_primitives::scan_preceded(&lower, parse_alone_combat_restriction)
     {
         if rest.trim().is_empty() {
             return vec![
-                StaticDefinition::new(StaticMode::CantAttackAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(stripped.to_string()),
-                StaticDefinition::new(StaticMode::CantBlockAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Block,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
             ];
         }
     }
@@ -621,6 +748,23 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c / CR 509.1b: "<grant or restriction> and can't attack or block"
+    // pairs a first clause with a full combat lockout under one subject (Immovable
+    // Rod, Fog on the Barrow-Downs). Split so the CantAttackOrBlock clause is not
+    // dropped. Registered before the bare-attack splitter so the combined phrase is
+    // consumed first.
+    if let Some(defs) = try_split_and_cant_attack_or_block(&stripped) {
+        return defs;
+    }
+
+    // CR 508.1d: "<grant or restriction> and can't attack you [or planeswalkers
+    // you control]" — the Vow cycle (Vow of Lightning / Duty / Flight / Torment
+    // / Wildness). Registered before the bare-attack splitter so the more
+    // specific scoped phrase is consumed first.
+    if let Some(defs) = try_split_and_cant_attack_scoped(&stripped) {
+        return defs;
+    }
+
     // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
     // attacking restriction under one subject (Cagemail). Split so the CantAttack
     // clause is not dropped. The terminal-phrase guard keeps the scoped
@@ -646,12 +790,36 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 702.18a / CR 702.11a: "<grant or restriction> and can't be the target of
+    // …" pairs a first clause with a targeting restriction under one subject
+    // (Spectral Shield). Split so the CantBeTargeted/Hexproof clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_targeted(&stripped) {
+        return defs;
+    }
+
     // CR 602.5: "<grant or restriction> and its activated abilities can't be
     // activated" pairs a first clause with an activation prohibition under one
     // subject (Viper's Kiss). Split so the CantBeActivated clause is not dropped.
     // (The "can't attack/block, and activated abilities …" compound — Arrest,
     // Faith's Fetters — is handled by its own earlier branch above.)
     if let Some(defs) = try_split_and_cant_activate_abilities(&stripped) {
+        return defs;
+    }
+
+    // CR 701.21: "<grant or restriction> and can't be sacrificed" pairs a first
+    // clause with a sacrifice prohibition under one subject (Assault Suit). Split
+    // so the CantBeSacrificed clause is not dropped.
+    if let Some(defs) = try_split_and_cant_be_sacrificed(&stripped) {
+        return defs;
+    }
+
+    // CR 611.3a + CR 613.1f: "PRIMARY and FOREIGN_SUBJECT have/has/gains/gain
+    // KEYWORD [as long as COND]" — compound static where the second conjunct has
+    // a different subject (e.g., Angelic Field Marshal: "~ gets +2/+2 and
+    // creatures you control have vigilance as long as you control your commander").
+    // Must run before the single-return fallback that can only produce one def.
+    if let Some(defs) = try_split_and_foreign_keyword_grant(&stripped) {
         return defs;
     }
 
@@ -1455,18 +1623,48 @@ pub(crate) fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<Ta
 /// "Cleric, Rogue, Warrior, and/or Wizard", "Cat, Elemental, Nightmare, Dinosaur, or Beast".
 /// Returns `TargetFilter::Or` for multiple subtypes, single `TargetFilter::Typed` for one.
 pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
-    fn parse_subtype_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-        use nom::bytes::complete::take_while1;
-        let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
-        if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Fail,
-            )));
-        }
-        Ok((rest, word))
-    }
+    parse_subtype_or_list_with_word_parser(input, parse_subtype_word_capitalized)
+}
 
+/// CR 205.3m: Lowercase subtype list prefix plus the unconsumed suffix.
+pub(crate) fn parse_subtype_or_list_insensitive_prefix(
+    input: &str,
+) -> Option<(TargetFilter, &str)> {
+    parse_subtype_or_list_prefix_with_word_parser(input, parse_subtype_word_any_case)
+}
+
+fn parse_subtype_word_capitalized(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    use nom::bytes::complete::take_while1;
+    let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
+    if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((rest, word))
+}
+
+fn parse_subtype_word_any_case(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    use nom::bytes::complete::take_while1;
+    take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)
+}
+
+fn parse_subtype_or_list_with_word_parser(
+    input: &str,
+    parse_subtype_word: fn(&str) -> nom::IResult<&str, &str, OracleError<'_>>,
+) -> Option<TargetFilter> {
+    let (filter, rest) = parse_subtype_or_list_prefix_with_word_parser(input, parse_subtype_word)?;
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('.') {
+        return None;
+    }
+    Some(filter)
+}
+
+fn parse_subtype_or_list_prefix_with_word_parser(
+    input: &str,
+    parse_subtype_word: fn(&str) -> nom::IResult<&str, &str, OracleError<'_>>,
+) -> Option<(TargetFilter, &str)> {
     fn parse_list_separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((
             tag(", and/or a "),
@@ -1491,9 +1689,6 @@ pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
         separated_list1(parse_list_separator, parse_subtype_word)
             .parse(input)
             .ok()?;
-    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('.') {
-        return None;
-    }
     let filters: Vec<TargetFilter> = words
         .iter()
         .map(|w| {
@@ -1504,9 +1699,9 @@ pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
         })
         .collect();
     if filters.len() == 1 {
-        filters.into_iter().next()
+        filters.into_iter().next().map(|filter| (filter, rest))
     } else {
-        Some(TargetFilter::Or { filters })
+        Some((TargetFilter::Or { filters }, rest))
     }
 }
 
@@ -1642,7 +1837,7 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
             .properties(vec![FilterProp::HasAttachment {
                 kind,
                 controller: None,
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             }]),
     )
 }
@@ -2025,7 +2220,7 @@ pub(crate) fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<F
     let prop = FilterProp::HasAttachment {
         kind,
         controller: Some(ControllerRef::You),
-        exclude_source: false,
+        exclude_source: crate::types::ability::SourceExclusion::Include,
     };
     (&subject[..before.len()], Some(prop))
 }
@@ -2243,7 +2438,8 @@ pub(crate) fn parse_rule_static_predicate_nom(
     Ok((rest, predicate))
 }
 
-/// Combat-rule predicate plus optional CR 508.1d defended scope (`CantAttack` only).
+/// Combat-rule predicate plus optional CR 508.1b + CR 508.1c defended scope
+/// (`CantAttack` only).
 pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
     input: &str,
 ) -> OracleResult<
@@ -2305,26 +2501,53 @@ pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
 
 pub(crate) fn parse_rule_static_tail_predicate_nom(
     input: &str,
-) -> OracleResult<'_, RuleStaticPredicate> {
+) -> OracleResult<
+    '_,
+    (
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    ),
+> {
     alt((
-        parse_rule_static_predicate_nom,
-        value(RuleStaticPredicate::CantBlock, tag("block")),
-        value(
-            RuleStaticPredicate::CantCrew,
-            (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+        map(
+            parse_combat_rule_static_predicate_with_defended_nom,
+            |(predicate, defended)| (predicate, defended),
         ),
-        value(
-            RuleStaticPredicate::CantBeActivated,
-            alt((
-                tag("have its activated abilities activated"),
-                tag("have their activated abilities activated"),
-            )),
+        map(parse_rule_static_predicate_nom, |predicate| {
+            (predicate, None)
+        }),
+        map(value(RuleStaticPredicate::CantBlock, tag("block")), |p| {
+            (p, None)
+        }),
+        map(
+            value(
+                RuleStaticPredicate::CantCrew,
+                (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+            ),
+            |p| (p, None),
+        ),
+        map(
+            value(
+                RuleStaticPredicate::CantBeActivated,
+                alt((
+                    tag("have its activated abilities activated"),
+                    tag("have their activated abilities activated"),
+                )),
+            ),
+            |p| (p, None),
         ),
     ))
     .parse(input)
 }
 
-pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
+pub(crate) fn parse_rule_static_tail_predicates(
+    rest: &str,
+) -> Option<
+    Vec<(
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    )>,
+> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
 
@@ -2334,14 +2557,14 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
             return Some(predicates);
         }
         let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
-        let (after_predicate, predicate) =
+        let (after_predicate, (predicate, defended)) =
             parse_rule_static_tail_predicate_nom(after_separator).ok()?;
-        predicates.push(predicate);
+        predicates.push((predicate, defended));
         remaining = after_predicate;
     }
 }
 
-/// Optional attack-target scope after "can't attack" (CR 508.1d).
+/// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
@@ -2360,11 +2583,13 @@ pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     let (rest, _) = tag("can't attack").parse(input)?;
-    let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
+    let (rest, owner_restriction) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
     let (rest, a_player) = opt(preceded(space1, tag("a player"))).parse(rest)?;
     let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
     use crate::types::triggers::AttackTargetFilter;
-    let defended = if a_player.is_some() {
+    let defended = if owner_restriction.is_some() {
+        Some(AttackTargetFilter::Owner)
+    } else if a_player.is_some() {
         Some(AttackTargetFilter::Player)
     } else {
         defended

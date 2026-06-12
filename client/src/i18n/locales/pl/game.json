@@ -264,6 +264,7 @@
     "grantsProperty": "Nadaje czarowi właściwość"
   },
   "zone": {
+    "commandZone": "Strefa dowodzenia",
     "emblem": "Emblemat",
     "emblemFallback": "Emblemat",
     "commander": "Dowódca",
@@ -283,6 +284,8 @@
     "graveyardShort": "CM",
     "graveyardTitle": "Cmentarz ({{count}})",
     "libraryAlt": "Biblioteka",
+    "library": "Biblioteka",
+    "libraryLower": "biblioteka",
     "libraryCount_one": "Biblioteka ({{count}} karta)",
     "libraryCount_other": "Biblioteka ({{count}} kart)",
     "playFromTop": "Zagraj {{name}} z wierzchu biblioteki",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Wybierz kwotę do zapłaty",
     "payAmount": "Zapłać {{value}} {{resource}}",
     "resourceEnergy": "energii",
-    "resourceMana": "many"
+    "resourceMana": "many",
+    "resourceCounters": "znaczników"
   },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",
@@ -426,6 +430,7 @@
     "one": "{{target}}",
     "nounPlayer": "gracz",
     "nounNonlandPermanent": "trwały niebędący ziemią",
+    "nounSpell": "czar",
     "nounCreature": "stwór",
     "nounPlaneswalker": "wędrowiec",
     "nounTargetPermanent": "docelowy trwały",
@@ -725,6 +730,14 @@
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
       "takeEffect": "Przyjmij efekt"
+    },
+    "spliceOffer": {
+      "title": "Połącz z Arcane?",
+      "subtitle": "Wybierz kartę do ujawnienia i połączenia z tym czarem albo rzuć go bez łączenia.",
+      "spliceCard": "Połącz {{name}}",
+      "decline": "Nie łącz",
+      "declineDescription": "Rzuć czar bez dodawania tekstu innej karty.",
+      "unknownCard": "Karta #{{id}}"
     },
     "activationCost": {
       "title": "Wybierz koszt aktywacji"
@@ -1165,6 +1178,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1175,6 +1192,11 @@
     "warpAltLabel": "Rzuć z Warp",
     "warpAltSuffix": "(wygnanie w kroku końcowym)",
     "warpSubtitle": "Rzuć {{name}} normalnie lub użyj jego kosztu Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Rzuć normalnie",
+    "dashAltLabel": "Rzuć z Dash",
+    "dashAltSuffix": "(zyskuje pośpiech, wraca do ręki w kroku końcowym)",
+    "dashSubtitle": "Rzuć {{name}} normalnie lub użyj jego kosztu Dash.",
     "evokeEyebrow": "Evoke",
     "evokeNormalLabel": "Rzuć normalnie",
     "evokeAltLabel": "Rzuć z Evoke",
@@ -1225,15 +1247,27 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
+    "rippleEyebrow": "Ripple",
     "title": "Rzucić {{name}}?",
     "subtitleCascade": "Cascade wygnało {{name}} (wartość many poniżej {{sourceMv}}). Rzuć go bez płacenia jego kosztu many lub odmów i przetasuj wszystkie {{total}} wygnanych kart na spód swojej biblioteki.",
     "subtitleDiscover": "Discover wygnało {{name}}. Rzuć go bez płacenia jego kosztu many lub weź go do ręki i przetasuj pozostałe {{missCount}} wygnanych kart na spód swojej biblioteki.",
+    "subtitleRipple": "Ripple ujawniło {{name}}. Rzuć go bez płacenia jego kosztu many lub odmów i umieść wszystkie {{total}} ujawnionych kart na spodzie swojej biblioteki w losowej kolejności.",
     "castNamed": "Rzuć {{name}}",
     "castSuffix": "(bez płacenia jego kosztu many)",
     "putIntoHand": "Weź do ręki",
     "decline": "Odmów",
     "discoverDeclineSuffix": "(połóż resztę na spód)",
     "cascadeDeclineSuffix": "(przetasuj wszystkie wygnane karty na spód)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Darmowe rzucenie",
+    "title": "Rzuć czar za darmo",
+    "subtitle": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
+    "subtitleNoBudget": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
+    "castNamed": "Rzuć {{name}}",
+    "castSuffix": "(bez płacenia jego kosztu many)",
+    "done": "Gotowe",
+    "doneSuffix": "(przestań rzucać czary w ten sposób)"
   },
   "castingVariant": {
     "eyebrow": "Rzuć",
@@ -1245,6 +1279,7 @@
     "variantEscape": "Rzuć z Escape",
     "variantRetrace": "Rzuć z Retrace",
     "variantHarmonize": "Rzuć z Harmonize",
+    "variantMayhem": "Rzuć z Mayhem",
     "variantFlashback": "Rzuć z Flashback",
     "variantAftermath": "Rzuć z Aftermath",
     "variantGraveyardPermission": "Rzuć z cmentarza",
@@ -1257,6 +1292,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantFuse": "Rzuć z Fuse",
     "variantFallback": "Rzuć z {{type}}"
   },
   "categoryChoice": {
@@ -1270,6 +1306,7 @@
     "eyebrow": "Wybór",
     "title": "Wybierz jedno",
     "subtitle": "Wybierz opcję do rozpatrzenia.",
+    "subtitleBinary": "Wybierz jedną z dwóch opcji poniżej.",
     "optionFallback": "Opcja {{number}}"
   },
   "combatTax": {
@@ -1425,6 +1462,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferate",
     "proliferateSubtitle": "Wybierz dowolną liczbę trwałych i graczy ze znacznikami. Każdy wybrany cel otrzymuje po jednym dodatkowym znaczniku każdego rodzaju, który już tam jest.",
+    "timeTravelTitle": "Podróż w czasie",
+    "timeTravelRemoveSubtitle": "Wybierz dowolną liczbę kwalifikujących się obiektów, z których usunąć znacznik czasu.",
+    "timeTravelAddSubtitle": "Wybierz dowolną liczbę pozostałych kwalifikujących się obiektów, na które dodać znacznik czasu.",
     "chooseObjectsTitle": "Wybierz trwałe",
     "chooseObjectsSubtitle": "Wybierz dowolną liczbę trwałych. Płacisz koszt za każdego wybranego.",
     "selectAll": "Wszystko",
@@ -1444,7 +1484,9 @@
     "scopeMulti": "Wybierz nowe cele dla czaru",
     "subtitle": "{{scope}}. Obecnie: {{current}}",
     "confirm": "Potwierdź",
-    "badgeNewTarget": "Nowy cel"
+    "badgeNewTarget": "Nowy cel",
+    "slotLabel": "Cel {{index}}: {{current}} → {{chosen}}",
+    "unselected": "bez zmian"
   },
   "separatePiles": {
     "chooserName": "Gracz {{number}}",

@@ -67,6 +67,43 @@ pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
         && scan_contains(lower, "spells you cast")
 }
 
+/// CR 118.9 + CR 701.59a: Collect-evidence alternative-cost grant static —
+/// "You may collect evidence N rather than pay the mana cost for [filter]
+/// spells you cast." Conspiracy Unraveler class. Separate from
+/// `is_spells_alternative_cost_pattern` because the verb is "collect evidence",
+/// not "pay". Verified: CR 118.9 (docs/MagicCompRules.txt:1014).
+pub(crate) fn is_collect_evidence_alt_cost_pattern(lower: &str) -> bool {
+    lower_starts_with(lower, "you may collect evidence ")
+        && scan_contains(lower, "rather than pay")
+        && scan_contains(lower, "mana cost for")
+        && scan_contains(lower, "spells you cast")
+}
+
+/// CR 107.4f: K'rrik-class payment substitution — "For each {C} in a cost,
+/// you may pay 2 life rather than pay that mana." Routes to
+/// `parse_pay_life_as_colored_mana`.
+/// Verified: CR 107.4f (docs/MagicCompRules.txt:507).
+pub(crate) fn is_pay_life_as_colored_mana_pattern(lower: &str) -> bool {
+    lower_starts_with(lower, "for each {")
+        && scan_contains(lower, "in a cost")
+        && scan_contains(lower, "you may pay")
+        && scan_contains(lower, "rather than pay that mana")
+}
+
+/// CR 118.9 + CR 702.29a + CR 702.122a: Alternative keyword-cost grant static —
+/// "[As long as <cond>, ]You may [cost] rather than pay [card-ref's] [keyword] cost[s]."
+/// New Perspectives (cycling) / Heart of Kiran (crew) / Gavi class. Accepts an
+/// optional leading "as long as " gate (New Perspectives); the lowering
+/// (`parse_alternative_keyword_cost`) splits and types the condition, strict-failing
+/// when the gate is unrecognized.
+/// Verified: CR 702.29a (docs/MagicCompRules.txt:4202), CR 702.122a (docs/MagicCompRules.txt:4870).
+pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
+    (lower_starts_with(lower, "you may ")
+        || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))
+        && scan_contains(lower, "rather than pay")
+        && (scan_contains(lower, "cycling cost") || scan_contains(lower, "crew cost"))
+}
+
 /// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
 /// rather than paying their mana costs." Primal Prayers class. Structural
 /// pre-filter; lowering is `parse_cast_spells_alternative_cost_multi`.
@@ -392,6 +429,19 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
+    // CR 608.2g + CR 601.2: The one-shot free-cast window class —
+    // "you may cast up to N [filter] spells ... from your graveyard and/or hand
+    // without paying their mana costs" — is a SPELL-RESOLUTION effect, not a
+    // continuous static permission. The diagnostic combination "up to" +
+    // "without paying" never appears on the standing graveyard/exile permission
+    // statics (Muldrotha, Gisa+Geralf, etc.), so route this form to effect
+    // parsing (`try_parse_free_cast_from_zones`) instead of the static classifier.
+    if scan_contains(lower, "you may cast up to")
+        && scan_contains(lower, "from your")
+        && scan_contains(lower, "without paying")
+    {
+        return false;
+    }
     if alt((
         tag::<_, _, OracleError<'_>>("you may play"),
         tag("you may cast"),
@@ -503,17 +553,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     // `parse_replacement_line` even when its suffix carries a static keyword
     // pattern like "has haste" that would otherwise classify it as static.
     "become a copy of",
-    // CR 614.6 + CR 614.7 + CR 122.1: Self-targeted counter-prohibition
-    // replacements ("~ can't have counters put on it." — Melira's Keepers
-    // class). The line lacks "would"/"instead" so it does not match the
-    // damage/destroy/draw replacement surface phrases, and the static
-    // classifier's `can't have ` pattern (if any) would otherwise miscategorize
-    // it as a static. Routing it as a replacement keeps it in the CR 614
-    // pipeline where `add_counter_applier` short-circuits the proposed event.
-    "can't have counters put on",
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if is_counter_prohibition_replacement_pattern(lower) {
+        return true;
+    }
+
     if REPLACEMENT_CONTAINS_PATTERNS
         .iter()
         .any(|pattern| scan_contains(lower, pattern))
@@ -555,7 +601,26 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
+    if scan_contains(lower, "an effect causes you to discard a card")
+        && scan_contains(lower, "instead of into your graveyard")
+    {
+        return true;
+    }
     false
+}
+
+fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
+    // CR 614.17 + CR 122.1: Counter-prohibition effects lack "would" or
+    // "instead" but still route through the replacement pipeline.
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        alt((
+            tag::<_, _, OracleError>("can't have counters put on"),
+            tag("players can't get counters"),
+            tag("counters can't be put on"),
+        ))
+        .parse(input)
+    })
+    .is_some()
 }
 
 fn is_as_enters_choose_pattern(lower: &str) -> bool {
@@ -645,7 +710,32 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::nom_primitives::strip_double_quoted_spans;
     use super::*;
+
+    #[test]
+    fn masked_white_suns_twilight_is_not_static() {
+        // The only static-shaped marker ("can't block") lives INSIDE the token's
+        // quoted ability text; masking it must yield a non-static spell line.
+        let line = "you gain x life. create x 1/1 colorless phyrexian mite artifact \
+            creature tokens with toxic 1 and \"this token can't block.\" if x is 5 or more, \
+            destroy all other creatures.";
+        assert!(!is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    #[test]
+    fn masked_brood_birthing_stays_static() {
+        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
+        // so masking the quoted span must NOT flip the line off static.
+        let line = "they have \"sacrifice this token: add {c}.\"";
+        assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    #[test]
+    fn unquoted_cant_block_static_unchanged() {
+        // No quotes → fast path → classification unchanged.
+        assert!(is_static_pattern("creatures you control can't block"));
+    }
 
     #[test]
     fn classifies_enters_with_counter_trigger() {

@@ -27,6 +27,14 @@ tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+ngrok = { version = "0.18", optional = true }
+
+[features]
+# Embed an ngrok tunnel so self-hosters can share a join code without
+# port-forwarding or TLS setup. Off by default (keeps the standard build lean);
+# enable in the Docker image with `--features ngrok` + NGROK_AUTHTOKEN.
+ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
 tempfile = "3"

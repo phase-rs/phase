@@ -3,8 +3,14 @@ use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
+use crate::game::conditions::{
+    counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
+    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
+    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+};
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
 use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
@@ -18,10 +24,14 @@ use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterType};
+#[cfg(test)]
+use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+#[cfg(test)]
+use crate::types::keywords::KeywordKind;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -198,6 +208,28 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             | CastingPermission::Foretold { .. } => true,
         });
     }
+    // CR 601.2a + CR 603.7 + CR 611.2a: Garbage-collect single-use consumed
+    // markers whose grant has expired. After the prune above, drop any consumed
+    // tracked-set entry that no longer has a live single-use `PlayFromExile`
+    // grant in exile, so the set does not grow without bound.
+    let live_single_use_groups: std::collections::HashSet<crate::types::identifiers::TrackedSetId> =
+        state
+            .objects
+            .values()
+            .flat_map(|obj| {
+                obj.casting_permissions.iter().filter_map(|p| match p {
+                    CastingPermission::PlayFromExile {
+                        single_use_group,
+                        single_use: true,
+                        ..
+                    } => *single_use_group,
+                    _ => None,
+                })
+            })
+            .collect();
+    state
+        .exile_play_single_use_consumed
+        .retain(|group| live_single_use_groups.contains(group));
 }
 
 /// CR 514.2: Remove durational casting permissions granted to
@@ -595,9 +627,11 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
@@ -709,9 +743,11 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
@@ -791,11 +827,7 @@ fn evaluate_condition_with_context(
         // matches the anchor word. The comparison is case-insensitive so a
         // capitalised anchor word ("Jeskai") matches a label persisted in
         // any canonicalisation. Mirrors `ChosenColorIs`'s lookup pattern.
-        StaticCondition::ChosenLabelIs { label } => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.chosen_label())
-            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
+        StaticCondition::ChosenLabelIs { label } => eval_chosen_label_is(state, source_id, label),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -875,12 +907,10 @@ fn evaluate_condition_with_context(
                 )
             })
             .unwrap_or(false),
-        // CR 716.3: Level abilities are active at or above the specified level.
-        StaticCondition::ClassLevelGE { level } => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.class_level)
-            .is_some_and(|current| current >= *level),
+        // CR 716.2a + CR 716.3: Level abilities are active at or above the specified
+        // level. No battlefield zone guard here — the functioning-abilities machinery
+        // already constrains source availability before this static is evaluated.
+        StaticCondition::ClassLevelGE { level } => eval_class_level_ge(state, source_id, *level),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
         // CR 103.1: True when the scoped player took the first turn of the
@@ -892,10 +922,13 @@ fn evaluate_condition_with_context(
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         // CR 400.7: True when the source permanent entered the battlefield this turn.
-        StaticCondition::SourceEnteredThisTurn => state
+        StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
+        // CR 601.2 + CR 611.3a: True when the source permanent was cast.
+        StaticCondition::WasCast { zone } => state
             .objects
             .get(&source_id)
-            .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
+            .and_then(|obj| obj.cast_from_zone)
+            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
         StaticCondition::IsRingBearer => {
             super::effects::ring::is_current_ring_bearer(state, controller, source_id)
@@ -904,17 +937,15 @@ fn evaluate_condition_with_context(
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }
-        // CR 611.2b + CR 110.5d: True only when the source is a tapped permanent.
-        // CR 110.5d: cards not on the battlefield are neither tapped nor untapped,
-        // regardless of their physical state — so a source that has left the
-        // battlefield (e.g. Callous Oppressor dying while tapped) fails this
-        // predicate and any `ForAsLongAs { SourceIsTapped }` continuous effect
-        // (gain-control, etc.) ends. Mirrors the battlefield-presence guard the
-        // `UntilHostLeavesPlay` arm of `gather_transient_continuous_effects` uses.
-        StaticCondition::SourceIsTapped => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield && obj.tapped),
+        // CR 611.2b + CR 110.5d: require battlefield — cards not on the battlefield are
+        // neither tapped nor untapped. A source that has left the battlefield (e.g.
+        // Callous Oppressor dying while tapped) fails this predicate and any
+        // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
+        StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
+        StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
+            obj.zone == crate::types::zones::Zone::Battlefield && obj.is_saddled
+        }),
         // CR 702.62a + CR 611.2b: True when the source object's current controller
         // equals the stored player. Drives the Suspend haste duration: when a
         // suspended creature spell resolves, a transient continuous effect with
@@ -954,10 +985,7 @@ fn evaluate_condition_with_context(
                     .contains(&crate::types::card_type::CoreType::Creature)
             }),
         // CR 113.6b: True when the source card is in the specified zone.
-        StaticCondition::SourceInZone { zone } => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.zone == *zone),
+        StaticCondition::SourceInZone { zone } => eval_source_in_zone(state, source_id, *zone),
         // CR 708.2 + CR 707.2: True when the creature this Aura/Equipment is attached to
         // is face-down. Traverses `attached_to` to the target object and reads its
         // `face_down` status (false if source is not attached, or attached to a
@@ -1009,10 +1037,7 @@ fn evaluate_condition_with_context(
                     .is_some_and(|a| a.object_id == source_id)
         }),
         // CR 508.1k: Source creature is currently an attacker.
-        StaticCondition::SourceIsAttacking => state
-            .combat
-            .as_ref()
-            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == source_id)),
+        StaticCondition::SourceIsAttacking => eval_source_is_attacking(state, source_id),
         // CR 509.1g: Source creature is currently a blocker.
         StaticCondition::SourceIsBlocking => state
             .combat
@@ -1027,11 +1052,11 @@ fn evaluate_condition_with_context(
                 .is_some_and(|a| a.blocked)
         }),
         // CR 725.1: True when the controller is the monarch.
-        StaticCondition::IsMonarch => state.monarch == Some(controller),
+        StaticCondition::IsMonarch => eval_is_monarch(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
-        StaticCondition::NoMonarch => state.monarch.is_none(),
+        StaticCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
-        StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
+        StaticCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
         StaticCondition::OpponentPoisonAtLeast { count } => state
             .players
             .iter()
@@ -1070,19 +1095,6 @@ fn evaluate_condition_with_context(
             }
         },
     }
-}
-
-fn counter_condition_matches(
-    obj: &crate::game::game_object::GameObject,
-    counters: &CounterMatch,
-    minimum: u32,
-    maximum: Option<u32>,
-) -> bool {
-    let count: u32 = match counters {
-        CounterMatch::Any => obj.counters.values().sum(),
-        CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
-    };
-    count >= minimum && maximum.is_none_or(|max| count <= max)
 }
 
 /// Test-only wrapper to expose `evaluate_condition` for unit tests in other modules.
@@ -1149,17 +1161,24 @@ fn rebuild_static_index_at_top() -> bool {
     true
 }
 
+/// Unconditional full layer evaluation (CR 613.1).
+///
+/// Production code must NOT call this directly — go through [`flush_layers`],
+/// which consumes the `LayersDirty` lattice and keeps the public-state dirty
+/// marks consistent with what was recomputed. To force a full pass, call
+/// `mark_layers_full` then `flush_layers`. Direct calls are reserved for
+/// tests that deliberately force a full evaluation regardless of dirty state.
 pub fn evaluate_layers(state: &mut GameState) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // CR 302.6 + CR 613.1b + CR 702.26c: Snapshot effective controllers for
+    // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this
     // snapshot to detect effective-controller transitions (Layer 2 control-
     // changing effect start/end, exchange-control, gain-control expiry) and
     // re-applies summoning sickness per CR 302.6 ("continuously under that
     // player's control since that player's most recent turn began").
-    // Phased-out permanents are excluded per CR 702.26c.
+    // Phased-out permanents are excluded per CR 702.26b.
     let prev_controllers: Vec<(ObjectId, PlayerId)> = state
         .battlefield_phased_in_ids()
         .into_iter()
@@ -1175,7 +1194,12 @@ pub fn evaluate_layers(state: &mut GameState) {
     // taken by AI search or snapshot diffing retain their own roots, so this
     // does not break structural sharing across `GameState` clones.
     state.attribution.clear();
-    let bf_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    // CR 702.26b + CR 702.26e: Phased-out permanents are treated as though
+    // they do not exist and are not included in continuous-effect affected
+    // sets. Exclude them from the whole layer pass so the reset/apply invariant
+    // remains intact; they are frozen until phase-in marks layers dirty and
+    // re-includes them.
+    let bf_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
@@ -1201,6 +1225,28 @@ pub fn evaluate_layers(state: &mut GameState) {
             // re-applies the copied source's `printed_ref` below for objects
             // under a copy effect, so a temporary copy's art reverts on expiry.
             obj.printed_ref = obj.base_printed_ref.clone();
+            // Reset display routing to the object's own derived baseline so a
+            // copy effect's override (set by `CopyValues` below) reverts on
+            // expiry. Display routing is derived state, not a copiable value
+            // (CR 707.2): a true token — created by a token-making effect
+            // (CR 111.1), so carrying no printed identity — routes to the token
+            // art database; everything else (a real card, or a token-copy *of a
+            // real card*, which carries `base_printed_ref`) routes to the card
+            // database. Deriving here (rather than storing a `base_display_source`)
+            // keeps tokens in pre-existing saved states correct on load.
+            obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
+                DisplaySource::Token
+            } else {
+                DisplaySource::Card
+            };
+            // A nontoken never has its own token-art pointer, so clear it to its
+            // baseline (`None`); a copy-of-token effect re-applies the source
+            // token's `token_image_ref` below while active. A true token keeps
+            // its own pointer (its baseline), which the copy layer overrides only
+            // while it is copying another object.
+            if !obj.is_token {
+                obj.token_image_ref = None;
+            }
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
             obj.controller = obj.base_controller.unwrap_or(obj.owner);
@@ -1350,14 +1396,84 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    // CR 113.11: "It's also impossible for an effect or keyword counter to add
+    // [a denied] ability to the object." The keyword-counter grant above runs
+    // after the in-loop Layer 6 denial, so re-apply the denial to strip any
+    // counter-granted keyword that a `CantHaveKeyword` static forbids.
+    apply_cant_have_keyword_denials(state, None);
+
     // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
     // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
     // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
     // before the 7d switch.)
+    //
+    // Loyalty is HYBRID: a counter-tracked planeswalker's loyalty IS its counter
+    // count (present entry wins, including 0); an un-counter-tracked planeswalker
+    // (a clone whose loyalty comes from the Copy layer, an in-place transform, an
+    // off-battlefield/pre-seed object) keeps the base/copy-layer value. So the
+    // `if let Some` is load-bearing: an ABSENT entry means "not counter-tracked,
+    // keep the field", while a PRESENT 0 means "drained to 0, must die" (CR
+    // 704.5i). `apply_counter_removal` is what keeps the 0 entry alive for a
+    // genuinely-tracked walker so this re-derive can see it.
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 614.12 + CR 604.1 + CR 702.136a: replacement-on-grant (seam 3).
+    // A Continuous static that grants an as-enters replacement keyword (Riot)
+    // contributes its as-enters `Moved` replacement from the GRANTING permanent,
+    // scoped to the static's `affected` filter — not as a SelfRef replacement on
+    // the recipient (CR 614.12: a grant to "a general subset of permanents that
+    // includes it" comes from the granting source). Build-time `synthesize_riot`
+    // installs this once on `face.replacements`; the per-pass reset above
+    // (CR 613.1) discards persistent installs, so the replacement must be
+    // re-derived each pass onto the source's live `replacement_definitions`. This
+    // runs AFTER Layer 6 (Ability) so a Riot-granting static that was itself
+    // granted to the source is visible in `static_definitions`. The runtime
+    // gather (`find_applicable_replacements`) then applies the affected-filter
+    // replacement to matching entering creatures with no further change.
+    for &id in &bf_ids {
+        let derived: Vec<crate::types::ability::ReplacementDefinition> = {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            obj.static_definitions
+                .iter_all()
+                .filter_map(|def| {
+                    // Cheap discriminator FIRST: `entry_replacement_for_grant_static`
+                    // is a couple of field checks returning `None` for ~every
+                    // static, whereas `source_condition_gate_passes` can scan all
+                    // objects (e.g. `IsPresent`). Run the condition gate only once
+                    // an as-enters keyword grant is confirmed, so the layer hot
+                    // path pays no board-wide condition tax for non-Riot statics.
+                    let replacement =
+                        crate::database::synthesis::entry_replacement_for_grant_static(def)?;
+                    let active = def.condition.as_ref().is_none_or(|condition| {
+                        source_condition_gate_passes(state, condition, obj.controller, id)
+                    });
+                    active.then_some(replacement)
+                })
+                .collect()
+        };
+        if derived.is_empty() {
+            continue;
+        }
+        if let Some(obj) = state.objects.get_mut(&id) {
+            for replacement in derived {
+                // Idempotent: the per-pass reset already cleared derived
+                // replacements, but a static that also appears in the base set
+                // (printed Riot grant) could double-install otherwise.
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|r| r == &replacement)
+                {
+                    obj.replacement_definitions.push(replacement);
+                }
             }
         }
     }
@@ -1895,6 +2011,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             }
         }
     }
+
+    // CR 113.11: re-apply the can't-have denial after the keyword-counter grant
+    // (which runs after the in-loop Layer 6 denial) so a counter can't add a
+    // forbidden keyword. Restricted to the freshly-entered objects, mirroring the
+    // incremental denial hook above.
+    apply_cant_have_keyword_denials(state, Some(entered_ids));
 
     // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
     apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
@@ -2786,6 +2908,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddStaticMode { .. }
             | ContinuousModification::GrantStaticAbility { .. }
             | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. }
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -3082,6 +3205,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::RemoveManaCost => None,
@@ -3293,6 +3417,20 @@ fn apply_continuous_effect_filtered(
     } else {
         None
     };
+    // CR 707.9a: Pre-read the printed activated ability to retain from the
+    // source object's `base_abilities`. Cloned before the per-object mutable
+    // borrow inside the loop (mirrors the trigger retain pre-read above).
+    let retained_printed_ability = if let ContinuousModification::RetainPrintedAbilityFromSource {
+        source_ability_index,
+    } = &effect.modification
+    {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.base_abilities.get(*source_ability_index).cloned())
+    } else {
+        None
+    };
     let all_creature_types = state.all_creature_types.clone();
 
     for id in affected_ids {
@@ -3321,13 +3459,22 @@ fn apply_continuous_effect_filtered(
         match &effect.modification {
             ContinuousModification::CopyValues {
                 values,
+                display_source,
                 printed_ref,
+                token_image_ref,
             } => {
                 apply_copiable_values(obj, values);
-                // Display identity follows the copy: override the baseline
+                // Display routing follows the copy: override the baseline
                 // restored by the layer reset so the copy renders the source's
                 // art. Reverts automatically when the copy effect expires.
+                // CR 111.1 + CR 707.2: for a copy of a true token, the source's
+                // `display_source = Token` + `token_image_ref` carry the art (the
+                // copied name has no real-card printing); for a printed source,
+                // `display_source = Card` + `printed_ref`. None are copiable
+                // values — purely display routing.
+                obj.display_source = *display_source;
                 obj.printed_ref = printed_ref.clone();
+                obj.token_image_ref = token_image_ref.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -3755,6 +3902,18 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+            // CR 707.9a: Retain the source's printed activated ability on the
+            // copy. After `CopyValues` overwrote `obj.abilities` with the
+            // copied values, push the source's printed ability back so the
+            // copy retains "this ability". Idempotent — duplicate retain calls
+            // (same ability structurally) collapse into one.
+            ContinuousModification::RetainPrintedAbilityFromSource { .. } => {
+                if let Some(ability) = retained_printed_ability.clone() {
+                    if !obj.abilities.iter().any(|a| a == &ability) {
+                        Arc::make_mut(&mut obj.abilities).push(ability);
+                    }
+                }
+            }
         }
     }
 }
@@ -3927,6 +4086,24 @@ pub(crate) fn compute_current_copiable_values(
                     }
                 }
             }
+            // CR 707.9a: A copy effect that retains an activated ability makes
+            // that ability part of the copiable values of the copy. Read the
+            // printed ability from the effect's source object by index,
+            // mirroring the trigger retain path above.
+            ContinuousModification::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            } => {
+                if let Some(ability) = state
+                    .objects
+                    .get(&effect.source_id)
+                    .and_then(|src| src.base_abilities.get(*source_ability_index).cloned())
+                {
+                    let abilities = Arc::make_mut(&mut values.abilities);
+                    if !abilities.iter().any(|a| a == &ability) {
+                        abilities.push(ability);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -3939,11 +4116,11 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid, ChosenSubtypeKind,
-        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
-        Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
-        TypedFilter, ZoneRef,
+        AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid,
+        ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+        CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, SacrificeCost, StaticCondition, StaticDefinition, TargetFilter,
+        TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -5035,6 +5212,187 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 604.1 + CR 702.123a/b: a runtime grant of `Fabricate N` via a
+    /// continuous `AddKeyword` static must install the Fabricate ETB trigger
+    /// onto the recipient's `trigger_definitions` (the trigger-on-grant seam at
+    /// `KeywordTriggerInstaller::triggers_for`). Before the `Fabricate` arm
+    /// existed, the recipient gained the bare keyword but no trigger, so this
+    /// assertion would have found zero installed Fabricate triggers.
+    #[test]
+    fn granted_fabricate_installs_etb_trigger_on_recipient() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Anthem-style static: grants Fabricate 2 to all creatures.
+        let anthem_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Fabricate(2),
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fabricate Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(anthem_static);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let recipient = state.objects.get(&bear).unwrap();
+        assert!(
+            recipient.has_keyword(&Keyword::Fabricate(2)),
+            "granted Fabricate keyword must land on the recipient"
+        );
+        let fabricate_triggers = recipient
+            .trigger_definitions
+            .iter_all()
+            .filter(|t| {
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(t, &Keyword::Fabricate(2))
+            })
+            .count();
+        assert_eq!(
+            fabricate_triggers, 1,
+            "granted Fabricate must install exactly one ETB ChooseOneOf trigger"
+        );
+    }
+
+    /// CR 614.12 + CR 604.1 + CR 702.136a (seam 3, replacement-on-grant): a
+    /// battlefield permanent whose Continuous static grants `AddKeyword{Riot}` to
+    /// a subset of permanents must, after a layer pass, carry the affected-filter
+    /// as-enters Riot replacement on its OWN `replacement_definitions` (scoped to
+    /// the static's `affected` filter, NOT SelfRef per CR 614.12). Before the
+    /// runtime-derivation pass existed, `AddKeyword` installed only the keyword +
+    /// triggers, never a replacement, so this assertion found none.
+    #[test]
+    fn granted_riot_static_derives_affected_filter_replacement_on_source() {
+        let mut state = setup();
+
+        let affected = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+        let riot_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(affected.clone())
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Riot,
+            }]);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Riot Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(riot_static);
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let expected =
+            crate::database::synthesis::keyword_entry_replacement(&Keyword::Riot, affected.clone())
+                .expect("Riot must map to an entry replacement");
+        let source = state.objects.get(&grantor).unwrap();
+        let installed = source
+            .replacement_definitions
+            .iter_all()
+            .filter(|r| **r == expected)
+            .count();
+        assert_eq!(
+            installed, 1,
+            "granting permanent must carry exactly one affected-filter Riot replacement"
+        );
+
+        // Idempotency across re-evaluation (the per-pass reset + re-derive must
+        // not accumulate duplicates).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let source = state.objects.get(&grantor).unwrap();
+        assert_eq!(
+            source
+                .replacement_definitions
+                .iter_all()
+                .filter(|r| **r == expected)
+                .count(),
+            1,
+            "re-evaluation must not duplicate the derived replacement"
+        );
+    }
+
+    /// CR 113.11 + CR 122.1b: a "can't have [keyword]" effect makes it impossible
+    /// for even a KEYWORD COUNTER to add that ability. A first-strike counter on a
+    /// creature under an Archetype-of-Courage-style `CantHaveKeyword { FirstStrike }`
+    /// denial must NOT grant first strike. The keyword-counter grant ran after the
+    /// denial pass with no re-denial, so the counter wrongly re-added the keyword.
+    #[test]
+    fn cant_have_keyword_denial_overrides_keyword_counter() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Keyword(KeywordKind::FirstStrike), 1);
+
+        // Baseline: the keyword counter grants first strike with no denial present.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "keyword counter grants first strike before the denial is added"
+        );
+
+        // Archetype of Courage: creatures can't have first strike (Layer 6 denial).
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::FirstStrike,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Courage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "CR 113.11: a keyword counter cannot grant a denied keyword"
         );
     }
 
@@ -6337,6 +6695,83 @@ mod tests {
         );
     }
 
+    /// CR 702.151b + CR 613.1d: A reconfigure Equipment is a creature while
+    /// unattached, stops being a creature while attached to a creature, and
+    /// becomes a creature again when unattached. Drives the synthesized
+    /// `synthesize_reconfigure` Layer-4 RemoveType static through
+    /// `evaluate_layers`. This is the discriminating test for the type-removal
+    /// fix: it flips to a hard failure if Step 2 of the fix is reverted (the
+    /// Equipment would remain a creature while attached).
+    #[test]
+    fn reconfigure_equipment_loses_creature_type_while_attached() {
+        use crate::database::synthesis::synthesize_reconfigure;
+        use crate::game::effects::attach::{attach_to, unattach};
+        use crate::types::card::CardFace;
+        use crate::types::keywords::Keyword;
+
+        // Synthesize the reconfigure statics from the typed keyword (real path).
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reconfigure(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_reconfigure(&mut face);
+
+        let mut state = setup();
+        // The reconfigure Equipment is itself an Artifact Creature (Equipment).
+        let equip = make_creature(&mut state, "Reconfigure Equipment", 0, 0, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&equip).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            // Apply the synthesized continuous static onto the base set so the
+            // Step-1 layer reset preserves it across passes.
+            obj.base_static_definitions = Arc::new(face.static_abilities.clone());
+        }
+        let host = make_creature(&mut state, "Host Creature", 2, 2, PlayerId(0));
+
+        // Unattached: still a creature.
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "unattached reconfigure Equipment is a creature"
+        );
+
+        // Attached to a creature: stops being a creature (CR 702.151b).
+        attach_to(&mut state, equip, host);
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 702.151b: attached reconfigure Equipment stops being a creature"
+        );
+        // Still an Artifact Equipment — only the Creature type is removed.
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Artifact),
+            "only the Creature type is removed (Layer 4 RemoveType)"
+        );
+
+        // Unattached again: a creature once more.
+        unattach(&mut state, equip);
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "unattaching restores the creature type"
+        );
+    }
+
     #[test]
     fn test_type_change_reverts_to_base_when_source_leaves() {
         let mut state = setup();
@@ -7530,6 +7965,98 @@ mod tests {
         );
     }
 
+    /// CR 114.3 + CR 613.1f: End-to-end test for Koth of the Hammer's −5
+    /// emblem. The emblem text nests the granted activated ability in single
+    /// quotes one level deep (`"Mountains you control have '{T}: …'"`); if the
+    /// emblem parser corrupts or drops those quotes the static lowers to an
+    /// inert `EmblemStatic` blob and the Mountains never receive the ability
+    /// (the reported bug). This drives the real parser, installs the parsed
+    /// static on a command-zone emblem, and verifies a Mountain you control
+    /// actually gains the activated damage ability (layer-6 ability-adding)
+    /// while an opponent's Mountain and a non-Mountain land do not.
+    #[test]
+    fn koth_emblem_grants_activated_ability_to_controlled_mountains() {
+        use crate::types::ability::AbilityKind;
+
+        let mut state = setup();
+
+        let make_basic_land =
+            |state: &mut GameState, name: &str, subtype: &str, player: PlayerId| {
+                let id = create_object(
+                    state,
+                    CardId(0),
+                    player,
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let ts = state.next_timestamp();
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push(subtype.to_string());
+                obj.base_card_types = obj.card_types.clone();
+                obj.timestamp = ts;
+                id
+            };
+
+        let my_mountain = make_basic_land(&mut state, "Mountain", "Mountain", PlayerId(0));
+        let opp_mountain = make_basic_land(&mut state, "Opp Mountain", "Mountain", PlayerId(1));
+        let my_forest = make_basic_land(&mut state, "Forest", "Forest", PlayerId(0));
+
+        // Drive the real parser on Koth's emblem Oracle text.
+        let effect = crate::parser::oracle_effect::parse_effect(
+            "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
+        );
+        let crate::types::ability::Effect::CreateEmblem { statics, triggers } = effect else {
+            panic!("expected CreateEmblem effect from Koth's emblem text");
+        };
+        assert!(triggers.is_empty(), "Koth emblem is a static grant");
+        assert_eq!(
+            statics.len(),
+            1,
+            "expected the granted static, got {statics:?}"
+        );
+
+        // CR 114.4: Install on a command-zone emblem controlled by Player 0;
+        // an emblem's abilities function from the command zone.
+        let emblem_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem_id).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions = statics.into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let grants_damage_ability = |state: &GameState, id: ObjectId| {
+            state.objects.get(&id).unwrap().abilities.iter().any(|a| {
+                a.kind == AbilityKind::Activated
+                    && matches!(&*a.effect, crate::types::ability::Effect::DealDamage { .. })
+            })
+        };
+
+        assert!(
+            grants_damage_ability(&state, my_mountain),
+            "a Mountain you control must gain the granted '{{T}}: deal 1 damage' ability"
+        );
+        // CR 613.1f: the layer-6 grant is scoped to permanents the emblem's
+        // controller controls.
+        assert!(
+            !grants_damage_ability(&state, opp_mountain),
+            "an opponent's Mountain must NOT gain the ability"
+        );
+        assert!(
+            !grants_damage_ability(&state, my_forest),
+            "a non-Mountain land must NOT gain the ability"
+        );
+    }
+
     /// CR 305.7: SetBasicLandType replaces old land subtypes and adds the new one.
     #[test]
     fn set_basic_land_type_replaces_subtypes() {
@@ -7932,6 +8459,42 @@ mod tests {
             &StaticCondition::Not {
                 condition: Box::new(StaticCondition::SourceIsTapped),
             },
+            PlayerId(0),
+            id,
+        ));
+    }
+
+    // CR 702.171b: `SourceIsSaddled` gates a continuous modification on the
+    // saddled designation. Not saddled → no gather; saddled → gathered;
+    // off-battlefield → false (CR 110.5d, no designation off the battlefield).
+    #[test]
+    fn source_is_saddled_gates_continuous_effect() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Mount", 2, 2, PlayerId(0));
+
+        // Not saddled → condition false (no bonus).
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
+            PlayerId(0),
+            id,
+        ));
+
+        // Saddled → condition true (regression for "mounts always behave as if saddled").
+        state.objects.get_mut(&id).unwrap().is_saddled = true;
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
+            PlayerId(0),
+            id,
+        ));
+
+        // CR 110.5d: off the battlefield there is no saddled designation.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(state.objects.get(&id).unwrap().is_saddled);
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
             PlayerId(0),
             id,
         ));
@@ -8609,6 +9172,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -8633,6 +9199,9 @@ mod tests {
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         });
         perms.push(CastingPermission::PlayFromExile {
             duration: Duration::Permanent,
@@ -8641,6 +9210,9 @@ mod tests {
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         });
         perms.push(CastingPermission::AdventureCreature);
 
@@ -8677,6 +9249,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
@@ -8762,6 +9337,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
         state
             .objects
@@ -8777,6 +9355,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         // Active player is P0 — only P0's permission should expire.
@@ -8809,6 +9390,9 @@ mod tests {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             });
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
@@ -9240,10 +9824,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         })
     }
@@ -9654,6 +10235,221 @@ mod tests {
         let obj = state.objects.get(&bear).unwrap();
         assert!(!obj.keywords.contains(&Keyword::Undying));
         assert!(obj.trigger_definitions.is_empty());
+    }
+
+    #[test]
+    fn granted_undying_with_complex_filter_installs_trigger() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Human".to_string(), "Bear".to_string()];
+
+        // Create a non-Human creature (Bear - not Human)
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let bear_obj = state.objects.get_mut(&bear).unwrap();
+        bear_obj.card_types.subtypes.push("Bear".to_string());
+        bear_obj.base_card_types.subtypes = bear_obj.card_types.subtypes.clone();
+
+        // Create Mikaeus-like source with complex filter: "Other non-Human creatures you control"
+        let mikaeus = make_creature(&mut state, "Mikaeus", 5, 5, PlayerId(0));
+        let mikaeus_obj = state.objects.get_mut(&mikaeus).unwrap();
+        mikaeus_obj.card_types.subtypes.push("Human".to_string());
+        mikaeus_obj.base_card_types.subtypes = mikaeus_obj.card_types.subtypes.clone();
+
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        "Human".to_string(),
+                    ))))
+                    .properties(vec![FilterProp::Another]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Undying,
+                },
+            ]);
+        mikaeus_obj.static_definitions.push(def);
+
+        evaluate_layers(&mut state);
+
+        // Verify Undying is granted to the non-Human creature
+        let bear = state.objects.get(&bear).unwrap();
+        assert!(
+            bear.keywords.contains(&Keyword::Undying),
+            "Bear should have Undying"
+        );
+        assert_eq!(bear.power, Some(3), "Bear should have +1/+1 from Mikaeus");
+        assert_eq!(
+            bear.toughness,
+            Some(3),
+            "Bear should have +1/+1 from Mikaeus"
+        );
+
+        // Verify the Undying trigger is installed
+        assert_eq!(
+            bear.trigger_definitions.len(),
+            1,
+            "Bear should have Undying trigger"
+        );
+        let trigger = bear.trigger_definitions.first().unwrap();
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+    }
+
+    #[test]
+    fn granted_undying_with_complex_filter_fires_on_death() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Human".to_string(), "Bear".to_string()];
+
+        // Create a non-Human creature (Bear - not Human)
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        {
+            let bear_obj = state.objects.get_mut(&bear).unwrap();
+            bear_obj.card_types.subtypes.push("Bear".to_string());
+            bear_obj.base_card_types.subtypes = bear_obj.card_types.subtypes.clone();
+        }
+
+        // Create Mikaeus-like source with complex filter: "Other non-Human creatures you control"
+        let mikaeus = make_creature(&mut state, "Mikaeus", 5, 5, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        "Human".to_string(),
+                    ))))
+                    .properties(vec![FilterProp::Another]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Undying,
+                },
+            ]);
+        {
+            let mikaeus_obj = state.objects.get_mut(&mikaeus).unwrap();
+            mikaeus_obj.card_types.subtypes.push("Human".to_string());
+            mikaeus_obj.base_card_types.subtypes = mikaeus_obj.card_types.subtypes.clone();
+            mikaeus_obj.static_definitions.push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        // Verify Undying is granted and trigger is installed
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .keywords
+                .contains(&Keyword::Undying),
+            "Bear should have Undying"
+        );
+        assert_eq!(
+            state.objects.get(&bear).unwrap().trigger_definitions.len(),
+            1,
+            "Bear should have Undying trigger"
+        );
+
+        // Kill the bear by dealing lethal damage
+        let mut events = Vec::new();
+        state.objects.get_mut(&bear).unwrap().damage_marked = 3;
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        // Process triggers from the death event
+        crate::game::triggers::process_triggers(&mut state, &events);
+
+        // Check if Undying trigger fired - it should be on the stack
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "Undying trigger should be on stack or pending"
+        );
+
+        let origin = state
+            .stack
+            .last()
+            .and_then(|entry| entry.ability())
+            .map(|ability| ability.may_trigger_origin)
+            .or_else(|| {
+                state
+                    .pending_trigger
+                    .as_ref()
+                    .map(|trigger| trigger.may_trigger_origin)
+            })
+            .flatten();
+        assert_eq!(
+            origin,
+            Some(MayTriggerOrigin::Keyword {
+                keyword: KeywordKind::Undying,
+            }),
+            "LKI-synthesized Undying must keep keyword origin instead of a fake printed index"
+        );
+    }
+
+    #[test]
+    fn printed_and_runtime_granted_parameterized_lki_keywords_both_trigger() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Afterlife Bear", 2, 2, PlayerId(0));
+        let printed = Keyword::Afterlife(1);
+        let printed_trigger = KeywordTriggerInstaller::triggers_for(&printed)
+            .pop()
+            .expect("afterlife has a trigger template");
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.keywords.push(printed.clone());
+            obj.base_keywords.push(printed);
+            obj.trigger_definitions.push(printed_trigger.clone());
+            obj.base_trigger_definitions = Arc::new(vec![printed_trigger]);
+        }
+
+        let source = make_creature(&mut state, "Afterlife Granter", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: bear })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Afterlife(2),
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert!(bear_obj.keywords.contains(&Keyword::Afterlife(1)));
+        assert!(bear_obj.keywords.contains(&Keyword::Afterlife(2)));
+        assert_eq!(
+            bear_obj.trigger_definitions.len(),
+            2,
+            "printed and runtime-granted Afterlife triggers must coexist"
+        );
+
+        let mut events = Vec::new();
+        state.objects.get_mut(&bear).unwrap().damage_marked = 2;
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        crate::game::triggers::process_triggers(&mut state, &events);
+
+        let crate::types::game_state::WaitingFor::OrderTriggers { player, triggers } =
+            state.waiting_for.clone()
+        else {
+            panic!(
+                "printed Afterlife 1 plus runtime-granted Afterlife 2 must produce two orderable triggers, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+        assert_eq!(
+            triggers.len(),
+            2,
+            "both printed and runtime-granted LKI keyword triggers must fire"
+        );
     }
 
     #[test]
@@ -10452,7 +11248,9 @@ mod tests {
             TargetFilter::SpecificObject { id: target },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copy_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
+                token_image_ref: None,
             }],
             None,
         );

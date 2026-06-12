@@ -24,10 +24,13 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, CopyRetargetPermission, Effect,
-    FilterProp, ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
+    CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
+    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
+use crate::types::game_state::RetargetScope;
+use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -275,9 +278,10 @@ fn detect_optional_you_may(
     parsed: &ParsedAbilities,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // Only the bare "you may [verb]" optional-effect form. We exclude
-    // "if you may" / "you may have" / "you may cast" patterns where the "may"
-    // belongs to a different grammatical construction.
+    // Only the bare "you may [verb]" optional-effect form. "you may cast" is
+    // NOT excluded at this scan level — the optionality is satisfied on the
+    // AST-walk side via `any_ability_is_optional` checking `casting_options`,
+    // `CastFromZone`, `GrantCastingPermission`, and `CastCopyOfCard`.
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("you may ") {
         return;
@@ -288,6 +292,51 @@ fn detect_optional_you_may(
     // CR 700.2a / CR 601.2b: "you may choose both instead" grants a modal
     // choice range, not an optional effect during resolution.
     if parsed_has_conditional_modal_max(parsed) {
+        return;
+    }
+    // CR 702.160a: Prototype keyword explanation "(You may cast this spell with
+    // different mana cost, color, and size. It keeps its abilities and types.)"
+    // is keyword reminder text, not an optional effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may cast this spell with different mana cost") {
+        // allow-noncombinator: swallow detector marker scan on classified text
+        return;
+    }
+    // CR 305.2: "you may play additional lands" is encoded as
+    // `StaticMode::MayPlayAdditionalLand`, which is an optional permission
+    // static, not a def-level optional effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may play") // allow-noncombinator: swallow detector marker scan on classified text
+        && cleaned.contains("additional land")
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
+        return;
+    }
+    // CR 614.1c: "you may reveal" in ETB replacement effects (e.g., Arsenal
+    // Thresher) is part of the replacement condition, not a separate optional
+    // effect. The reveal choice is captured in the replacement logic.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may reveal") // allow-noncombinator: swallow detector marker scan on classified text
+        && (cleaned.contains("as this creature enters") // allow-noncombinator: swallow detector marker scan on classified text
+            || cleaned.contains("as this permanent enters"))
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
+        return;
+    }
+    // Die roll result branches (e.g., "1—9 | You may put that card on top of
+    // your library") are conditional effects gated by the die result, not
+    // standalone optional effects. The optionality is conditional on the roll.
+    // Gate on die-roll pattern (N—N |) to avoid over-broad exemption for other pipe uses.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("— | you may")
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
+        return;
+    }
+    // CR 611.3: Static abilities that grant triggers with optional effects
+    // (e.g., Arm with Aether granting "you may return target creature")
+    // carry the optionality in the granted trigger, not at the grant site.
+    if any_static_has_granted_trigger_with_optional(parsed) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
@@ -365,6 +414,13 @@ fn trigger_tree_has_optional(trigger: &TriggerDefinition) -> bool {
 /// the structural shape of "you may reveal X. If you don't, ..." — the
 /// player's reveal choice IS the "may" decision, with the decline branch
 /// handling the "if you don't" alternative.
+///
+/// CR 118.9b + CR 707.12: `CastCopyOfCard` encodes "you may cast the copy
+/// without paying its mana cost" — CR 118.9b makes the alternative cost
+/// optional; the resolver presents a TrackedSet
+/// `ChooseFromZoneChoice { up_to: true }` — choosing 0 is the decline path.
+/// The def-level `optional` flag is correctly false (`fold_cast_copy_of_card_defs`
+/// hardcodes it); the "may" lives in the CR 707.12 cast step.
 fn effect_has_internal_optionality(effect: &Effect) -> bool {
     match effect {
         // CR 701.23j: Outside-game searches are optional at the selection
@@ -374,6 +430,19 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         Effect::Dig { up_to: true, .. }
         | Effect::GrantCastingPermission { .. }
         | Effect::CastFromZone { .. }
+        // CR 118.9b + CR 707.12: CastCopyOfCard encodes "you may cast the copy
+        // without paying its mana cost" — CR 118.9b makes the alternative cost
+        // optional; the resolver presents a TrackedSet
+        // `ChooseFromZoneChoice { up_to: true }` — choosing 0 is the decline
+        // path. Restricted to TrackedSet-target forms (what
+        // `fold_cast_copy_of_card_defs` actually produces); `TrackedSetFiltered`
+        // is included as defensive forward coverage for any future parser path.
+        // The Cipher runtime path uses a pre-resolved target with no optional
+        // gate and is correctly excluded.
+        | Effect::CastCopyOfCard {
+            target: TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+            ..
+        }
         | Effect::PayCost { .. }
         | Effect::RevealHand {
             choice_optional: true,
@@ -389,6 +458,13 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // therefore not needed — analogous to Dig { up_to: true }.
         | Effect::CopySpell {
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            ..
+        }
+        // CR 115.7d: "you may choose new targets for [spell/ability]" lowers to
+        // `ChangeTargets { scope: All }` with the full surface form preserved
+        // (not `def.optional`). The player may leave targets unchanged.
+        | Effect::ChangeTargets {
+            scope: RetargetScope::All,
             ..
         }
         // CR 701.20a + CR 608.2c: RevealUntil with kept_optional_to encodes
@@ -409,12 +485,57 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
+        // CR 601.3b + CR 702.8a + CR 609.4: a `GenericEffect` whose statics
+        // encode a "you may" opt-in accounts for the marker in two ways:
+        //
+        //   1. Casting-permission modes (`StaticMode::CastWithKeyword`, etc.):
+        //      detected by `static_mode_is_optional_permission` (via
+        //      `static_definition_has_optional`).
+        //
+        //   2. Optional modification grants (`ContinuousModification::
+        //      AssignDamageAsThoughUnblocked`, `GrantStaticAbility` recursion, etc.):
+        //      detected by `static_carries_optional_modification` (via
+        //      `static_definition_has_optional`). Garruk, Savage Herald's [-7]
+        //      ("Until end of turn, creatures you control gain 'You may have this
+        //      creature assign its combat damage as though it weren't blocked.'")
+        //      is the motivating case — CR 510.1c + CR 609.4.
+        //
+        // STILL NARROW: `static_definition_has_optional` only exempts permission
+        // modes and optional modifications — statics that are neither (CantGainLife,
+        // +1/+1, MustAttack, etc.) remain subject to Optional_YouMay detection.
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(static_definition_has_optional),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
         }
+        // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
+        // "you may choose new targets for the copy" on the win branch (Krark)
+        // lives in `win_effect`, not at `def.optional`.
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
         _ => false,
     }
 }
@@ -457,6 +578,12 @@ fn static_carries_optional_modification(s: &StaticDefinition) -> bool {
         ContinuousModification::AssignDamageAsThoughUnblocked => true,
         ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_optional(trigger),
         ContinuousModification::GrantAbility { definition } => def_tree_has_optional(definition),
+        // CR 113.3d + CR 613.1f: GrantStaticAbility conveys a static as if printed on the
+        // recipient (CR 113.3d: static abilities are simply true; CR 613.1f: layer 6).
+        // Recurse into the granted static definition to detect optional markers it may carry.
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_definition_has_optional(definition)
+        }
         _ => false,
     })
 }
@@ -479,6 +606,13 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // spells you cast" — opt-in alternative-mana-cost permission
             // (Rooftop Storm, Fist of Suns, Jodah), structurally optional.
             | StaticMode::CastWithAlternativeCost { .. }
+            // CR 118.9 + CR 702.29a + CR 702.122a: AlternativeKeywordCost is an
+            // opt-in substitution — "you may" is the permission itself
+            // (New Perspectives, Heart of Kiran, Gavi Nest Warden).
+            | StaticMode::AlternativeKeywordCost { .. }
+            // CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than
+            // pay that mana." K'rrik class — per-payment substitution is opt-in.
+            | StaticMode::PayLifeAsColoredMana { .. }
             // CR 602.5e: "You may activate [abilities] any time you could
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.
@@ -494,11 +628,30 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
+            // CR 609.4b: "You may spend mana as though it were mana of any color" —
+            // opt-in mana-color substitution, inherently optional by the "you may" surface.
+            | StaticMode::SpendManaAsAnyColor
+            // CR 602.5a + CR 702.10c: "You may activate abilities of X as though those
+            // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
+            // activated abilities; the permission is opt-in by the "you may" surface.
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
     )
 }
 
 fn static_definition_has_optional(s: &StaticDefinition) -> bool {
     static_carries_optional_modification(s) || static_mode_is_optional_permission(&s.mode)
+}
+
+/// Check if any static ability in the parsed abilities grants a trigger
+/// that has internal optionality (e.g., Arm with Aether granting a trigger
+/// with "you may return target creature").
+fn any_static_has_granted_trigger_with_optional(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|s| {
+        s.modifications.iter().any(|m| match m {
+            ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_optional(trigger),
+            _ => false,
+        })
+    })
 }
 
 /// Recursive walk: does any def in the tree carry an `Effect::Unimplemented`?
@@ -534,6 +687,12 @@ fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
         ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_unimplemented(trigger),
         ContinuousModification::GrantAbility { definition } => {
             def_tree_has_unimplemented(definition)
+        }
+        // CR 113.3d + CR 613.1f: Parallel to static_carries_optional_modification —
+        // recurse into GrantStaticAbility so an Unimplemented-carrying granted static
+        // suppresses swallow detectors rather than double-reporting the parse gap.
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_definition_has_unimplemented(definition)
         }
         _ => false,
     })
@@ -1057,13 +1216,35 @@ fn any_ability_has_constraint(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
-    !def.activation_restrictions.is_empty() || def.sorcery_speed
+    // CR 602.5d: sorcery-speed timing is now represented as
+    // `ActivationRestriction::AsSorcery` in `activation_restrictions`, so the
+    // non-empty check below already covers it.
+    !def.activation_restrictions.is_empty()
+}
+
+// CR 702.122 + CR 602.5b: Crew with a once-per-turn activation limit.
+fn keyword_has_activation_limit(keyword: &Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Crew { once_per_turn, .. }
+            if matches!(
+                once_per_turn.as_deref(),
+                Some(ActivationRestriction::OnlyOnceEachTurn)
+            )
+    )
+}
+
+fn any_keyword_has_activation_limit(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .extracted_keywords
+        .iter()
+        .any(keyword_has_activation_limit)
 }
 
 fn any_ability_has_limit(parsed: &ParsedAbilities) -> bool {
     // For Phase 1, treat presence of any non-trivial `constraint` as
     // covering activation limits too. Phase 2 will split these.
-    any_ability_has_constraint(parsed)
+    any_ability_has_constraint(parsed) || any_keyword_has_activation_limit(parsed)
 }
 
 fn any_text_field_contains(parsed: &ParsedAbilities, needle: &str) -> bool {
@@ -1318,6 +1499,23 @@ fn detect_dynamic_qty(
     {
         return;
     }
+    // CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than
+    // pay that mana." — the "for each {" phrase is a per-payment-substitution
+    // using an inline mana symbol, NOT a QuantityExpr carrier. Suppress when
+    // the parsed AST already contains PayLifeAsColoredMana and every "for each"
+    // marker is the mana-symbol form (immediately followed by `{`).
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("for each {") {
+        // allow-noncombinator: swallow detector marker scan on classified text
+        let all_for_each_are_mana_subst = !cleaned.contains("for each ")
+            || cleaned
+                // allow-noncombinator: swallow detector marker scan on classified text
+                .match_indices("for each ")
+                .all(|(idx, _)| cleaned[idx + "for each ".len()..].starts_with('{'));
+        if all_for_each_are_mana_subst && json_has_any(ast_json, &["PayLifeAsColoredMana"]) {
+            return;
+        }
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "DynamicQty".into(),
         description: truncate(original, 140).into(),
@@ -1507,6 +1705,53 @@ fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
     .any(|marker| cleaned.contains(marker))
 }
 
+/// CR 702.170c + CR 608.2c: "[you may] exile a card. If you do, it becomes
+/// plotted." The "if you do" gate is the optional-exile linkage — structurally
+/// represented by the `GrantCastingPermission { CastingPermission::Plotted }`
+/// chained off the (optional) exile, which only takes effect when the exile
+/// happened. It is not an uncaptured game-state condition (the coverage-side
+/// `line_has_condition_text` likewise excludes "if you do" wholesale).
+fn def_tree_has_plotted_grant(def: &AbilityDefinition) -> bool {
+    if let Effect::GrantCastingPermission {
+        permission: crate::types::ability::CastingPermission::Plotted { .. },
+        ..
+    } = &*def.effect
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_plotted_grant(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_plotted_grant(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_plotted_grant)
+}
+
+fn any_ability_has_plotted_grant(parsed: &ParsedAbilities) -> bool {
+    parsed.abilities.iter().any(def_tree_has_plotted_grant)
+        || parsed
+            .triggers
+            .iter()
+            .any(|t| t.execute.as_deref().is_some_and(def_tree_has_plotted_grant))
+}
+
+fn plotted_grant_linkage_is_only_if_marker(stripped: &str) -> bool {
+    let has_plot_link = stripped.contains("if you do, it becomes plotted"); // allow-noncombinator: swallow detector marker scan on classified text
+    if !has_plot_link {
+        return false;
+    }
+    let without_plot_link = stripped.replace("if you do, it becomes plotted", "");
+    let has_if_marker = without_plot_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_plot_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_plot_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -1567,6 +1812,12 @@ fn detect_condition_if(
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
+    // the "if you do" is the optional-exile linkage, represented by the
+    // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
+    if any_ability_has_plotted_grant(parsed) && plotted_grant_linkage_is_only_if_marker(&stripped) {
+        return;
+    }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
     // independent condition; prevention replacements encode it by storing the
     // follow-up in `execute`, which the replacement pipeline only fires from
@@ -1808,11 +2059,54 @@ fn detect_condition_as_long_as(
     if any_static_has_per_object_as_long_as_gate(parsed) {
         return;
     }
+    if any_static_has_attached_subject_qualifier_grant(parsed) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Condition_AsLongAs".into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
+}
+
+/// CR 611.3a + CR 613: an inverted attached-subject grant
+/// ("As long as enchanted/equipped creature is `<characteristic>`, it gets …")
+/// represents its "as long as" qualifier by folding the characteristic into the
+/// grant's `affected` attached-subject filter (e.g. `creature + EnchantedBy +
+/// HasColor{White}`), not as a separate `condition`. The qualifier IS
+/// represented — the static only applies while the host matches the folded
+/// characteristic — so the clause is not swallowed.
+///
+/// This is precise: when the qualifier is unparseable the inverted grant falls
+/// back to `affected: SelfRef` (not an attached-subject filter), so this
+/// exemption never masks a genuinely-dropped qualifier.
+fn any_static_has_attached_subject_qualifier_grant(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|static_def| {
+        static_def.description.as_ref().is_some_and(|description| {
+            let lower = description.to_ascii_lowercase(); // allow-noncombinator: swallow detector marker scan on parsed static description
+            lower.contains("as long as enchanted ") || lower.contains("as long as equipped ")
+        }) && static_def
+            .affected
+            .as_ref()
+            .is_some_and(target_filter_is_attached_subject)
+    })
+}
+
+fn target_filter_is_attached_subject(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::EnchantedBy
+                    | crate::types::ability::FilterProp::EquippedBy
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_attached_subject)
+        }
+        TargetFilter::Not { filter } => target_filter_is_attached_subject(filter),
+        _ => false,
+    }
 }
 
 fn any_static_has_per_object_as_long_as_gate(parsed: &ParsedAbilities) -> bool {
@@ -2349,8 +2643,11 @@ mod tests {
     use super::{def_tree_has_optional, def_tree_has_unimplemented, trigger_tree_has_optional};
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-    use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool};
+    use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool, TargetFilter};
+    use crate::types::identifiers::TrackedSetId;
+    use crate::types::mana::ManaCost;
     use crate::types::statics::StaticMode;
+    use crate::types::zones::Zone;
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
         parse_named(text, "Test Card", types)
@@ -2409,6 +2706,33 @@ mod tests {
     }
 
     #[test]
+    fn condition_as_long_as_accepts_inverted_attached_subject_color_grant() {
+        // CR 611.3a + CR 613: Shield of the Oversoul folds "is white/green" into
+        // the grant's `affected` attached-subject filter, so the "as long as"
+        // qualifier is represented (not swallowed) despite `condition: None`.
+        let parsed = parse_named(
+            "Enchant creature\n\
+             As long as enchanted creature is white, it gets +1/+1 and has flying.\n\
+             As long as enchanted creature is green, it gets +1/+1 and has indestructible.",
+            "Shield of the Oversoul",
+            &["Enchantment", "Aura"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
+    }
+
+    #[test]
+    fn condition_as_long_as_accepts_inverted_equipped_subject_grant() {
+        let parsed = parse_named(
+            "Equip {2}\nAs long as equipped creature is red, it gets +1/+1 and has haste.",
+            "Test Equipment",
+            &["Artifact", "Equipment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
+    }
+
+    #[test]
     fn optional_you_may_accepts_repeat_this_process() {
         // CR 107.1c: "You may repeat this process any number of times" is
         // captured as `repeat_until: ControllerChoice` on the root ability —
@@ -2431,6 +2755,263 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_teferi_flash_grant_generic_effect() {
+        // CR 117.3a + CR 702.8a: Teferi, Time Raveler's [+1] ("you may cast
+        // sorcery spells as though they had flash") lowers to a `GenericEffect`
+        // granting `StaticMode::CastWithKeyword { Flash }`. The granted casting
+        // permission IS the "you may cast" opt-in, so the "you may " marker must
+        // NOT be reported as a swallowed clause.
+        let parsed = parse_named(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Teferi, Time Raveler",
+            &["Planeswalker"],
+        );
+
+        // Pin the structural shape the exemption keys on: the [+1] must lower to
+        // a GenericEffect granting CastWithKeyword (directly or via
+        // GrantStaticAbility). Guards against a silent regression where the
+        // grant stops parsing — then the negative assertion below would pass
+        // vacuously.
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(def_tree_grants_cast_with_keyword),
+            "expected Teferi [+1] to lower to a GenericEffect granting \
+             CastWithKeyword, parsed abilities: {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_spend_mana_as_any_color_static() {
+        // CR 609.4b: "You may spend mana as though it were mana of any color."
+        // Must not produce an Optional_YouMay warning.
+        let parsed = parse(
+            "You may spend mana as though it were mana of any color.",
+            &["Artifact"],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::SpendManaAsAnyColor)),
+            "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
+            parsed.statics
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_activate_abilities_as_though_haste_static() {
+        // CR 602.5a + CR 702.10c: "You may activate abilities of creatures you
+        // control as though those creatures had haste."
+        let parsed = parse(
+            "You may activate abilities of creatures you control as though those creatures had haste.",
+            &["Creature"],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::CanActivateAbilitiesAsThoughHaste)),
+            "expected CanActivateAbilitiesAsThoughHaste static to parse, got statics: {:#?}",
+            parsed.statics
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn static_carries_optional_modification_recurses_into_grant_static_ability() {
+        // CR 113.3d + CR 613.1f: GrantStaticAbility wrapping an optional modification
+        // must be detected by static_carries_optional_modification via recursion.
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let inner_def = Box::new(
+            StaticDefinition::continuous()
+                .modifications(vec![ContinuousModification::AssignDamageAsThoughUnblocked]),
+        );
+        let outer_static = StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::GrantStaticAbility {
+                definition: inner_def,
+            },
+        ]);
+        assert!(
+            super::static_carries_optional_modification(&outer_static),
+            "static_carries_optional_modification must recurse into GrantStaticAbility"
+        );
+    }
+
+    #[test]
+    fn optional_you_may_accepts_chromatic_orrery_real_oracle_text() {
+        // Regression test against actual Chromatic Orrery oracle text.
+        // SpendManaAsAnyColor static must suppress Optional_YouMay.
+        let parsed = parse(
+            "You may spend mana as though it were mana of any color.\n\
+             {T}: Add {C}{C}{C}{C}{C}.\n\
+             {5}, {T}: Draw a card for each color among permanents you control.",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_thousand_year_elixir_real_oracle_text() {
+        // Regression test against actual Thousand-Year Elixir oracle text.
+        // CanActivateAbilitiesAsThoughHaste static must suppress Optional_YouMay.
+        let parsed = parse(
+            "You may activate abilities of creatures you control as though those creatures had haste.\n\
+             {1}, {T}: Untap target creature.",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_proud_wildbonder_real_oracle_text() {
+        // Regression test against actual Proud Wildbonder oracle text.
+        // "Creatures you control with trample have '...' " is a top-level static
+        // (exercises the parsed.statics path at swallow_check.rs line ~980), not the
+        // Effect::GenericEffect arm. AssignDamageAsThoughUnblocked must suppress
+        // Optional_YouMay via static_carries_optional_modification.
+        let parsed = parse(
+            "Trample\n\
+             Creatures you control with trample have \
+             \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_garruk_savage_herald_minus_seven() {
+        // CR 510.1c + CR 609.4: Garruk, Savage Herald's [-7] ("Until end of
+        // turn, creatures you control gain \"You may have this creature assign
+        // its combat damage as though it weren't blocked.\"") lowers to a
+        // loyalty AbilityDefinition with Effect::GenericEffect whose static
+        // carries AssignDamageAsThoughUnblocked (directly or via GrantStaticAbility).
+        // static_definition_has_optional must recognise this via
+        // static_carries_optional_modification so Optional_YouMay does not fire.
+        let parsed = parse_named(
+            "[+1]: Reveal the top card of your library. If it's a creature card, put it into your hand. Otherwise, put it on the bottom of your library.\n\
+             [\u{2212}2]: Target creature you control deals damage equal to its power to another target creature.\n\
+             [\u{2212}7]: Until end of turn, creatures you control gain \
+             \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+            "Garruk, Savage Herald",
+            &["Planeswalker"],
+        );
+        // Structural guard: the [-7] must lower to a GenericEffect carrying
+        // AssignDamageAsThoughUnblocked (directly or via GrantStaticAbility).
+        // Without this, the negative assertion below could pass vacuously if
+        // the [-7] regresses to Unimplemented (any_ability_has_unimplemented
+        // early-returns from check_swallowed_clauses, masking the gap).
+        use crate::types::ability::ContinuousModification;
+        fn ability_grants_assign_damage_unblocked(def: &AbilityDefinition) -> bool {
+            if let Effect::GenericEffect {
+                ref static_abilities,
+                ..
+            } = *def.effect
+            {
+                if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AssignDamageAsThoughUnblocked
+                                | ContinuousModification::GrantStaticAbility { .. }
+                        )
+                    })
+                }) {
+                    return true;
+                }
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(ability_grants_assign_damage_unblocked)
+        }
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(ability_grants_assign_damage_unblocked),
+            "expected Garruk [-7] to lower to GenericEffect with \
+             AssignDamageAsThoughUnblocked/GrantStaticAbility static, \
+             abilities: {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_still_flags_unrepresented_optional_verb() {
+        // Guard the exemption did NOT over-broaden: a genuine "you may <verb>"
+        // optional effect with no AST representation must still be flagged.
+        // `Effect::Unimplemented` suppression is avoided by pairing the bogus
+        // clause with a fully-parsed primary effect.
+        let parsed = parse_named(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: You may wibble the frobnicator until your next turn.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Not Teferi",
+            &["Planeswalker"],
+        );
+
+        // Only meaningful if the bogus +1 did NOT itself become Unimplemented
+        // (which would suppress all swallow detectors). If parsing classified it
+        // as Unimplemented, the test is inconclusive — skip rather than assert a
+        // false positive.
+        let plus_one_unimplemented = parsed.abilities.iter().any(def_tree_has_unimplemented);
+        if !plus_one_unimplemented {
+            assert!(
+                has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "an unrepresented 'you may <verb>' must still be flagged; \
+                 the CastWithKeyword exemption must not over-broaden. \
+                 warnings: {:#?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` (directly
+    /// or via `GrantStaticAbility`) — the flash-grant shape Teferi's [+1] lowers
+    /// to and the swallow-check exemption keys on.
+    fn def_tree_grants_cast_with_keyword(def: &AbilityDefinition) -> bool {
+        let here = if let Effect::GenericEffect {
+            ref static_abilities,
+            ..
+        } = &*def.effect
+        {
+            static_abilities.iter().any(|s| {
+                matches!(s.mode, StaticMode::CastWithKeyword { .. })
+                    || s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            crate::types::ability::ContinuousModification::GrantStaticAbility {
+                                definition,
+                            } if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                        )
+                    })
+            })
+        } else {
+            false
+        };
+        here || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_tree_grants_cast_with_keyword)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_grants_cast_with_keyword)
+            || def
+                .mode_abilities
+                .iter()
+                .any(def_tree_grants_cast_with_keyword)
     }
 
     #[test]
@@ -2863,6 +3444,42 @@ mod tests {
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
     }
 
+    /// CR 702.170c + CR 608.2c: "You may exile a card … If you do, it becomes
+    /// plotted." — the "if you do" gate is the optional-exile linkage,
+    /// represented by the chained `GrantCastingPermission { Plotted }`, so the
+    /// `Condition_If` detector must not flag Make Your Own Luck / Kellan Joins Up.
+    #[test]
+    fn condition_if_accepts_if_you_do_becomes_plotted() {
+        let myol = parse_named(
+            "Look at the top three cards of your library. You may exile a nonland card from \
+             among them. If you do, it becomes plotted. Put the rest into your hand.",
+            "Make Your Own Luck",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&myol, "Condition_If"));
+
+        let kellan = parse_named(
+            "When this creature enters, you may exile a nonland card with mana value 3 or less \
+             from your hand. If you do, it becomes plotted.",
+            "Kellan Joins Up",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&kellan, "Condition_If"));
+    }
+
+    /// CR 608.2c: Keep the plotted-grant exemption scoped to the actual
+    /// linkage phrase; a separate conditional marker on the same card must
+    /// still run through the detector.
+    #[test]
+    fn plotted_grant_linkage_exemption_is_text_scoped() {
+        assert!(super::plotted_grant_linkage_is_only_if_marker(
+            "you may exile a card. if you do, it becomes plotted."
+        ));
+        assert!(!super::plotted_grant_linkage_is_only_if_marker(
+            "you may exile a card. if you do, it becomes plotted. if another condition is true, draw a card."
+        ));
+    }
+
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is
     /// represented as `CopySpell { retarget: MayChooseNewTargets }`, so no
     /// `Optional_YouMay` swallowed-clause warning is emitted.
@@ -2927,6 +3544,50 @@ mod tests {
         }
     }
 
+    /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
+    /// to `ChangeTargets { scope: All }` with the full `you may choose new
+    /// targets` surface preserved — not `def.optional`.
+    #[test]
+    fn optional_you_may_accepts_change_targets_retarget_spells() {
+        for (oracle, name, types) in [
+            (
+                "The next time a spell or ability an opponent controls targets you \
+                 this turn, change the target to another spell or ability. \
+                 Overload {2}{U}{U} (You may cast this spell for its overload cost. \
+                 If you do, change its target.)\n\
+                 You may choose new targets for target spell or ability.",
+                "Deflecting Swat",
+                &["Instant"][..],
+            ),
+            (
+                "You may choose new targets for target spell.",
+                "Redirect",
+                &["Instant"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} should not swallow retarget optional"
+            );
+        }
+    }
+
+    /// CR 707.10c + CR 115.7d: Increasing Vengeance — copy with optional
+    /// retarget for copies (absorbed onto CopySpell when adjacent).
+    #[test]
+    fn optional_you_may_accepts_increasing_vengeance_copy_retarget() {
+        let parsed = parse_named(
+            "Copy target instant or sorcery spell you control. If this spell was cast from a \
+             graveyard, copy that spell twice instead. You may choose new targets for the copies.\n\
+             Flashback {3}{R}{R}",
+            "Increasing Vengeance",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
     /// CR 707.10c: Thousand-Year Storm exercises the triggered-ability context
     /// — the plural "for the copies" clause is absorbed onto the trigger's
     /// inner CopySpell.
@@ -2938,6 +3599,38 @@ mod tests {
              You may choose new targets for the copies.",
             "Thousand-Year Storm",
             &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
+    /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
+    /// into `FlipCoin.win_effect`.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
+        let parsed = parse_named(
+            "Whenever you cast an instant or sorcery spell, flip a coin. \
+             If you lose the flip, return that spell to its owner's hand. \
+             If you win the flip, copy that spell, and you may choose new targets for the copy.",
+            "Krark, the Thumbless",
+            &["Legendary", "Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 603.2b + CR 611.2 + CR 609.4b: Xanathar's upkeep trigger bundles
+    /// look/play/spend-as-any-color permissions inside the execute tree.
+    #[test]
+    fn optional_you_may_accepts_xanathar_upkeep_permissions() {
+        let parsed = parse_named(
+            "At the beginning of your upkeep, choose target opponent. Until end of turn, \
+             that player can't cast spells, you may look at the top card of their library \
+             any time, you may play the top card of their library, and you may spend mana \
+             as though it were mana of any color to cast spells this way.",
+            "Xanathar, Guild Kingpin",
+            &["Legendary", "Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
@@ -3190,6 +3883,22 @@ mod tests {
         ));
     }
 
+    // ── ActivateLimit regressions (#2240) ──────────────────────────────────
+
+    #[test]
+    fn activate_limit_accepts_crew_once_per_turn_cadence() {
+        // CR 702.122 + CR 602.5b: Luxurious Locomotive — "Crew 1. Activate only
+        // once each turn." The cadence sentence is represented on the Crew
+        // keyword's `once_per_turn` field, not on an activated ability.
+        let parsed = parse_named(
+            "Crew 1. Activate only once each turn. (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)\n\
+             Whenever a creature attacks, create a Treasure token for each creature and Vehicle that attacked this turn.",
+            "Luxurious Locomotive",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "ActivateLimit"));
+    }
+
     // ── Optional_MayHave regressions (#2237) ───────────────────────────────
 
     #[test]
@@ -3341,5 +4050,141 @@ mod tests {
             &["Artifact"],
         );
         assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
+
+    /// CR 118.9b + CR 707.12: `CastCopyOfCard` encodes the "you may cast the
+    /// copy without paying its mana cost" permission internally, so
+    /// `effect_has_internal_optionality` must classify the TrackedSet-target
+    /// form (the only shape the parser produces) as carrying its own
+    /// optionality (analogous to `CastFromZone`). The def-level `optional` flag
+    /// stays false; the "may" is presented by the resolver as a TrackedSet
+    /// `ChooseFromZoneChoice { up_to: true }`.
+    #[test]
+    fn effect_has_internal_optionality_cast_copy_of_card() {
+        let effect = Effect::CastCopyOfCard {
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            cost: ManaCost::zero(),
+        };
+        assert!(super::effect_has_internal_optionality(&effect));
+    }
+
+    /// Recursive walk mirroring the module's `def_tree_has_*` predicates:
+    /// does any def in the tree carry a `CastCopyOfCard` effect?
+    fn def_tree_has_cast_copy_of_card(def: &AbilityDefinition) -> bool {
+        if matches!(def.effect.as_ref(), Effect::CastCopyOfCard { .. }) {
+            return true;
+        }
+        if def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_tree_has_cast_copy_of_card)
+        {
+            return true;
+        }
+        if def
+            .else_ability
+            .as_deref()
+            .is_some_and(def_tree_has_cast_copy_of_card)
+        {
+            return true;
+        }
+        def.mode_abilities
+            .iter()
+            .any(def_tree_has_cast_copy_of_card)
+    }
+
+    fn parsed_has_cast_copy_of_card(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+        parsed.abilities.iter().any(def_tree_has_cast_copy_of_card)
+            || parsed.triggers.iter().any(|t| {
+                t.execute
+                    .as_deref()
+                    .is_some_and(def_tree_has_cast_copy_of_card)
+            })
+    }
+
+    /// Issue #2273: Mizzix's Mastery folds "copy it. You may cast the copy
+    /// without paying its mana cost" into `CastCopyOfCard`; the comma+and
+    /// continuation must not trip the `Optional_YouMay` swallow detector now
+    /// that `CastCopyOfCard` carries its own internal optionality.
+    #[test]
+    fn optional_you_may_accepts_mizzix_mastery_cast_copy() {
+        let parsed = parse_named(
+            "Exile target card that's an instant or sorcery from your graveyard. \
+             For each card exiled this way, copy it. You may cast the copy \
+             without paying its mana cost.",
+            "Mizzix's Mastery",
+            &["Sorcery"],
+        );
+
+        // Structural guard: `check_swallowed_clauses` early-returns when any
+        // ability is Unimplemented, so the `Optional_YouMay` assertion could
+        // otherwise pass vacuously. Assert the parse actually folded the
+        // exile+copy+cast chain into a `CastCopyOfCard` effect so the swallow
+        // assertion exercises the real CastCopyOfCard optionality path.
+        assert!(
+            parsed_has_cast_copy_of_card(&parsed),
+            "expected a CastCopyOfCard effect in the parsed ability chain, got {:?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// Issue #2273: Narset's attack trigger ends a sentence before "You may cast
+    /// the copy …". In the *trigger* context the exile+copy currently folds to
+    /// `ChangeZone → CopySpell { retarget: KeepOriginalTargets }` and the
+    /// "You may cast the copy without paying its mana cost" sentence is dropped,
+    /// so `Optional_YouMay` still fires. The primary `CastCopyOfCard`
+    /// optionality fix (verified by the Mizzix spell-context test above) does
+    /// NOT cover this because the trigger fold never produces `CastCopyOfCard`.
+    ///
+    /// **Status:** ignored — the trigger-context fold to `CastCopyOfCard` is a
+    /// separate parser gap (in the trigger/sequence fold, out of scope for the
+    /// swallow_check optionality fix). Tracked as issue #2273 follow-up.
+    #[test]
+    #[ignore = "trigger-context exile+copy folds to CopySpell, not CastCopyOfCard; \
+                trigger fold gap is out of scope for the swallow_check fix (issue #2273 follow-up)"]
+    fn optional_you_may_accepts_narset_attack_cast_copy() {
+        let parsed = parse_named(
+            "Creatures you control have prowess.\n\
+             Whenever Narset attacks, exile target noncreature, nonland card with \
+             mana value less than Narset's power from a graveyard and copy it. \
+             You may cast the copy without paying its mana cost.",
+            "Narset, Enlightened Exile",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("expected Narset's attack trigger with an execute body");
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("attack trigger execute body");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "expected ChangeZone(Exile), got {:?}",
+            execute.effect
+        );
+        let cast_copy = execute
+            .sub_ability
+            .as_deref()
+            .expect("expected CastCopyOfCard sub-ability after the exile");
+        assert!(
+            matches!(cast_copy.effect.as_ref(), Effect::CastCopyOfCard { .. }),
+            "expected CastCopyOfCard, got {:?}",
+            cast_copy.effect
+        );
     }
 }

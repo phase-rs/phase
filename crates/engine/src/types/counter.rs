@@ -158,6 +158,62 @@ impl<'de> serde::Deserialize<'de> for CounterType {
     }
 }
 
+pub(crate) mod counter_map_serde {
+    use super::*;
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub(crate) fn serialize<S>(
+        map: &HashMap<CounterType, u32>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
+        for (counter_type, count) in map {
+            ser_map.serialize_entry(counter_type.as_str().as_ref(), count)?;
+        }
+        ser_map.end()
+    }
+
+    pub(crate) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<CounterType, u32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CounterMapVisitor;
+
+        impl<'de> Visitor<'de> for CounterMapVisitor {
+            type Value = HashMap<CounterType, u32>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a map of counter type keys to counts")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut map = HashMap::new();
+                while let Some((counter_type, count)) = access.next_entry::<CounterType, u32>()? {
+                    let total = map.entry(counter_type).or_insert(0_u32);
+                    let next = (*total)
+                        .checked_add(count)
+                        .ok_or_else(|| de::Error::custom("counter count overflow"))?;
+                    *total = next;
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(CounterMapVisitor)
+    }
+}
+
 /// Which counter(s) a predicate is matching against.
 ///
 /// CR 122.1: "A counter is a marker placed on an object or player…" — some
@@ -212,8 +268,10 @@ pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
         return None;
     }
     match trimmed {
-        "P1P1" | "+1/+1" | "plus1plus1" => return Some(CounterType::Plus1Plus1),
-        "M1M1" | "-1/-1" | "minus1minus1" => return Some(CounterType::Minus1Minus1),
+        // Lowercase legacy keys: the pre-fix debug menu persisted these as
+        // generic counters; alias them so saved states migrate to typed P/T counters.
+        "P1P1" | "p1p1" | "+1/+1" | "plus1plus1" => return Some(CounterType::Plus1Plus1),
+        "M1M1" | "m1m1" | "-1/-1" | "minus1minus1" => return Some(CounterType::Minus1Minus1),
         "LOYALTY" | "loyalty" => return Some(CounterType::Loyalty),
         "defense" | "DEFENSE" => return Some(CounterType::Defense),
         "stun" => return Some(CounterType::Stun),
@@ -359,11 +417,28 @@ mod tests {
         assert_eq!(parse_counter_type("+1/+1"), CounterType::Plus1Plus1);
         assert_eq!(parse_counter_type("-1/-1"), CounterType::Minus1Minus1);
         assert_eq!(parse_counter_type("P1P1"), CounterType::Plus1Plus1);
+        assert_eq!(parse_counter_type("p1p1"), CounterType::Plus1Plus1);
         assert_eq!(parse_counter_type("M1M1"), CounterType::Minus1Minus1);
+        assert_eq!(parse_counter_type("m1m1"), CounterType::Minus1Minus1);
         assert_eq!(
             parse_counter_type("MINING"),
             CounterType::Generic("mining".to_string())
         );
+    }
+
+    #[test]
+    fn sums_legacy_duplicate_counter_keys_on_deserialize() {
+        #[derive(serde::Deserialize)]
+        struct CounterMapFixture {
+            #[serde(with = "super::counter_map_serde")]
+            counters: HashMap<CounterType, u32>,
+        }
+
+        let fixture: CounterMapFixture =
+            serde_json::from_str(r#"{"counters":{"P1P1":2,"p1p1":3,"M1M1":1,"m1m1":4}}"#).unwrap();
+
+        assert_eq!(fixture.counters.get(&CounterType::Plus1Plus1), Some(&5));
+        assert_eq!(fixture.counters.get(&CounterType::Minus1Minus1), Some(&5));
     }
 
     #[test]

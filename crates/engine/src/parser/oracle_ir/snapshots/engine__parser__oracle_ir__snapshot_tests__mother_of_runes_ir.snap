@@ -50,7 +50,6 @@ expression: "&ir"
         "duration": "UntilEndOfTurn",
         "description": "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

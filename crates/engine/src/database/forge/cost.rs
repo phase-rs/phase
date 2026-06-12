@@ -32,10 +32,7 @@ pub(crate) fn translate_cost(cost_str: &str) -> Result<AbilityCost, ForgeTransla
                     .and_then(|s| s.strip_suffix('>'))
                     .unwrap_or("");
                 let (count, filter) = parse_count_filter(inner)?;
-                costs.push(AbilityCost::Sacrifice {
-                    target: filter,
-                    count,
-                });
+                costs.push(AbilityCost::Sacrifice(SacrificeCost::count(filter, 1)));
             }
 
             // Pay life: PayLife<N>
@@ -69,8 +66,8 @@ pub(crate) fn translate_cost(cost_str: &str) -> Result<AbilityCost, ForgeTransla
                 costs.push(AbilityCost::Discard {
                     count,
                     filter,
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 });
             }
 
@@ -236,9 +233,9 @@ mod tests {
     #[test]
     fn test_sacrifice_cost() {
         match translate_cost("Sac<1/CARDNAME>").unwrap() {
-            AbilityCost::Sacrifice { target, count } => {
-                assert_eq!(count, 1);
-                assert_eq!(target, TargetFilter::SelfRef);
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(cost.requirement.fixed_count(), Some(1));
+                assert_eq!(cost.target, TargetFilter::SelfRef);
             }
             other => panic!("expected Sacrifice, got {other:?}"),
         }

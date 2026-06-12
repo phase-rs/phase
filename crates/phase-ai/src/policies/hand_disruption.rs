@@ -15,6 +15,8 @@ use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::strategy_helpers::best_proactive_cast_score;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct HandDisruptionPolicy;
 
@@ -285,7 +287,7 @@ mod tests {
                     target: TargetFilter::Any,
                     card_filter: TargetFilter::Any,
                     count: None,
-                    random: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                 },
             ),
@@ -296,6 +298,8 @@ mod tests {
                 object_id: discard,
                 card_id: CardId(10),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -349,7 +353,7 @@ mod tests {
                         properties: vec![],
                     }),
                     count: None,
-                    random: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                 },
             )
@@ -418,7 +422,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             Vec::new(),
@@ -545,7 +549,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             Vec::new(),
@@ -635,7 +639,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             Vec::new(),
@@ -697,7 +701,7 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             card_filter: TargetFilter::Any,
             count: None,
-            random: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         };
         assert!(reveal_hand_matches_chosen_player_target(
@@ -717,7 +721,7 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::creature()),
             card_filter: TargetFilter::Any,
             count: None,
-            random: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         };
         assert!(!reveal_hand_matches_chosen_player_target(

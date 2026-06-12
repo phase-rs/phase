@@ -13,11 +13,12 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
     DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
-    FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
-    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    EffectScope, FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -86,6 +87,8 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
+            // CR 509.1b: BlockRestriction carries the allowed-attacker filter.
+            | StaticMode::BlockRestriction { .. }
             // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
             // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
             // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
@@ -341,6 +344,14 @@ pub struct SetCoverageSummary {
 /// Extract the effect variant name (e.g. "DealDamage", "Draw", "Unimplemented")
 /// by serializing to JSON and reading the serde `type` tag.
 fn effect_type_name(effect: &Effect) -> String {
+    // CR 701.26a/b: `Effect::SetTapState` serializes under one `"type"` tag,
+    // but the diagnostic label must preserve the four legacy names
+    // (Tap/Untap/TapAll/UntapAll) so per-effect coverage reporting reads the
+    // same set as before the collapse. `effect_variant_name` reconstructs them
+    // from `(scope, state)`.
+    if matches!(effect, Effect::SetTapState { .. }) {
+        return crate::types::ability::effect_variant_name(effect).to_string();
+    }
     serde_json::to_value(effect)
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
@@ -362,19 +373,27 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
-        TargetFilter::StackAbility { controller: None } => "ability on stack".into(),
+        TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+        } => "ability on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::You),
+            tag: None,
         } => "ability you control on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::Opponent),
+            tag: None,
         } => "ability opponent controls on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(controller),
+            tag: None,
         } => format!("ability scoped to {controller:?} on stack"),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
+        TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
@@ -433,7 +452,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
+            FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
+            FilterProp::HasHasteOrControlledSinceTurnBegan => {
+                parts.push("haste or controlled since turn began".into())
+            }
             FilterProp::WithKeyword { value } => parts.push(format!("with {value:?}")),
             FilterProp::CanEnchant { target } => {
                 parts.push(format!("can enchant {}", fmt_target(target)))
@@ -506,7 +529,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
-                let qualifier = if *exclude_source { " another" } else { "" };
+                let qualifier = if exclude_source.is_exclude() {
+                    " another"
+                } else {
+                    ""
+                };
                 match controller {
                     None => parts.push(format!("attached by{qualifier} {kind_s}")),
                     Some(c) => parts.push(format!(
@@ -605,6 +632,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
             FilterProp::Historic => parts.push("historic".into()),
+            FilterProp::NotHistoric => parts.push("nonhistoric".into()),
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
@@ -902,6 +930,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeTotal { player } => {
             format!("life total ({})", fmt_player_scope(player))
         }
+        QuantityRef::UnspentMana { color } => match color {
+            Some(c) => format!("unspent {c:?} mana you have"),
+            None => "unspent mana you have".to_string(),
+        },
         QuantityRef::GraveyardSize { player } => {
             format!("cards in graveyard ({})", fmt_player_scope(player))
         }
@@ -964,6 +996,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             None => format!("counters on {}", fmt_target(filter)),
         },
         QuantityRef::Variable { name } => name.clone(),
+        QuantityRef::Intensity { .. } => "intensity".into(),
         QuantityRef::Power { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
                 "self power".into()
@@ -1071,6 +1104,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             zone,
             card_types,
             scope,
+            filter,
         } => {
             let types = if card_types.is_empty() {
                 "cards".into()
@@ -1082,11 +1116,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                     .join("/")
                     + " cards"
             };
-            format!(
+            let base = format!(
                 "{types} in {} {}",
                 fmt_count_scope(scope),
                 fmt_zone_ref(zone)
-            )
+            );
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
+            }
         }
         QuantityRef::BasicLandTypeCount { controller } => {
             format!(
@@ -1100,6 +1138,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
+        QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter } => {
@@ -1177,7 +1216,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
-        QuantityRef::AttackedThisTurn => "attacked this turn".into(),
+        QuantityRef::AttackedThisTurn { .. } => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             format!("loyalty abilities activated this turn ({player:?})")
@@ -1271,6 +1310,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::DefendingPlayer => "defending player",
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
+        PlayerFilter::HasLostTheGame => "each player who has lost the game",
         PlayerFilter::OpponentDealtCombatDamage { .. } => {
             "each opponent who was dealt combat damage this turn"
         }
@@ -1425,6 +1465,13 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         }
         ManaProduction::DistinctColorsAmongPermanents { filter } => {
             format!("1 of each color among {}", fmt_target(filter))
+        }
+        ManaProduction::AnyOneColorAmongPermanents { count, filter, .. } => {
+            format!(
+                "1 of any color among {} x{}",
+                fmt_target(filter),
+                fmt_quantity(count)
+            )
         }
         ManaProduction::TriggerEventManaType => "1 of the triggering mana's type".to_string(),
     }
@@ -1664,9 +1711,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("filter".into(), fmt_target(target)));
             }
         }
+        // CR 701.26a/b: single-target tap/untap reports its `target` like other
+        // single-target effects; the mass scope reports a `filter` below.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::Destroy { target, .. }
-        | Effect::Tap { target }
-        | Effect::Untap { target }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
@@ -1687,9 +1741,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Regenerate { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
+        Effect::EpicCopy { .. } => {}
+        Effect::Intensify { .. } => {}
+        Effect::TurnFaceUp { .. } => {}
         Effect::DestroyAll { target, .. }
-        | Effect::TapAll { target }
-        | Effect::UntapAll { target }
+        // CR 613.1b: mass gain-control reports its population `filter` like the
+        // other mass effects (Hellkite Tyrant — "all artifacts that player controls").
+        | Effect::GainControlAll { target, .. }
+        // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
+        // population `filter`, like the other mass effects.
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::DamageAll {
@@ -1790,12 +1856,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             d.push(("token".into(), desc));
         }
-        Effect::AddCounter {
-            counter_type,
-            count,
-            target,
-        }
-        | Effect::PutCounter {
+        Effect::PutCounter {
             counter_type,
             count,
             target,
@@ -1969,8 +2030,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             ..
         } => {
+            let fmt_pt = |v: &PtValue| match v {
+                PtValue::Fixed(n) => n.to_string(),
+                PtValue::Variable(s) => s.clone(),
+                PtValue::Quantity(_) => "dyn".to_string(),
+            };
             if let (Some(p), Some(t)) = (power, toughness) {
-                d.push(("p/t".into(), format!("{p}/{t}")));
+                d.push(("p/t".into(), format!("{}/{}", fmt_pt(p), fmt_pt(t))));
             }
             if !types.is_empty() {
                 d.push(("types".into(), types.join(" ")));
@@ -1999,7 +2065,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
-            random,
+            selection,
             ..
         } => {
             d.push(("player".into(), fmt_target(target)));
@@ -2009,7 +2075,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
             }
-            if *random {
+            if selection.is_random() {
                 d.push(("selection".into(), "random".into()));
             }
         }
@@ -2086,6 +2152,30 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
             if *without_paying_mana_cost {
                 d.push(("free cast".into(), "yes".into()));
+            }
+        }
+        Effect::FreeCastFromZones {
+            count,
+            max_total_mv,
+            filter,
+            zones,
+            exile_instead_of_graveyard,
+        } => {
+            d.push(("count".into(), count.to_string()));
+            if let Some(mv) = max_total_mv {
+                d.push(("total mana value".into(), mv.to_string()));
+            }
+            d.push(("filter".into(), fmt_target(filter)));
+            d.push((
+                "zones".into(),
+                zones
+                    .iter()
+                    .map(|z| format!("{z:?}"))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            ));
+            if *exile_instead_of_graveyard {
+                d.push(("exile instead of graveyard".into(), "yes".into()));
             }
         }
         Effect::RollDie {
@@ -2282,6 +2372,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
         Effect::Cascade => {}
+        Effect::Ripple { .. } => {}
+        // CR 614.1a: the "exile it instead of putting it into a graveyard as it
+        // resolves" rider acts on the triggering spell; no displayable parameter.
+        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
@@ -2470,6 +2564,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantCastingPermission { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }
@@ -2478,6 +2573,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::SwitchPT { .. }
         | Effect::Myriad
         | Effect::Encore
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon
@@ -2492,6 +2590,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
+        | Effect::DraftFromSpellbook { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
@@ -2525,7 +2624,7 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     if def.condition.is_some() {
         d.push(("conditional".into(), "yes".into()));
     }
-    if def.sorcery_speed {
+    if def.is_sorcery_speed() {
         d.push(("timing".into(), "sorcery speed".into()));
     }
     if let Some(modal) = &def.modal {
@@ -2665,6 +2764,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
         } => format!("retain printed trigger {source_trigger_index}"),
+        ContinuousModification::RetainPrintedAbilityFromSource {
+            source_ability_index,
+        } => format!("retain printed ability {source_ability_index}"),
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
@@ -3036,13 +3138,15 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 
     let label = match additional_cost {
         AdditionalCost::Optional {
-            repeatable: true, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            ..
         } => "AdditionalCost:Repeatable",
         AdditionalCost::Optional {
-            repeatable: false, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            ..
         } => "AdditionalCost:Optional",
-        AdditionalCost::Kicker { repeatable, .. } => {
-            if *repeatable {
+        AdditionalCost::Kicker { repeatability, .. } => {
+            if repeatability.is_repeatable() {
                 "AdditionalCost:Multikicker"
             } else {
                 "AdditionalCost:Kicker"
@@ -5229,6 +5333,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
+        AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
@@ -5271,6 +5376,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs) with current-state and optional
         // LKI paths.
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
+        AbilityCondition::TriggeringSpellTargetsFilter { .. } => {
+            ("TriggeringSpellTargetsFilter", Handled)
+        }
         // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
         // against the ability source object.
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
@@ -5311,6 +5419,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
     match qref {
         QuantityRef::HandSize { .. } => ("HandSize", Handled),
         QuantityRef::LifeTotal { .. } => ("LifeTotal", Handled),
+        QuantityRef::UnspentMana { .. } => ("UnspentMana", Handled),
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
@@ -5320,6 +5429,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ObjectCountBySharedQuality { .. } => ("ObjectCountBySharedQuality", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
+        QuantityRef::Intensity { .. } => ("Intensity", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::Power { scope } => match scope {
@@ -5396,6 +5506,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("DistinctColorsAmongPermanents", Handled)
         }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
+        QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
@@ -5413,7 +5524,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
-        QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Handled),
+        QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
@@ -5455,6 +5566,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
+        PlayerFilter::HasLostTheGame => ("HasLostTheGame", Handled),
         PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
         PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
@@ -5493,9 +5605,11 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
+        StaticCondition::WasCast { .. } => ("WasCast", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
         StaticCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        StaticCondition::SourceIsSaddled => ("SourceIsSaddled", Handled),
         StaticCondition::SourceControllerEquals { .. } => ("SourceControllerEquals", Handled),
         StaticCondition::Unrecognized { .. } => ("Unrecognized", Handled),
         StaticCondition::None => ("None", Handled),
@@ -6920,10 +7034,18 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     // "You may pay {X} rather than pay ..." — alternative cost patterns
                     effective_lower.contains("rather than pay")
                 }
-                Effect::TapAll { .. } => {
-                    effective_lower.contains("tap") && !effective_lower.contains("untap")
-                }
-                Effect::UntapAll { .. } => effective_lower.contains("untap"),
+                // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`)
+                // swallowed-clause detection.
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                    ..
+                } => effective_lower.contains("tap") && !effective_lower.contains("untap"),
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    state: TapStateChange::Untap,
+                    ..
+                } => effective_lower.contains("untap"),
                 Effect::PreventDamage { .. } => {
                     // "If a source would deal damage to you, prevent N of that damage"
                     // Parsed as PreventDamage without a description string.
@@ -6938,9 +7060,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 Effect::CastCopyOfCard { .. } => {
                     effective_lower.contains("copy") && effective_lower.contains("cast the copy")
                 }
-                Effect::Untap { .. } => {
-                    // "Untap this creature during each other player's untap step" and similar
-                    // Parsed as Untap without a description string.
+                // CR 701.26b: single-target untap (legacy `Effect::Untap`) —
+                // "Untap this creature during each other player's untap step"
+                // and similar, parsed without a description string. Single-target
+                // tap (legacy `Effect::Tap`) has no swallowed-clause heuristic and
+                // falls through to `false`.
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                } => {
                     effective_lower.contains("untap")
                         && (effective_lower.contains("untap step")
                             || effective_lower.contains("during each"))
@@ -7341,7 +7470,7 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if it's not your turn")
             || lower.contains("if it's your turn")
             || lower.contains("if no other ")
-            || lower.contains("if no creatures ")
+            || (lower.contains("if no creatures ") && !lower.contains("if no creatures attacked"))
             // Replacement effect patterns (not ability conditions):
             // "if X would Y, Z instead" is the canonical CR 614.1a replacement structure.
             || (lower.contains(" would ") && lower.contains(" instead"))
@@ -8406,6 +8535,7 @@ mod tests {
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::KeywordKind;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
@@ -8732,7 +8862,7 @@ mod tests {
             cost: AbilityCost::Unimplemented {
                 description: "mystery cost".to_string(),
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
 
         assert!(card_face_has_unimplemented_parts(&face));
@@ -9967,13 +10097,15 @@ mod tests {
 
     #[test]
     fn unsupported_cumulative_upkeep_cost_counts_as_keyword_gap() {
+        // CR 702.24a: arbitrary exile-base cumulative upkeep still needs
+        // interactive object selection before it can enter the unless-payment
+        // pipeline. Thought Lash-style top-library exile is covered separately.
         let mut face = make_face();
         face.keywords
-            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
                 filter: None,
-                random: false,
-                self_ref: false,
             }));
 
         let gaps = card_face_gaps(&face);
@@ -9987,6 +10119,26 @@ mod tests {
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(!keyword.supported);
+    }
+
+    #[test]
+    fn top_library_exile_cumulative_upkeep_has_no_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Library),
+                filter: None,
+            }));
+
+        assert!(card_face_gaps(&face).is_empty());
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(keyword.supported);
     }
 
     #[test]
@@ -10005,6 +10157,39 @@ mod tests {
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(keyword.supported);
+    }
+
+    #[test]
+    fn alternative_keyword_cost_static_remains_runtime_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some("You may pay {0} rather than pay cycling costs.".to_string());
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::AlternativeKeywordCost {
+                keyword: KeywordKind::Cycling,
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(0),
+                },
+                frequency: None,
+            })
+            .description("You may pay {0} rather than pay cycling costs.".to_string()),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.iter()
+                .any(|gap| gap == "Static:AlternativeKeywordCost(Cycling)"),
+            "runtime-deferred AlternativeKeywordCost must remain a coverage gap: {gaps:?}"
+        );
+
+        let parse_details = build_parse_details_for_face(&face);
+        let static_item = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Static)
+            .expect("static parse item");
+        assert!(
+            !static_item.supported,
+            "runtime-deferred AlternativeKeywordCost must not be marked supported"
+        );
     }
 
     /// Regression: cards with a concrete `AdditionalCost` + one spell ability
@@ -10293,6 +10478,7 @@ mod tests {
                     zone: ZoneRef::Hand,
                     card_types: Vec::new(),
                     scope: CountScope::Controller,
+                    filter: None,
                 },
             },
             defended: None,

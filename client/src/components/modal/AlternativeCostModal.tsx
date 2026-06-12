@@ -56,6 +56,17 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.evokeSubtitle", { name: cardName }),
       };
+    // CR 702.109a: Dash — like Warp, the rider (haste + end-step return to hand)
+    // lives on the keyword itself and doesn't change the spell's printed text.
+    case "Dash":
+      return {
+        eyebrow: t("alternativeCost.dashEyebrow"),
+        normalLabel: t("alternativeCost.dashNormalLabel"),
+        altLabel: t("alternativeCost.dashAltLabel"),
+        altSuffix: t("alternativeCost.dashAltSuffix"),
+        showOracleText: false,
+        subtitle: t("alternativeCost.dashSubtitle", { name: cardName }),
+      };
     case "Overload":
       return {
         eyebrow: t("alternativeCost.overloadEyebrow"),
@@ -105,6 +116,16 @@ function keywordCopy(
         altLabel: t("alternativeCost.mutateAltLabel"),
         showOracleText: true,
         subtitle: t("alternativeCost.mutateSubtitle", { name: cardName }),
+      };
+    // CR 702.152a: Blitz — pay the blitz cost; the creature gains haste and
+    // "when it dies, draw a card", but is sacrificed at the next end step.
+    case "Blitz":
+      return {
+        eyebrow: t("alternativeCost.blitzEyebrow"),
+        normalLabel: t("alternativeCost.blitzNormalLabel"),
+        altLabel: t("alternativeCost.blitzAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.blitzSubtitle", { name: cardName }),
       };
   }
 }

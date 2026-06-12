@@ -1,4 +1,6 @@
-use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::effects::counters::{
+    add_counter_with_replacement, stash_pending_counter_completion_with_actions,
+};
 use crate::game::effects::token::apply_create_token_after_replacement;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
@@ -6,7 +8,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
@@ -44,15 +46,26 @@ pub fn resolve(
     };
 
     // CR 701.47a: Put N +1/+1 counters on the chosen Army.
-    if n > 0 {
-        add_counter_with_replacement(
+    if n > 0
+        && !add_counter_with_replacement(
             state,
             ability.controller,
             target_id,
             CounterType::Plus1Plus1,
             n,
             events,
+        )
+    {
+        stash_pending_counter_completion_with_actions(
+            state,
+            EffectKind::Amass,
+            ability.source_id,
+            vec![PendingCounterPostAction::AddSubtype {
+                object_id: target_id,
+                subtype: subtype.clone(),
+            }],
         );
+        return Ok(());
     }
 
     // CR 701.47a: If it isn't a [subtype], it becomes a [subtype] in addition to its other types.

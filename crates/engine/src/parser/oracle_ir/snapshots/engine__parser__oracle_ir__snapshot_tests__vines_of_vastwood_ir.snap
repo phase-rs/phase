@@ -62,7 +62,6 @@ expression: "&ir"
           "duration": "UntilEndOfTurn",
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": {
             "type": "AdditionalCostPaid"
           },
@@ -74,7 +73,6 @@ expression: "&ir"
         "duration": "UntilEndOfTurn",
         "description": "Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

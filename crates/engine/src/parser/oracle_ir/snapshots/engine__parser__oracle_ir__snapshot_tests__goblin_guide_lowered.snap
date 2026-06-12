@@ -16,7 +16,6 @@ expression: "&lowered"
       "duration": null,
       "description": "Haste",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
@@ -55,10 +54,11 @@ expression: "&lowered"
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": {
             "type": "RevealedHasCardType",
-            "card_type": "Land"
+            "card_types": [
+              "Land"
+            ]
           },
           "optional_targeting": false,
           "optional": false,
@@ -68,7 +68,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

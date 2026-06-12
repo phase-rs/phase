@@ -30,6 +30,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -87,6 +88,8 @@ fn kutzils_flanker_mode_one_counts_only_your_departed_creatures() {
             object_id: flanker,
             card_id: flanker_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Kutzil's Flanker must succeed");
 

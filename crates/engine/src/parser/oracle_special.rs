@@ -1,8 +1,10 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::char;
 use nom::combinator::opt;
 use nom::combinator::value;
+use nom::sequence::delimited;
 use nom::Parser;
 
 use crate::types::ability::{
@@ -17,6 +19,7 @@ use super::oracle_cost::{parse_or_separated_mana_costs, parse_single_cost};
 use super::oracle_effect::imperative::try_parse_die_result_line;
 use super::oracle_effect::{capitalize, parse_effect_chain};
 use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{
@@ -60,6 +63,21 @@ pub(super) fn parse_solve_condition(text: &str) -> SolveCondition {
             comparator: Comparator::EQ,
             threshold: 0,
         };
+    }
+
+    // CR 719.3a: A solve condition is a general game-state condition. Route it
+    // through the single condition authority (`parse_inner_condition`) so every
+    // condition shape the engine already understands (life totals, hand size,
+    // control counts, event history, quantity comparisons) makes a Case
+    // auto-solve. The caller lowercases the text (`oracle.rs` passes `rest_lower`);
+    // bridge defensively through `nom_on_lower` exactly as the arm above.
+    let trimmed = text.trim_end_matches('.').trim();
+    if let Some((condition, rest)) = nom_on_lower(trimmed, trimmed, parse_inner_condition) {
+        // Only accept a fully-consumed parse (trailing punctuation/whitespace
+        // already stripped); a partial parse falls through to `Text`.
+        if rest.trim().trim_end_matches('.').trim().is_empty() {
+            return SolveCondition::Condition { condition };
+        }
     }
 
     SolveCondition::Text {
@@ -395,18 +413,34 @@ pub(super) fn parse_escape_keyword(line: &str) -> Option<Keyword> {
 }
 
 pub(super) fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
-    let lower = line.to_lowercase();
-    let ((), rest) = nom_on_lower(line, &lower, |i| value((), tag("harmonize ")).parse(i))?;
-    let cost_str = if let Some(paren_start) = rest.find('(') {
-        rest[..paren_start].trim()
-    } else {
-        rest.trim()
-    };
-    if cost_str.is_empty() {
-        return None;
-    }
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+    let cost = parse_keyword_mana_cost_line(line, "harmonize ")?;
     Some(Keyword::Harmonize(cost))
+}
+
+fn parse_keyword_mana_cost_line(line: &str, keyword: &'static str) -> Option<ManaCost> {
+    let lower = line.to_lowercase();
+    let ((), rest) = nom_on_lower(line, &lower, |i| value((), tag(keyword)).parse(i))?;
+    let (after_cost, cost) = nom_primitives::parse_mana_cost(rest.trim_start()).ok()?;
+    let after_cost = after_cost.trim();
+    if !after_cost.is_empty() {
+        let lower_after_cost = after_cost.to_lowercase();
+        let ((), remainder) = nom_on_lower(after_cost, &lower_after_cost, |i| {
+            value((), delimited(char('('), take_until(")"), char(')'))).parse(i)
+        })?;
+        if !remainder.trim().is_empty() {
+            return None;
+        }
+    }
+    Some(cost)
+}
+
+/// CR 702.187b: Parse a "Mayhem {cost}" Oracle line into `Keyword::Mayhem`.
+/// MTGJSON's keywords array carries only the bare "Mayhem" name, so the mana
+/// cost is extracted here from the card's Oracle text (the cost precedes the
+/// parenthesized reminder text). Mirrors `parse_harmonize_keyword`.
+pub(super) fn parse_mayhem_keyword(line: &str) -> Option<Keyword> {
+    let cost = parse_keyword_mana_cost_line(line, "mayhem ")?;
+    Some(Keyword::Mayhem(cost))
 }
 
 /// CR 702.24a: Dispatch a cumulative-upkeep cost text into a typed
@@ -475,4 +509,84 @@ pub(super) fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
     let cost_text = stripped.trim().trim_end_matches('.');
     let cost = parse_cumulative_upkeep_cost(cost_text)?;
     Some(Keyword::CumulativeUpkeep(cost))
+}
+
+#[cfg(test)]
+mod solve_condition_tests {
+    use super::parse_solve_condition;
+    use crate::types::ability::{
+        Comparator, PlayerScope, QuantityExpr, QuantityRef, SolveCondition, StaticCondition,
+    };
+
+    // CR 719.3a: "you have no cards in hand" (Case of the Crimson Pulse) decomposes
+    // through the single condition authority into a hand-size comparison.
+    #[test]
+    fn hand_size_solve_condition_decomposes() {
+        let cond = parse_solve_condition("you have no cards in hand");
+        assert_eq!(
+            cond,
+            SolveCondition::Condition {
+                condition: StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                },
+            }
+        );
+    }
+
+    // A life-total threshold decomposes to a quantity comparison.
+    #[test]
+    fn life_total_solve_condition_decomposes() {
+        let cond = parse_solve_condition("you have 10 or more life");
+        match cond {
+            SolveCondition::Condition {
+                condition:
+                    StaticCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal { .. },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 10 },
+                    },
+            } => {}
+            other => panic!("expected life-total QuantityComparison, got {other:?}"),
+        }
+    }
+
+    // A control-count solve condition routes through the condition authority
+    // (no longer the inert `Text` fallback).
+    #[test]
+    fn control_count_solve_condition_decomposes() {
+        let cond = parse_solve_condition("you control three or more creatures");
+        assert!(
+            matches!(cond, SolveCondition::Condition { .. }),
+            "expected a decomposed Condition, got {cond:?}"
+        );
+    }
+
+    // The existing bespoke subtype-count arm still produces `ObjectCount`.
+    #[test]
+    fn subtype_count_solve_condition_uses_object_count() {
+        let cond = parse_solve_condition("you control no suspected skeletons");
+        assert!(
+            matches!(cond, SolveCondition::ObjectCount { .. }),
+            "expected ObjectCount for the suspected-subtype arm, got {cond:?}"
+        );
+    }
+
+    // A condition the shared combinator cannot decompose falls back to `Text`.
+    #[test]
+    fn unparseable_solve_condition_falls_back_to_text() {
+        let cond = parse_solve_condition("the stars align in your favor");
+        assert!(
+            matches!(cond, SolveCondition::Text { .. }),
+            "expected Text fallback, got {cond:?}"
+        );
+    }
 }

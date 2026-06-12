@@ -173,7 +173,7 @@ mod tests {
     fn generator_ability() -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Activated,
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,

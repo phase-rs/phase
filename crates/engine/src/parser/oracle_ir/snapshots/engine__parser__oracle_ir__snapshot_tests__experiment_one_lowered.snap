@@ -17,7 +17,6 @@ expression: "&lowered"
       "duration": null,
       "description": "Evolve",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
@@ -38,13 +37,13 @@ expression: "&lowered"
           "type": "OfType",
           "data": "P1P1"
         },
-        "target": null
+        "target": null,
+        "selection": "SingleObject"
       },
       "sub_ability": null,
       "duration": null,
       "description": "Remove two +1/+1 counters from ~: Regenerate it.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,

@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
 
 DATA_DIR="data/scryfall"
-CARDS_FILE="$DATA_DIR/default-cards.json"
-OUTPUT="client/public/scryfall-printings.json"
+CARDS_FILE="${SCRYFALL_DEFAULT_CARDS_FILE:-$DATA_DIR/default-cards.json}"
+OUTPUT="${SCRYFALL_PRINTINGS_OUTPUT:-client/public/scryfall-printings.json}"
 
 echo "=== Scryfall Printings Generation ==="
 
@@ -34,16 +34,20 @@ mkdir -p "$(dirname "$OUTPUT")"
 # DFC handling: when top-level image_uris is null, per-face URLs are
 # extracted from card_faces[].image_uris.
 #
+# Reversible cards omit root-level `oracle_id`; group by
+# `card_faces[0].oracle_id` instead (issue #2031).
+#
 # Non-playable layouts (token, emblem, art_series, etc.) are excluded.
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" '
   [.[] |
-    select(.oracle_id != null) |
+    (.oracle_id // .card_faces[0].oracle_id) as $oracle_id |
+    select($oracle_id != null) |
     select(.layout as $l | $exclude | index($l) | not) |
     select(.set != "plst") |
     {
-      oracle_id: .oracle_id,
+      oracle_id: $oracle_id,
       entry: {
         id: .id,
         set: .set,

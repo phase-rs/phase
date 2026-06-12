@@ -20,6 +20,10 @@ pub(crate) struct ParseContext {
     /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
     /// parsed. Consumed by BecomeCopy "has this ability" arm.
     pub current_trigger_index: Option<usize>,
+    /// CR 707.9a + CR 602.1: Index of the printed activated ability whose
+    /// effect is being parsed. Consumed by BecomeCopy "has this ability" arm
+    /// inside activated abilities (Thespian's Stage, Cytoshape, …).
+    pub current_ability_index: Option<usize>,
     /// CR 701.21a + CR 608.2k: The actor performing the effect ("you", "an opponent").
     pub actor: Option<ControllerRef>,
     /// Resolved quantity reference ("that many", "that much").
@@ -87,6 +91,10 @@ pub(crate) struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
+    /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
+    /// like cultivate/Final-Parting split-destination detection on a search
+    /// clause that does not include the put-destination phrase in its chunk.
+    pub effect_chain_full_lower: Option<String>,
     /// CR 608.2c + CR 601.2a: The chain's prior referent is an explicit target
     /// SELECTION (`Effect::TargetOnly`, e.g. Emry's "Choose target artifact
     /// card in your graveyard"), as distinct from an exile/impulse publisher
@@ -98,6 +106,15 @@ pub(crate) struct ParseContext {
     /// `ExileFromTopUntil` referent (Territorial Bruntar) that
     /// `parent_target_available` would otherwise include.
     pub parent_target_is_chosen: bool,
+    /// CR 701.42a: The partner card name extracted from a meld instigator's
+    /// own/control gate ("if you both own and control [self] and a [type] named
+    /// [partner], exile them, then meld them into [result]"). The gate is parsed
+    /// as the trigger's intervening-if condition (carrying [partner] inside its
+    /// `ControlCount` conjunct), but the meld EFFECT clause ("exile them, then
+    /// meld them into [result]") must also stamp [partner] onto `Effect::Meld`.
+    /// Set when the meld gate is recognized; consumed by the meld effect
+    /// combinator. `None` for non-meld faces.
+    pub pending_meld_partner: Option<String>,
 }
 
 impl ParseContext {

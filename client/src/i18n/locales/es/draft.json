@@ -44,7 +44,8 @@
     "endDraftConfirm": "¿Terminar este draft para todos? Esta acción no se puede deshacer."
   },
   "manaCurve": {
-    "title": "Curva de maná"
+    "title": "Curva de maná",
+    "bucketLabel": "Valor de maná {{bucket}}"
   },
   "pickTimer": {
     "label": "Temporizador de elección",

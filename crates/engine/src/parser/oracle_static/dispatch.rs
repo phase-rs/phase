@@ -21,6 +21,23 @@ pub(crate) enum InvertedAsLongAs {
     Skip,
 }
 
+/// Single authority for recognizing the speed-cap-lift sentence
+/// "Your speed can increase beyond 4" (with or without the trailing period).
+///
+/// CR 702.179d–e: a player's speed normally tops out at 4 (the inherent
+/// speed trigger stops at "less than 4", and "max speed" means exactly 4);
+/// this static lifts that cap. The routing call sites in `oracle.rs` and the
+/// semantic parse in [`parse_static_line_inner`] all delegate here — never
+/// re-encode the phrase as a string literal elsewhere.
+pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
+    all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("your speed can increase beyond 4"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -110,6 +127,28 @@ pub(crate) fn parse_static_line_inner(
             if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
                 return Some(def.description(text.to_string()));
             }
+            // CR 601.3b + CR 702.8a: Inverted flash-grant conditional:
+            // "As long as X, you may cast [type] spells as though they had flash."
+            // The recursed call above fails because `parse_cast_as_though_flash_static`
+            // uses `eof` and the canonical form carries a trailing condition clause.
+            // Try the flash parser against the isolated effect slice; if it succeeds,
+            // attach the condition from the split.
+            {
+                let effect_lower = split.effect_text.to_lowercase();
+                let tp_effect = TextPair::new(&split.effect_text, &effect_lower);
+                if let Some(mut def) =
+                    parse_cast_as_though_flash_static(&tp_effect, &split.effect_text)
+                {
+                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                        StaticCondition::Unrecognized {
+                            text: split.condition_text.clone(),
+                        },
+                    );
+                    def.condition = Some(condition);
+                    def.description = Some(text.to_string());
+                    return Some(def);
+                }
+            }
             // Rewrite succeeded (we cleanly separated condition from effect), but the
             // recursed parser could not model the effect clause. Produce a generic
             // Continuous static whose condition is typed via `parse_static_condition`
@@ -138,9 +177,7 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    if tp.lower == "your speed can increase beyond 4."
-        || tp.lower == "your speed can increase beyond 4"
-    {
+    if is_speed_unlock_sentence(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::SpeedCanIncreaseBeyondFour)
                 .affected(TargetFilter::Player)
@@ -1172,8 +1209,34 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 702.122c / 702.171a / 702.184a: crew/saddle/station power-contribution
+    // modifier (Reckoner Bankbuster, Giant Ox, Stoic Star-Captain).
+    if let Some(def) = parse_crew_contribution_static(&text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
+    }
+
+    // CR 506.5 + CR 508.1c: "~ can only attack alone" — CombatAlone(Attack, MustBeSole).
+    // The creature may attack only if it is the sole attacker (Master of Cruelties).
+    // Must precede the generic "can't attack" arm to avoid mis-dispatch.
+    if let Some((_, _, rest)) = nom_primitives::scan_preceded(tp.lower, |i: &str| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("can only attack alone").parse(i)?;
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i)?;
+        Ok((i, ()))
+    }) {
+        if rest.trim().is_empty() {
+            return Some(
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::MustBeSole,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
+            );
+        }
     }
 
     // CR 506.5 + CR 508.1a + CR 509.1b: "~ can't attack alone" / "~ can't
@@ -1186,16 +1249,19 @@ pub(crate) fn parse_static_line_inner(
         nom_primitives::scan_preceded(tp.lower, parse_alone_combat_restriction)
     {
         if rest.trim().is_empty() {
-            let mode = match restriction {
+            let action = match restriction {
                 AloneCombatRestriction::Attack | AloneCombatRestriction::AttackOrBlock => {
-                    StaticMode::CantAttackAlone
+                    CombatAloneAction::Attack
                 }
-                AloneCombatRestriction::Block => StaticMode::CantBlockAlone,
+                AloneCombatRestriction::Block => CombatAloneAction::Block,
             };
             return Some(
-                StaticDefinition::new(mode)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
             );
         }
     }

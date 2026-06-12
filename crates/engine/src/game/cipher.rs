@@ -25,6 +25,7 @@
 //! encode is an independent link.
 
 use super::triggers::{PendingTrigger, PendingTriggerContext};
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -94,14 +95,35 @@ pub fn legal_encode_creatures(state: &GameState, player: PlayerId) -> Vec<Object
 /// the chosen creature. Caller has already validated `creature_id` is a legal
 /// "creature you control". The card moves graveyard-free from the stack to
 /// exile (the cipher static functions while the card is in exile, CR 702.99a).
-pub fn finish_encode(
+pub(crate) fn finish_encode(
     state: &mut GameState,
     card_id: ObjectId,
     creature_id: ObjectId,
     events: &mut Vec<GameEvent>,
-) {
-    super::zones::move_to_zone(state, card_id, Zone::Exile, events);
-    add_encode_link(state, card_id, creature_id);
+) -> ZoneMoveResult {
+    // CR 702.99a + CR 614.6: the cipher card exiles itself on resolution. Route
+    // through the zone-change pipeline so a board-wide `Moved` "would be exiled →
+    // ... instead" redirect is consulted (none target Exile in the current pool
+    // today, but a future redirect could send the card elsewhere or surface a
+    // CR 616.1 ordering choice). The card moves itself, attributed to its own
+    // object id.
+    let result = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::effect(card_id, Zone::Exile, card_id),
+        events,
+    );
+    // CR 702.99b: only record the encoded relationship once the card has
+    // actually landed in exile. A `NeedsChoice` pause leaves the move
+    // unresolved (the caller surfaces the parked prompt), and a `Moved` redirect
+    // could send the card to a different zone — in either case the card is not
+    // encoded, so the link must NOT be recorded. The redirect-safe zone check is
+    // the single guard that covers both cases.
+    if matches!(result, ZoneMoveResult::Done)
+        && state.objects.get(&card_id).map(|o| o.zone) == Some(Zone::Exile)
+    {
+        add_encode_link(state, card_id, creature_id);
+    }
+    result
 }
 
 /// CR 702.99a: Begin the on-resolution encode offer for a Cipher spell. Returns
@@ -130,19 +152,43 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
 /// card on that creature (exile + link); `None` — or a creature that is no
 /// longer a legal host — declines, routing the card to its owner's graveyard
 /// (CR 608.2n). The chosen creature is re-validated against the current board.
-pub fn handle_encode_choice(
+///
+/// Returns the [`ZoneMoveResult`] of the move so the caller knows whether a
+/// CR 616.1 replacement-ordering choice parked a prompt — either the declined
+/// card hit a graveyard→exile redirect, or (future-proof) the accepted card's
+/// self-exile hit an Exile-targeting redirect. No such Exile redirect exists in
+/// the current pool, so the accept path reports `Done` today.
+pub(crate) fn handle_encode_choice(
     state: &mut GameState,
     card_id: ObjectId,
     creature: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
-) {
+) -> ZoneMoveResult {
     let controller = state.objects.get(&card_id).map(|o| o.controller);
     let chosen = creature
         .filter(|id| controller.is_some_and(|c| legal_encode_creatures(state, c).contains(id)));
     match chosen {
+        // CR 702.99a–b: the encode self-exile is normally non-pausing (no
+        // Exile-targeting `Moved` redirect exists today), but a future redirect
+        // could surface a CR 616.1 ordering choice — propagate `finish_encode`'s
+        // result so the caller surfaces the parked prompt instead of returning to
+        // priority mid-pause.
         Some(creature_id) => finish_encode(state, card_id, creature_id, events),
-        // CR 608.2n: a declined cipher card is put into its owner's graveyard.
-        None => super::zones::move_to_zone(state, card_id, Zone::Graveyard, events),
+        // CR 608.2n + CR 614.6: a declined cipher card is the resolving spell's
+        // card being put into its owner's graveyard — route it through the
+        // zone-change pipeline so a `Moved` graveyard→exile redirect (Rest in
+        // Peace / Leyline of the Void) fires on it. The raw `move_to_zone` never
+        // proposed the inner ZoneChange, silently dropping those redirects. The
+        // spell's card moves itself on resolution, so the cause is
+        // `SpellResolutionDefault` (no external source). A CR 616.1 ordering
+        // choice (two simultaneous redirects) is parked centrally by
+        // `move_object`; the caller surfaces the parked prompt instead of
+        // returning to priority.
+        None => zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::spell_resolution_default(card_id, Zone::Graveyard),
+            events,
+        ),
     }
 }
 

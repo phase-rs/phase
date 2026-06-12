@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{ReplacementDefinition, RestrictionExpiry};
+use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
-use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
+use crate::types::game_state::{
+    AutoPassMode, GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -413,6 +415,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.players_attacked_this_step.clear();
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
+    // CR 607.2b + CR 603.10e: linked-exile LKI is likewise step-scoped — it only
+    // needs to outlive the resolution of the ability whose source just left.
+    state.linked_exile_lki.clear();
 
     events.push(GameEvent::PhaseChanged { phase: next });
 }
@@ -570,6 +575,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
+    state.attacker_declarations_this_turn.clear();
     state.creatures_blocked_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
     state.created_tokens_this_turn.clear();
@@ -587,6 +593,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state
         .assassin_or_commander_dealt_combat_damage_this_turn
         .clear();
+    // CR 702.76a + CR 514: Clear the Prowl creature-type ledger at cleanup — its
+    // "was dealt combat damage this turn" predicate is turn-scoped too.
+    state.creature_types_dealt_combat_damage_this_turn.clear();
     // CR 500.8: Clear any leftover extra phases from the previous turn.
     state.extra_phases.clear();
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
@@ -1067,7 +1076,8 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             )
     });
 
-    // CR 730.2: Check day/night transition at cleanup.
+    // CR 502.2 / CR 731.2: Check the prior active player's day/night transition
+    // before advancing the active player.
     day_night::check_day_night_transition(state, events);
 
     let active = state.active_player;
@@ -1132,7 +1142,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // at cleanup (CR 514).
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.is_saddled {
+            // CR 702.171b: the designation (and the saddling-creature record) ends at end of turn.
             obj.is_saddled = false;
+            obj.saddled_by.clear();
         }
     }
 
@@ -1320,7 +1332,7 @@ fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
 
 /// CR 714.3b: As the precombat main phase begins, put a lore counter on each Saga
 /// the active player controls. This is a turn-based action, not a triggered ability.
-fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>) -> bool {
     let active = state.active_player;
     let saga_ids: Vec<_> = state
         .battlefield
@@ -1338,16 +1350,38 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
         .collect();
 
     // CR 614.1: Route through replacement pipeline so Vorinclex-class effects apply.
-    for saga_id in saga_ids {
-        super::effects::counters::add_counter_with_replacement(
+    for (index, saga_id) in saga_ids.iter().copied().enumerate() {
+        if !super::effects::counters::add_counter_with_replacement(
             state,
             active,
             saga_id,
             CounterType::Lore,
             1,
             events,
-        );
+        ) {
+            let remaining = saga_ids[index + 1..]
+                .iter()
+                .copied()
+                .map(|object_id| PendingCounterAddition::Object {
+                    actor: active,
+                    object_id,
+                    counter_type: CounterType::Lore,
+                    count: 1,
+                })
+                .collect();
+            super::effects::counters::stash_pending_counter_additions(
+                state,
+                remaining,
+                PendingEffectResolved::with_post_actions_without_effect(
+                    EffectKind::GenericEffect,
+                    saga_id,
+                    Vec::new(),
+                ),
+            );
+            return false;
+        }
     }
+    true
 }
 
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
@@ -1358,21 +1392,12 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   target selection, or are awaiting CR 603.3b ordering. The combat arms
 ///   (BeginCombat / EndCombat) use this to decide whether to set up / tear down
 ///   combat and grant a priority window.
-/// * `ordering_prompt` is `Some(WaitingFor::OrderTriggers { .. })` when 2+
-///   simultaneous triggers controlled by the same player fired and that player
-///   must order them (CR 603.3b) before anyone receives priority. The caller
-///   MUST surface this prompt instead of granting priority — `process_triggers`
-///   populated `state.pending_trigger_order` and set `state.waiting_for` to the
-///   prompt, but the phase arm's return value is what `apply` writes back to
-///   `state.waiting_for`. Returning `Priority` here would overwrite the prompt
-///   and strand the queued triggers in `pending_trigger_order` forever (they
-///   never reach the stack). Single-trigger steps take the `NoChoiceNeeded`
-///   path with no prompt and fall through to the normal priority grant. The
-///   prompt is rebuilt from the AUTHORITATIVE `pending_trigger_order` state via
-///   `build_next_order_triggers_prompt_public`, not cloned from
-///   `state.waiting_for` — so a stale `waiting_for` left by an upstream
-///   phase-advance can't re-surface and hang, and already-corrupted saves
-///   recover by surfacing the real ordering prompt.
+/// * `ordering_prompt` is `Some(...)` when the phase must pause before priority:
+///   - `WaitingFor::OrderTriggers { .. }` when 2+ simultaneous triggers controlled
+///     by the same player fired and that player must order them (CR 603.3b), or
+///   - an active trigger prompt (`TriggerTargetSelection`, etc.) when
+///     `pending_trigger` / `deferred_triggers` still hold unresolved work (CR
+///     603.3). The caller MUST surface this prompt instead of granting priority.
 fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
@@ -1387,11 +1412,16 @@ fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     // surfacing the real ordering prompt. Note `pending_trigger_order.is_some()` no
     // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
     // the prior `.then(|| clone)` idiom was unsafe.
-    let ordering_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
+    let order_triggers_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
+    let active_trigger_prompt = (order_triggers_prompt.is_none()
+        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
+    .then(|| state.waiting_for.clone());
+    let prompt = order_triggers_prompt.or(active_trigger_prompt);
     let fired = state.stack.len() > stack_before
         || state.pending_trigger.is_some()
-        || ordering_prompt.is_some();
-    (fired, ordering_prompt)
+        || !state.deferred_triggers.is_empty()
+        || prompt.is_some();
+    (fired, prompt)
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
@@ -1404,6 +1434,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
         // trips through `GameAction::ChooseReplacement`; the drain resumes
         // via the `EmptyManaPool` arm of `handle_replacement_choice`.
         if state.pending_phase_transition_progress.is_some() {
+            state.deferred_step_trigger_resume = Some(state.phase);
             return state.waiting_for.clone();
         }
 
@@ -1499,7 +1530,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 714.3b: As the precombat main phase begins, add a lore counter
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
-                    add_lore_counters_to_sagas(state, events);
+                    if !add_lore_counters_to_sagas(state, events) {
+                        return state.waiting_for.clone();
+                    }
                     super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                     // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                     // the start of the active player's first precombat main
@@ -1603,6 +1636,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 }
             }
             Phase::CombatDamage => {
+                // CR 510.1a + CR 613.4c: Combat damage equals a creature's power as determined
+                // by the layer system (layer 7c applies P/T counters). Flush here so
+                // combat_damage_amount reads evaluated power, not stale base power. commit_attackers
+                // (combat.rs) marks layers dirty; the post-action pipeline flush runs after
+                // resolve_combat_damage returns — too late without this pre-flush.
+                super::layers::flush_layers(state);
                 // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
                 // resolve_combat_damage may pause for interactive assignment (2+ blockers).
                 if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
@@ -1947,7 +1986,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Green,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -4399,6 +4438,77 @@ mod tests {
             "state.waiting_for should be GameOver, got {:?}",
             state.waiting_for
         );
+    }
+
+    #[test]
+    fn auto_advance_combat_damage_flushes_layers_before_reading_power() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::CombatDamage;
+
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Beast".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(3);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(3);
+            obj.base_characteristics_initialized = true;
+            obj.counters.insert(CounterType::Plus1Plus1, 8);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Professor Onyx".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            // CR 306.5b: loyalty field and counter map mirror each other.
+            obj.loyalty = Some(10);
+            obj.counters.insert(CounterType::Loyalty, 10);
+        }
+
+        state.layers_dirty.mark_full();
+        assert_eq!(
+            state.objects.get(&attacker).unwrap().power,
+            Some(1),
+            "precondition: attacker power is stale before the CombatDamage phase arm runs"
+        );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(planeswalker),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        let mut events = Vec::new();
+        let _ = auto_advance(&mut state, &mut events);
+
+        // CR 510.1a + CR 120.3c + CR 613.4c: combat damage uses evaluated power,
+        // including +1/+1 counters from layer 7c. Without the CombatDamage pre-flush
+        // in auto_advance, this remains at 9 because stale base power dealt only 1.
+        assert_eq!(state.objects[&planeswalker].loyalty, Some(1));
+        assert_eq!(state.players[1].life, 20);
     }
 
     /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,

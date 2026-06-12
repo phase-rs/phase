@@ -4,7 +4,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -42,15 +42,28 @@ pub fn resolve(
     let values = compute_current_copiable_values(state, target_id)
         .ok_or(EffectError::ObjectNotFound(target_id))?;
 
-    // Display identity follows the copy: carry the source's image pointer so the
-    // copying object renders the copied card's art. Not a CR 707.2 copiable
+    // Display identity follows the copy: carry the source's image routing so the
+    // copying object renders the copied source's art. Not a CR 707.2 copiable
     // value (kept off `CopiableValues`); rides on the modification so it reverts
     // with the effect. The source is guaranteed present — the copiable-values
     // lookup above returned `Some` for `target_id`.
-    let source_printed_ref = state
+    //
+    // CR 111.1 + CR 707.2: when the source is a true token, `printed_ref` is
+    // `None` and the token's art lives only in the token database — so capture
+    // `display_source` + `token_image_ref` too, otherwise a copy-of-token (e.g.
+    // Mockingbird copying a Rabbit token) is stranded on the real-card name path
+    // for a name that has no real-card printing and renders blank.
+    let (source_display_source, source_printed_ref, source_token_image_ref) = state
         .objects
         .get(&target_id)
-        .and_then(|o| o.printed_ref.clone());
+        .map(|o| {
+            (
+                o.display_source,
+                o.printed_ref.clone(),
+                o.token_image_ref.clone(),
+            )
+        })
+        .unwrap_or_default();
 
     // CR 202.1b + CR 707.9: "except it has no mana cost" is a copy-value
     // exception consumed at resolution — strip the copied mana cost from the
@@ -83,7 +96,9 @@ pub fn resolve(
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
+        display_source: source_display_source,
         printed_ref: source_printed_ref,
+        token_image_ref: source_token_image_ref,
     }];
     modifications.extend(layered_mods);
 
@@ -99,14 +114,16 @@ pub fn resolve(
     );
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
-    // copy is or has certain characteristics" — re-evaluate layers so the
-    // copied card_types is realized. This is required for keyword grants
-    // (e.g., "except it has myriad") to synthesize their associated triggers.
-    // Counters are then placed via the shared replacement-aware primitive
-    // (Doubling Season etc. apply normally).
-    crate::game::layers::evaluate_layers(state);
+    // copy is or has certain characteristics" — flush the layer re-evaluation
+    // queued by `add_transient_continuous_effect` so the copied card_types is
+    // realized. This is required for keyword grants (e.g., "except it has
+    // myriad") to synthesize their associated triggers. Counters are then
+    // placed via the shared replacement-aware primitive (Doubling Season etc.
+    // apply normally).
+    crate::game::layers::flush_layers(state);
 
     if !resolution_mods.is_empty() {
+        let mut additions = Vec::new();
         for modification in resolution_mods {
             // RemoveManaCost was already consumed into `values`; only the
             // counter-placement exceptions remain to apply here.
@@ -137,14 +154,41 @@ pub fn resolve(
                 if !gate_passes {
                     continue;
                 }
-                super::counters::add_counter_with_replacement(
-                    state,
-                    ability.controller,
-                    ability.source_id,
+                additions.push(PendingCounterAddition::Object {
+                    actor: ability.controller,
+                    object_id: ability.source_id,
                     counter_type,
-                    n,
-                    events,
+                    count: n,
+                });
+            }
+        }
+        for (index, addition) in additions.iter().cloned().enumerate() {
+            let PendingCounterAddition::Object {
+                actor,
+                object_id,
+                counter_type,
+                count,
+            } = addition
+            else {
+                continue;
+            };
+            if !super::counters::add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                counter_type,
+                count,
+                events,
+            ) {
+                super::counters::stash_pending_counter_additions(
+                    state,
+                    additions[index + 1..].to_vec(),
+                    PendingEffectResolved::new(
+                        EffectKind::from(&ability.effect),
+                        ability.source_id,
+                    ),
                 );
+                return Ok(());
             }
         }
     }
@@ -407,6 +451,98 @@ mod tests {
     }
 
     #[test]
+    fn become_copy_of_token_carries_token_display_routing_and_reverts() {
+        // CR 111.1 + CR 707.2: a nontoken that becomes a copy of a *token* (e.g.
+        // Mockingbird copying a Rabbit token) stays a nontoken but takes the
+        // token's name — which only resolves in the token art database. The copy
+        // must therefore carry the source token's `display_source = Token` +
+        // `token_image_ref` (not `printed_ref`), or it renders blank on the
+        // real-card name path. On a temporary copy that routing reverts to the
+        // copier's own when the effect expires. Drives the real pipeline
+        // (resolve → evaluate_layers → cleanup → evaluate_layers). Token-source
+        // analog of `become_copy_propagates_source_printed_ref_and_reverts_at_cleanup`.
+        let mut state = GameState::new_two_player(42);
+
+        let token_ref = crate::types::card::TokenImageRef {
+            scryfall_id: "rabbit-scryfall-id".to_string(),
+            scryfall_oracle_id: Some("rabbit-oracle-id".to_string()),
+            face_name: None,
+            preset_id: "rabbit-preset".to_string(),
+        };
+        let own_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "mockingbird-oracle-id".to_string(),
+            face_name: "Mockingbird".to_string(),
+        };
+
+        // Copy source: a true 1/1 Rabbit token (no printed identity).
+        let token_id = create_creature(&mut state, 1, PlayerId(0), "Rabbit", 1, 1);
+        {
+            let token = state.objects.get_mut(&token_id).unwrap();
+            token.is_token = true;
+            token.display_source = crate::game::game_object::DisplaySource::Token;
+            token.token_image_ref = Some(token_ref.clone());
+        }
+        // Copier: a real nontoken card with its own printed identity.
+        let copier_id = create_creature(&mut state, 2, PlayerId(0), "Mockingbird", 1, 1);
+        {
+            let copier = state.objects.get_mut(&copier_id).unwrap();
+            copier.printed_ref = Some(own_ref.clone());
+            copier.base_printed_ref = Some(own_ref.clone());
+        }
+
+        let mut events = Vec::new();
+        let ability = make_copy_ability(
+            token_id,
+            copier_id,
+            PlayerId(0),
+            Some(Duration::UntilEndOfTurn),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copy = &state.objects[&copier_id];
+        assert_eq!(
+            copy.display_source,
+            crate::game::game_object::DisplaySource::Token,
+            "a copy of a token must route art through the token database"
+        );
+        assert_eq!(
+            copy.token_image_ref,
+            Some(token_ref),
+            "the copy must carry the source token's exact art pointer"
+        );
+        assert_eq!(
+            copy.printed_ref, None,
+            "a token source has no printed identity to carry"
+        );
+        assert_eq!(copy.name, "Rabbit");
+        assert!(
+            !copy.is_token,
+            "CR 111.1: copying a token does not make the copy a token"
+        );
+
+        // Temporary copy expires: display routing reverts to the copier's own.
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        let reverted = &state.objects[&copier_id];
+        assert_eq!(
+            reverted.display_source,
+            crate::game::game_object::DisplaySource::Card,
+            "when the copy expires, a nontoken reverts to card-database routing"
+        );
+        assert_eq!(
+            reverted.token_image_ref, None,
+            "the stale token-art pointer is cleared on revert"
+        );
+        assert_eq!(
+            reverted.printed_ref,
+            Some(own_ref),
+            "the copier's own printed identity is restored"
+        );
+        assert_eq!(reverted.name, "Mockingbird");
+    }
+
+    #[test]
     fn permanent_become_copy_is_pruned_when_object_leaves_battlefield() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_object(
@@ -442,7 +578,12 @@ mod tests {
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source_id].name, "Target Bear");
 
-        move_to_zone(&mut state, source_id, Zone::Exile, &mut events);
+        move_to_zone(&mut state, source_id, Zone::Graveyard, &mut events);
+        assert_eq!(
+            state.objects[&source_id].name, "Copy Source",
+            "copy identity must not persist in graveyard after leaving the battlefield"
+        );
+
         move_to_zone(&mut state, source_id, Zone::Battlefield, &mut events);
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source_id].name, "Copy Source");
@@ -1339,6 +1480,60 @@ mod tests {
                 .count(),
             0,
             "out-of-bounds retain must be a no-op (no panic, no spurious trigger)"
+        );
+    }
+
+    // CR 707.9a: Activated-ability "except it has this ability" (Thespian's
+    // Stage class) retains the source's printed activated ability on the copy.
+    #[test]
+    fn become_copy_retains_printed_ability_from_source() {
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Urza's Saga", 2, 2);
+        state.objects.get_mut(&target).unwrap().base_keywords = vec![Keyword::Trample];
+
+        let source = create_creature(&mut state, 2, PlayerId(0), "Thespian's Stage", 0, 0);
+        let copy_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![],
+            },
+        )
+        .cost(AbilityCost::Tap);
+        state.objects.get_mut(&source).unwrap().base_abilities =
+            Arc::new(vec![copy_ability.clone()]);
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::RetainPrintedAbilityFromSource {
+                        source_ability_index: 0,
+                    },
+                ],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = state.objects.get(&source).unwrap();
+        assert!(
+            copied.abilities.iter().any(|a| a == &copy_ability),
+            "retained activated copy ability must survive Layer 1; got {:?}",
+            copied.abilities
         );
     }
 

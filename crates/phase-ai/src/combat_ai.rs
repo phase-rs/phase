@@ -1259,7 +1259,13 @@ fn crackback_damage(
     opp_attackers.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let mut unblocked_damage = 0i32;
-    let mut blocker_idx = 0;
+    // CR 509.1: greedy 1:1 blocker assignment. Track which blockers have been
+    // committed rather than a single advancing cursor: a blocker that can't
+    // legally block the CURRENT attacker (e.g. a ground creature vs a flyer)
+    // must remain available for later attackers it CAN block. A shared cursor
+    // permanently discarded such a blocker, over-estimating crackback and making
+    // the AI hold back profitable attacks.
+    let mut used = vec![false; our_blockers.len()];
     for &(opp_id, opp_power) in &opp_attackers {
         // Keyword lookup mirrors the power lookup: prefer the projected view
         // (e.g., Battle Cry / Mentor pumps, newly-granted Trample).
@@ -1270,24 +1276,27 @@ fn crackback_damage(
             Some(o) => o,
             None => continue,
         };
-        let blocked = loop {
-            if blocker_idx >= our_blockers.len() {
-                break false;
+        // First not-yet-committed blocker that can legally block this attacker.
+        let mut blocked = false;
+        for (i, &bid) in our_blockers.iter().enumerate() {
+            if used[i] {
+                continue;
             }
-            let bid = our_blockers[blocker_idx];
-            if let Some(blocker) = state.objects.get(&bid) {
-                if can_block_pair(state, bid, opp_id) {
-                    blocker_idx += 1;
-                    if opp_obj.has_keyword(&Keyword::Trample) {
-                        let blocker_toughness = blocker.toughness.unwrap_or(0);
-                        let trample_through = (opp_power - blocker_toughness).max(0);
-                        unblocked_damage += trample_through;
-                    }
-                    break true;
-                }
+            if !can_block_pair(attacker_source, bid, opp_id) {
+                continue; // skip — still available for other attackers
             }
-            blocker_idx += 1;
-        };
+            used[i] = true;
+            blocked = true;
+            if opp_obj.has_keyword(&Keyword::Trample) {
+                let blocker_toughness = attacker_source
+                    .objects
+                    .get(&bid)
+                    .and_then(|b| b.toughness)
+                    .unwrap_or(0);
+                unblocked_damage += (opp_power - blocker_toughness).max(0);
+            }
+            break;
+        }
         if !blocked {
             unblocked_damage += opp_power;
         }
@@ -1335,9 +1344,13 @@ fn sum_power(state: &GameState, ids: &[ObjectId]) -> i32 {
 /// bail) only cost CPU; false positives (bailing when a save existed) cannot
 /// happen because the bound dominates any real assignment's absorption.
 ///
-/// Optimal greedy under the relaxation: chump the N highest-power non-trample
-/// non-unblockable attackers (each absorbs full attacker_power), then apply
-/// remaining blocker toughness to tramplers (each absorbs blocker_toughness).
+/// Optimal allocation under the relaxation: a blocker spent chumping absorbs the
+/// attacker's full power (toughness-independent); a blocker spent on trample
+/// absorbs its own toughness. Chumping the most attackers is NOT always optimal —
+/// chumping a low-power attacker can waste a high-toughness blocker that would
+/// soak more trample. So maximize over every chump count `k` in `0..=min(chumps,
+/// blockers)`: chump the `k` highest-power attackers (using the `k` smallest
+/// blockers) and reserve the `blockers - k` largest-toughness blockers for trample.
 fn block_is_futile(
     state: &GameState,
     player: PlayerId,
@@ -1378,25 +1391,39 @@ fn block_is_futile(
         .collect();
     blocker_toughnesses.sort_unstable_by(|a, b| b.cmp(a));
 
-    let chump_count = chumpable_powers.len().min(blocker_toughnesses.len());
-    let chump_absorption: i32 = chumpable_powers.iter().take(chump_count).sum();
-    let remaining_blocker_toughness: i32 = blocker_toughnesses.iter().skip(chump_count).sum();
-    let trample_absorption = trample_power.min(remaining_blocker_toughness);
+    // CR 510.1c: Chumping a non-trample attacker absorbs its full power regardless
+    // of the blocker's toughness, so chump with the SMALLEST blockers and reserve
+    // the LARGEST-toughness ones to soak trample. `blocker_toughnesses` is sorted
+    // descending, so `toughness_prefix[m]` is the absorption of the m largest.
+    let total_blockers = blocker_toughnesses.len();
+    let mut toughness_prefix = vec![0i32; total_blockers + 1];
+    for (i, &t) in blocker_toughnesses.iter().enumerate() {
+        toughness_prefix[i + 1] = toughness_prefix[i] + t;
+    }
 
-    let max_absorption = chump_absorption + trample_absorption;
+    // Maximize absorption over every chump count `k`: chumping the `k` biggest
+    // attackers frees the `total_blockers - k` largest blockers for trample.
+    // Forcing the maximum `k` under-counted absorption (a small chump can cost a
+    // big trample blocker) and wrongly reported survivable boards as futile.
+    let max_chump = chumpable_powers.len().min(total_blockers);
+    let mut max_absorption = 0;
+    let mut chump_absorption = 0;
+    for k in 0..=max_chump {
+        if k > 0 {
+            chump_absorption += chumpable_powers[k - 1];
+        }
+        let trample_absorption = trample_power.min(toughness_prefix[total_blockers - k]);
+        max_absorption = max_absorption.max(chump_absorption + trample_absorption);
+    }
     let min_residual = total_attacker_power - max_absorption;
 
-    // Residual is unblockable_power + uncovered chumpables + uncovered trample.
-    // Equivalently: total - max_absorption (which already accounts for unblockable
-    // contributing zero absorption). Bail iff that residual STRICTLY EXCEEDS life
-    // — at exact lethal we still chump per the existing "minimize damage even when
-    // dying" semantics (theoretical opponent miscounts / instant-speed lifegain).
-    debug_assert_eq!(
-        min_residual,
-        unblockable_power
-            + (chumpable_powers.iter().sum::<i32>() - chump_absorption)
-            + (trample_power - trample_absorption)
-    );
+    // Residual = unblockable_power + uncovered chumpables + uncovered trample.
+    // Absorption only ever neutralizes chumpable/trample power, never unblockable,
+    // so the residual can never drop below the unblockable total. Bail iff residual
+    // STRICTLY EXCEEDS life — at exact lethal we still chump per the existing
+    // "minimize damage even when dying" semantics (opponent miscounts / lifegain).
+    debug_assert!(min_residual >= unblockable_power);
+    debug_assert!(max_absorption <= chumpable_powers.iter().sum::<i32>() + trample_power);
     min_residual > life
 }
 
@@ -1683,6 +1710,104 @@ mod tests {
         obj.keywords = keywords;
         obj.entered_battlefield_turn = Some(1);
         id
+    }
+
+    // --- Issue #2514: crackback_damage blocker reuse (CR 509.1) ---
+
+    #[test]
+    fn crackback_blocker_not_consumed_by_unblockable_attacker() {
+        // A ground wall that can't block a flyer must remain available to block a
+        // ground attacker. The old shared cursor discarded the wall after it
+        // failed to block the (higher-power) flyer, over-counting crackback.
+        let mut state = setup();
+        // AI (P0) has only a 0/5 ground wall.
+        add_creature(&mut state, PlayerId(0), "Wall", 0, 5, vec![]);
+        // Opponent (P1): a 5/5 flyer (sorted first by power) and a 4/4 ground.
+        add_creature(
+            &mut state,
+            PlayerId(1),
+            "Flyer",
+            5,
+            5,
+            vec![Keyword::Flying],
+        );
+        add_creature(&mut state, PlayerId(1), "Ground", 4, 4, vec![]);
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], None);
+        // The wall blocks the 4/4; only the 5/5 flyer is unblocked.
+        assert_eq!(
+            cb, 5,
+            "wall must block the ground 4/4, leaving only the flyer's 5"
+        );
+    }
+
+    #[test]
+    fn crackback_uses_all_legal_pairings() {
+        // Two ground walls + (flyer, two ground attackers): both walls block the
+        // ground attackers; only the flyer is unblocked.
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Wall A", 0, 5, vec![]);
+        add_creature(&mut state, PlayerId(0), "Wall B", 0, 4, vec![]);
+        add_creature(
+            &mut state,
+            PlayerId(1),
+            "Flyer",
+            5,
+            5,
+            vec![Keyword::Flying],
+        );
+        add_creature(&mut state, PlayerId(1), "Ground A", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(1), "Ground B", 2, 2, vec![]);
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], None);
+        assert_eq!(
+            cb, 5,
+            "both walls block the ground attackers; flyer unblocked"
+        );
+    }
+
+    #[test]
+    fn crackback_trample_counts_only_excess() {
+        // A trampler blocked by a smaller creature contributes only the excess.
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Blocker", 2, 2, vec![]);
+        add_creature(
+            &mut state,
+            PlayerId(1),
+            "Trampler",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], None);
+        // 5 power - 2 toughness blocker = 3 trample-through.
+        assert_eq!(cb, 3, "only the trample excess (5-2) is counted");
+    }
+
+    #[test]
+    fn crackback_projection_drives_block_legality() {
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Wall", 0, 5, vec![]);
+        let attacker = add_creature(&mut state, PlayerId(1), "Projected Flyer", 4, 4, vec![]);
+
+        let mut projected = state.clone();
+        projected
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentAttackersDeclared,
+            state: projected,
+            snapshots: Vec::new(),
+            confidence: crate::projection::Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
+        assert_eq!(cb, 4, "projected flying must make the attacker unblocked");
     }
 
     /// Battlefield planeswalker for `owner` with the given starting loyalty.
@@ -2888,6 +3013,64 @@ mod tests {
         assert!(
             !blockers.is_empty(),
             "5/5 wall must block 3/3 bear; got empty assignment"
+        );
+    }
+
+    /// CR 509.1 + CR 510.1c: `block_is_futile` must reserve the LARGEST-toughness
+    /// blockers to soak tramplers and chump with the smallest, since chumping a
+    /// non-trample attacker absorbs its full power regardless of the blocker's
+    /// toughness. A survivable assignment here (chump the 1/1 with the 1/1, block
+    /// the 5/5 trampler with the 10-toughness wall → 0 trample-through) must NOT
+    /// be reported as futile. The bug reserved the SMALLEST blockers for trample,
+    /// under-counting absorption and conceding survivable boards to lethal.
+    #[test]
+    fn block_is_futile_reserves_largest_blockers_for_trample() {
+        let mut state = setup();
+        state.players[1].life = 2;
+        let wall = add_creature(&mut state, PlayerId(1), "Wall", 0, 10, vec![]);
+        let small = add_creature(&mut state, PlayerId(1), "Small", 1, 1, vec![]);
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+        let bear = add_creature(&mut state, PlayerId(0), "Bear", 1, 1, vec![]);
+        assert!(
+            !block_is_futile(&state, PlayerId(1), &[trampler, bear], &[wall, small]),
+            "Wall absorbs the trampler and Small chumps the Bear (residual 0 < life 2); not futile"
+        );
+    }
+
+    /// CR 509.1 + CR 510.1c: `block_is_futile` must not assume chumping every
+    /// possible attacker maximizes absorption. Chumping a low-power attacker
+    /// consumes a blocker that could have soaked more trample damage. Here the
+    /// optimum is to gang-block the 6/6 trampler with BOTH 0/3 walls (absorb 6 →
+    /// 0 tramples through) and take 1 from the unblocked 1/1: residual 1 == life,
+    /// not > life, so the board is survivable and must NOT be reported futile.
+    /// The bug forced `chump_count = min(chumpables, blockers)` (always chump the
+    /// 1/1), leaving only one wall (toughness 3) for trample → 3 tramples through,
+    /// wrongly conceding the game.
+    #[test]
+    fn block_is_futile_skips_chump_to_soak_more_trample() {
+        let mut state = setup();
+        state.players[1].life = 1;
+        let wall_a = add_creature(&mut state, PlayerId(1), "WallA", 0, 3, vec![]);
+        let wall_b = add_creature(&mut state, PlayerId(1), "WallB", 0, 3, vec![]);
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            6,
+            6,
+            vec![Keyword::Trample],
+        );
+        let goblin = add_creature(&mut state, PlayerId(0), "Goblin", 1, 1, vec![]);
+        assert!(
+            !block_is_futile(&state, PlayerId(1), &[trampler, goblin], &[wall_a, wall_b]),
+            "both walls should soak the trampler (residual 1 == life) instead of chumping the 1/1"
         );
     }
 

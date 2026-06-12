@@ -24,7 +24,6 @@ expression: result
       "duration": null,
       "description": "{2}{U}: Level 2",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -61,7 +60,6 @@ expression: result
       "duration": null,
       "description": "{4}{U}: Level 3",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -99,7 +97,6 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -152,7 +149,6 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

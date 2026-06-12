@@ -527,4 +527,104 @@ mod tests {
             "Create a 1/1 green Saproling."
         ));
     }
+
+    /// Fable of the Mirror-Breaker chapter III: exile then return transformed.
+    #[test]
+    fn fable_chapter_three_exiles_then_returns_transformed() {
+        let lines = vec![
+            "III — Exile this Saga, then return it to the battlefield transformed under your control.",
+        ];
+        let (triggers, _etb, _consumed) =
+            parse_saga_chapters(&lines, "Fable of the Mirror-Breaker");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().expect("chapter III execute");
+        match &*exec.effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            } => {}
+            other => panic!("expected exile SelfRef clause 1, got {other:?}"),
+        }
+        let sub = exec.sub_ability.as_ref().expect("return transformed sub");
+        assert!(
+            !matches!(&*sub.effect, Effect::ChangeZoneAll { .. }),
+            "chapter III return must be single-object ChangeZone so enter_transformed propagates"
+        );
+        match &*sub.effect {
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target,
+                enter_transformed,
+                enters_under,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        target,
+                        TargetFilter::SelfRef
+                            | TargetFilter::TrackedSet { .. }
+                            | TargetFilter::ParentTarget
+                    ),
+                    "return target must refer to the exiled saga, got {target:?}"
+                );
+                assert!(*enter_transformed, "chapter III must return transformed");
+                assert_eq!(
+                    enters_under.as_ref(),
+                    Some(&ControllerRef::You),
+                    "chapter III must enter under your control"
+                );
+            }
+            other => panic!("expected return transformed clause 2, got {other:?}"),
+        }
+    }
+
+    /// CR 714.2 + CR 400.7i: The Legend of Roku chapter I (issue #1549) —
+    /// exile top three, then grant play-from-exile until end of controller's
+    /// next turn. The permission sub-ability must bind to `TrackedSet`, not
+    /// the saga source.
+    #[test]
+    fn legend_of_roku_chapter_one_exiles_and_grants_play_permission() {
+        use crate::types::ability::{
+            CastingPermission, Duration, PlayerScope, QuantityExpr, TargetFilter,
+        };
+        use crate::types::identifiers::TrackedSetId;
+
+        let lines = vec![
+            "I — Exile the top three cards of your library. Until the end of your next turn, you may play those cards.",
+        ];
+        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "The Legend of Roku");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().expect("chapter I execute");
+        match &*exec.effect {
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                face_down: false,
+            } => {}
+            other => panic!("expected ExileTop(controller, 3), got {other:?}"),
+        }
+        let sub = exec
+            .sub_ability
+            .as_ref()
+            .expect("play permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        duration:
+                            Duration::UntilEndOfNextTurnOf {
+                                player: PlayerScope::Controller,
+                            },
+                        ..
+                    },
+                target:
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                ..
+            } => {}
+            other => panic!("expected PlayFromExile grant on TrackedSet, got {other:?}"),
+        }
+    }
 }

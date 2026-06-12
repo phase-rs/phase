@@ -33,6 +33,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 /// Give P0 the mana to cast Flickerwisp ({1}{W}{W}).
 fn add_flickerwisp_mana(runner: &mut engine::game::scenario::GameRunner) {
@@ -82,6 +83,8 @@ fn flickerwisp_delayed_return_fires_at_end_step() {
             object_id: flickerwisp,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Flickerwisp cast should be accepted");
 
@@ -230,6 +233,8 @@ fn flickerwisp_delayed_return_skipped_when_victim_left_exile() {
             object_id: flickerwisp,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Flickerwisp cast should be accepted");
 

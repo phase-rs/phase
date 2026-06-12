@@ -1,4 +1,6 @@
-use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::effects::counters::{
+    add_counter_with_replacement, stash_pending_counter_completion,
+};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::counter::CounterType;
@@ -41,15 +43,18 @@ pub fn resolve(
     let n = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as u32;
 
     // CR 701.46a: Put N +1/+1 counters on the permanent.
-    if n > 0 {
-        add_counter_with_replacement(
+    if n > 0
+        && !add_counter_with_replacement(
             state,
             ability.controller,
             source_id,
             CounterType::Plus1Plus1,
             n,
             events,
-        );
+        )
+    {
+        stash_pending_counter_completion(state, EffectKind::Adapt, source_id);
+        return Ok(());
     }
 
     // CR 701.46a: Emit EffectResolved so "When ~ adapts" triggers can fire.

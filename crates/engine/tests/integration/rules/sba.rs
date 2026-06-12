@@ -2,6 +2,7 @@
 use super::*;
 
 use engine::types::ability::TargetRef;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 
 /// CR 704.5g: Creature with lethal damage is destroyed by state-based actions.
@@ -29,6 +30,8 @@ fn lethal_damage_destroys_creature() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -111,6 +114,8 @@ fn zero_life_player_loses() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -156,6 +161,8 @@ fn negative_life_player_loses() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -230,6 +237,8 @@ fn indestructible_survives_lethal_damage() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -280,6 +289,8 @@ fn sbas_checked_automatically_after_action() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 

@@ -19,6 +19,7 @@ use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, FilterProp, TargetFilter, TargetRef, TypeFilter};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -102,6 +103,8 @@ fn cast_with_decision(
             object_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should reach the cleave choice or proceed");
     // Both costs affordable → an AlternativeCastChoice(Cleave) offer.
@@ -351,6 +354,8 @@ fn fierce_retribution_base_destroys_attacking_only() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("offer surfaces");
     assert!(matches!(

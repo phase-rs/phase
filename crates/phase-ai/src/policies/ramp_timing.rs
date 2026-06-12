@@ -21,6 +21,8 @@ use crate::features::mana_ramp::{
     chain_has_mana_effect, is_land_fetch_spell_parts, is_ritual_parts,
 };
 use crate::features::DeckFeatures;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 /// Minimum commitment required to activate this policy at all.
 const COMMITMENT_FLOOR: f32 = 0.1;
@@ -242,6 +244,8 @@ mod tests {
                 object_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(AI),
@@ -310,7 +314,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],

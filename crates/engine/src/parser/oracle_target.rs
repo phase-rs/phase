@@ -20,7 +20,9 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
-use super::oracle_effect::{is_bare_object_pronoun, resolve_it_pronoun};
+use super::oracle_effect::{
+    is_bare_object_pronoun, parse_multi_target_count_expr, resolve_it_pronoun,
+};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::OracleError;
@@ -461,9 +463,21 @@ pub fn parse_target_with_syntax<'a>(
             return parse_target_with_syntax(original_rest, ctx);
         }
     }
-    // "that [type phrase]" → anaphoric reference to a typed subject
+    // CR 608.2k: Bare "that spell" refers to the triggering spell object
+    // (Krark, the Thumbless; Spellchain Scatter). "that card" is NOT included —
+    // it stays on the ParentTarget arm below and is rewritten to TrackedSet when
+    // a prior sibling publishes an affected set (Sin, Spira's Punishment). Predicate
+    // continuations ("that spell is countered this way") keep ParentTarget because
+    // text remains after the noun; comma continuations ("copy that spell, and …")
+    // still name the triggering spell.
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
+        if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
+            if after.is_empty() || after.starts_with([',', ';']) {
+                let orig_after = original_rest.get("spell".len()..).unwrap_or(original_rest);
+                return (TargetFilter::TriggeringSource, orig_after, syntax);
+            }
+        }
         let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
             return (TargetFilter::ParentTarget, rem, syntax);
@@ -532,8 +546,12 @@ pub fn parse_target_with_syntax<'a>(
         tag("all cards exiled with it"),
         tag("all cards they own exiled with ~"),
         tag("all cards they own exiled with it"),
+        tag("card they own exiled with ~"),
+        tag("card they own exiled with it"),
         tag("cards they own exiled with ~"),
         tag("cards they own exiled with it"),
+        tag("card exiled with ~"),
+        tag("card exiled with it"),
         tag("cards exiled with ~"),
         tag("cards exiled with it"),
     ))
@@ -957,8 +975,12 @@ pub fn parse_target_with_syntax<'a>(
         tag("all cards exiled with it"),
         tag("all cards they own exiled with ~"),
         tag("all cards they own exiled with it"),
+        tag("card they own exiled with ~"),
+        tag("card they own exiled with it"),
         tag("cards they own exiled with ~"),
         tag("cards they own exiled with it"),
+        tag("card exiled with ~"),
+        tag("card exiled with it"),
         tag("cards exiled with ~"),
         tag("cards exiled with it"),
     ))
@@ -974,6 +996,16 @@ pub fn parse_target_with_syntax<'a>(
         tag::<_, _, OracleError<'_>>("each card exiled with this ").parse(lower.as_str())
     {
         // Skip the type word after "this " to consume "each card exiled with this artifact"
+        let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
+        return (
+            TargetFilter::ExiledBySource,
+            &text[text.len() - after_type.len()..],
+            syntax,
+        );
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("card exiled with this ").parse(lower.as_str())
+    {
         let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
         return (
             TargetFilter::ExiledBySource,
@@ -1021,6 +1053,25 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
+    }
+
+    // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
+    // distribution (handled upstream by the counter.rs strip), NOT an all-matching
+    // "each" filter. For any non-counter effect that reaches here, route the type
+    // through "target" parsing rather than the bare "each " path below — which
+    // would call `parse_type_phrase_with_ctx("of <count> target <type>")` and
+    // degenerate to an all-matching TypedFilter.
+    if let Ok((rest_lower, ())) = (|i| {
+        let (i, ()) = value((), tag::<_, _, OracleError<'_>>("each of ")).parse(i)?;
+        let (i, _count) = parse_multi_target_count_expr(i)?;
+        let (i, ()) = value((), space1).parse(i)?;
+        let (i, _) = peek(tag::<_, _, OracleError<'_>>("target")).parse(i)?;
+        Ok::<_, nom::Err<OracleError<'_>>>((i, ()))
+    })(lower.as_str())
+    {
+        let tail = &text[lower.len() - rest_lower.len()..];
+        let (filter, rest) = parse_target_with_ctx(tail, ctx);
+        return (filter, rest, syntax);
     }
 
     // "each " + type phrase
@@ -1279,37 +1330,93 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
     }
 }
 
-/// CR 201.2: Scan `name_text` (the lowercase text after "named ") for the
-/// first word boundary where a conjugated verb begins, indicating the card
-/// name has ended and a verb phrase follows. Returns the byte offset of the
-/// space preceding the verb, or `None` if no verb boundary is found.
+/// CR 201.2: Match a clause boundary that ends a card name in a board-filter
+/// "X named <CardName> …" phrase, scanned at word boundaries (most arms begin
+/// with a space; the comma arm begins with ","). A bare comma or " and " is NOT
+/// a terminator on its own — card names embed both ("Bruna, the Fading Light";
+/// "Gisa and Geralf") — so the name is never split on internal punctuation. The
+/// name ends only at a *clause-joining* connective: the controller suffix
+/// ("… you control"), a relative pronoun ("… that has flying"), the predicate
+/// verb that opens the enclosing relative clause ("… draws a card", "… loses 3
+/// life"), or a comma that introduces a *referential* clause about the named
+/// object ("…, it gains", "…, they draw"). The comma arm is pronoun-guarded:
+/// a legendary epithet after a comma is a noun phrase ("…, the Fading Light"),
+/// never a bare referential pronoun, so comma-bearing names stay whole while
+/// "Falkenrath Gorger, it gains" still terminates at "Falkenrath Gorger". This
+/// mirrors `oracle_effect::search::parse_name_terminator` (the search-zone
+/// analogue) but covers the board-filter predicate verbs rather than search
+/// follow-up actions.
 ///
-/// Delegates to `nom_primitives::scan_split_at_phrase` for word-boundary
-/// scanning with nom `tag()` combinators.
-fn find_verb_boundary_in_named(name_text: &str) -> Option<usize> {
-    // Conjugated 3rd-person verbs that commonly follow a card name in
-    // "each player who controls a permanent named X [verb]" patterns.
-    // Only verbs that do NOT appear in real MTG card names are included.
-    // Excluded: "gains" (Ill-Gotten Gains), "deals" (Orzhova, the Church
-    // of Deals), "gets" (Bird Gets the Worm), "has"/"is"/"are"/"enters"
-    // (too generic and appear in card names).
-    nom_primitives::scan_split_at_phrase(name_text, |i| {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("draws ")),
-            value((), tag("loses ")),
-            value((), tag("creates ")),
-            value((), tag("destroys ")),
-            value((), tag("discards ")),
-            value((), tag("exiles ")),
-            value((), tag("mills ")),
-            value((), tag("puts ")),
-            value((), tag("reveals ")),
-            value((), tag("sacrifices ")),
-            value((), tag("searches ")),
-        ))
-        .parse(i)
-    })
-    .map(|(prefix, _)| prefix.len().saturating_sub(1))
+/// The verb arms are third-person singular/plural present forms because the
+/// enclosing subject is a singular "permanent/creature named X" or the
+/// per-player iteration of "each player who controls a permanent named X"
+/// (issue #2016, Bonder's Ornament). They are kept as a single composable
+/// `alt()` over the predicate lead so the boundary covers the class, not one
+/// card.
+fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        // Controller-scope suffixes (CR 109.4). Longest-match-first.
+        value((), tag(" you don't control")),
+        value((), tag(" you control")),
+        value((), tag(" you own")),
+        value((), tag(" an opponent controls")),
+        value((), tag(" your opponents control")),
+        // Relative-pronoun clause leads (CR 201.2 descriptive clauses).
+        value((), tag(" that ")),
+        value((), tag(" with ")),
+        value((), tag(" without ")),
+        // Copular / state predicates opening a relative clause.
+        value((), tag(" is ")),
+        value((), tag(" are ")),
+        value((), tag(" has ")),
+        value((), tag(" have ")),
+        // Per-player / per-permanent action predicates (issue #2016 class:
+        // "… draws a card", "… loses N life", "… sacrifices a permanent").
+        // Excludes conjugated verbs that occur verbatim inside real card
+        // names — matching them would truncate the name: "gains" (Ill-Gotten
+        // Gains), "gets" (Bird Gets the Worm), "deals" (Orzhova, the Church of
+        // Deals). Plural/modal board-filter predicates ("get", "can't") are
+        // split upstream by the static parser before this terminator sees them.
+        value(
+            (),
+            (
+                tag(" "),
+                alt((
+                    tag("draws "),
+                    tag("loses "),
+                    tag("sacrifices "),
+                    tag("discards "),
+                    tag("creates "),
+                    tag("mills "),
+                    tag("destroys "),
+                    tag("exiles "),
+                    tag("puts "),
+                    tag("reveals "),
+                    tag("searches "),
+                )),
+            ),
+        ),
+        // CR 201.2: A comma that opens a referential clause about the named
+        // object ("Falkenrath Gorger, it gains"). Pronoun-guarded so a
+        // name-internal comma followed by an epithet noun phrase ("Bruna, the
+        // Fading Light") is preserved — legendary epithets never begin with a
+        // bare referential pronoun.
+        value(
+            (),
+            (
+                tag(", "),
+                alt((
+                    tag("it "),
+                    tag("they "),
+                    tag("he "),
+                    tag("she "),
+                    tag("you "),
+                    tag("its "),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
@@ -1500,6 +1607,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
             properties.push(FilterProp::IsCommander);
             pos += lower[pos..].len() - after_commander_word.len();
         }
+    }
+
+    // CR 208.1 (#2912): a leading "N/M" power/toughness designation ("a 1/1
+    // creature", "two 2/2 creatures") constrains the object's current power and
+    // toughness — it is NOT a subtype. Emit a `PtComparison` for each side and
+    // let the trailing type word ("creature") parse normally; previously the
+    // whole "1/1 creature" fused into `Subtype("1/1 Creature")`, so e.g. Sword
+    // of the Meek never matched 1/1 tokens.
+    if let Some((power, toughness, consumed)) = parse_leading_pt_designation(&lower[pos..]) {
+        properties.push(FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: power },
+        });
+        properties.push(FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: toughness },
+        });
+        pos += consumed;
     }
 
     // CR 105.1 + CR 105.2: Handle color adjective prefixes:
@@ -1922,6 +2051,18 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 205.3 (#2905): positive "that's a/an <Subtype> [or a/an <Subtype>]"
+    // relative-clause restriction ("creature you control that's an Ape or a
+    // Monkey"). Append the subtype constraint as an adjective type filter so it
+    // AND-merges with the core type (Creature) rather than being dropped — the
+    // clause previously fell through, leaving every creature eligible. Checked
+    // before `parse_that_clause_suffix` (mirrors the `that isn't` arm); it only
+    // fires for real subtypes, so color/supertype "that's" clauses are unaffected.
+    if let Some((subtype_filter, consumed)) = parse_that_is_subtype_suffix(&lower[pos..]) {
+        adjective_type_filters.push(subtype_filter);
+        pos += consumed;
+    }
+
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..], Some(ctx)) {
         properties.extend(that_props);
@@ -2095,12 +2236,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
     if let Ok((name_text, _)) = tag::<_, _, OracleError<'_>>("named ").parse(remaining_named) {
-        // Name extends to end-of-clause markers: comma, period, conjugated
-        // verb at a word boundary (CR 201.2), or end-of-input.
-        let punct_end = name_text.find([',', '.']).unwrap_or(name_text.len());
-        let name_end = find_verb_boundary_in_named(name_text)
-            .unwrap_or(punct_end)
-            .min(punct_end);
+        // CR 201.2: The card name runs to the earliest *clause* boundary, NOT to
+        // the first comma/period. Card names legitimately contain commas and the
+        // word "and" ("Bruna, the Fading Light"; "Gisa and Geralf"), so splitting
+        // on bare punctuation truncates them, while scanning to end-of-string
+        // over-consumes the trailing relative-clause predicate. Issue #2016:
+        // "each player who controls a permanent named Bonder's Ornament draws a
+        // card" produced `Named { name: "Bonder's Ornament draws a card" }` — the
+        // predicate verb was swallowed into the name, so the controls-predicate
+        // matched nobody and the whole "who controls …" scope was dropped, making
+        // *every* player draw. Scan word boundaries (spaces, and commas for the
+        // pronoun-guarded comma-clause arm) and stop at the first clause-joining
+        // terminator (see `parse_named_filter_terminator`), which preserves
+        // comma/and-bearing names while ending the name at the controller
+        // suffix, relative pronoun, predicate verb, or referential comma clause.
+        let name_end = name_text
+            .char_indices()
+            .filter(|&(_, c)| c == ' ' || c == ',')
+            .find(|&(idx, _)| parse_named_filter_terminator(&name_text[idx..]).is_ok())
+            .map_or_else(
+                || name_text.find(['.', ':', ';']).unwrap_or(name_text.len()),
+                |(idx, _)| idx,
+            );
         let raw_name = name_text[..name_end].trim();
         if !raw_name.is_empty() {
             // Reconstruct original-case name from the same position in `text`
@@ -2231,6 +2388,14 @@ fn classify_negation(negated: &str) -> NegationResult {
     {
         return NegationResult::Prop(FilterProp::NonToken);
     }
+    // CR 700.6: "nonhistoric" / "not historic" — historic is a card property,
+    // not a subtype, so it must not fall through to `Non(Subtype("Historic"))`.
+    if tag::<_, _, OracleError<'_>>("historic")
+        .parse(negated)
+        .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return NegationResult::Prop(FilterProp::NotHistoric);
+    }
 
     match negated {
         // Color negation — parallel to HasColor
@@ -2358,6 +2523,9 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
         || parse_color_prefix(text).is_some()
         || parse_color_quality_prefix(text).is_some()
         || parse_combat_status_prefix(text).is_some()
+        // CR 208.1 (#2912): "1/1 creature" leads a type phrase (the P/T
+        // designation is followed by a type word).
+        || parse_leading_pt_designation(text).is_some()
 }
 
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
@@ -2477,13 +2645,19 @@ fn distribute_shared_properties(filter: TargetFilter, shared_props: &[FilterProp
 }
 
 /// Returns true when the given property is leg-local (produced by an adjective
-/// prefix during `parse_type_phrase` scanning) and must NOT distribute back
-/// across earlier legs of a comma-OR list. Every other property is assumed to
+/// prefix during `parse_type_phrase` scanning, or by a type-scoped keyword
+/// suffix on only the final disjunct) and must NOT distribute back across
+/// earlier legs of a comma-OR list. Every other property is assumed to
 /// originate from a trailing-suffix parser and is eligible for distribution —
 /// e.g., "artifacts and creatures with mana value 2 or less" distributes
 /// `CmcLE` back onto the artifact leg, while "Auras, Equipment, and modified
 /// creatures you control" must NOT propagate `FilterProp::Modified` to the
 /// Aura/Equipment legs.
+///
+/// CR 115.1: "artifact, enchantment, or creature with flying" binds flying
+/// only to the creature disjunct. Spreading `WithKeyword(Flying)` onto the
+/// artifact/enchantment legs would require those permanents to have flying and
+/// would block activation when only a legal enchantment is present (#2941).
 fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
@@ -2493,6 +2667,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Renowned
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
+            | FilterProp::NotHistoric
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
             | FilterProp::EnchantedBy
             | FilterProp::EquippedBy
@@ -2501,6 +2676,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 110.5: "tapped [type]" / "untapped [type]".
             | FilterProp::Tapped
             | FilterProp::Untapped
+            // CR 702.171b: "saddled [type]" adjective prefix.
+            | FilterProp::IsSaddled
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
             | FilterProp::Attacking
             | FilterProp::Blocking
@@ -2514,6 +2691,12 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // Token qualifier ("creature tokens").
             | FilterProp::Token
             | FilterProp::NonToken
+            // CR 702: "<type> with [keyword]" suffixes bind to the type
+            // phrase that parsed them — never retroactively onto earlier Or
+            // disjuncts ("artifact, enchantment, or creature with flying").
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
     )
 }
 
@@ -2819,6 +3002,28 @@ fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
+/// CR 208.1 (#2912): Parse a leading "N/M " power/toughness designation
+/// ("1/1 creature", "2/2 creatures") into fixed `(power, toughness)` plus the
+/// bytes consumed (including the trailing space). Only matches when a type word
+/// follows, so a bare "1/1" elsewhere is not hijacked. Fixed integers only;
+/// dynamic "*/*" / "X/X" designations are left to the existing P/T paths.
+fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usize)> {
+    let (after_power, power) = nom_primitives::parse_number(input).ok()?;
+    let (after_slash, _) = tag::<_, _, OracleError<'_>>("/").parse(after_power).ok()?;
+    let (after_toughness, toughness) = nom_primitives::parse_number(after_slash).ok()?;
+    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ")
+        .parse(after_toughness)
+        .ok()?;
+    if !starts_with_type_phrase_lead(after_space) {
+        return None;
+    }
+    Some((
+        power as i32,
+        toughness as i32,
+        input.len() - after_space.len(),
+    ))
+}
+
 /// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
 /// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
 /// Handles combat status (attacking, unblocked), tap status (tapped, untapped),
@@ -2837,6 +3042,9 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::Blocking
                 | FilterProp::Tapped
                 | FilterProp::Untapped
+                // CR 702.171b: "saddled" designation as a type-phrase prefix
+                // ("saddled Mount", "saddled creature").
+                | FilterProp::IsSaddled
                 | FilterProp::FaceDown
                 // CR 701.60b: "suspected" is a battlefield designation that appears
                 // as an adjective prefix in type phrases ("suspected creatures").
@@ -3841,9 +4049,20 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    // CR 702.113: "card with awaken" (and the other parameterized graveyard/cast
+    // keywords) is a keyword-presence meta-reference that must match by
+    // discriminant, not exact payload — a `WithKeyword(Awaken { count, cost })`
+    // would never match a real instance. Route to `KeywordMatch::Kind`.
     if matches!(
         text,
-        "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
+        "flashback"
+            | "cycling"
+            | "escape"
+            | "embalm"
+            | "eternalize"
+            | "harmonize"
+            | "unearth"
+            | "awaken"
     ) {
         let kind = match text {
             "flashback" => KeywordKind::Flashback,
@@ -3853,6 +4072,7 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             "eternalize" => KeywordKind::Eternalize,
             "harmonize" => KeywordKind::Harmonize,
             "unearth" => KeywordKind::Unearth,
+            "awaken" => KeywordKind::Awaken, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
             _ => unreachable!(),
         };
         return Some(KeywordMatch::Kind(kind));
@@ -4094,7 +4314,7 @@ pub(crate) fn attachment_kinds_filter_prop(
         [kind] => FilterProp::HasAttachment {
             kind: kind.clone(),
             controller,
-            exclude_source: false,
+            exclude_source: crate::types::ability::SourceExclusion::Include,
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
@@ -4155,6 +4375,10 @@ pub(crate) fn parse_that_clause_suffix(
     }
 
     if let Some(parsed) = parse_supertype_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
+
+    if let Some(parsed) = parse_historic_relative_clause_suffix(trimmed, leading_ws) {
         return Some(parsed);
     }
 
@@ -4294,6 +4518,28 @@ fn parse_color_relative_clause_suffix(
     Some((props, consumed))
 }
 
+fn parse_relative_clause_intro(trimmed: &str) -> Option<(&str, usize, bool)> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
+        Some((rest, "that aren't ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
+        Some((rest, "that isn't ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
+        Some((rest, "that's not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
+        Some((rest, "that are not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
+        Some((rest, "that is not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
+        Some((rest, "that's ".len(), false))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+        Some((rest, "that is ".len(), false))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+        Some((rest, "that are ".len(), false))
+    } else {
+        None
+    }
+}
+
 /// CR 205.4a: "that's / that is / that are <supertype>" → `HasSupertype`;
 /// "that aren't / that isn't / that's not / that are not / that is not
 /// <supertype>" → `NotSupertype`. Supertypes are legendary/basic/snow
@@ -4308,27 +4554,7 @@ fn parse_supertype_relative_clause_suffix(
     trimmed: &str,
     leading_ws: usize,
 ) -> Option<(Vec<FilterProp>, usize)> {
-    let (after_intro, intro_len, negated) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
-            (rest, "that aren't ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
-            (rest, "that isn't ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
-            (rest, "that's not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
-            (rest, "that are not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
-            (rest, "that is not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
-            (rest, "that's ".len(), false)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
-            (rest, "that is ".len(), false)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
-            (rest, "that are ".len(), false)
-        } else {
-            return None;
-        };
-
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
     let (rest, supertype) = nom_target::parse_supertype_word(after_intro).ok()?;
     // Word-boundary check: the supertype word must terminate so we don't
     // false-match e.g. "that's basically free" (basic + "ally free").
@@ -4345,6 +4571,33 @@ fn parse_supertype_relative_clause_suffix(
         FilterProp::NotSupertype { value: supertype }
     } else {
         FilterProp::HasSupertype { value: supertype }
+    };
+    Some((vec![prop], consumed))
+}
+
+/// CR 700.6: "that's historic" / "that's not historic" relative clauses on typed
+/// mass-filter subjects (Desynchronization: "nonland permanent that's not historic").
+fn parse_historic_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("historic")
+        .parse(after_intro)
+        .ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let prop = if negated {
+        FilterProp::NotHistoric
+    } else {
+        FilterProp::Historic
     };
     Some((vec![prop], consumed))
 }
@@ -4409,6 +4662,70 @@ fn parse_that_isnt_subtype_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
         vec![TypeFilter::Non(Box::new(TypeFilter::Subtype(subtype)))],
         total,
     ))
+}
+
+/// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
+/// Parses a "that's a/an <Subtype> [or a/an <Subtype>]*" relative clause into a
+/// single `Subtype` (one subtype) or an `AnyOf` of `Subtype`s (disjunction).
+/// "creature you control that's an Ape or a Monkey" →
+/// `AnyOf([Subtype("Ape"), Subtype("Monkey")])`, which AND-merges with the
+/// Creature core type. Returns the bytes consumed (including leading whitespace).
+/// Returns `None` unless the clause names at least one recognized subtype, so
+/// color/supertype "that's …" relative clauses are left to their own parsers.
+fn parse_that_is_subtype_suffix(text: &str) -> Option<(TypeFilter, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+
+    // Positive intro only — negation is handled by `parse_that_isnt_subtype_suffix`.
+    let after_intro = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed)
+    {
+        rest
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+        rest
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+        rest
+    } else {
+        return None;
+    };
+
+    // One "[a/an] <Subtype>" leg → `(Subtype, remaining)`.
+    let parse_leg = |rest: &'_ str| -> Option<(String, usize)> {
+        let after_article = if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("a ").parse(rest) {
+            ("a ".len(), r)
+        } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an ").parse(rest) {
+            ("an ".len(), r)
+        } else {
+            (0usize, rest)
+        };
+        let (article_len, body) = after_article;
+        let (subtype, sub_len) = parse_subtype(body)?;
+        Some((subtype, article_len + sub_len))
+    };
+
+    let mut subtypes: Vec<TypeFilter> = Vec::new();
+    let (first, first_len) = parse_leg(after_intro)?;
+    subtypes.push(TypeFilter::Subtype(first));
+    let mut rest = &after_intro[first_len..];
+
+    // Optional " or [a/an] <Subtype>" continuations.
+    loop {
+        let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(rest) else {
+            break;
+        };
+        let Some((next, next_len)) = parse_leg(after_or) else {
+            break;
+        };
+        subtypes.push(TypeFilter::Subtype(next));
+        rest = &after_or[next_len..];
+    }
+
+    let consumed = leading_ws + (trimmed.len() - rest.len());
+    let filter = if subtypes.len() == 1 {
+        subtypes.pop().expect("non-empty")
+    } else {
+        TypeFilter::AnyOf(subtypes)
+    };
+    Some((filter, consumed))
 }
 
 /// CR 115.9c: Parse the constraint after "that targets only ".
@@ -4942,13 +5259,21 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
                 tag("each player's "),
             )),
         ),
-        // CR 400.7: Adjective-qualified zone references — "a single graveyard" /
-        // "a random graveyard" — share the indefinite-article semantics with
-        // bare "a "/"the " for origin-zone tracking (the modifier constrains
+        // CR 400.7: Adjective- and quantity-qualified zone references — "all
+        // graveyards", "each graveyard", "a single graveyard", "a random
+        // graveyard" — share the indefinite-article semantics with bare
+        // "a "/"the " for origin-zone tracking (the modifier constrains
         // which instance, not which zone). Longest-match-first ordering.
         value(
             ZoneQual::Plain,
-            alt((tag("a single "), tag("a random "), tag("a "), tag("the "))),
+            alt((
+                tag("all "),
+                tag("each "),
+                tag("a single "),
+                tag("a random "),
+                tag("a "),
+                tag("the "),
+            )),
         ),
         // Bare form (e.g., "from exile"): zero-width match so the zone_word combinator runs next.
         value(ZoneQual::Plain, tag("")),
@@ -5014,6 +5339,50 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
             _ => None,
         }
+    }
+
+    /// CR 201.2 (issue #2016): the "named <CardName>" suffix must terminate the
+    /// card name at the enclosing clause boundary instead of swallowing the
+    /// trailing predicate or controller suffix. Tests the boundary class, not a
+    /// single card: predicate verb, controller suffix, and relative pronoun all
+    /// terminate the name, while a comma-bearing legendary name is preserved.
+    #[test]
+    fn named_filter_terminates_at_clause_boundary() {
+        fn named_of(text: &str) -> (String, String) {
+            let mut ctx = ParseContext::default();
+            let (filter, rest) = parse_type_phrase_with_ctx(text, &mut ctx);
+            let name = typed_leg(&filter)
+                .and_then(|tf| {
+                    tf.properties.iter().find_map(|p| match p {
+                        FilterProp::Named { name } => Some(name.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| panic!("expected a Named property in {filter:?}"));
+            (name, rest.to_string())
+        }
+
+        // Predicate verb terminates the name (Bonder's Ornament class).
+        let (name, rest) = named_of("a permanent named Bonder's Ornament draws a card");
+        assert_eq!(name, "Bonder's Ornament");
+        assert_eq!(rest, " draws a card");
+
+        // Controller suffix terminates the name.
+        let (name, _) = named_of("a creature named Storm Crow you control");
+        assert_eq!(name, "Storm Crow");
+
+        // Relative pronoun terminates the name.
+        let (name, _) = named_of("a creature named Storm Crow that has flying");
+        assert_eq!(name, "Storm Crow");
+
+        // A comma-bearing legendary name is preserved (no split on internal
+        // punctuation) when no clause boundary follows.
+        let (name, _) = named_of("a creature named Bruna, the Fading Light");
+        assert_eq!(name, "Bruna, the Fading Light");
+
+        // Period still ends the name.
+        let (name, _) = named_of("a creature named Storm Crow.");
+        assert_eq!(name, "Storm Crow");
     }
 
     fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
@@ -5404,6 +5773,29 @@ mod tests {
                     .properties(vec![FilterProp::Tapped])
             )
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn saddled_type_phrase_parses_as_target() {
+        // CR 702.171b: a "saddled <type>" selector must carry FilterProp::IsSaddled
+        // through the full parse_target path (not just parse_property_filter) —
+        // guards the parse_combat_status_prefix / is_adjective_prefix_prop allowlist
+        // wiring against silent regression if the prefix allowlist is reordered.
+        let (f, rest) = parse_target("saddled creature you control");
+        if let TargetFilter::Typed(tf) = &f {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "missing Creature in {tf:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::IsSaddled),
+                "missing IsSaddled in {tf:?}"
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("expected Typed filter, got {f:?}");
+        }
         assert_eq!(rest, "");
     }
 
@@ -7310,6 +7702,29 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 601.2c: "each of <count> target <type>" must route through "target"
+    /// parsing (a concrete creature filter), NOT degenerate to the bare "each "
+    /// all-matching path. This guard is the safety net for any non-counter
+    /// effect that reaches `parse_target` with the exact-count form.
+    #[test]
+    fn each_of_count_target_creatures_routes_to_target_filter() {
+        let (filter, rest) = parse_target("each of two target creatures");
+        assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
+        assert_eq!(rest, "");
+    }
+
+    /// CR 702.113: "card with awaken" is a parameterized-keyword presence
+    /// meta-reference and must map to `KeywordMatch::Kind(Awaken)` (matched by
+    /// discriminant), not an exact-payload `WithKeyword` that never matches a
+    /// real `Awaken { count, cost }`. Mirrors the flashback/cycling/escape arms.
+    #[test]
+    fn parse_keyword_match_awaken_is_kind() {
+        assert!(matches!(
+            parse_keyword_match("awaken"),
+            Some(KeywordMatch::Kind(KeywordKind::Awaken))
+        ));
+    }
+
     #[test]
     fn definite_artifact_reference_binds_first_parent_target_slot() {
         let (filter, rest) = parse_target("the artifact and returns it");
@@ -7472,6 +7887,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_target_standalone_that_spell_is_triggering_source() {
+        let (filter, rest, _) =
+            parse_target_with_syntax("that spell", &mut ParseContext::default());
+        assert_eq!(filter, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_standalone_that_card_is_parent_target() {
+        let (filter, rest, _) = parse_target_with_syntax("that card", &mut ParseContext::default());
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn parse_target_that_spell_inherits_parent_target() {
         let (filter, rest) = parse_target("that spell is countered this way");
         assert_eq!(filter, TargetFilter::ParentTarget);
@@ -7524,6 +7954,13 @@ mod tests {
     #[test]
     fn each_card_exiled_with_this_artifact_produces_exiled_by_source() {
         let (f, rest) = parse_target("each card exiled with this artifact");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn card_exiled_with_this_artifact_produces_exiled_by_source() {
+        let (f, rest) = parse_target("card exiled with this artifact");
         assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest, "");
     }
@@ -8690,6 +9127,95 @@ mod tests {
     }
 
     #[test]
+    fn comma_or_keyword_suffix_stays_on_final_disjunct_only() {
+        // Issue #2941 (Vivien Reid): "artifact, enchantment, or creature with
+        // flying" — flying applies only to the creature leg.
+        let (f, rest) = parse_target("target artifact, enchantment, or creature with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected three disjuncts, got {filters:?}"
+        );
+
+        let artifact = &filters[0];
+        let enchantment = &filters[1];
+        let creature = &filters[2];
+
+        let TargetFilter::Typed(artifact_typed) = artifact else {
+            panic!("artifact leg should be Typed, got {artifact:?}");
+        };
+        assert!(has_type(artifact_typed, TypeFilter::Artifact));
+        assert!(
+            !artifact_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+            "flying must not distribute onto artifact leg: {artifact_typed:?}"
+        );
+
+        let TargetFilter::Typed(enchantment_typed) = enchantment else {
+            panic!("enchantment leg should be Typed, got {enchantment:?}");
+        };
+        assert!(has_type(enchantment_typed, TypeFilter::Enchantment));
+        assert!(
+            !enchantment_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+            "flying must not distribute onto enchantment leg: {enchantment_typed:?}"
+        );
+
+        let TargetFilter::Typed(creature_typed) = creature else {
+            panic!("creature leg should be Typed, got {creature:?}");
+        };
+        assert!(has_type(creature_typed, TypeFilter::Creature));
+        assert!(
+            creature_typed
+                .properties
+                .contains(&FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }),
+            "creature leg must retain flying: {creature_typed:?}"
+        );
+    }
+
+    #[test]
+    fn comma_or_without_keyword_suffix_stays_on_final_disjunct_only() {
+        let (f, rest) = parse_target("target artifact or creature without flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(artifact_typed) = &filters[0] else {
+            panic!("expected artifact Typed");
+        };
+        assert!(
+            !artifact_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithoutKeyword { .. })),
+            "without-flying must not distribute onto artifact leg: {artifact_typed:?}"
+        );
+
+        let TargetFilter::Typed(creature_typed) = &filters[1] else {
+            panic!("expected creature Typed");
+        };
+        assert!(
+            creature_typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WithoutKeyword { .. })),
+            "creature leg must retain without-flying: {creature_typed:?}"
+        );
+    }
+
+    #[test]
     fn distribute_properties_across_or_branches() {
         // "artifacts and creatures with mana value 2 or less" → both branches get CmcLE(2)
         let (f, _) = parse_type_phrase("artifacts and creatures with mana value 2 or less");
@@ -8715,6 +9241,125 @@ mod tests {
         } else {
             panic!("expected Or filter, got {f:?}");
         }
+    }
+
+    /// #2912 (CR 208.1): a leading "N/M" P/T designation must be parsed as
+    /// power/toughness constraints, not fused into a `Subtype("1/1 Creature")`.
+    #[test]
+    fn parse_type_phrase_pt_designation_is_not_a_subtype() {
+        use crate::types::ability::{
+            Comparator, FilterProp, PtStat, PtValueScope, QuantityExpr, TypeFilter,
+        };
+        let (filter, _rest) = parse_type_phrase("a 1/1 creature you control");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "must be a Creature type, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains('/'))),
+            "the P/T designation must NOT be a subtype: {:?}",
+            tf.type_filters
+        );
+        let pt = |stat| FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 1 },
+        };
+        assert!(
+            tf.properties.contains(&pt(PtStat::Power)),
+            "expected power == 1, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&pt(PtStat::Toughness)),
+            "expected toughness == 1, got {:?}",
+            tf.properties
+        );
+
+        let (colored_filter, _rest) = parse_type_phrase("a 1/1 white creature you control");
+        let TargetFilter::Typed(colored_tf) = colored_filter else {
+            panic!("expected Typed filter, got {colored_filter:?}");
+        };
+        assert!(
+            colored_tf.properties.contains(&FilterProp::HasColor {
+                color: ManaColor::White
+            }),
+            "P/T designation must compose with color prefixes, got {:?}",
+            colored_tf.properties
+        );
+        assert!(colored_tf.properties.contains(&pt(PtStat::Power)));
+        assert!(colored_tf.properties.contains(&pt(PtStat::Toughness)));
+
+        // End-to-end: Sword of the Meek's trigger filter must no longer be a
+        // bogus `Subtype("1/1 Creature")`.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever a 1/1 creature you control enters, draw a card.",
+            "Sword of the Meek",
+            &[],
+            &["Artifact".into()],
+            &[],
+        );
+        let valid = parsed.triggers[0]
+            .valid_card
+            .as_ref()
+            .expect("trigger has a valid_card filter");
+        let TargetFilter::Typed(vtf) = valid else {
+            panic!("expected Typed valid_card, got {valid:?}");
+        };
+        assert!(
+            vtf.type_filters.contains(&TypeFilter::Creature)
+                && !vtf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains('/'))),
+            "trigger filter must be Creature + P/T, not a '1/1 Creature' subtype: {:?}",
+            vtf.type_filters
+        );
+        assert!(vtf.properties.contains(&pt(PtStat::Power)));
+    }
+
+    /// #2905 (CR 205.3): a positive "that's a/an <Subtype> [or a/an <Subtype>]"
+    /// relative clause must restrict by subtype, not be dropped (Kibo, Uktabi
+    /// Prince put counters on every creature instead of only Apes and Monkeys).
+    #[test]
+    fn parse_type_phrase_positive_subtype_relative_clause() {
+        use crate::types::ability::TypeFilter;
+
+        let (filter, _rest) = parse_type_phrase("creature you control that's an Ape or a Monkey");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "must keep the Creature core type, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.type_filters.contains(&TypeFilter::AnyOf(vec![
+                TypeFilter::Subtype("Ape".to_string()),
+                TypeFilter::Subtype("Monkey".to_string()),
+            ])),
+            "the 'that's an Ape or a Monkey' restriction must AND-merge as an \
+             AnyOf subtype disjunction, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+
+        // Single-subtype form → a bare Subtype (no AnyOf wrapper).
+        let (single, _) = parse_type_phrase("creature you control that's a Goblin");
+        let TargetFilter::Typed(stf) = single else {
+            panic!("expected Typed filter");
+        };
+        assert!(stf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Goblin".to_string())));
     }
 
     #[test]

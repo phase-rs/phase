@@ -5,7 +5,8 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 use engine::types::ability::{
-    AbilityCost, Effect, QuantityExpr, ReplacementMode, TargetFilter, TargetRef,
+    AbilityCost, Effect, EffectScope, QuantityExpr, ReplacementMode, TapStateChange, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -34,6 +35,8 @@ use super::effect_classify::{
 };
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -472,7 +475,16 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
     if beneficial
         && effects.iter().any(|effect| {
-            matches!(effect, Effect::Untap { .. }) && effect_targets_object(ctx, effect, object_id)
+            // CR 701.26b: only single-target untap (legacy `Effect::Untap`)
+            // factors here; the mass scope was never matched.
+            matches!(
+                effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            ) && effect_targets_object(ctx, effect, object_id)
         })
     {
         if object.tapped {
@@ -766,10 +778,8 @@ fn ability_cost_requires_sacrifice(ability: &engine::types::ability::AbilityDefi
         Some(AbilityCost::Composite { costs }) => costs.iter().any(|c| {
             matches!(
                 c,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    ..
-                }
+                AbilityCost::Sacrifice(cost)
+                    if matches!(cost.target, TargetFilter::SelfRef)
             )
         }),
         _ => false,
@@ -801,10 +811,11 @@ fn target_is_sacrificed_source(ctx: &PolicyContext<'_>, object_id: ObjectId) -> 
 
 fn cost_includes_sacrifice_self(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            ..
-        } => true,
+        AbilityCost::Sacrifice(cost)
+            if matches!(cost.target, engine::types::ability::TargetFilter::SelfRef) =>
+        {
+            true
+        }
         AbilityCost::Composite { costs } => costs.iter().any(cost_includes_sacrifice_self),
         _ => false,
     }
@@ -829,9 +840,9 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification, ControllerRef,
-        FilterProp, PtValue, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification,
+        ControllerRef, FilterProp, PtValue, QuantityRef, ResolvedAbility, SacrificeCost,
+        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -946,7 +957,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
@@ -977,6 +988,8 @@ mod tests {
                 object_id,
                 card_id: state.objects[&object_id].card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1453,7 +1466,7 @@ mod tests {
 
     #[test]
     fn plus_counter_is_beneficial() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1463,7 +1476,7 @@ mod tests {
 
     #[test]
     fn minus_counter_is_harmful() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Minus1Minus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1473,7 +1486,7 @@ mod tests {
 
     #[test]
     fn generic_positive_pt_counter_is_beneficial() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Generic("+0/+1".to_string()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1483,7 +1496,7 @@ mod tests {
 
     #[test]
     fn generic_negative_pt_counter_is_harmful() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Generic("-0/-1".to_string()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1610,6 +1623,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(201),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1670,6 +1685,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(202),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1766,6 +1783,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(201),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1827,6 +1846,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(300),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1887,6 +1908,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(301),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1947,6 +1970,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(302),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2009,6 +2034,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(300),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2070,6 +2097,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(400),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2130,6 +2159,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(500),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2232,8 +2263,10 @@ mod tests {
             PlayerId(0),
         );
         rewind.sub_ability = Some(Box::new(ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             Vec::new(),
             rewind_id,
@@ -2341,6 +2374,8 @@ mod tests {
                 object_id: aura_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2469,6 +2504,8 @@ mod tests {
                 object_id: aura_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2625,6 +2662,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(500),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2726,6 +2765,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(502),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2888,7 +2929,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -2997,7 +3038,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -3084,10 +3125,10 @@ mod tests {
         let ability = ResolvedAbility::new(effect, Vec::new(), fanatic_id, PlayerId(0));
         let mut pending_cast = PendingCast::new(fanatic_id, CardId(100), ability, ManaCost::zero());
         pending_cast.activation_cost = Some(AbilityCost::Composite {
-            costs: vec![AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            }],
+            costs: vec![AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::SelfRef,
+                1,
+            ))],
         });
 
         let legal_targets = vec![

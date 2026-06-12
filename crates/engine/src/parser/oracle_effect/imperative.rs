@@ -18,7 +18,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
@@ -26,9 +26,10 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost, PlayerScope,
+    EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
     PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter, ZoneOwner,
+    SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TypeFilter,
+    TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -95,6 +96,19 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
     .is_ok()
     {
         return TargetFilter::ParentTarget;
+    }
+
+    // CR 608.2c + CR 400.3: "that library" — anaphoric to a library
+    // identified earlier in the instruction (Chaos Warp: owner's library
+    // after shuffle).
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("that library"),
+        tag::<_, _, OracleError<'_>>("that library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::ParentTargetOwner;
     }
 
     TargetFilter::Controller
@@ -314,16 +328,100 @@ fn parse_life_verb_remainder<'a>(
     .map(|(_, rest)| rest)
 }
 
+/// CR 119.3 + CR 115.1: "the amount of life [they|that player] [lost|gained]
+/// this turn" in a *targeted* life-change context ("Target opponent loses life
+/// equal to the amount of life they lost this turn" — Astarion, the Decadent's
+/// Feed/Friends modes). The third-person "they"/"that player" anaphor refers to
+/// the effect's player target, so it resolves through `PlayerScope::Target`
+/// (read from `ability.targets` by `resolve_quantity_with_targets`) — the same
+/// player the surrounding LoseLife/GainLife affects, so a target opponent loses
+/// life equal to *their own* life lost this turn.
+///
+/// Kept distinct from the shared `parse_life_lost_ref` "they lost" arms (which
+/// map to `Controller` for the per-iteration rebind of "each opponent" effects
+/// and to which Astarion's phrase never reaches because that combinator's
+/// `opt("the amount of ")` strip makes its "amount of …" tag unreachable). This
+/// recognizer requires the "amount of" gloss, so the article-only each-opponent
+/// phrasing ("the life they lost this turn", Archfiend of Despair) is untouched.
+fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<QuantityExpr> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("the "))
+        .parse(qty_text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("amount of life ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they "), tag("that player ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, gained) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("lost")),
+        value(true, tag("gained")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // "this turn" is the canonical duration; tolerate its absence for callers
+    // that strip trailing durations before this point.
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn"))
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let qty = if gained {
+        QuantityRef::LifeGainedThisTurn {
+            player: PlayerScope::Target,
+        }
+    } else {
+        QuantityRef::LifeLostThisTurn {
+            player: PlayerScope::Target,
+        }
+    };
+    Some(QuantityExpr::Ref { qty })
+}
+
 fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
     let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
         .parse(after_verb_lower)
         .ok()?;
     let qty_text = qty_text.trim_end_matches('.').trim();
+    // CR 115.1: target-relative "they/that player lost/gained this turn" → Target
+    // scope. Tried before the generic delegation, which would otherwise map the
+    // third-person anaphor to the controller (see helper doc).
+    if let Some(qty) = parse_target_relative_life_change_this_turn(qty_text) {
+        return Some(qty);
+    }
     if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
         return Some(qty);
     }
     crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
         .map(|qty| QuantityExpr::Ref { qty })
+}
+
+/// CR 119.3 + CR 102.1: "gain 1 life for each player" (a/an/1) → the count of
+/// every player in the game (`PlayerFilter::All`). Narrow to the one-life-per
+/// form, the only shape that occurs (Benediction of Moons); other multipliers
+/// fall through to the generic quantity paths. `text` is the remainder after
+/// the "gain" verb, lowercased.
+fn parse_gain_life_per_player(after_gain_lower: &str) -> Option<QuantityExpr> {
+    // `(1|a|an) life for each player(s)` — `players` first so the longer tag
+    // wins; the optional trailing period is consumed so `all_consuming` accepts
+    // both the sentence-final and mid-clause forms.
+    all_consuming((
+        alt((
+            tag::<_, _, OracleError<'_>>("1 life for each "),
+            tag("a life for each "),
+            tag("an life for each "),
+        )),
+        alt((tag("players"), tag("player"))),
+        opt(tag(".")),
+    ))
+    .parse(after_gain_lower.trim())
+    .ok()
+    .map(|_| QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: crate::types::ability::PlayerFilter::All,
+        },
+    })
 }
 
 pub(super) fn parse_numeric_imperative_ast(
@@ -367,6 +465,13 @@ pub(super) fn parse_numeric_imperative_ast(
 
     if let Some(after_gain) = parse_life_verb_remainder(text, lower, "gain", "gains") {
         let after_lower = after_gain.to_ascii_lowercase();
+        // CR 119.3 + CR 102.1: "gain N life for each player" — the life gained is
+        // the number of players (the per-each amount is 1). Benediction of Moons.
+        // Probed before the bare-quantity fallback, which would otherwise parse
+        // "1" and silently drop the "for each player" multiplier.
+        if let Some(amount) = parse_gain_life_per_player(&after_lower) {
+            return Some(NumericImperativeAst::GainLife { amount });
+        }
         // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
         // CR 119.3: target-relative quantity refs ("target creature's
         // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
@@ -1400,11 +1505,23 @@ pub(super) fn parse_targeted_action_ast(
                 grant_extra_turn_after,
             });
         }
+        // CR 613.1b: "gain control of all/each <filter>" is the untargeted mass
+        // form (Hellkite Tyrant) — mirrors "destroy all". Detect the mass
+        // pluralizer; `parse_target_with_ctx` still consumes the "all "/"each "
+        // prefix into the population filter, so only the flag is threaded.
+        let all = nom_on_lower(text, lower, |input| {
+            value(
+                (),
+                alt((tag("gain control of all "), tag("gain control of each "))),
+            )
+            .parse(input)
+        })
+        .is_some();
         let (target_text, _) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::GainControl { target });
+        return Some(TargetedImperativeAst::GainControl { target, all });
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
@@ -1437,10 +1554,28 @@ pub(super) fn parse_targeted_action_ast(
 
 pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     match ast {
-        TargetedImperativeAst::Tap { target } => Effect::Tap { target },
-        TargetedImperativeAst::Untap { target } => Effect::Untap { target },
-        TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
-        TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
+        // CR 701.26a/b: map the parser AST tap/untap variants onto the
+        // parameterized `Effect::SetTapState` (scope = Single/All, state = Tap/Untap).
+        TargetedImperativeAst::Tap { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+        TargetedImperativeAst::Untap { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        },
+        TargetedImperativeAst::TapAll { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            state: TapStateChange::Tap,
+        },
+        TargetedImperativeAst::UntapAll { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        },
         TargetedImperativeAst::Goad { target } => Effect::Goad { target },
         TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
         TargetedImperativeAst::Sacrifice {
@@ -1469,7 +1604,11 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             // CR 701.9a: "Discard" with no subject defaults to the controller.
             // Subject injection overrides this for "target player discards" patterns.
             target: TargetFilter::Controller,
-            random,
+            selection: if random {
+                crate::types::ability::CardSelectionMode::Random
+            } else {
+                crate::types::ability::CardSelectionMode::Chosen
+            },
             unless_filter,
             filter,
         },
@@ -1509,7 +1648,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             owner_library: false,
             enter_transformed,
             enters_under,
-            enter_tapped,
+            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
             enters_attacking,
             up_to: false,
             enter_with_counters,
@@ -1527,7 +1666,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -1550,7 +1689,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 destination,
                 target,
                 enters_under,
-                enter_tapped,
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 face_down_profile: None,
             }
         }
@@ -1558,7 +1697,13 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             subject: TargetFilter::SelfRef,
         },
-        TargetedImperativeAst::GainControl { target } => Effect::GainControl { target },
+        TargetedImperativeAst::GainControl { target, all } => {
+            if all {
+                Effect::GainControlAll { target }
+            } else {
+                Effect::GainControl { target }
+            }
+        }
         TargetedImperativeAst::ControlNextTurn {
             target,
             grant_extra_turn_after,
@@ -1571,8 +1716,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             power,
             toughness,
         } => Effect::Animate {
-            power: Some(power),
-            toughness: Some(toughness),
+            power: Some(PtValue::Fixed(power)),
+            toughness: Some(PtValue::Fixed(toughness)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target,
@@ -1588,6 +1733,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
+                exile_instead_of_graveyard_on_resolve: false,
             },
             target,
             grantee: Default::default(),
@@ -1618,6 +1764,7 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
         let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("its owner's "),
+            tag("its controller's "),
             tag("their "),
             tag("that player's "),
             tag("target player's "),
@@ -1642,15 +1789,35 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
             value((), tag("a card")),
         ))
         .parse(input)?;
-        // Match the trailing same-name suffix in either of two synonymous forms:
-        //   " with that name and exile them"            (Deadly Cover-Up, Lost Legacy)
-        //   " with the same name as that card and exile them"  (Surgical Extraction)
+        // Match the trailing same-name suffix. The name source is either a
+        // previously-named card ("with that name", Lost Legacy / Deadly Cover-Up)
+        // or the spell's exiled/countered target referenced by its card type
+        // ("with the same name as that card/creature/land/spell/…", Surgical
+        // Extraction / Eradicate / Crumble to Dust / Counterbore / Deicide). The
+        // card-type is composed as one `alt` axis rather than enumerated as full
+        // strings; all forms lower to the same `SameNameAsParentTarget` effect.
         let (input, _) = alt((
             value(
                 (),
                 tag::<_, _, OracleError<'_>>(" with that name and exile them"),
             ),
-            value((), tag(" with the same name as that card and exile them")),
+            value(
+                (),
+                (
+                    tag::<_, _, OracleError<'_>>(" with the same name as that "),
+                    alt((
+                        tag("creature"),
+                        tag("permanent"),
+                        tag("planeswalker"),
+                        tag("artifact"),
+                        tag("enchantment"),
+                        tag("land"),
+                        tag("spell"),
+                        tag("card"),
+                    )),
+                    tag(" and exile them"),
+                ),
+            ),
         ))
         .parse(input)?;
         Ok((input, ()))
@@ -2025,6 +2192,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal,
+            enter_tapped: false,
         },
         SearchCreationImperativeAst::CopyTokenOf {
             target,
@@ -2073,7 +2241,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count,
             from_top,
             destination,
-            enter_tapped,
+            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
         },
         // CR 400.7 + CR 701.23 + CR 701.24: Multi-zone same-name exile.
         // The target filter encodes both the zone union (graveyard, hand,
@@ -2091,7 +2259,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
                 crate::types::ability::FilterProp::SameNameAsParentTarget,
             ])),
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             face_down_profile: None,
         },
     }
@@ -2102,6 +2270,26 @@ pub(super) fn parse_hand_reveal_ast(
     lower: &str,
     _ctx: &mut ParseContext,
 ) -> Option<HandRevealImperativeAst> {
+    // CR 406.6: Private look at source-linked exile (Scroll Rack) — no "hand" in phrase.
+    if let Some((_, after_look_at)) =
+        nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input))
+    {
+        let after_look_at_lower = &lower[lower.len() - after_look_at.len()..];
+        if alt((
+            tag::<_, _, OracleError<'_>>("the exiled cards"),
+            tag("the cards exiled this way"),
+        ))
+        .parse(after_look_at_lower)
+        .is_ok()
+        {
+            return Some(HandRevealImperativeAst::LookAt {
+                target: TargetFilter::ExiledBySource,
+                count: None,
+                random: false,
+            });
+        }
+    }
+
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "hand")
     {
@@ -2178,40 +2366,72 @@ pub(super) fn parse_hand_reveal_ast(
     // This function only handles hand-related reveals.
 
     if nom_primitives::scan_contains(lower, "hand") {
+        let (target, card_filter) = parse_hand_reveal_target_and_card_filter(after_reveal_lower);
         return Some(HandRevealImperativeAst::RevealAll {
-            card_filter: parse_hand_reveal_card_filter(after_reveal_lower),
+            target,
+            card_filter,
         });
     }
 
     None
 }
 
-fn parse_hand_reveal_card_filter(after_reveal_lower: &str) -> TargetFilter {
-    let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) else {
-        return TargetFilter::None;
-    };
-    let Ok((rest, descriptor)) = take_until::<_, _, OracleError<'_>>(" cards").parse(after_all)
+fn parse_hand_reveal_target_and_card_filter(
+    after_reveal_lower: &str,
+) -> (TargetFilter, TargetFilter) {
+    if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
+        let Ok((hand_phrase, descriptor)) = terminated(
+            take_until::<_, _, OracleError<'_>>(" cards"),
+            alt((
+                tag::<_, _, OracleError<'_>>(" cards in "),
+                tag(" cards from "),
+            )),
+        )
+        .parse(after_all) else {
+            return (TargetFilter::Any, TargetFilter::None);
+        };
+        let target = parse_hand_possessive_target(hand_phrase)
+            .map(|(_, target)| target)
+            .unwrap_or(TargetFilter::Any);
+        if descriptor.trim().is_empty() {
+            return (target, TargetFilter::Any);
+        }
+        let singular = format!("{} card", descriptor.trim());
+        let (filter, rem) = parse_type_phrase(&singular);
+        if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
+            return (target, filter);
+        }
+        return (target, TargetFilter::None);
+    }
+
+    // CR 701.20a: "reveal a card from your hand" / "reveal an [type] card from ..."
+    let Ok((after_article, _)) =
+        alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(after_reveal_lower)
     else {
-        return TargetFilter::None;
+        return (TargetFilter::Any, TargetFilter::None);
     };
-    if alt((
-        tag::<_, _, OracleError<'_>>(" cards in "),
-        tag(" cards from "),
-    ))
-    .parse(rest)
-    .is_err()
-    {
-        return TargetFilter::None;
+    if let Ok((hand_phrase, _)) = tag::<_, _, OracleError<'_>>("card from ").parse(after_article) {
+        let target = parse_hand_possessive_target(hand_phrase)
+            .map(|(_, target)| target)
+            .unwrap_or(TargetFilter::Any);
+        return (target, TargetFilter::Any);
     }
-    if descriptor.trim().is_empty() {
-        return TargetFilter::Any;
-    }
+    let Ok((hand_phrase, descriptor)) = terminated(
+        take_until::<_, _, OracleError<'_>>(" card from "),
+        tag(" card from "),
+    )
+    .parse(after_article) else {
+        return (TargetFilter::Any, TargetFilter::None);
+    };
+    let target = parse_hand_possessive_target(hand_phrase)
+        .map(|(_, target)| target)
+        .unwrap_or(TargetFilter::Any);
     let singular = format!("{} card", descriptor.trim());
     let (filter, rem) = parse_type_phrase(&singular);
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-        filter
+        (target, filter)
     } else {
-        TargetFilter::None
+        (target, TargetFilter::None)
     }
 }
 
@@ -2225,21 +2445,28 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target,
             card_filter: TargetFilter::None,
             count,
-            random,
+            selection: if random {
+                crate::types::ability::CardSelectionMode::Random
+            } else {
+                crate::types::ability::CardSelectionMode::Chosen
+            },
             choice_optional: false,
         },
-        HandRevealImperativeAst::RevealAll { card_filter } => Effect::RevealHand {
-            target: TargetFilter::Any,
+        HandRevealImperativeAst::RevealAll {
+            target,
+            card_filter,
+        } => Effect::RevealHand {
+            target,
             card_filter,
             count: None,
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealPartial { count } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter: TargetFilter::None,
             count: Some(count),
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
@@ -2805,7 +3032,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter,
             count: None,
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional,
         },
         // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
@@ -2895,9 +3122,16 @@ pub(super) fn parse_utility_imperative_ast(
                 } else {
                     parse_target(rest)
                 };
-                #[cfg(debug_assertions)]
-                assert_no_compound_remainder(_rem, text);
-                Some(UtilityImperativeAst::Copy { target })
+                let retarget = if super::sequence::recognize_copy_retarget_clause(_rem.trim()) {
+                    // CR 707.10c: "copy that spell and may choose new targets for the
+                    // copy" — same-chunk compound when bare-`and` splitting did not run.
+                    CopyRetargetPermission::MayChooseNewTargets
+                } else {
+                    #[cfg(debug_assertions)]
+                    assert_no_compound_remainder(_rem, text);
+                    CopyRetargetPermission::KeepOriginalTargets
+                };
+                Some(UtilityImperativeAst::Copy { target, retarget })
             }
             _ => unreachable!(),
         };
@@ -3089,6 +3323,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
         return Some((
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
+                tag: None,
             },
             rem,
         ));
@@ -3098,7 +3333,13 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             .parse(input)
             .is_ok()
     {
-        return Some((TargetFilter::StackAbility { controller: None }, input));
+        return Some((
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+            },
+            input,
+        ));
     }
     None
 }
@@ -3114,7 +3355,10 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     } else {
         None
     };
-    TargetFilter::StackAbility { controller }
+    TargetFilter::StackAbility {
+        controller,
+        tag: None,
+    }
 }
 
 fn parse_explicit_targeted_attach(
@@ -3194,11 +3438,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             let (target, _) = parse_target(rest);
             Effect::Regenerate { target }
         }
-        UtilityImperativeAst::Copy { target } => Effect::CopySpell {
+        UtilityImperativeAst::Copy { target, retarget } => Effect::CopySpell {
             target,
-            // Step 4 continuation absorption upgrades this to MayChooseNewTargets
-            // when "you may choose new targets for the copy" follows (CR 707.10c).
-            retarget: CopyRetargetPermission::KeepOriginalTargets,
+            retarget,
             copier: None,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
@@ -3252,6 +3494,28 @@ fn parse_prevent_effect(text: &str) -> Effect {
         PreventionAmount::Next(n)
     };
 
+    // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
+    // spell). "Prevent all damage target instant or sorcery spell would deal
+    // this turn" (Dromoka's Command) restricts the shield to a SINGLE chosen
+    // source object, not a blanket recipient-scoped prevent-all. When this
+    // matches, the recipient `target` collapses to `Any` and the source scope
+    // is carried as the `damage_source_filter`.
+    if let Some(source_filter) = parse_prevent_source_scope(text, &lower) {
+        // CR 609.7a: the source is chosen when the effect is created and applies
+        // even after the spell leaves the stack. The chosen spell lands in
+        // `ability.targets[0]` (the recipient `Any` surfaces no slot), so the
+        // shield captures it via `ParentTargetSlot { index: 0 }`.
+        return Effect::PreventDamage {
+            amount,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            scope,
+            damage_source_filter: Some(TargetFilter::And {
+                filters: vec![TargetFilter::ParentTargetSlot { index: 0 }, source_filter],
+            }),
+        };
+    }
+
     // Determine target
     let target = if nom_primitives::scan_contains(rest, "any target") {
         TargetFilter::Any
@@ -3276,6 +3540,8 @@ fn parse_prevent_effect(text: &str) -> Effect {
         TargetFilter::Any
     };
 
+    let damage_source_filter = parse_prevent_damage_source_filter(text, &lower);
+
     // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
     // <quantity>" override) is populated at chunk level by
     // `apply_where_x_effect_expression`, not here — the chunk machinery
@@ -3287,7 +3553,85 @@ fn parse_prevent_effect(text: &str) -> Effect {
         amount_dynamic: None,
         target,
         scope,
-        damage_source_filter: None,
+        damage_source_filter,
+    }
+}
+
+/// CR 615.1: Optional trailing "by [source-filter]" on prevent clauses
+/// (Arachnogenesis: "by non-Spider creatures").
+fn parse_prevent_damage_source_filter(text: &str, lower: &str) -> Option<TargetFilter> {
+    let (_, filter_text) = nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            (take_until::<_, _, OracleError<'_>>(" by "), tag(" by ")),
+        )
+        .parse(input)
+    })?;
+    let filter_text = filter_text.trim().trim_end_matches('.');
+    let (filter, rem) = parse_type_phrase(filter_text);
+    if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
+        Some(filter)
+    } else {
+        None
+    }
+}
+
+/// CR 609.7 + CR 615.2: Detect the source-scoped prevent form — "prevent
+/// [all/the next N] damage **target `<source>`** would deal this turn"
+/// (Dromoka's Command: "Prevent all damage target instant or sorcery spell
+/// would deal this turn").
+///
+/// This is distinct from the recipient form ("...damage **to** target
+/// creature"), which the caller already handles. The disambiguator is the
+/// trailing `" would deal"` clause: a source-scoped prevent names what the
+/// chosen object *deals*, whereas the recipient form names what is dealt *to*
+/// the target. We isolate the region before `" would deal"`, take the source
+/// descriptor after `"target "` (both via the `split_once_on_lower` combinator
+/// bridge — `take_until`+`tag`, never ad-hoc string dispatch), and run
+/// `parse_target` on it. We accept ONLY when the parsed filter resolves to a
+/// choosable stack source (a spell on the stack) — `parse_target` is the
+/// detector.
+///
+/// Returns the parsed `<source>` filter (e.g. an `Or`/`And` of stack-spell
+/// `Typed` legs) on match, or `None` to fall through to the recipient/by-source
+/// logic.
+fn parse_prevent_source_scope(text: &str, lower: &str) -> Option<TargetFilter> {
+    // Isolate the slice that precedes " would deal" (the source phrase region).
+    // `split_once_on_lower` composes `take_until`+`tag` internally and returns
+    // original-case slices, so the borrowed remainder escapes cleanly.
+    let (before_would_deal, _) = split_once_on_lower(text, lower, " would deal")?;
+    // Within that region, the source descriptor follows the "target " keyword.
+    let region_lower = before_would_deal.to_lowercase();
+    let (_, source_descriptor) = split_once_on_lower(before_would_deal, &region_lower, "target ")?;
+    let (source_filter, rem) = parse_target(source_descriptor);
+    // The candidate must consume the entire source descriptor and resolve to a
+    // choosable spell on the stack — otherwise this is not the source-scoped
+    // form (e.g. "target creature" recipient).
+    if rem.trim().is_empty() && filter_is_choosable_stack_source(&source_filter) {
+        Some(source_filter)
+    } else {
+        None
+    }
+}
+
+/// CR 609.7a: A source-scope prevent's chosen source must be a choosable object
+/// on the stack — a spell (`StackSpell`, or a `Typed` filter scoped `InZone
+/// Stack`), possibly wrapped in `And`/`Or`/`Not` (e.g. "instant or sorcery
+/// spell" → `Or` of two stack-spell legs). Mirrors `targeting.rs`'s
+/// `filter_targets_stack_spells`, kept local so the parser stays dependency-free
+/// of the runtime targeting module.
+fn filter_is_choosable_stack_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell => true,
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Stack)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_is_choosable_stack_source)
+        }
+        TargetFilter::Not { filter } => filter_is_choosable_stack_source(filter),
+        _ => false,
     }
 }
 
@@ -3414,6 +3758,24 @@ pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
 pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
     tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
 
+    if nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            (
+                tag("put "),
+                tag("that many "),
+                tag("cards "),
+                tag("from the top of your library "),
+                tag("into your hand"),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
+    {
+        return Some(PutImperativeAst::PutTopCardsIntoHandMatchingExileCount);
+    }
+
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("put the top ").parse(lower) {
         if nom_primitives::scan_contains(lower, "graveyard") {
             let count = nom_primitives::parse_number
@@ -3476,34 +3838,47 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    if let Some((
-        Effect::ChangeZone {
-            origin,
-            destination,
-            target,
-            enters_under,
-            enter_tapped,
-            enter_transformed,
-            enters_attacking,
-            up_to,
-            enter_with_counters,
-            ..
-        },
-        choice_count,
-    )) = super::try_parse_put_zone_change_parts(lower, text)
-    {
-        return Some(PutImperativeAst::ZoneChange {
-            origin,
-            destination,
-            target,
-            enters_under,
-            enter_tapped,
-            enter_transformed,
-            enters_attacking,
-            up_to,
-            choice_count: choice_count.map(Box::new),
-            enter_with_counters,
-        });
+    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text) {
+        return match effect {
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+                ..
+            } => Some(PutImperativeAst::ZoneChangeAll {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped: enter_tapped.is_tapped(),
+            }),
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+                enter_transformed,
+                enters_attacking,
+                up_to,
+                enter_with_counters,
+                ..
+            } => Some(PutImperativeAst::ZoneChange {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped: enter_tapped.is_tapped(),
+                enter_transformed,
+                enters_attacking,
+                up_to,
+                choice_count: choice_count.map(Box::new),
+                enter_with_counters,
+            }),
+            _ => None,
+        };
     }
 
     None
@@ -3518,6 +3893,20 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             // CR 701.17a: "Put top N into graveyard" is self-mill.
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+        },
+        PutImperativeAst::ZoneChangeAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+        } => Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+            face_down_profile: None,
         },
         PutImperativeAst::ZoneChange {
             origin,
@@ -3547,7 +3936,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     destination,
                     target,
                     enters_under: None,
-                    enter_tapped,
+                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     face_down_profile: None,
                 }
             } else {
@@ -3558,7 +3947,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     owner_library: false,
                     enter_transformed,
                     enters_under,
-                    enter_tapped,
+                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     // CR 508.4: Propagated from the inline-tail patcher in
                     // `try_parse_put_zone_change` (Kaalia / Ilharg class).
                     enters_attacking,
@@ -3587,6 +3976,13 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::NthFromTop { n },
+        },
+        PutImperativeAst::PutTopCardsIntoHandMatchingExileCount => Effect::Mill {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            },
+            target: TargetFilter::Controller,
+            destination: Zone::Hand,
         },
     }
 }
@@ -3966,7 +4362,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 owner_library,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -3993,7 +4389,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4104,7 +4500,7 @@ pub(super) fn lower_multi_filter_search_library(
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped,
+        enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
@@ -4175,7 +4571,7 @@ pub(super) fn lower_multi_filter_seek(
                 count: count.clone(),
                 from_top,
                 destination,
-                enter_tapped,
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
             },
         );
         seek_def.sub_ability = tail;
@@ -4187,7 +4583,7 @@ pub(super) fn lower_multi_filter_seek(
         count,
         from_top,
         destination,
-        enter_tapped,
+        enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
     });
     clause.sub_ability = tail;
     clause
@@ -4246,10 +4642,20 @@ fn lower_target_referenced_search_library(
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
+    // CR 400.3: When the parent `ChangeZone` routes to the target's owner's
+    // library (`owner_library: true`), the implicit shuffle must randomize that
+    // same library — not the spell controller's (Chaos Warp stolen-permanent case).
+    let shuffle_target = match &effect {
+        Effect::ChangeZone {
+            owner_library: true,
+            ..
+        } => TargetFilter::ParentTargetOwner,
+        _ => TargetFilter::Controller,
+    };
     let shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {
-            target: TargetFilter::Controller,
+            target: shuffle_target,
         },
     );
     ParsedEffectClause {
@@ -4270,7 +4676,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         destination: Zone::Library,
         target: TargetFilter::Controller,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         face_down_profile: None,
     }
 }
@@ -4622,6 +5028,13 @@ pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
         return TargetFilter::TriggeringPlayer;
     }
+    // CR 603.7c: DamageDone triggers use TriggeringPlayer for "that player"
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::TriggeringPlayer)
+    ) {
+        return TargetFilter::TriggeringPlayer;
+    }
 
     match &ctx.subject {
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
@@ -4665,6 +5078,31 @@ fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
 /// dynamic count. When the suffix is missing or the inner phrase fails to
 /// parse to a known quantity, the original count (typically `Variable { "X" }`
 /// or `Fixed { value: N }`) is returned unchanged.
+/// CR 701.50e + CR 107.3i: Parse connive count from text after "connive"/"connives".
+/// Handles literal N, bare `X` (spell-cost path), and ", where X is <quantity>"
+/// bindings (Spymaster's Vault class).
+fn parse_connive_count_expr<'a>(rest_orig: &'a str, lower_rest: &str) -> (QuantityExpr, &'a str) {
+    if let Ok((after_num, n)) = nom_primitives::parse_number.parse(lower_rest) {
+        let consumed = lower_rest.len() - after_num.len();
+        let after_orig = rest_orig.get(consumed..).unwrap_or(rest_orig).trim_start();
+        return (QuantityExpr::Fixed { value: n as i32 }, after_orig);
+    }
+
+    if let Ok((after_x, _)) = tag::<_, _, OracleError<'_>>("x").parse(lower_rest) {
+        let consumed = lower_rest.len() - after_x.len();
+        let after_orig = rest_orig.get(consumed..).unwrap_or(rest_orig).trim_start();
+        let initial = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let count = resolve_exile_top_where_x_binding(after_orig, initial);
+        return (count, after_orig);
+    }
+
+    (QuantityExpr::Fixed { value: 1 }, rest_orig)
+}
+
 fn resolve_exile_top_where_x_binding(after_lib: &str, initial_count: QuantityExpr) -> QuantityExpr {
     let trimmed = after_lib
         .trim_start()
@@ -4851,7 +5289,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     None
 }
 
-fn parse_mana_and_life_payment(rest_orig: &str) -> Option<PaymentCost> {
+fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
     let (mana_cost, after_mana) = parse_mana_symbols(rest_orig.trim())?;
     let after_mana_lower = after_mana.to_lowercase();
     let (_, after_and) = nom_on_lower(after_mana, &after_mana_lower, |input| {
@@ -4862,13 +5300,11 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<PaymentCost> {
         .parse(input)
     })?;
     let amount = parse_pay_life_amount(after_and.trim_start())?;
-    Some(PaymentCost::AbilityCost {
-        cost: AbilityCost::Composite {
-            costs: vec![
-                AbilityCost::Mana { cost: mana_cost },
-                AbilityCost::PayLife { amount },
-            ],
-        },
+    Some(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana { cost: mana_cost },
+            AbilityCost::PayLife { amount },
+        ],
     })
 }
 
@@ -4902,13 +5338,13 @@ pub(super) fn parse_cost_resource_ast(
         // nom combinators over the post-"pay " remainder.
         if let Some(amount) = parse_pay_life_amount(rest) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Life { amount },
+                cost: AbilityCost::PayLife { amount },
             });
         }
         // CR 107.14: "pay any amount of {E}" → variable energy payment
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable {
                             name: "X".to_string(),
@@ -4922,7 +5358,7 @@ pub(super) fn parse_cost_resource_ast(
         // following effect chain.
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: crate::types::mana::ManaCost::Cost {
                         shards: vec![crate::types::mana::ManaCostShard::X],
                         generic: 0,
@@ -4940,12 +5376,12 @@ pub(super) fn parse_cost_resource_ast(
         {
             if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
                 return Some(CostResourceImperativeAst::Pay {
-                    cost: PaymentCost::Energy { amount },
+                    cost: AbilityCost::PayEnergy { amount },
                 });
             }
             // Fallback: variable energy payment
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable {
                             name: "X".to_string(),
@@ -4954,14 +5390,14 @@ pub(super) fn parse_cost_resource_ast(
                 },
             });
         }
-        // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → PaymentCost::Energy
+        // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy
         if rest.contains("{e}") {
             let energy_count = rest.matches("{e}").count() as u32;
             let cleaned = rest.replace("{e}", "").replace(' ', "");
             if cleaned.is_empty() {
                 // Pure {E} symbols: "pay {e}{e}"
                 return Some(CostResourceImperativeAst::Pay {
-                    cost: PaymentCost::Energy {
+                    cost: AbilityCost::PayEnergy {
                         amount: QuantityExpr::Fixed {
                             value: energy_count as i32,
                         },
@@ -4973,17 +5409,17 @@ pub(super) fn parse_cost_resource_ast(
                 let prefix = rest.trim_end_matches("{e}").trim();
                 if let Ok((_, n)) = nom_primitives::parse_number.parse(prefix) {
                     return Some(CostResourceImperativeAst::Pay {
-                        cost: PaymentCost::Energy {
+                        cost: AbilityCost::PayEnergy {
                             amount: QuantityExpr::Fixed { value: n as i32 },
                         },
                     });
                 }
             }
         }
-        // "pay {2}{B}" → PaymentCost::Mana (CR 117.1)
+        // "pay {2}{B}" → AbilityCost::Mana (CR 117.1)
         if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
             return Some(CostResourceImperativeAst::Pay {
-                cost: PaymentCost::Mana { cost: mana_cost },
+                cost: AbilityCost::Mana { cost: mana_cost },
             });
         }
     }
@@ -5089,6 +5525,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
         }
         CostResourceImperativeAst::Pay { cost } => Effect::PayCost {
             cost,
+            scale: None,
             payer: TargetFilter::Controller,
         },
         CostResourceImperativeAst::DamageEffect(effect) => *effect,
@@ -5265,6 +5702,42 @@ pub(super) fn parse_imperative_family_ast(
         "exile" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
         "counter" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
+        // CR 406.3 + CR 701.20a: "turn the exiled card(s) face up" — the Imprint "flip" cards
+        // (Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation of
+        // Avacyn). Distinct from the morph/disguise special action ("you may
+        // turn this face up"), which is an activated ability parsed elsewhere.
+        "turn" | "turns" if nom_primitives::scan_contains(lower, "face up") => {
+            // Match ONLY the complete "turn the exiled card(s) face up" clause
+            // (anchored, all-consuming). A trailing follow-up sentence — e.g.
+            // "... face up. If it's a creature card, put it onto the
+            // battlefield under your control." — must be left for the chain's
+            // sentence splitter, not swallowed: returning `None` on the
+            // combined text lets the splitter break it into separate clauses.
+            let matched = all_consuming(terminated(
+                preceded(
+                    alt((
+                        tag::<_, _, OracleError<'_>>("turn the exiled cards"),
+                        tag("turn the exiled card"),
+                        tag("turn that card"),
+                        tag("turns the exiled cards"),
+                        tag("turns the exiled card"),
+                        tag("turns that card"),
+                    )),
+                    tag(" face up"),
+                ),
+                opt(tag(".")),
+            ))
+            .parse(lower.trim())
+            .is_ok();
+            if matched {
+                Some(ImperativeFamilyAst::TurnFaceUp {
+                    target: TargetFilter::ExiledBySource,
+                })
+            } else {
+                None
+            }
+        }
+
         // Numeric verbs (CR 121)
         "draw" if nom_primitives::scan_contains(lower, "that many") => {
             // "draw that many cards" / "draw that many cards minus one" →
@@ -5334,14 +5807,21 @@ pub(super) fn parse_imperative_family_ast(
         "explore" if lower == "explore" || lower == "explore again" => {
             Some(ImperativeFamilyAst::Explore)
         }
-        // CR 702.162a: "connive" / "connives" — extract target from remainder
+        // CR 702.162a + CR 701.50e: "connive" / "connives" — extract optional
+        // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
-            let rest = lower[first_word.len()..].trim();
-            if !rest.is_empty() {
-                let (target, _) = parse_target(rest);
+            let after_verb_lower = &lower[first_word.len()..];
+            let rest_lower = after_verb_lower.trim_start();
+            let prefix_len = lower.len() - rest_lower.len();
+            let rest_orig = text.get(prefix_len..).unwrap_or("");
+            let (count, rest_orig) = parse_connive_count_expr(rest_orig, rest_lower);
+            if !rest_orig.trim().is_empty() {
+                let (target, _) = parse_target(rest_orig.trim());
+                Some(ImperativeFamilyAst::GainKeyword(Effect::Connive { target, count }))
+            } else if count != (QuantityExpr::Fixed { value: 1 }) {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive {
-                    target,
-                    count: 1,
+                    target: TargetFilter::Any,
+                    count,
                 }))
             } else {
                 Some(ImperativeFamilyAst::Connive)
@@ -5413,6 +5893,47 @@ pub(super) fn parse_imperative_family_ast(
                 None
             }
         }
+        // CR 701.58a: "cloak the top card of your library" / "cloak the top N
+        // cards of [your / that player's] library" — face-down 2/2 with ward {2}.
+        // First pass covers the top-of-library source (Cryptic Coat, Ransom
+        // Note); cloaking from hand / a face-down pile is deferred.
+        "cloak" | "cloaks" => {
+            let that_player_target = that_player_library_filter(ctx);
+            let parsed = all_consuming((
+                alt((
+                    tag::<_, _, OracleError<'_>>("cloak the top "),
+                    tag("cloaks the top "),
+                )),
+                alt((
+                    value(
+                        QuantityExpr::Fixed { value: 1 },
+                        alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))),
+                    ),
+                    terminated(
+                        map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                            value: n as i32,
+                        }),
+                        preceded(
+                            space1::<_, OracleError<'_>>,
+                            alt((tag("cards"), tag("card"))),
+                        ),
+                    ),
+                )),
+                space1::<_, OracleError<'_>>,
+                alt((
+                    value(TargetFilter::Controller, tag("of your library")),
+                    value(that_player_target, tag("of that player's library")),
+                )),
+                opt(tag(".")),
+            ))
+            .parse(lower.trim());
+
+            if let Ok((_, (_, count, _, target, _))) = parsed {
+                Some(ImperativeFamilyAst::Cloak { target, count })
+            } else {
+                None
+            }
+        }
         "proliferate" => Some(ImperativeFamilyAst::Proliferate),
         // CR 701.56a: "time travel" / "time travel N times"
         "time" => {
@@ -5474,7 +5995,7 @@ pub(super) fn parse_imperative_family_ast(
                 count,
             }))
         }
-        // Forage keyword action (CR 702.166a)
+        // Forage keyword action (CR 701.61a)
         "forage" => Some(ImperativeFamilyAst::GainKeyword(Effect::Forage)),
         // Collect evidence N keyword action (CR 702.163a)
         "collect" => {
@@ -5694,12 +6215,12 @@ pub(super) fn parse_imperative_family_ast(
                 ))
                 .parse(rest)
                 {
-                    let (target, _) = parse_target(mass_rest);
+                    let (target, _) = parse_target_with_ctx(mass_rest, ctx);
                     return Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
                         target,
                     }));
                 }
-                let (target, _) = parse_target(rest);
+                let (target, _) = parse_target_with_ctx(rest, ctx);
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Goad { target }))
             } else {
                 Some(ImperativeFamilyAst::Goad)
@@ -5863,12 +6384,12 @@ pub(super) fn parse_imperative_family_ast(
             }
         }
 
-        // "look" → "look at the top" (step 5) → "look at hand" (step 10)
-        "look" => parse_search_and_creation_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
+        // "look" → exiled/hand targets (step 4) → "look at the top" (step 5)
+        "look" => parse_hand_reveal_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch; exiled-card look must precede library-top search
+            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             .or_else(|| {
-                parse_hand_reveal_ast(text, lower, ctx)
-                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
+                parse_search_and_creation_ast(text, lower, ctx)
+                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
             }),
 
         // "gets"/"get" → try player counter first, then the subjectless
@@ -6644,6 +7165,18 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
             clause
         }
+        // CR 603.5 / CR 608.2d: "you may <effect>" and subject-stripped "each
+        // player may <effect>" both arrive here as `YouMay` (the `you`/`may`
+        // first-word arms). The optionality is an ability-level flag, not part
+        // of the Effect, so lower the body and mark the CLAUSE optional. The
+        // bare `lower_imperative_family_effect` path drops the "may" entirely,
+        // making the effect mandatory — e.g. Mog, Moogle Warrior's "each player
+        // may discard a card" became a forced discard (issue #2901).
+        ImperativeFamilyAst::YouMay { text } => {
+            let mut clause = parsed_clause(super::parse_effect(&text));
+            clause.optional = true;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -6657,7 +7190,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Explore => Effect::Explore,
         ImperativeFamilyAst::Connive => Effect::Connive {
             target: TargetFilter::Any,
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
         },
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
@@ -6704,6 +7237,10 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
         ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
+        // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward {2}).
+        ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
+        // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
+        ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
@@ -7030,7 +7567,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     destination: Zone::Exile,
                     target,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     face_down_profile: None,
                 }
             } else {
@@ -7041,7 +7578,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
@@ -7491,9 +8028,13 @@ mod tests {
             panic!("expected Or {{ ability, noncreature-spell }}, got {target:?}");
         };
         assert!(
-            filters
-                .iter()
-                .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
             "missing the activated/triggered ability disjunct: {target:?}"
         );
         let spell_leg = filters
@@ -8187,8 +8728,8 @@ mod tests {
                 keywords,
                 ..
             } => {
-                assert_eq!(power, Some(3));
-                assert_eq!(toughness, Some(3));
+                assert_eq!(power, Some(PtValue::Fixed(3)));
+                assert_eq!(toughness, Some(PtValue::Fixed(3)));
                 assert!(keywords.contains(&crate::types::keywords::Keyword::Haste));
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
@@ -8674,6 +9215,50 @@ mod tests {
         let _ = (text, lower);
     }
 
+    /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
+    /// controls" is the untargeted MASS form, lowered to `GainControlAll`
+    /// (mirrors "destroy all" → `DestroyAll`). The "target" single form must
+    /// stay `GainControl`. The mass population filter still carries the type +
+    /// `controller: TargetPlayer` anaphor.
+    #[test]
+    fn parse_gain_control_of_all_is_mass_gain_control_all() {
+        use crate::types::ability::TypeFilter;
+        let text = "gain control of all artifacts that player controls";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("mass gain control should parse");
+        match lower_targeted_action_ast(ast) {
+            Effect::GainControlAll { target } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Artifact),
+                        "filter must be artifacts, got {tf:?}"
+                    );
+                    // A "that player controls" controller anaphor is present; the
+                    // concrete `ControllerRef` (TargetPlayer in the Hellkite
+                    // trigger) is resolved with effect context — see the
+                    // GainControlAll runtime test for the bound-target behavior.
+                    assert!(
+                        tf.controller.is_some(),
+                        "mass filter must carry a controller anaphor, got {tf:?}"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected GainControlAll, got {other:?}"),
+        }
+
+        // Regression: the targeted single form stays GainControl.
+        let single = "gain control of target artifact";
+        let single_lower = single.to_lowercase();
+        let ast =
+            parse_targeted_action_ast(single, &single_lower, &mut ParseContext::default()).unwrap();
+        assert!(
+            matches!(lower_targeted_action_ast(ast), Effect::GainControl { .. }),
+            "targeted gain control must stay GainControl"
+        );
+    }
+
     #[test]
     fn parse_mass_return_to_battlefield_after_leading_destination() {
         let text = "Return to the battlefield all artifact and creature cards in your graveyard that were put there from the battlefield this turn";
@@ -8692,7 +9277,7 @@ mod tests {
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(!enter_tapped);
+                assert!(!enter_tapped.is_tapped());
                 assert_eq!(filters.len(), 2);
                 for filter in filters {
                     let TargetFilter::Typed(typed) = filter else {
@@ -8791,8 +9376,8 @@ mod tests {
             Effect::Animate {
                 power, toughness, ..
             } => {
-                assert_eq!(power, Some(0));
-                assert_eq!(toughness, Some(0));
+                assert_eq!(power, Some(PtValue::Fixed(0)));
+                assert_eq!(toughness, Some(PtValue::Fixed(0)));
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
         }
@@ -8817,8 +9402,8 @@ mod tests {
                 target,
                 ..
             } => {
-                assert_eq!(power, Some(2));
-                assert_eq!(toughness, Some(2));
+                assert_eq!(power, Some(PtValue::Fixed(2)));
+                assert_eq!(toughness, Some(PtValue::Fixed(2)));
                 assert_eq!(
                     target,
                     default_earthbend_target(),
@@ -9028,6 +9613,37 @@ mod tests {
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1 + CR 119.3: Astarion (Feed mode) — "loses life equal to the
+    /// amount of life they lost this turn." The third-person "they" anaphor in a
+    /// targeted life-change refers to the effect's player target, so it maps to
+    /// `LifeLostThisTurn { Target }` (NOT `Controller` like the "you" form). The
+    /// maintainer's shared `parse_life_lost_ref` "amount of … they lost" tag is
+    /// unreachable behind its own prefix strip, so this targeted-context
+    /// recognizer is what resurrects the Feed mode.
+    #[test]
+    fn parse_lose_life_equal_to_life_they_lost_this_turn_is_target_scoped() {
+        for text in [
+            "loses life equal to the amount of life they lost this turn",
+            "loses life equal to the amount of life that player lost this turn",
+        ] {
+            let lower = text.to_lowercase();
+            let result = parse_numeric_imperative_ast(text, &lower)
+                .unwrap_or_else(|| panic!("should parse {text:?}"));
+            match result {
+                NumericImperativeAst::LoseLife { amount } => assert_eq!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn {
+                            player: PlayerScope::Target,
+                        },
+                    },
+                    "{text:?} must be Target-scoped",
+                ),
+                other => panic!("Expected LoseLife, got {other:?}"),
+            }
         }
     }
 
@@ -9343,7 +9959,7 @@ mod tests {
         let text = "pay any amount of mana";
         let lower = text.to_lowercase();
         let Some(CostResourceImperativeAst::Pay {
-            cost: PaymentCost::Mana { cost },
+            cost: AbilityCost::Mana { cost },
         }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
         else {
             panic!("expected variable mana PayCost");
@@ -10626,6 +11242,13 @@ mod tests {
             "search target player's graveyard, hand, and library for all cards with that name and exile them",
             "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
             "search their graveyard, hand, and library for a card with that name and exile them",
+            // CR 201.2a: "its controller's" possessive + card-type name source —
+            // Eradicate ("that creature"), Crumble to Dust ("that land"),
+            // Counterbore ("that spell"), Deicide ("its controller's … that card").
+            "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
+            "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
+            "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
+            "search its controller's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
         ];
         for text in positives {
             assert!(
@@ -10659,7 +11282,8 @@ mod tests {
         assert!(matches!(
             controlled.0,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None,
             }
         ));
 
@@ -10668,7 +11292,10 @@ mod tests {
         assert_eq!(unscoped.1, "");
         assert!(matches!(
             unscoped.0,
-            TargetFilter::StackAbility { controller: None }
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
         ));
 
         assert!(
@@ -11470,5 +12097,105 @@ mod tests {
             ),
             "expected ScopedPlayer ExileTop, got {each:?}"
         );
+    }
+
+    /// CR 609.7 + CR 615.2: A source-scoped prevent ("prevent all damage target
+    /// instant or sorcery spell would deal this turn" — Dromoka's Command)
+    /// collapses the recipient `target` to `Any` and carries the chosen source
+    /// as `damage_source_filter = And[ParentTargetSlot{0}, <stack-spell leaf>]`.
+    #[test]
+    fn prevent_source_scoped_spell_yields_parent_target_slot_filter() {
+        let effect = parse_prevent_effect(
+            "Prevent all damage target instant or sorcery spell would deal this turn.",
+        );
+        let Effect::PreventDamage {
+            amount,
+            target,
+            scope,
+            damage_source_filter,
+            ..
+        } = effect
+        else {
+            panic!("expected PreventDamage, got {effect:?}");
+        };
+        assert_eq!(amount, PreventionAmount::All);
+        assert_eq!(target, TargetFilter::Any);
+        assert_eq!(scope, PreventionScope::AllDamage);
+        let Some(TargetFilter::And { filters }) = damage_source_filter else {
+            panic!("expected And source filter, got {damage_source_filter:?}");
+        };
+        // First leg: the cast-time-chosen-source sentinel at slot 0.
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ParentTargetSlot { index: 0 })),
+            "expected ParentTargetSlot {{ index: 0 }} leg, got {filters:?}"
+        );
+        // Sibling leg: the choosable instant-or-sorcery stack-spell filter.
+        let source_leaf = filters
+            .iter()
+            .find(|f| !matches!(f, TargetFilter::ParentTargetSlot { .. }))
+            .expect("source leaf present");
+        assert!(
+            is_stack_spell_leg(source_leaf)
+                || matches!(source_leaf, TargetFilter::Or { filters } if filters.iter().any(is_stack_spell_leg)),
+            "source leaf must scope to a stack spell, got {source_leaf:?}"
+        );
+    }
+
+    /// NEGATIVE: a recipient-scoped prevent ("prevent the next 3 damage to
+    /// target creature") must stay recipient-targeted — `target: Typed(creature)`
+    /// and `damage_source_filter: None` — proving the source-scope branch does
+    /// not divert the recipient form.
+    #[test]
+    fn prevent_recipient_scoped_creature_not_diverted_to_source() {
+        let effect = parse_prevent_effect(
+            "Prevent the next 3 damage that would be dealt to target creature this turn.",
+        );
+        let Effect::PreventDamage {
+            amount,
+            target,
+            damage_source_filter,
+            ..
+        } = effect
+        else {
+            panic!("expected PreventDamage, got {effect:?}");
+        };
+        assert_eq!(amount, PreventionAmount::Next(3));
+        assert!(
+            typed_leg(&target).is_some_and(|tf| has_type(tf, TypeFilter::Creature)),
+            "recipient target must stay Typed(creature), got {target:?}"
+        );
+        assert_eq!(
+            damage_source_filter, None,
+            "recipient prevent must not carry a source filter"
+        );
+    }
+
+    /// CR 119.3 + CR 608.2c: Kaya's Wrath lifegain (issue #2943) must parse
+    /// through the imperative GainLife path with a FilteredTrackedSetSize
+    /// amount, not fall through to Unimplemented.
+    #[test]
+    fn gain_life_equal_to_destroyed_creatures_you_controlled_this_way() {
+        use crate::types::ability::{ControllerRef, QuantityExpr, QuantityRef};
+
+        let text = "You gain life equal to the number of creatures you controlled that were \
+                    destroyed this way.";
+        let lower = text.to_ascii_lowercase();
+        let ast = parse_numeric_imperative_ast(text, &lower)
+            .expect("Kaya's Wrath lifegain clause must parse");
+        match ast {
+            NumericImperativeAst::GainLife { amount } => match amount {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize { filter },
+                } => {
+                    let tf = typed_leg(&filter).expect("filter must be Typed");
+                    assert!(has_type(tf, TypeFilter::Creature));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+            },
+            other => panic!("expected GainLife imperative, got {other:?}"),
+        }
     }
 }

@@ -117,4 +117,24 @@ describe("CascadeChoiceModal", () => {
       data: { choice: { type: "Decline" } },
     });
   });
+
+  it("routes RippleChoice actions from remaining-hit offers", () => {
+    setWaitingFor({
+      type: "CastOffer",
+      data: {
+        player: 0,
+        kind: { type: "Ripple", hit_card: 52, remaining_hits: [53], revealed_misses: [54] },
+      },
+    });
+
+    render(<CascadeChoiceModal />);
+
+    expect(screen.getByText("Ripple")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Cast Lightning Bolt/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RippleChoice",
+      data: { choice: { type: "Cast" } },
+    });
+  });
 });

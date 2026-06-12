@@ -346,10 +346,10 @@ export class P2PHostAdapter implements EngineAdapter {
       resumeData?: { state: GameState; session: PersistedP2PHostSession };
     },
   ) {
-    if (playerCount < 2 || playerCount > 4) {
+    if (playerCount < 2 || playerCount > 6) {
       throw new AdapterError(
         "P2P_PLAYER_COUNT",
-        `P2P supports 2-4 players; got ${playerCount}`,
+        `P2P supports 2-6 players; got ${playerCount}`,
         false,
       );
     }

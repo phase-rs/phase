@@ -203,7 +203,7 @@ pub fn room_effects(
         // 3: Storeroom — "Put a +1/+1 counter on target creature you control"
         (DungeonId::LostMineOfPhandelver, 3) => (
             simple(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: fixed(1),
                     target: TargetFilter::Typed(
@@ -350,6 +350,9 @@ pub fn room_effects(
                         source_id: None,
                         exiled_by_ability_controller: None,
                         mana_spend_permission: None,
+                        card_filter: None,
+                        single_use_group: None,
+                        single_use: false,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),
@@ -497,7 +500,7 @@ pub fn room_effects(
         // 1: Forge — "Put two +1/+1 counters on target creature"
         (DungeonId::Undercity, 1) => (
             simple(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: fixed(2),
                     target: TargetFilter::Typed(TypedFilter::creature()),
@@ -662,7 +665,7 @@ pub fn room_effects(
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -982,7 +985,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],

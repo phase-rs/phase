@@ -261,7 +261,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
         let unit = ManaUnit {
             color: final_mana_type,
             source_id,
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors,
             restrictions: restrictions.to_vec(),
             grants: grants.to_vec(),
@@ -281,6 +281,9 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             source_id,
             tap_state: ManaTapState::from_tap(tapped_for_mana),
         });
+    }
+    if final_count > 0 {
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -577,7 +580,11 @@ pub fn can_pay_for_spell(
 ///
 /// CR 601.2h: The player pays the total cost. Partial payments are not allowed.
 /// Unpayable costs can't be paid.
-pub fn pay_cost(
+///
+/// Pool-level arithmetic only — the ability-cost payment authority
+/// (`game/costs.rs::pay_cost`, see `.planning/cost-payment-unification/`)
+/// sits above this and owns `AbilityCost` dispatch.
+pub fn pay_from_pool(
     pool: &mut ManaPool,
     cost: &ManaCost,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
@@ -1807,7 +1814,7 @@ fn spend_snow(pool: &mut ManaPool) -> bool {
 
 /// CR 107.4h: Snow mana {S} — paid with one mana of any type from a snow source.
 fn spend_snow_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
-    if let Some(pos) = pool.mana.iter().position(|m| m.snow) {
+    if let Some(pos) = pool.mana.iter().position(|m| m.is_snow()) {
         Some(pool.mana.swap_remove(pos))
     } else {
         None
@@ -1911,7 +1918,7 @@ mod tests {
         ManaUnit {
             color,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -1946,7 +1953,7 @@ mod tests {
             generic: 1,
         };
 
-        let (spent, life_payments) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, life_payments) = pay_from_pool(&mut pool, &cost).unwrap();
 
         assert_eq!(spent.len(), 2);
         assert!(spent
@@ -1965,7 +1972,7 @@ mod tests {
         };
 
         assert_eq!(
-            pay_cost(&mut pool, &cost),
+            pay_from_pool(&mut pool, &cost),
             Err(PaymentError::InsufficientMana)
         );
         assert_eq!(pool.total(), 2);
@@ -1981,7 +1988,7 @@ mod tests {
             generic: 0,
         };
 
-        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, _) = pay_from_pool(&mut pool, &cost).unwrap();
 
         assert_eq!(spent.len(), 2);
         assert_eq!(pool.total(), 0);
@@ -2382,7 +2389,7 @@ mod tests {
             shards: vec![ManaCostShard::White, ManaCostShard::Blue],
             generic: 0,
         };
-        let (spent, life) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, life) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent.len(), 2);
         assert!(life.is_empty());
         assert_eq!(pool.total(), 1); // 1 white left
@@ -2395,7 +2402,7 @@ mod tests {
             shards: vec![],
             generic: 2,
         };
-        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, _) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent.len(), 2);
         assert_eq!(pool.total(), 1);
     }
@@ -2408,7 +2415,7 @@ mod tests {
             shards: vec![ManaCostShard::WhiteBlue],
             generic: 0,
         };
-        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, _) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent.len(), 1);
         assert_eq!(spent[0].color, ManaType::White);
     }
@@ -2421,7 +2428,7 @@ mod tests {
             shards: vec![ManaCostShard::GreenBlue, ManaCostShard::GreenBlue],
             generic: 0,
         };
-        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, _) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent.len(), 2);
         assert!(spent.iter().all(|unit| unit.color == ManaType::Green));
     }
@@ -2434,7 +2441,7 @@ mod tests {
             shards: vec![ManaCostShard::GreenBlue, ManaCostShard::GreenBlue],
             generic: 0,
         };
-        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, _) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent.len(), 2);
         assert!(spent.iter().any(|unit| unit.color == ManaType::Green));
         assert!(spent.iter().any(|unit| unit.color == ManaType::Blue));
@@ -2447,7 +2454,7 @@ mod tests {
             shards: vec![ManaCostShard::PhyrexianRed],
             generic: 0,
         };
-        let (spent, life) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, life) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent.len(), 1);
         assert!(life.is_empty());
     }
@@ -2459,7 +2466,7 @@ mod tests {
             shards: vec![ManaCostShard::PhyrexianBlue],
             generic: 0,
         };
-        let (spent, life) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, life) = pay_from_pool(&mut pool, &cost).unwrap();
         assert!(spent.is_empty());
         assert_eq!(life.len(), 1);
         assert_eq!(life[0].amount, 2);
@@ -2472,7 +2479,7 @@ mod tests {
             shards: vec![ManaCostShard::White],
             generic: 0,
         };
-        assert!(pay_cost(&mut pool, &cost).is_err());
+        assert!(pay_from_pool(&mut pool, &cost).is_err());
     }
 
     #[test]
@@ -2482,7 +2489,7 @@ mod tests {
             shards: vec![],
             generic: 1,
         };
-        let (spent, _) = pay_cost(&mut pool, &cost).unwrap();
+        let (spent, _) = pay_from_pool(&mut pool, &cost).unwrap();
         assert_eq!(spent[0].color, ManaType::Colorless);
     }
 
@@ -2553,7 +2560,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Green,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
             grants: vec![],
@@ -2616,7 +2623,7 @@ mod tests {
             pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(1),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
                     "Colorless Eldrazi".to_string(),
@@ -2680,7 +2687,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKind(
                 crate::types::keywords::KeywordKind::Flashback,
@@ -2741,7 +2748,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKindFromZone(
                 crate::types::keywords::KeywordKind::Flashback,
@@ -2804,7 +2811,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Green,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],
@@ -2836,7 +2843,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],

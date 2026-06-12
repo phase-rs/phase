@@ -459,7 +459,7 @@ fn pay_activation_costs_after_target_selection(
     state: &mut GameState,
     player: PlayerId,
     pending: &PendingCast,
-    assigned_ability: ResolvedAbility,
+    mut assigned_ability: ResolvedAbility,
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
@@ -489,7 +489,13 @@ fn pay_activation_costs_after_target_selection(
                 player,
                 ability_index,
             );
-        if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
+        super::casting::stamp_self_ref_discard_cost_paid_object(
+            state,
+            pending.object_id,
+            &mut assigned_ability,
+            activation_cost,
+        );
+        if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             pay_ability_cost_for_activation(
                 state,
                 player,
@@ -584,10 +590,6 @@ pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
         Effect::PutCounter {
             count: QuantityExpr::Fixed { value },
             ..
-        }
-        | Effect::AddCounter {
-            count: QuantityExpr::Fixed { value },
-            ..
         } => Some(*value as u32),
         _ => None,
     }
@@ -604,7 +606,7 @@ pub(super) fn extract_distribution_total(
     }
     let count_expr = match effect {
         Effect::DealDamage { amount, .. } => amount,
-        Effect::PutCounter { count, .. } | Effect::AddCounter { count, .. } => count,
+        Effect::PutCounter { count, .. } => count,
         _ => return None,
     };
     let (inner, _) = count_expr.peel_up_to();

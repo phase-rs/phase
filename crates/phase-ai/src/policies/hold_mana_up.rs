@@ -31,6 +31,8 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 use crate::features::control::REACTIVE_TEMPO_FLOOR;
 use crate::features::mana_ramp::is_mana_dork_parts;
 use crate::features::DeckFeatures;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 /// Penalty applied when the AI would tap out below the cost of the cheapest
 /// instant in hand — it can no longer use its interaction this turn cycle.
@@ -221,6 +223,8 @@ mod tests {
                 object_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(AI),

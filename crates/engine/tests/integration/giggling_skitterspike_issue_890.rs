@@ -9,6 +9,7 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 use super::rules::AttackTarget;
+use engine::types::game_state::CastPaymentMode;
 
 const SKITTERSPIKE_ORACLE: &str = "Indestructible\n\
 Whenever this creature attacks, blocks, or becomes the target of a spell, it \
@@ -115,6 +116,8 @@ fn issue_890_targeted_by_spell_trigger_deals_damage() {
             object_id: bolt,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Lightning Bolt should succeed");
 

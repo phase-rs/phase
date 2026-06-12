@@ -18,6 +18,8 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 use crate::features::tribal::{statics_are_lord_for, LORD_PRIORITY_FLOOR};
 use crate::features::DeckFeatures;
 use engine::parser::oracle_util::canonicalize_subtype_name;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 /// Bonus for casting an on-tribe lord.
 /// CR 613.4c: lords grant layer 7c P/T modifications to other tribe members.
@@ -172,6 +174,8 @@ mod tests {
                 object_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(AI),

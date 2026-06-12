@@ -12,7 +12,9 @@
 //!    `legal_actions` / AI / frontend pre-filtering.
 
 use engine::game::zones::create_object;
-use engine::types::ability::{AbilityCost, AdditionalCost, TargetFilter, TypeFilter, TypedFilter};
+use engine::types::ability::{
+    AbilityCost, AdditionalCost, SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -22,10 +24,10 @@ use engine::types::zones::Zone;
 const P0: PlayerId = PlayerId(0);
 
 fn sacrifice_a_land() -> AbilityCost {
-    AbilityCost::Sacrifice {
-        target: TargetFilter::Typed(TypedFilter::land()),
-        count: 1,
-    }
+    AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::Typed(TypedFilter::land()),
+        1,
+    ))
 }
 
 /// CR 601.2f: Harrow's full Oracle additional-cost line parses to the
@@ -41,12 +43,16 @@ fn harrow_additional_cost_parses_required_sacrifice_land_cr_601_2f() {
     );
 
     let cost = result.expect("Harrow additional-cost line must parse");
-    let AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) = cost else {
+    let AdditionalCost::Required(AbilityCost::Sacrifice(sac_cost)) = cost else {
         panic!("Expected Required(Sacrifice {{ ... }}), got {cost:?}");
     };
-    assert_eq!(count, 1, "Harrow sacrifices exactly one land");
-    let TargetFilter::Typed(typed) = target else {
-        panic!("Expected Typed filter, got {target:?}");
+    assert_eq!(
+        sac_cost.requirement.fixed_count(),
+        Some(1),
+        "Harrow sacrifices exactly one land"
+    );
+    let TargetFilter::Typed(typed) = &sac_cost.target else {
+        panic!("Expected Typed filter, got {0:?}", sac_cost.target);
     };
     assert!(
         typed

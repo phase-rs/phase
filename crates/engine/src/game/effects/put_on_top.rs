@@ -105,7 +105,7 @@ pub fn resolve(
                     effect_kind: EffectKind::PutAtLibraryPosition,
                     zone: source_zone,
                     destination: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_transformed: false,
                     enters_under_player: None,
                     enters_attacking: false,

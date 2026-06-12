@@ -190,6 +190,8 @@ pub(crate) fn open_copy_target_selection(
         player: controller,
         copy_id,
         target_slots,
+        effect_kind: crate::types::ability::EffectKind::CopySpell,
+        effect_source_id: Some(copy_id),
         current_slot: 0,
     };
     Ok(true)
@@ -255,6 +257,7 @@ fn synthesize_prepared_copy_object(
             granted_to: Some(controller),
             resolution_cleanup: None,
             duration: None,
+            exile_instead_of_graveyard_on_resolve: false,
         });
     state.objects.insert(copy_id, copy_obj);
 
@@ -532,7 +535,7 @@ mod tests {
             ObjectId(999),
             None,
             false,
-            false,
+            crate::types::zones::EtbTapState::Unspecified,
             None,
             &[],
             None,
