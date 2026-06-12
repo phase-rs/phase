@@ -97,6 +97,8 @@ If the answer to any of these is wrong, **stop and refactor before moving on.** 
 
 Build/test/cargo commands, cargo aliases, WASM build, card-data pipeline + jq lookups, frontend commands, coverage, full crate/workspace architecture, engine internals, environment variables, releasing, and CI live in the **`project-reference`** skill (`.claude/skills/project-reference/SKILL.md`, shared with Codex via `.agents/skills` / `.codex/skills`). Invoke it or read the file when you need a command, a module location, or an env var — it is not resident every turn by design.
 
+AI tactical policy scoring uses the card-equivalent `PolicyVerdict` contract in `crates/phase-ai/src/policies/registry.rs`; new policies must use the band helpers rather than raw sentinel scores. AI behavior changes must run `cargo ai-gate` and refresh baselines only with the paired-seed report attached.
+
 ## Documentation (`docs/`)
 
 - **`.claude/skills/oracle-parser/SKILL.md`** — Oracle parser single source of truth: architecture, nom combinator mandate, parsing priority system, AST type system, all helper modules, CR annotation protocol, and contribution checklists.

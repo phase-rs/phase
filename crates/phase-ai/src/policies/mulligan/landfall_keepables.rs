@@ -35,9 +35,9 @@ impl MulliganPolicy for LandfallKeepablesMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        _plan: &PlanSnapshot, // input-unused: landfall opener scoring is card-composition only
+        _turn_order: TurnOrder, // input-unused: landfall opener scoring is card-composition only
+        _mulligans_taken: u8, // input-unused: landfall opener scoring is card-composition only
     ) -> MulliganScore {
         let commitment = features.landfall.commitment;
         if commitment <= COMMITMENT_THRESHOLD {

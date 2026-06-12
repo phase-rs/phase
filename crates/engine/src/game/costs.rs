@@ -844,6 +844,7 @@ pub(crate) fn can_pay(
             if matches!(cost, AbilityCost::Waterbend { .. }) {
                 return true;
             }
+            crate::game::perf_counters::record_state_clone_for_legality();
             let mut simulated = state.clone();
             // CR 601.2h: dry-run the authority on a throwaway clone. A `Failed`
             // outcome (insufficient mana, life, …) or an engine error (e.g. a

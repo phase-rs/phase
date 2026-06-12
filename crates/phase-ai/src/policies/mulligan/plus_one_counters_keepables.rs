@@ -36,9 +36,9 @@ impl MulliganPolicy for PlusOneCountersMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        _plan: &PlanSnapshot, // input-unused: counters opener scoring is card-composition only
+        _turn_order: TurnOrder, // input-unused: counters opener scoring is card-composition only
+        _mulligans_taken: u8, // input-unused: counters opener scoring is card-composition only
     ) -> MulliganScore {
         let commitment = features.plus_one_counters.commitment;
         if commitment <= MULLIGAN_FLOOR {

@@ -23,6 +23,8 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::run_ai_actions;
 use phase_ai::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 const MAX_TOTAL_ACTIONS: usize = 200_000;
 
@@ -172,9 +174,17 @@ fn main() {
     let mut total_actions: usize = 0;
     let mut last_turn_reported: u32 = 0;
     let mut aborted = false;
+    let mut ai_rng = StdRng::seed_from_u64(seed);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
 
     loop {
-        let results = run_ai_actions(&mut state, &ai_players, &ai_configs);
+        let results = run_ai_actions(
+            &mut state,
+            &ai_players,
+            &ai_configs,
+            &mut ai_rng,
+            &ai_session,
+        );
         if results.is_empty() {
             break;
         }

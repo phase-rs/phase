@@ -39,6 +39,8 @@ use phase_ai::auto_play::run_ai_actions;
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::duel_suite::find_matchup;
 use phase_ai::duel_suite::run::resolve_matchup;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 
 /// Bound on total AI actions across the game. Pre-fix runs hit the
 /// 10,000-action safety cap in `ai_duel.rs`. Post-fix games complete
@@ -81,8 +83,16 @@ fn greasefang_mirror_terminates_within_bound() {
             .collect();
 
     let mut total_actions: usize = 0;
+    let mut ai_rng = SmallRng::seed_from_u64(1);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
     loop {
-        let results = run_ai_actions(&mut state, &ai_players, &ai_configs);
+        let results = run_ai_actions(
+            &mut state,
+            &ai_players,
+            &ai_configs,
+            &mut ai_rng,
+            &ai_session,
+        );
         if results.is_empty() {
             break;
         }

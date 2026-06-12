@@ -5235,12 +5235,10 @@ pub struct GameState {
     /// (their truth is per-recipient; `source_condition_gate_passes` is only an
     /// over-approximation for them) and always escalate. Refreshed wholesale
     /// every full eval (`refresh_static_gate_truth`). `#[serde(skip)]` derived
-    /// state, like `layers_dirty`/`trigger_index`. NOTE: a plain
-    /// `std::collections::HashMap` (not `im`-backed), so it deep-clones on every
-    /// `GameState::clone()` — kept small by storing only source-level-gated
-    /// continuous statics (a small fraction of the board).
+    /// state, like `layers_dirty`/`trigger_index`. `im::HashMap` keeps
+    /// clone-per-candidate legality probes from deep-copying this derived cache.
     #[serde(skip)]
-    pub static_gate_truth: std::collections::HashMap<StaticGateKey, bool>,
+    pub static_gate_truth: im::HashMap<StaticGateKey, bool>,
     /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
     /// lazily after deserialize via a sentinel check at the top of the consult
     /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
@@ -6656,7 +6654,7 @@ impl GameState {
             pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
-            static_gate_truth: std::collections::HashMap::new(),
+            static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
             static_source_index: StaticSourceIndex::default(),
             next_timestamp: 1,

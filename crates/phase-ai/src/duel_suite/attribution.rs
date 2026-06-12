@@ -82,13 +82,21 @@ struct EventVisitor {
     ai_player: u32,
     top_policies: String,
     rejects: String,
+    combat_kind: String,
 }
 
 impl Visit for EventVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "combat_kind" {
+            self.combat_kind = value.to_string();
+        }
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         match field.name() {
             "top_policies" => self.top_policies = format!("{value:?}"),
             "rejects" => self.rejects = format!("{value:?}"),
+            "combat_kind" => self.combat_kind = format!("{value:?}"),
             _ => {}
         }
     }
@@ -118,8 +126,15 @@ where
             ai_player: u32::MAX,
             top_policies: String::new(),
             rejects: String::new(),
+            combat_kind: String::new(),
         };
         event.record(&mut visitor);
+        if !visitor.combat_kind.is_empty() {
+            // Combat AI emits on the shared decision_trace target for raw-log
+            // observability, but suite policy attribution should count only
+            // tactical policy-registry decisions.
+            return;
+        }
         if visitor.ai_player == u32::MAX {
             // Event lacks ai_player (e.g. mulligan decisions emit their own
             // format). Skip — we can't attribute it to a player.

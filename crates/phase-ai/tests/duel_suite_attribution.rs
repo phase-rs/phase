@@ -101,6 +101,8 @@ fn declared_exercises_appear_in_attribution() {
         output_path: PathBuf::from("target/duel-suite-attribution-test.json"),
         filter: None,
         attribution: AttributionMode::Enabled,
+        git_sha: None,
+        card_data_hash: None,
     };
     let report = run_suite(&db, &opts).expect("suite run");
 

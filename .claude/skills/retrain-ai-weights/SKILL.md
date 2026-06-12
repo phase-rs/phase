@@ -14,9 +14,19 @@ The AI weight system has 4 layers:
 1. **Base weights** (`EvalWeightSet` in `crates/phase-ai/src/eval.rs`) — 9 weights × 3 game phases (early T1-3, mid T4-7, late T8+). Learned from 17Lands replay data.
 2. **Archetype multipliers** (`ArchetypeMultipliers` in `crates/phase-ai/src/deck_profile.rs`) — 5 archetypes × 9 multipliers. Scale base weights per deck type.
 3. **Keyword bonuses** (`KeywordBonuses` in `crates/phase-ai/src/eval.rs`) — 10 params for creature evaluation.
-4. **AiProfile** (`crates/phase-ai/src/config.rs`) — 3 params (risk_tolerance, interaction_patience, stabilize_bias).
+4. **Policy penalties** (`PolicyPenalties` in `crates/phase-ai/src/config.rs`) — tactical policy score knobs.
+5. **AiProfile** (`crates/phase-ai/src/config.rs`) — 3 params (risk_tolerance, interaction_patience, stabilize_bias).
 
-All stored in `AiConfig`. CMA-ES can optimize all 85 parameters.
+All stored in `AiConfig`. The CMA-ES optimizer tunes one parameter group per
+run via `--group eval|penalties|keywords|archetype`:
+
+- `eval`: 9 late-game `EvalWeights` plus 3 `AiProfile` values. Early/mid weights are derived from the 17Lands phase ratios.
+- `penalties`: every field listed in `ACTIVE_POLICY_PENALTY_FIELDS`.
+- `keywords`: all `KeywordBonuses` fields.
+- `archetype`: 5 archetypes x 9 `ArchetypeMultipliers`.
+
+Do not mix groups in one run. Compare and validate one group artifact at a
+time so regressions can be attributed to a specific surface.
 
 ## Training Data Setup
 
@@ -41,7 +51,7 @@ The script auto-discovers all `replay_data_public.*.PremierDraft.csv` files.
 ### Step 1: Run the training script
 
 ```bash
-python3 scripts/train_eval_weights.py --data-dir data/17lands --output data/learned-weights.json
+rtk python3 scripts/train_eval_weights.py --data-dir data/17lands --output data/learned-weights.json
 ```
 
 **Dependencies:** `pip3 install -r scripts/requirements-training.txt` (pandas, scikit-learn, numpy)
@@ -83,24 +93,58 @@ pub fn learned() -> Self {
 ### Step 3: Verify
 
 ```bash
-cargo test -p phase-ai
-cargo clippy -p phase-ai -- -D warnings
+rtk cargo fmt --all
+rtk ./scripts/tilt-wait.sh --timeout 420 clippy test-ai
 ```
+
+If Tilt is not running (`rtk tilt get uiresource clippy` fails), use the
+project-reference skill before falling back to direct cargo commands.
 
 ### Step 4 (optional): CMA-ES optimization
 
 ```bash
 # Smoke test (fast, verifies binary works)
-cargo tune-ai data/ --generations 2 --population 5 --games 3 --seed 42
+rtk cargo tune-ai data/ --group eval --generations 2 --population 5 --games 3 --seed 42
 
-# Full run (10-15 min on 8 cores)
-cargo tune-ai data/ --generations 100 --population 50 --games 20 --output data/learned-weights.json
+# Full eval/profile run
+rtk cargo tune-ai data/ --group eval --generations 100 --population 50 --games 20 --output data/cma-tuned-eval.json
 
-# Validate matchup correctness (aggro < midrange < control < aggro triangle)
-cargo tune-ai data/ --validate --games 500
+# Full policy-penalty run
+rtk cargo tune-ai data/ --group penalties --generations 100 --population 50 --games 20 --output data/cma-tuned-penalties.json
+
+# Full keyword-bonus run
+rtk cargo tune-ai data/ --group keywords --generations 100 --population 50 --games 20 --output data/cma-tuned-keywords.json
+
+# Full archetype-multiplier run
+rtk cargo tune-ai data/ --group archetype --generations 100 --population 50 --games 20 --output data/cma-tuned-archetype.json
+
+# Validate a tuned artifact against paired holdout matchups and Easy/Medium/Hard opponents
+rtk cargo tune-ai data/ --validate --games 500 --output data/cma-tuned-eval.json
 ```
 
-CMA-ES optimizes 12 base parameters (9 late-game weights + 3 AiProfile) and applies phase ratios from 17Lands training. After a full run, update `EvalWeightSet::learned()` with the optimized values.
+CMA-ES writes the requested artifact plus a sibling `*-manifest.json`
+containing the git SHA, seed, group, parameter names, fitness decks, holdout
+decks, opponent pool, games/eval, paired-seed flag, draw-exclusion flag, and
+baseline config hash. Do not write CMA output to `data/learned-weights.json`;
+that path is reserved for the 17Lands logistic-regression artifact
+(`kind: 17lands_phase_weights`). After a full run, review the validation
+output before manually updating Rust defaults.
+
+Fitness uses registered `duel_suite` matchup IDs from the fitness split and
+paired mirrored seeds. Drawn games are excluded from the fitness denominator.
+Holdout validation uses a separate registered split and compares baseline vs
+learned on the same seeds against Easy, Medium, and Hard opponent configs.
+
+Commander sanity measurement lives in `ai-duel`, not `ai-tune`:
+
+```bash
+rtk cargo run --release --bin ai-duel -- client/public --commander-suite --games 8 --seed 42 \
+  --difficulty Hard --baseline-difficulty Medium \
+  --output target/commander-suite-results.json
+```
+
+This runs the candidate seat through four seat rotations against three
+baseline seats and reports win rate, survival turns, and elimination order.
 
 ## Key Files
 
@@ -109,11 +153,14 @@ CMA-ES optimizes 12 base parameters (9 late-game weights + 3 AiProfile) and appl
 | `scripts/train_eval_weights.py` | Python training pipeline |
 | `scripts/requirements-training.txt` | Python deps (pandas, scikit-learn, numpy) |
 | `data/learned-weights.json` | Trained weight artifact (committed) |
+| `data/cma-tuned-weights.json` | CMA-ES tuned artifact (generated, not a 17Lands artifact) |
+| `data/cma-tuned-weights-manifest.json` | CMA-ES reproducibility manifest |
 | `data/17lands/` | Raw 17Lands CSVs (gitignored) |
 | `crates/phase-ai/src/eval.rs` | `EvalWeights`, `EvalWeightSet`, `KeywordBonuses`, evaluation functions |
 | `crates/phase-ai/src/deck_profile.rs` | `ArchetypeMultipliers`, deck classification |
 | `crates/phase-ai/src/config.rs` | `AiConfig` with all tunable params |
 | `crates/phase-ai/src/bin/ai_tune.rs` | CMA-ES optimizer binary |
+| `crates/phase-ai/src/bin/ai_duel.rs` | Duel-suite, compare, and Commander measurement binary |
 
 ## EvalWeights Fields (9 total)
 

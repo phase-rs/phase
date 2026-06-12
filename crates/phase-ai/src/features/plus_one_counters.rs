@@ -37,6 +37,7 @@ use engine::types::ability::{
     AbilityDefinition, ControllerRef, Effect, FilterProp, ReplacementDefinition, StaticDefinition,
     TargetFilter, TriggerDefinition,
 };
+use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::keywords::Keyword;
 use engine::types::replacements::ReplacementEvent;
@@ -44,6 +45,7 @@ use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 
 /// Commitment floor below which the tactical policy opts out.
 pub const COMMITMENT_FLOOR: f32 = 0.20;
@@ -98,9 +100,13 @@ pub fn detect(deck: &[DeckEntry]) -> PlusOneCountersFeature {
     let mut payoff_count = 0u32;
     let mut etb_with_counters_count = 0u32;
     let mut payoff_names: BTreeSet<String> = BTreeSet::new();
+    let mut total_nonland = 0u32;
 
     for entry in deck {
         let face = &entry.card;
+        if !face.card_type.core_types.contains(&CoreType::Land) {
+            total_nonland = total_nonland.saturating_add(entry.count);
+        }
 
         let is_generator = face.abilities.iter().any(ability_places_plus_one_counter);
         let is_proliferator = face.abilities.iter().any(ability_proliferates);
@@ -132,6 +138,7 @@ pub fn detect(deck: &[DeckEntry]) -> PlusOneCountersFeature {
         doubler_count,
         payoff_count,
         etb_with_counters_count,
+        total_nonland,
     );
 
     PlusOneCountersFeature {
@@ -153,20 +160,34 @@ fn compute_commitment(
     doubler_count: u32,
     payoff_count: u32,
     etb_with_counters_count: u32,
+    total_nonland: u32,
 ) -> f32 {
-    let sources_raw = generator_count as f32
-        + 0.5 * etb_with_counters_count as f32
-        + 0.3 * doubler_count as f32
-        + 0.5 * proliferate_count as f32;
-    let s = (sources_raw / 12.0).min(1.0);
-    let p = (payoff_count as f32 / 6.0).min(1.0);
+    let source_density = commitment::weighted_sum(&[
+        (
+            1.0 / 12.0,
+            commitment::density_per_60(generator_count, total_nonland),
+        ),
+        (
+            0.5 / 12.0,
+            commitment::density_per_60(etb_with_counters_count, total_nonland),
+        ),
+        (
+            0.3 / 12.0,
+            commitment::density_per_60(doubler_count, total_nonland),
+        ),
+        (
+            0.5 / 12.0,
+            commitment::density_per_60(proliferate_count, total_nonland),
+        ),
+    ]);
+    let payoff_density = (commitment::density_per_60(payoff_count, total_nonland) / 6.0).min(1.0);
 
     if generator_count == 0 && etb_with_counters_count == 0 {
         0.0
     } else if payoff_count == 0 {
-        0.15 * s
+        0.15 * source_density
     } else {
-        (s * p).sqrt().min(1.0)
+        commitment::geometric_mean(&[source_density, payoff_density])
     }
 }
 
