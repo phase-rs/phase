@@ -408,8 +408,14 @@ pub(super) fn handle_resolution_choice(
                 .copied()
                 .collect();
 
-            crate::game::morph::manifest_card(state, player, manifest_id, events)
-                .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
+            crate::game::morph::manifest_card(
+                state,
+                player,
+                manifest_id,
+                crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                events,
+            )
+            .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
 
             // CR 614.6 + CR 701.17a class: route the non-manifested cards to the
             // graveyard through the simultaneous-move batch so each card's own

@@ -5320,6 +5320,7 @@ mod tests {
                     toughness: Some(2),
                     extra_core_types: vec![CoreType::Artifact],
                     subtypes: vec!["Cyberman".to_string()],
+                    ward: None,
                 }),
             },
             vec![],

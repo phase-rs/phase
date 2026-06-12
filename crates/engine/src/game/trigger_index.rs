@@ -796,6 +796,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Amass
         | EffectKind::Bolster
         | EffectKind::Manifest
+        | EffectKind::Cloak
         | EffectKind::ExtraTurn
         | EffectKind::GrantExtraLoyaltyActivations
         | EffectKind::SkipNextTurn

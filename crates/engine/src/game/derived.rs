@@ -1,12 +1,17 @@
+use std::collections::HashSet;
+
 use crate::game::combat::has_summoning_sickness;
 use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
+use crate::game::functioning_abilities::game_active_statics;
 use crate::game::mana_abilities;
 use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::ability::StaticCondition;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -244,6 +249,58 @@ pub fn derive_display_state(state: &mut GameState) {
         "has_pending_cast is true but no PendingCast is reachable — drift in {:?}",
         std::mem::discriminant(&state.waiting_for)
     );
+
+    // CR 400.2: Continuous "play with the top card of your library revealed"
+    // statics (Future Sight, Magus of the Future) must keep the library top in
+    // `revealed_cards` across action boundaries — `apply_action` clears
+    // momentary reveals at the start of each action, so re-sync here on every
+    // derive pass before the state is exported to clients.
+    sync_continuous_library_top_reveals(state);
+}
+
+/// CR 400.2: Repopulate `revealed_cards` for every active `RevealTopOfLibrary`
+/// static after action-boundary clears.
+fn sync_continuous_library_top_reveals(state: &mut GameState) {
+    let mut reveal_all_players = false;
+    let mut reveal_controllers = HashSet::<PlayerId>::new();
+
+    for (source, def) in game_active_statics(state) {
+        let StaticMode::RevealTopOfLibrary { all_players } = def.mode else {
+            continue;
+        };
+        if all_players {
+            reveal_all_players = true;
+        } else {
+            reveal_controllers.insert(source.controller);
+        }
+    }
+
+    if !reveal_all_players && reveal_controllers.is_empty() {
+        return;
+    }
+
+    let tops: Vec<ObjectId> = if reveal_all_players {
+        state
+            .players
+            .iter()
+            .filter_map(|player| player.library.front().copied())
+            .collect()
+    } else {
+        reveal_controllers
+            .into_iter()
+            .filter_map(|controller| {
+                state
+                    .players
+                    .iter()
+                    .find(|player| player.id == controller)
+                    .and_then(|player| player.library.front().copied())
+            })
+            .collect()
+    };
+
+    for top in tops {
+        state.revealed_cards.insert(top);
+    }
 }
 
 /// Commander damage received by `victim`, grouped by the commander's

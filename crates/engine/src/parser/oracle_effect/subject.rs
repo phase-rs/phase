@@ -907,6 +907,23 @@ pub(super) fn parse_subject_application(
         let (filter, _) = parse_target(&normalized);
         return subject_filter_application(filter, false);
     }
+    // CR 119.5: "each player's life total" / "all players' life
+    // total(s)" is a non-targeted ALL-players scope (Worldfire — issue #2882).
+    // This must precede the generic "each "/"all " branch below: that branch
+    // strips the quantifier and routes "player's life total" through
+    // `parse_target`, yielding an empty (targetable) filter that wrongly
+    // prompts the controller to pick a single player.
+    if alt((
+        tag::<_, _, OracleError<'_>>("each player's life totals"),
+        tag("each player's life total"),
+        tag("all players' life totals"),
+        tag("all players' life total"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(TargetFilter::AllPlayers, false);
+    }
     if let Ok((rest_lower, _)) =
         alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(lower.as_str())
     {
@@ -3456,6 +3473,28 @@ mod tests {
             };
             assert_eq!(amount, &expected, "wrong amount for {text:?}");
         }
+    }
+
+    #[test]
+    fn each_players_life_total_becomes_n_targets_all_players() {
+        // CR 119.5 + issue #2882: Worldfire — "Each player's life total becomes 1"
+        // must lower to an all-players (non-targeted) SetLifeTotal, not `Any`
+        // (which prompts the controller to pick one player).
+        // Worldfire's exact wording.
+        let text = "Each player's life total becomes 1.";
+        let ability = crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::SetLifeTotal { target, amount } = &*ability.effect else {
+            panic!(
+                "expected SetLifeTotal for {text:?}, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::AllPlayers,
+            "expected AllPlayers target, got {target:?}"
+        );
+        assert_eq!(amount, &QuantityExpr::Fixed { value: 1 });
     }
 
     #[test]

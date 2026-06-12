@@ -23960,6 +23960,46 @@ mod tests {
     }
 
     #[test]
+    fn effect_cloak_top_card() {
+        // CR 701.58a: Cryptic Coat / Ransom Note — "cloak the top card of your library".
+        let e = parse_effect("Cloak the top card of your library");
+        assert!(
+            matches!(
+                e,
+                Effect::Cloak {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
+            "expected Cloak {{ Controller, count: 1 }}, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_cloak_top_n_cards() {
+        let e = parse_effect("Cloak the top two cards of your library");
+        assert!(
+            matches!(
+                e,
+                Effect::Cloak {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 2 }
+                }
+            ),
+            "expected Cloak {{ Controller, count: 2 }}, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_cloak_rejects_unsupported_source_suffix() {
+        let e = parse_effect("Cloak the top card of their library");
+        assert!(
+            matches!(e, Effect::Unimplemented { .. }),
+            "unsupported cloak source must not default to Controller: {e:?}"
+        );
+    }
+
+    #[test]
     fn turn_face_up_then_conditional_put_keeps_follow_up_clause() {
         // CR 406.3 + CR 701.20a: Clone Shell / Summoner's Egg dies-trigger effect. The
         // "turn the exiled card face up" clause must NOT swallow the trailing

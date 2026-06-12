@@ -938,7 +938,10 @@ pub(super) fn handle_unless_payment(
         )?);
     }
 
-    if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
+    if matches!(
+        state.waiting_for,
+        WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. }
+    ) {
         set_active_priority(state);
     }
     resume_pending_continuation_if_priority(state, events)?;

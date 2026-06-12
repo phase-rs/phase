@@ -3263,6 +3263,7 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
                 toughness,
                 extra_core_types,
                 subtypes,
+                ward: None,
             });
         }
         // Extra core type word (Creature excluded — always implicit).
@@ -3488,6 +3489,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }

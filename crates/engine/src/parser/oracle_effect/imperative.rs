@@ -5875,6 +5875,47 @@ pub(super) fn parse_imperative_family_ast(
                 None
             }
         }
+        // CR 701.58a: "cloak the top card of your library" / "cloak the top N
+        // cards of [your / that player's] library" — face-down 2/2 with ward {2}.
+        // First pass covers the top-of-library source (Cryptic Coat, Ransom
+        // Note); cloaking from hand / a face-down pile is deferred.
+        "cloak" | "cloaks" => {
+            let that_player_target = that_player_library_filter(ctx);
+            let parsed = all_consuming((
+                alt((
+                    tag::<_, _, OracleError<'_>>("cloak the top "),
+                    tag("cloaks the top "),
+                )),
+                alt((
+                    value(
+                        QuantityExpr::Fixed { value: 1 },
+                        alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))),
+                    ),
+                    terminated(
+                        map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                            value: n as i32,
+                        }),
+                        preceded(
+                            space1::<_, OracleError<'_>>,
+                            alt((tag("cards"), tag("card"))),
+                        ),
+                    ),
+                )),
+                space1::<_, OracleError<'_>>,
+                alt((
+                    value(TargetFilter::Controller, tag("of your library")),
+                    value(that_player_target, tag("of that player's library")),
+                )),
+                opt(tag(".")),
+            ))
+            .parse(lower.trim());
+
+            if let Ok((_, (_, count, _, target, _))) = parsed {
+                Some(ImperativeFamilyAst::Cloak { target, count })
+            } else {
+                None
+            }
+        }
         "proliferate" => Some(ImperativeFamilyAst::Proliferate),
         // CR 701.56a: "time travel" / "time travel N times"
         "time" => {
@@ -7166,6 +7207,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
         ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
+        // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward {2}).
+        ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
         // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
         ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,

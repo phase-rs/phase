@@ -2312,6 +2312,7 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::DayNightIs { state: *state })
         }
         StaticCondition::SourceEnteredThisTurn => None,
+        StaticCondition::WasCast { .. } => None,
         StaticCondition::IsPresent { filter } => {
             let filter = match filter {
                 Some(f) => f.clone(),
@@ -2567,6 +2568,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
@@ -2765,6 +2767,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
     }
 
     if let Some(condition) = parse_die_result_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_objects_share_quality_condition(text, ctx) {
         return Some(condition);
     }
 
@@ -3529,6 +3535,84 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
 /// `previous_effect_amount_from_events`). Covers Deck of Many Things' "If the
 /// result is 0 or less, discard your hand" and the analogous "is N or
 /// less/more" phrasings used by every dice-table rider in the corpus.
+/// CR 608.2c + CR 201.2: "if it shares a [quality] with [reference]" — compare
+/// whether two anaphoric object references share at least one value of the named
+/// quality at resolution time (Amareth: "If it shares a card type with that
+/// permanent, you may reveal that card and put it into your hand").
+fn parse_objects_share_quality_condition(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<AbilityCondition> {
+    let lower = text.to_lowercase();
+    let (rest, subject) = if let Ok((rest, _)) =
+        crate::parser::oracle_target::parse_word_bounded(lower.as_str(), "it")
+    {
+        (rest, TargetFilter::LastRevealed)
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that card").parse(lower.as_str()) {
+        (rest, TargetFilter::LastRevealed)
+    } else {
+        return None;
+    };
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" shares a ")
+        .parse(rest)
+        .ok()?;
+    let (rest, quality) = crate::parser::oracle_target::parse_shared_quality(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" with ").parse(rest).ok()?;
+    let offset = text.len() - rest.len();
+    let (reference, remainder) = parse_objects_share_quality_reference(&text[offset..], ctx)?;
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(AbilityCondition::ObjectsShareQuality {
+        subject,
+        reference,
+        quality,
+    })
+}
+
+/// Reference side of `parse_objects_share_quality_condition` — event-context
+/// anaphors ("that permanent"), cost-paid objects, and typed target phrases.
+fn parse_objects_share_quality_reference<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    if let Some((filter, rest)) = crate::parser::oracle_target::parse_event_context_ref(text) {
+        return Some((filter, rest));
+    }
+    let lower = text.to_lowercase();
+    if let Ok((rest, filter)) = value(
+        TargetFilter::TriggeringSource,
+        tag::<_, _, OracleError<'_>>("one of the discarded cards"),
+    )
+    .parse(lower.as_str())
+    {
+        let offset = text.len() - rest.len();
+        return Some((filter, &text[offset..]));
+    }
+    if let Ok((rest, filter)) = value(
+        TargetFilter::ParentTarget,
+        tag::<_, _, OracleError<'_>>("the discarded card"),
+    )
+    .parse(lower.as_str())
+    {
+        let offset = text.len() - rest.len();
+        return Some((filter, &text[offset..]));
+    }
+    if let Ok((rest, ())) = crate::parser::oracle_target::parse_word_bounded(&lower, "it") {
+        let offset = text.len() - rest.len();
+        let mut ctx_mut = ctx.clone();
+        return Some((
+            crate::parser::oracle_target::resolve_pronoun_target(&mut ctx_mut, "it"),
+            &text[offset..],
+        ));
+    }
+    let (filter, rest) = crate::parser::oracle_target::parse_target(text);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((filter, rest))
+}
+
 fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
     let rest = tag::<_, _, OracleError<'_>>("the result is ")
         .parse(lower)
@@ -3989,18 +4073,35 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 201.2: Amareth pattern is now a typed
+    /// `ObjectsShareQuality` condition — the structural fallback must NOT strip
+    /// the head. Issue #2921.
+    #[test]
+    fn objects_share_quality_condition_parses_amareth_pattern() {
+        let input = "it shares a card type with that permanent";
+        let condition = try_nom_condition_as_ability_condition(input, &mut ParseContext::default());
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::ObjectsShareQuality {
+                subject: TargetFilter::LastRevealed,
+                reference: TargetFilter::TriggeringSource,
+                quality: crate::types::ability::SharedQuality::CardType,
+            })
+        );
+    }
+
     /// CR 608.2c + CR 608.2d: When the leading `If <X>, ` has no typed
     /// recognizer AND the body begins with `"you may "`, the structural
     /// fallback strips the head so the inner optional choice can be peeled
-    /// downstream. Issue #2277 — Amareth pattern.
+    /// downstream. Issue #2277 — Tithe pattern (still unrepresented).
     #[test]
     fn strip_unrecognized_conditional_head_fires_on_optional_body() {
-        let input = "If it shares a card type with that permanent, you may reveal \
-                     that card and put it into your hand";
+        let input = "If target opponent controls more lands than you, you may search \
+                     your library for an additional Plains card";
         let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
         assert_eq!(
             stripped,
-            "you may reveal that card and put it into your hand"
+            "you may search your library for an additional Plains card"
         );
     }
 
