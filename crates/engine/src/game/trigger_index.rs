@@ -124,6 +124,14 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
                     push(TriggerEventKey::LeaveBattlefield(narrow));
                 }
                 (Some(Zone::Battlefield), _) => push(TriggerEventKey::LeaveBattlefield(narrow)),
+                // CR 603.6c: destination=Graveyard with unrestricted origin ("from anywhere")
+                // should match battlefield→graveyard events (the most common "to graveyard" case).
+                // This optimizes triggers like Vulturous Zombie that watch cards going to
+                // graveyards from any zone.
+                (None, Some(Zone::Graveyard)) => {
+                    push(TriggerEventKey::Dies(narrow));
+                    push(TriggerEventKey::LeaveBattlefield(narrow));
+                }
                 _ => {
                     // Non-battlefield zone change (e.g. cast-from-graveyard
                     // observers). Route to unclassified — these are rare and
@@ -1077,5 +1085,22 @@ mod tests {
             &state,
         );
         assert!(event_keys.contains(&TriggerEventKey::PhaseOut));
+    }
+
+    #[test]
+    fn from_anywhere_to_graveyard_emits_dies_and_leave_battlefield() {
+        // CR 603.6c: A trigger with destination=Graveyard and unrestricted origin
+        // ("from anywhere") should emit Dies and LeaveBattlefield keys to match
+        // the most common battlefield→graveyard events. This optimizes triggers
+        // like Vulturous Zombie that watch cards going to graveyards from any zone.
+        let def = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(TypedFilter::card()));
+        let (keys, route) = keys_from_trigger_def(&def);
+        // Should emit Dies and LeaveBattlefield keys (broad, since Card is not narrow)
+        assert!(keys.contains(&TriggerEventKey::Dies(None)));
+        assert!(keys.contains(&TriggerEventKey::LeaveBattlefield(None)));
+        // Should NOT route to unclassified - it's now indexed under specific keys
+        assert!(!route);
     }
 }
