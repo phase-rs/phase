@@ -235,45 +235,44 @@ fn resolve_mass_put_all(
         events,
     );
 
-    for &obj_id in selectable {
-        if dest == Zone::Battlefield {
-            // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield entries through
-            // the zone-change pipeline so ETB triggers fire and the delivery tail
-            // seeds intrinsic enters-with counters and the CR 614.1 tap state.
-            // CR 400.7: attribute the entry to the Dig's source.
-            let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
-                obj_id,
-                Zone::Battlefield,
-                ability.source_id,
-            );
-            req.mods.enter_tapped =
-                crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
-            match crate::game::zone_pipeline::move_object(state, req, events) {
-                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                // CR 303.4f / CR 616.1: this kept card's entry paused on an
-                // as-enters choice. Defer the tracked-set publish + continuation
-                // wiring onto the batch tail so it runs once the entry resolves.
-                // The rest pile is already placed (empty `rest_cards`), and any
-                // kept cards after this one are NOT moved on this paused path — no
-                // supported "put all onto the battlefield" card pairs a mass entry
-                // with an as-enters pause, so this ceiling is latent.
-                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
-                | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    crate::game::zone_pipeline::defer_completion_on_pause(
-                        state,
-                        crate::types::game_state::BatchCompletion::RevealRestPile {
-                            player: ability.controller,
-                            rest_cards: Vec::new(),
-                            rest_destination: rest_destination.unwrap_or(Zone::Library),
-                            clear_markers: Vec::new(),
-                            publish_tracked_set: Some(selectable.to_vec()),
-                            emit_reveal_until_resolved: None,
-                        },
-                    );
-                    return;
-                }
+    if dest == Zone::Battlefield {
+        // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield entries through
+        // the batch zone-change pipeline so ETB triggers fire, intrinsic
+        // enters-with counters / tap state seed, and any CR 303.4f / CR 616.1
+        // pause preserves the remaining kept tail. CR 400.7: attribute entries
+        // to the Dig's source.
+        let reqs: Vec<_> = selectable
+            .iter()
+            .map(|&obj_id| {
+                let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    obj_id,
+                    Zone::Battlefield,
+                    ability.source_id,
+                );
+                req.mods.enter_tapped =
+                    crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                req
+            })
+            .collect();
+        match crate::game::zone_pipeline::move_objects_simultaneously(state, reqs, events) {
+            crate::game::zone_pipeline::BatchMoveResult::Done => {}
+            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                crate::game::zone_pipeline::defer_completion_on_pause(
+                    state,
+                    crate::types::game_state::BatchCompletion::RevealRestPile {
+                        player: ability.controller,
+                        rest_cards: Vec::new(),
+                        rest_destination: rest_destination.unwrap_or(Zone::Library),
+                        clear_markers: Vec::new(),
+                        publish_tracked_set: Some(selectable.to_vec()),
+                        emit_reveal_until_resolved: None,
+                    },
+                );
+                return;
             }
-        } else {
+        }
+    } else {
+        for &obj_id in selectable {
             crate::game::zones::move_to_zone(state, obj_id, dest, events);
         }
     }
