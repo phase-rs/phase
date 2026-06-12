@@ -2312,6 +2312,33 @@ pub(super) fn handle_resolution_choice(
                 kind: effect_kind,
                 source_id,
             });
+
+            // CR 614.12a: this `DiscardChoice` was the interactive payment of an
+            // optional `MayCost` replacement's accept (e.g. Mox Diamond's
+            // "discard a land card" with multiple eligible lands). The cost is
+            // now paid, so resume the parked replacement with the accept index —
+            // `continue_replacement` sees `may_cost_paid: true`, skips
+            // re-payment, and finishes entering the permanent. This runs instead
+            // of the ordinary continuation drain (there is no `Effect::PayCost`
+            // chain behind a replacement-originated discard).
+            if state
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.may_cost_paid)
+            {
+                let waiting_for =
+                    super::engine_replacement::handle_replacement_choice(state, 0, events)?;
+                if let Some(outcome) = batch_or_drain_observer_triggers(
+                    state,
+                    events,
+                    events_before_effect,
+                    events_after_move,
+                ) {
+                    return Ok(outcome);
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
+
             let waiting_for = finish_with_continuation(state, player, events);
 
             // CR 603.2c: each opponent's discard is a separate occurrence of a

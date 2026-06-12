@@ -5122,6 +5122,16 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
+    /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
+    /// "discard a land card" with multiple eligible lands). It re-parks the
+    /// pending replacement (`may_cost_paid: true`) and leaves `waiting_for` on
+    /// the live sub-choice prompt. `handle_replacement_choice` reads this flag to
+    /// surface that prompt instead of re-applying the replacement, and the
+    /// sub-choice's resolution resumes the accept once the cost is settled.
+    /// Cleared the moment it is observed. Transient — never serialized.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replacement_may_cost_paused: bool,
     /// CR 614.12a + CR 615.5: Continuation effect to resolve after a
     /// replacement's modifications complete. The two binding states (Template
     /// AST vs. Resolved with captured targets) share one slot via
@@ -6319,6 +6329,15 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
+    /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
+    /// "discard a land card" with more than one eligible land surfaces a
+    /// `WaitingFor::DiscardChoice`). The pending record is re-parked so the
+    /// post-choice resume re-enters `continue_replacement` with the accept
+    /// index; this flag tells that resume the cost is already settled and must
+    /// NOT be charged a second time. `false` for every other parked event.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub may_cost_paid: bool,
 }
 
 /// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending
@@ -6600,6 +6619,7 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            replacement_may_cost_paused: false,
             post_replacement_continuation: None,
             legacy_post_replacement_effect: None,
             legacy_post_replacement_resolved_effect: None,
