@@ -97,13 +97,13 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
             return PolicyVerdict::reject(reason);
         }
 
-        PolicyVerdict::Score {
-            delta: self.score(ctx).clamp(
+        PolicyVerdict::score(
+            self.score(ctx).clamp(
                 -ANTI_SELF_HARM_RAW_CRITICAL_CEILING,
                 ANTI_SELF_HARM_RAW_CRITICAL_CEILING,
             ),
-            reason: PolicyReason::new("anti_self_harm_score"),
-        }
+            PolicyReason::new("anti_self_harm_score"),
+        )
     }
 }
 
@@ -211,10 +211,6 @@ fn ability_tree_any_impl(
     predicate: &mut impl FnMut(&Effect) -> bool,
 ) -> bool {
     predicate(&ability.effect)
-        || match &*ability.effect {
-            Effect::CreateDelayedTrigger { effect, .. } => ability_tree_any_impl(effect, predicate),
-            _ => false,
-        }
         || ability
             .sub_ability
             .as_deref()
@@ -3704,6 +3700,19 @@ mod tests {
     }
 
     fn extra_turn_spell(state: &mut GameState, self_loss: bool) -> ObjectId {
+        extra_turn_spell_with_self_loss_phase(
+            state,
+            self_loss.then_some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: PlayerId(0),
+            }),
+        )
+    }
+
+    fn extra_turn_spell_with_self_loss_phase(
+        state: &mut GameState,
+        self_loss_condition: Option<DelayedTriggerCondition>,
+    ) -> ObjectId {
         let id = create_object(
             state,
             CardId(state.next_object_id),
@@ -3717,14 +3726,11 @@ mod tests {
                 target: TargetFilter::Controller,
             },
         );
-        if self_loss {
+        if let Some(condition) = self_loss_condition {
             ability = ability.sub_ability(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::CreateDelayedTrigger {
-                    condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
-                        phase: Phase::End,
-                        player: PlayerId(0),
-                    },
+                    condition,
                     effect: Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::LoseTheGame { target: None },
@@ -3844,6 +3850,23 @@ mod tests {
     fn allows_extra_turn_spell_without_self_loss() {
         let mut state = make_state();
         let spell_id = extra_turn_spell(&mut state, false);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn allows_extra_turn_spell_with_non_end_step_delayed_self_loss() {
+        let mut state = make_state();
+        let spell_id = extra_turn_spell_with_self_loss_phase(
+            &mut state,
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::Upkeep,
+                player: PlayerId(0),
+            }),
+        );
 
         assert!(matches!(
             pre_cast_verdict_for_spell(&state, spell_id),

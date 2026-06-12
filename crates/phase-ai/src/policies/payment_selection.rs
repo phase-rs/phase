@@ -116,7 +116,7 @@ fn crew_or_saddle_score(ctx: &PolicyContext<'_>) -> Option<f64> {
 
     let contribution: u32 = creature_ids
         .iter()
-        .map(|&id| object_crew_power_contribution(ctx.state, id, action) as u32)
+        .map(|&id| object_crew_power_contribution(ctx.state, id, action).max(0) as u32)
         .sum();
     let preservation_cost: f64 = creature_ids
         .iter()
@@ -149,7 +149,7 @@ fn station_activation_score(ctx: &PolicyContext<'_>) -> Option<f64> {
     }
 
     let contribution =
-        object_crew_power_contribution(ctx.state, *creature_id, CrewAction::Station) as u32;
+        object_crew_power_contribution(ctx.state, *creature_id, CrewAction::Station).max(0) as u32;
     let preservation_cost =
         permanent_value(ctx.state, *creature_id) * 0.05 + f64::from(contribution) * 0.02;
 

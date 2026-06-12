@@ -1016,23 +1016,6 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
-    if matches!(ability_def.cost, Some(AbilityCost::Tap)) {
-        #[cfg(debug_assertions)]
-        {
-            let simulated = can_activate_mana_ability_by_simulation(
-                state,
-                player,
-                source_id,
-                ability_index,
-                ability_def,
-            );
-            debug_assert!(
-                simulated,
-                "pure tap mana ability readiness must match simulation"
-            );
-        }
-        return true;
-    }
     can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
 }
 
