@@ -3174,26 +3174,35 @@ pub(super) fn matching_you_attack_unblocked_pairs(
     if combat.attackers.is_empty() {
         return Vec::new();
     }
-    let defending_player = combat.attackers[0].defending_player;
-    let attacker_ids: Vec<ObjectId> = combat.attackers.iter().map(|a| a.object_id).collect();
-    let attacks: Vec<_> = combat
+
+    combat
         .attackers
         .iter()
-        .map(|a| (a.object_id, a.attack_target))
-        .collect();
-    let synthetic = GameEvent::AttackersDeclared {
-        attacker_ids,
-        defending_player,
-        attacks,
-    };
-    matching_you_attack_pairs(&synthetic, trigger, source_id, state)
-        .into_iter()
-        .filter(|(id, _)| {
-            combat
-                .attackers
-                .iter()
-                .find(|attacker| attacker.object_id == *id)
-                .is_some_and(|attacker| !attacker.blocked)
+        .filter(|attacker| !attacker.blocked)
+        .filter_map(|attacker| {
+            if trigger.valid_card.as_ref().is_some_and(|filter| {
+                !target_filter_matches_object(state, attacker.object_id, filter, source_id)
+            }) {
+                return None;
+            }
+            if trigger
+                .attack_target_filter
+                .as_ref()
+                .is_some_and(|filter| !attack_target_type_matches(attacker.attack_target, filter))
+            {
+                return None;
+            }
+            if trigger.valid_target.is_some() {
+                let defending_player = attack_target_defending_player(
+                    state,
+                    attacker.attack_target,
+                    attacker.defending_player,
+                );
+                if !valid_player_matches(trigger, state, defending_player, source_id) {
+                    return None;
+                }
+            }
+            Some((attacker.object_id, attacker.attack_target))
         })
         .collect()
 }
@@ -7093,13 +7102,59 @@ mod tests {
             TypedFilter::creature().controller(ControllerRef::Opponent),
         ));
         trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
-        trigger.valid_target = Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::Opponent),
-        ));
+        trigger.valid_target = Some(TargetFilter::Controller);
         let event = GameEvent::BlockersDeclared {
             assignments: vec![],
         };
         assert!(match_you_attack_unblocked(&event, &trigger, jewel, &state));
+    }
+
+    #[test]
+    fn you_attack_unblocked_rejects_opponent_attacking_other_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let jewel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coveted Jewel".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker,
+                PlayerId(2),
+            )],
+            ..Default::default()
+        });
+        let mut trigger = make_trigger(TriggerMode::YouAttackUnblocked);
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![],
+        };
+
+        assert!(
+            !match_you_attack_unblocked(&event, &trigger, jewel, &state),
+            "attack you must require the source controller as defending player"
+        );
     }
 
     #[test]

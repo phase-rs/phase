@@ -602,13 +602,6 @@ mod tests {
             "Raider".to_string(),
             Zone::Battlefield,
         );
-        let source = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Coveted Jewel Trigger".to_string(),
-            Zone::Stack,
-        );
         state.current_trigger_event = Some(GameEvent::AttackersDeclared {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(0),
@@ -620,7 +613,7 @@ mod tests {
                 recipient: TargetFilter::TriggeringPlayer,
             },
             vec![],
-            source,
+            jewel,
             PlayerId(0),
         );
         let mut events = Vec::new();

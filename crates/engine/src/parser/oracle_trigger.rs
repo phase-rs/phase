@@ -6049,16 +6049,31 @@ fn split_taps_for_mana_for_clause(text: &str) -> Option<(String, Option<Vec<Mana
 /// isn't blocked", Frenzy) and plural batched phrasing ("attack you and aren't
 /// blocked", Coveted Jewel).
 fn strip_attack_unblocked_qualifier(after: &str) -> (bool, &str) {
-    for suffix in [
-        " and isn't blocked",
-        " and isn\u{2019}t blocked",
-        " and aren't blocked",
-        " and aren\u{2019}t blocked",
-        " and are not blocked",
-    ] {
-        if let Some(rest) = after.strip_suffix(suffix) {
-            return (true, rest);
-        }
+    fn parse_suffix(input: &str) -> OracleResult<'_, &str> {
+        alt((
+            terminated(take_until(" and isn't blocked"), tag(" and isn't blocked")),
+            terminated(
+                take_until(" and isn\u{2019}t blocked"),
+                tag(" and isn\u{2019}t blocked"),
+            ),
+            terminated(
+                take_until(" and aren't blocked"),
+                tag(" and aren't blocked"),
+            ),
+            terminated(
+                take_until(" and aren\u{2019}t blocked"),
+                tag(" and aren\u{2019}t blocked"),
+            ),
+            terminated(
+                take_until(" and are not blocked"),
+                tag(" and are not blocked"),
+            ),
+        ))
+        .parse(input)
+    }
+
+    if let Ok((_, rest)) = all_consuming(parse_suffix).parse(after) {
+        return (true, rest);
     }
     (false, after)
 }
@@ -6368,18 +6383,7 @@ fn try_parse_event(
             Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
         ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok()
         {
-            // CR 508.3d + CR 603.7c: "that player" in the effect is the attacking
-            // opponent, not the jewel's controller. `YouAttackUnblocked` uses the
-            // opponent player-scope gate; `AttackersDeclared` keeps `Controller`
-            // for player-subject "an opponent attacks you" forms (Lulu, Cunning
-            // Rhetoric) whose matcher ignores `valid_target`.
-            def.valid_target = if matches!(def.mode, TriggerMode::YouAttackUnblocked) {
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                ))
-            } else {
-                Some(TargetFilter::Controller)
-            };
+            def.valid_target = Some(TargetFilter::Controller);
         }
         let mode = def.mode.clone();
         return Some((mode, def));
@@ -12573,12 +12577,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
-        assert_eq!(
-            def.valid_target,
-            Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent)
-            ))
-        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     #[test]
@@ -12934,12 +12933,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttackUnblocked);
         assert!(def.batched);
         assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
-        assert_eq!(
-            def.valid_target,
-            Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent)
-            ))
-        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         let execute = def.execute.as_ref().expect("trigger should have effect");
         fn effect_chain_contains_give_control_self(ability: &AbilityDefinition) -> bool {
             match ability.effect.as_ref() {
@@ -12953,9 +12947,27 @@ mod tests {
                     .is_some_and(|sub| effect_chain_contains_give_control_self(sub)),
             }
         }
+        fn effect_chain_contains_untap_self(ability: &AbilityDefinition) -> bool {
+            match ability.effect.as_ref() {
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                } => true,
+                _ => ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| effect_chain_contains_untap_self(sub)),
+            }
+        }
         assert!(
             effect_chain_contains_give_control_self(execute),
             "expected GiveControl of SelfRef in effect chain, got {:?}",
+            execute.effect
+        );
+        assert!(
+            effect_chain_contains_untap_self(execute),
+            "expected Untap of SelfRef in effect chain, got {:?}",
             execute.effect
         );
     }

@@ -3804,6 +3804,63 @@ fn rebind_owned_scope(filter: &mut TargetFilter, index: u8) {
     }
 }
 
+fn try_parse_player_draws_and_gains_control(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let ((subject, draw_text), target_text) = nom_on_lower(text, &lower, |input| {
+        let (input, subject) = alt((
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" draws "),
+                tag(" draws "),
+            ),
+            terminated(take_until::<_, _, OracleError<'_>>(" draw "), tag(" draw ")),
+        ))
+        .parse(input)?;
+        let (input, draw_quantity) = alt((
+            terminated(
+                take_until(" and gains control of "),
+                tag(" and gains control of "),
+            ),
+            terminated(
+                take_until(" and gain control of "),
+                tag(" and gain control of "),
+            ),
+        ))
+        .parse(input)?;
+        Ok((input, (subject.to_string(), draw_quantity.to_string())))
+    })?;
+
+    let recipient = parse_subject_application(subject.trim(), ctx)?.affected;
+    let (count, count_tail) = parse_count_expr(&draw_text)?;
+    if !matches!(count_tail.trim(), "card" | "cards") {
+        return None;
+    }
+
+    let (target, rest) = parse_target_with_ctx(target_text.trim(), ctx);
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::Draw {
+            count,
+            target: recipient.clone(),
+        },
+        duration: None,
+        sub_ability: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GiveControl { target, recipient },
+        ))),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
@@ -3852,6 +3909,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
             name: "empty".to_string(),
             description: None,
         });
+    }
+    if let Some(clause) = try_parse_player_draws_and_gains_control(text, ctx) {
+        return clause;
     }
 
     // CR 608.2c: Deconjugate bare third-person verbs that appear after ", then" splits
@@ -9953,13 +10013,23 @@ fn replace_target_with_parent(effect: &mut Effect) {
 /// `replace_target_with_parent`, but assigns `TargetFilter::SelfRef`.
 ///
 /// Only the effect arms reachable for the "name ~ then refer back" class are
-/// populated: zone changes (the issue card) and `Transform` for the DFC family.
-/// Arms with `ParentTargetController`/`LastCreated` guards (`Sacrifice`,
-/// `Attach`) are intentionally omitted — those guards are meaningless for a
-/// `SelfRef` rebind, and no card in this class reaches them.
+/// populated: zone changes (the issue card), single-object tap/untap, and
+/// `Transform` for the DFC family. Arms with
+/// `ParentTargetController`/`LastCreated` guards (`Sacrifice`, `Attach`) are
+/// intentionally omitted — those guards are meaningless for a `SelfRef` rebind,
+/// and no card in this class reaches them.
 fn replace_target_with_self(effect: &mut Effect) {
     match effect {
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
+            *target = TargetFilter::SelfRef;
+        }
+        // CR 701.26a/b: only single-target tap/untap carries a source-object
+        // referent; the mass scope's target is a population filter.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => {
             *target = TargetFilter::SelfRef;
         }
         Effect::Transform { target, .. } => {
@@ -9970,6 +10040,26 @@ fn replace_target_with_self(effect: &mut Effect) {
             // stay as-is.
         }
     }
+}
+
+fn effect_targets_self_ref(effect: &Effect) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::SelfRef))
+}
+
+fn ability_targets_self_ref(ability: &AbilityDefinition) -> bool {
+    effect_targets_self_ref(ability.effect.as_ref())
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_targets_self_ref)
+}
+
+fn parsed_clause_targets_self_ref(clause: &ParsedEffectClause) -> bool {
+    effect_targets_self_ref(&clause.effect)
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_targets_self_ref)
 }
 
 fn replace_player_anaphor_with_parent_target(effect: &mut Effect) {
@@ -16600,24 +16690,19 @@ pub(crate) fn parse_effect_chain_ir(
         }
         // CR 608.2c: A clause whose bare pronoun ("it"/"him"/"her") follows an
         // earlier clause that named the source object via `~` (parsed as a
-        // SelfRef-targeted zone change — "exile ~, then return him transformed",
-        // Ajani, Nacatl Pariah) must bind that pronoun to the source, not the
-        // typed trigger subject. Mirrors the Toshiro exile-after-spell rider
-        // above: a rewrite that fires even under a typed trigger subject because
-        // the antecedent is a *named clause*, not the trigger condition. The
-        // SelfRef prior-clause test is a typed `matches!` on the parsed Effect
-        // AST — the parser's own output is the detector, no string heuristic.
+        // SelfRef-targeted effect — "exile ~, then return him transformed",
+        // Ajani, Nacatl Pariah; "gain control of ~. Untap it.", Coveted Jewel)
+        // must bind that pronoun to the source, not the typed trigger subject.
+        // Mirrors the Toshiro exile-after-spell rider above: a rewrite that
+        // fires even under a typed trigger subject because the antecedent is a
+        // *named clause*, not the trigger condition. The SelfRef prior-clause
+        // test is structural over the parsed clause and its nested sub-ability
+        // chain — no string heuristic.
         if typed_trigger_subject
             && has_anaphoric_reference(&text_lower)
-            && clauses.last().is_some_and(|prev| {
-                matches!(
-                    &prev.parsed.effect,
-                    Effect::ChangeZone {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    }
-                )
-            })
+            && clauses
+                .last()
+                .is_some_and(|prev| parsed_clause_targets_self_ref(&prev.parsed))
         {
             replace_target_with_self(&mut clause.effect);
         }
@@ -18527,6 +18612,45 @@ mod tests {
                 assert!(*enter_transformed, "clause 2 must carry enter_transformed");
             }
             other => panic!("expected clause 2 = ChangeZone battlefield, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c (issue #1354): a source object named inside a nested
+    /// sub-ability still establishes the referent for a later bare pronoun.
+    /// Coveted Jewel's trigger parses the first sentence as Draw →
+    /// GiveControl(SelfRef); the following "Untap it" must bind to that
+    /// artifact, not to the typed attacking-creature trigger subject.
+    #[test]
+    fn anaphor_rebinds_to_self_after_nested_give_control_clause() {
+        let mut ctx = cat_subject_ctx();
+        let def = parse_effect_chain_with_context(
+            "you draw three cards and gain control of ~. Untap it.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let give = def.sub_ability.as_ref().expect("give-control sub_ability");
+        match &*give.effect {
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                ..
+            } => {}
+            Effect::GainControl {
+                target: TargetFilter::SelfRef,
+            } => {}
+            other => panic!("expected source-object control effect, got {other:?}"),
+        }
+        let untap = give.sub_ability.as_ref().expect("untap sub_ability");
+        match &*untap.effect {
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+                target,
+            } => assert_eq!(
+                *target,
+                TargetFilter::SelfRef,
+                "trailing pronoun must bind to the named source object, not TriggeringSource",
+            ),
+            other => panic!("expected SetTapState(Untap), got {other:?}"),
         }
     }
 

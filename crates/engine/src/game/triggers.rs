@@ -278,12 +278,19 @@ fn contextual_batched_trigger_event(
             let matching = super::trigger_matchers::matching_you_attack_unblocked_pairs(
                 event, trig_def, obj_id, state,
             );
-            let defending_player = state
-                .combat
-                .as_ref()
-                .and_then(|combat| combat.attackers.first().map(|a| a.defending_player))
-                .or_else(|| state.objects.get(&obj_id).map(|o| o.controller))
+            let fallback = state
+                .objects
+                .get(&obj_id)
+                .map(|o| o.controller)
                 .unwrap_or(PlayerId(0));
+            let defending_player = matching
+                .first()
+                .map(|(_, target)| {
+                    super::trigger_matchers::attack_target_defending_player(
+                        state, *target, fallback,
+                    )
+                })
+                .unwrap_or(fallback);
             (defending_player, matching)
         }
         _ => return Some(event.clone()),

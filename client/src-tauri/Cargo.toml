@@ -17,6 +17,3 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"
-# Pin below time 0.3.47: newer time adds `From<HourBase>` impls that overlap
-# blanket `From<T>` in cookie/tauri-utils under rustc 1.96+ (tauri-apps/tauri#15525).
-time = "=0.3.45"
