@@ -275,6 +275,21 @@ pub fn resolve(
             return Ok(());
         }
 
+        // CR 400.7: SelfRef resolves to the source only while it is still the
+        // same object (same incarnation). When `resolved_targets` returned empty
+        // because `source_is_current()` was false (the source left and re-entered
+        // the battlefield since the ability was created), the zone-scan fallback
+        // must NOT re-discover the source by raw id equality — that would bypass
+        // the incarnation guard. Short-circuit here so the stale self-reference
+        // does nothing (e.g. a Warp delayed exile after a blink).
+        if matches!(target_filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
         // CR 701.23b + CR 401.2: Interactive library-step fail-to-find guard.
         // The parser emits `origin=Library, target=Any` for the put-step of a
         // chain where an earlier interactive step selects the card from the
