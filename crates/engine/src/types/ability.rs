@@ -3657,13 +3657,18 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 508.1a: Number of creatures the controller attacked with this turn,
-    /// optionally narrowed by `filter` (e.g. "attacked with a token / a
-    /// commander / a Wolf"). `None` counts all attacking creatures (the bare
-    /// "if you attacked this turn" / "for each creature you attacked with this
-    /// turn" patterns); `Some(filter)` counts only this-turn attackers matching
-    /// `filter`, resolved against `state.creatures_attacked_this_turn`.
+    /// CR 508.1a: Number of creatures that attacked this turn, scoped by
+    /// `scope` and optionally narrowed by `filter` (e.g. "attacked with a
+    /// token / a commander / a Wolf"). `Controller` + `filter: None` counts all
+    /// attacking creatures the controller declared (the bare "if you attacked
+    /// this turn" / "for each creature you attacked with this turn" patterns);
+    /// `All` + `filter: Some(creature)` counts every creature that attacked this
+    /// turn by any player ("if no creatures attacked this turn"). Filtered forms
+    /// resolve against `state.attacker_declarations_this_turn` declaration-time
+    /// snapshots so attackers that left the battlefield still count.
     AttackedThisTurn {
+        #[serde(default = "default_count_scope_controller")]
+        scope: CountScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },

@@ -2117,7 +2117,10 @@ fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
         StaticMode::ModifyCost {
             mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
-            dynamic_count: Some(QuantityRef::AttackedThisTurn { filter: None }),
+            dynamic_count: Some(QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }),
             ..
         }
     ));
