@@ -3112,11 +3112,22 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         None
     };
 
+    // CR 608.2c: A trailing "and the rest on the bottom ..." rider sits in the
+    // SAME clause as the from-among put-step when the rest-subject ("the rest")
+    // does not begin with a recognized imperative verb, so `split_clause_sequence`
+    // never splits it off into a standalone `PutRest` continuation (Muxus, Goblin
+    // Grandee: "Put all ... from among them onto the battlefield and the rest on
+    // the bottom of your library in a random order"). Capture it here with the
+    // shared rest-anaphor matcher so the rest pile is routed correctly instead of
+    // falling through to the `None`→Graveyard default. A genuinely separate
+    // "Put the rest ..." sentence still patches via its own PutRest continuation.
+    let rest_destination = parse_of_them_rest_destination(lower);
+
     Some(ContinuationAst::DigFromAmong {
         quantity,
         filter,
         destination,
-        rest_destination: None, // rest_destination handled by subsequent PutRest continuation
+        rest_destination,
         enters_under,
         face_down_profile,
         enter_tapped,

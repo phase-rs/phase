@@ -8390,8 +8390,13 @@ fn continue_with_prepared(
 
     // CR 601.2b/c/f: When target cardinality depends on an announced X, defer
     // target selection until that X is chosen from the spell's required
-    // additional cost or mana cost.
-    if ability_target_legality_needs_chosen_x(&resolved) {
+    // additional cost or mana cost. CR 601.2d: a divided pool's target count is
+    // also X-bounded (issue #2856), so the distribute flag participates.
+    let prepared_distribute = prepared
+        .ability_def
+        .as_ref()
+        .and_then(|a| a.distribute.clone());
+    if ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref()) {
         if let Some(required_cost) =
             casting_costs::required_additional_cost_can_declare_x(state, player, prepared.object_id)
         {
@@ -8443,7 +8448,16 @@ fn continue_with_prepared(
         }
     }
 
-    let target_slots = build_target_slots(state, &resolved)?;
+    let mut target_slots = build_target_slots(state, &resolved)?;
+    // CR 601.2c + CR 601.2d: A fixed-amount divided spell (no X to announce, e.g.
+    // "2 damage divided among up to three targets") must likewise offer at most
+    // one slot per divisible unit — each chosen target needs ≥1 (issue #2856).
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &resolved,
+        prepared_distribute.as_ref(),
+        &mut target_slots,
+    );
     if !target_slots.is_empty() {
         let target_constraints = prepared
             .ability_def
@@ -8836,7 +8850,7 @@ pub fn spell_has_legal_targets(
             }
         }
         Err(_) => {
-            ability_target_legality_needs_chosen_x(&resolved)
+            ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
                 && (casting_costs::required_additional_cost_can_declare_x(
                     &simulated, player, obj.id,
                 )
@@ -10976,7 +10990,7 @@ pub fn can_activate_ability_now(
                 )
         }
         Err(_) => {
-            ability_target_legality_needs_chosen_x(&resolved)
+            ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
                 && ability_def.cost.as_ref().is_some_and(|cost| {
                     casting_costs::extract_x_mana_cost(cost).is_some()
                         || find_non_self_sacrifice_cost(cost)
@@ -11199,7 +11213,7 @@ pub fn handle_activate_ability(
                 let resolved = build_resolved_from_def(mode, source_id, player);
                 (casting_costs::extract_x_mana_cost(cost).is_some()
                     || casting_costs::activation_cost_needs_x_choice(&resolved, cost))
-                    && ability_target_legality_needs_chosen_x(&resolved)
+                    && ability_target_legality_needs_chosen_x(&resolved, mode.distribute.as_ref())
             })
         });
         // CR 602.2b + CR 601.2b/c: When modal activated ability target legality

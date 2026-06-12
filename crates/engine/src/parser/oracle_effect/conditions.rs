@@ -2307,6 +2307,7 @@ pub(crate) fn static_condition_to_ability_condition(
             })
         }
         StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
+        StaticCondition::IsInitiative => Some(AbilityCondition::IsInitiative),
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })
@@ -2593,6 +2594,7 @@ pub(crate) fn ability_condition_to_static_condition(
         AbilityCondition::SourceEnteredThisTurn
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::WasStartingPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }

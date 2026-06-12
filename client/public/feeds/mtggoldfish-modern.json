@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-11T00:00:00Z",
+  "updated": "2026-06-12T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -606,11 +606,11 @@
       ]
     },
     {
-      "name": "Living End",
+      "name": "Grixis Reanimator",
       "author": "MTGGoldfish",
       "colors": [
+        "B",
         "R",
-        "G",
         "U"
       ],
       "tags": [
@@ -618,76 +618,76 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 1,
-          "name": "Stomping Ground"
+          "count": 4,
+          "name": "Abhorrent Oculus"
         },
         {
           "count": 4,
-          "name": "Street Wraith"
+          "name": "Archon of Cruelty"
         },
         {
           "count": 1,
-          "name": "Colossal Skyturtle"
+          "name": "Blood Crypt"
         },
         {
           "count": 4,
-          "name": "Shardless Agent"
+          "name": "Bloodstained Mire"
         },
         {
           "count": 4,
-          "name": "Curator of Mysteries"
+          "name": "Emperor of Bones"
         },
         {
           "count": 4,
-          "name": "Misty Rainforest"
-        },
-        {
-          "count": 1,
-          "name": "Mistrise Village"
+          "name": "Faithless Looting"
         },
         {
           "count": 4,
-          "name": "Generous Ent"
-        },
-        {
-          "count": 3,
-          "name": "Living End"
+          "name": "Fatal Push"
         },
         {
           "count": 1,
           "name": "Island"
         },
         {
+          "count": 4,
+          "name": "Persist"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
           "count": 1,
-          "name": "Hedge Maze"
+          "name": "Raucous Theater"
+        },
+        {
+          "count": 1,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
           "name": "Steam Vents"
         },
         {
-          "count": 1,
-          "name": "Oliphaunt"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
+          "count": 2,
+          "name": "Swamp"
         },
         {
           "count": 4,
-          "name": "Endurance"
+          "name": "Thought Scour"
         },
         {
-          "count": 2,
-          "name": "Sink into Stupor"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
@@ -695,65 +695,45 @@
         },
         {
           "count": 1,
-          "name": "Breeding Pool"
+          "name": "Undercity Sewers"
         },
         {
           "count": 4,
-          "name": "Violent Outburst"
+          "name": "Unearth"
         },
         {
           "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 4,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 1,
-          "name": "Striped Riverwinder"
-        },
-        {
-          "count": 4,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 1,
-          "name": "Vibrance"
-        },
-        {
-          "count": 4,
-          "name": "Subtlety"
+          "name": "Watery Grave"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Force of Vigor"
+          "count": 4,
+          "name": "Consign to Memory"
         },
         {
-          "count": 4,
+          "count": 2,
+          "name": "Damping Sphere"
+        },
+        {
+          "count": 2,
+          "name": "Meltdown"
+        },
+        {
+          "count": 2,
           "name": "Mystical Dispute"
         },
         {
           "count": 2,
-          "name": "Damping Matrix"
-        },
-        {
-          "count": 2,
-          "name": "Blood Moon"
+          "name": "Pyroclasm"
         },
         {
           "count": 1,
-          "name": "Foundation Breaker"
+          "name": "Surgical Extraction"
         },
         {
           "count": 2,
-          "name": "Brotherhood's End"
-        },
-        {
-          "count": 2,
-          "name": "Inevitable Betrayal"
+          "name": "Vexing Bauble"
         }
       ]
     },
@@ -896,134 +876,158 @@
       ]
     },
     {
-      "name": "Grixis Reanimator",
+      "name": "Living End",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "R",
-        "U"
+        "U",
+        "G",
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Abhorrent Oculus"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Cruelty"
+          "count": 1,
+          "name": "Boseiju, Who Endures"
         },
         {
           "count": 1,
-          "name": "Blood Crypt"
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 2,
+          "name": "Colossal Skyturtle"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
         },
         {
           "count": 4,
-          "name": "Bloodstained Mire"
+          "name": "Curator of Mysteries"
         },
         {
           "count": 4,
-          "name": "Emperor of Bones"
+          "name": "Force of Negation"
+        },
+        {
+          "count": 3,
+          "name": "Living End"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
         },
         {
           "count": 4,
-          "name": "Faithless Looting"
+          "name": "Generous Ent"
         },
         {
-          "count": 4,
-          "name": "Fatal Push"
+          "count": 1,
+          "name": "Hedge Maze"
         },
         {
           "count": 1,
           "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Persist"
-        },
-        {
-          "count": 4,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
           "count": 1,
-          "name": "Raucous Theater"
+          "name": "Mistrise Village"
         },
         {
-          "count": 1,
-          "name": "Scalding Tarn"
+          "count": 4,
+          "name": "Misty Rainforest"
         },
         {
           "count": 2,
-          "name": "Spell Pierce"
+          "name": "Oliphaunt"
+        },
+        {
+          "count": 4,
+          "name": "Street Wraith"
+        },
+        {
+          "count": 1,
+          "name": "Sink into Stupor"
         },
         {
           "count": 1,
           "name": "Steam Vents"
         },
         {
-          "count": 2,
-          "name": "Swamp"
+          "count": 1,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 1,
+          "name": "Striped Riverwinder"
         },
         {
           "count": 4,
-          "name": "Thought Scour"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
+          "name": "Subtlety"
         },
         {
           "count": 1,
           "name": "Thundering Falls"
         },
         {
-          "count": 1,
-          "name": "Undercity Sewers"
+          "count": 4,
+          "name": "Violent Outburst"
         },
         {
           "count": 4,
-          "name": "Unearth"
+          "name": "Shardless Agent"
+        },
+        {
+          "count": 3,
+          "name": "Wistfulness"
+        },
+        {
+          "count": 4,
+          "name": "Endurance"
         },
         {
           "count": 1,
-          "name": "Watery Grave"
+          "name": "Wistfulness"
+        },
+        {
+          "count": 1,
+          "name": "Wooded Foothills"
         }
       ],
       "sideboard": [
         {
-          "count": 4,
-          "name": "Consign to Memory"
+          "count": 1,
+          "name": "Brazen Borrower"
         },
         {
           "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
-          "name": "Meltdown"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Pyroclasm"
+          "name": "Brotherhood's End"
         },
         {
           "count": 1,
-          "name": "Surgical Extraction"
+          "name": "Dismember"
+        },
+        {
+          "count": 1,
+          "name": "Faerie Macabre"
+        },
+        {
+          "count": 1,
+          "name": "Ingot Chewer"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 4,
+          "name": "Obsidian Charmaw"
         },
         {
           "count": 2,
-          "name": "Vexing Bauble"
+          "name": "Force of Vigor"
         }
       ]
     },

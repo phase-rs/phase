@@ -1540,6 +1540,66 @@ pub(crate) struct MultiTargetBounds {
     pub max: usize,
 }
 
+/// CR 601.2d: When a spell or ability divides an effect (damage, counters)
+/// among its targets, each chosen target must receive at least one unit. The
+/// pool to divide is therefore an upper bound on how many targets may legally be
+/// chosen — picking more targets than units leaves at least one target with
+/// nothing, which the rules forbid. Returns the resolved pool size for a
+/// distributing ability, peeling any outer "up to" wrapper so the structural
+/// maximum (not the cap) drives the bound. Returns `None` when the pool amount
+/// is not a damage/counter count (e.g. life-distribution stubs that don't
+/// surface a divisible amount), in which case no pool cap applies.
+///
+/// `distribute` is the distribution-unit flag carried on the originating
+/// `AbilityDefinition` / `PendingCast` (the runtime `ResolvedAbility` does not
+/// itself carry it), so callers in the cast/trigger pipeline pass it through.
+pub(crate) fn distribution_pool_cap(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    distribute: Option<&crate::types::game_state::DistributionUnit>,
+) -> Option<usize> {
+    distribute?;
+    let amount = match &ability.effect {
+        Effect::DealDamage { amount, .. } => amount,
+        Effect::PutCounter { count, .. } => count,
+        _ => return None,
+    };
+    // CR 601.2d: "up to N divided as you choose" still divides the *resolved*
+    // amount; peel the cap so the pool is the concrete number to distribute.
+    let (inner, _) = amount.peel_up_to();
+    Some(resolve_quantity_with_targets(state, inner, ability).max(0) as usize)
+}
+
+/// CR 601.2c + CR 601.2d: Truncate `target_slots` so a divided spell offers at
+/// most one slot per unit of its divisible pool. Each chosen target must receive
+/// ≥1 (CR 601.2d), so a pool of N can be split among at most N targets; offering
+/// more slots lets the controller pick a target set that can never be legally
+/// divided (the Shatterskull Smashing X=1 / two-slot softlock, issue #2856).
+///
+/// Required slots (the leading `!optional` prefix) are preserved — only the
+/// optional "up to" tail beyond the pool size is dropped. A no-op when the
+/// ability does not distribute, the pool is not a countable amount, or the pool
+/// already meets/exceeds the slot count (the common case, e.g. Lathiel whose
+/// printed cap already equals the pool).
+pub(crate) fn cap_distribution_target_slots(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    distribute: Option<&crate::types::game_state::DistributionUnit>,
+    target_slots: &mut Vec<TargetSelectionSlot>,
+) {
+    let Some(pool) = distribution_pool_cap(state, ability, distribute) else {
+        return;
+    };
+    let required = target_slots.iter().filter(|slot| !slot.optional).count();
+    // Never drop a required slot: if the pool somehow underruns the structural
+    // minimum, keep the minimum (a malformed spec, not reachable for well-formed
+    // "up to N" distribution where min == 0).
+    let keep = pool.max(required);
+    if target_slots.len() > keep {
+        target_slots.truncate(keep);
+    }
+}
+
 /// CR 115.1d: A triggered ability's targets are chosen as it is put on the stack.
 /// CR 601.2c: Resolve a multi-target count after any required quantity choices
 /// have been announced, then cap optional slots at the live legal-target set
@@ -1622,11 +1682,22 @@ fn quantity_expr_has_unresolved_variable(
     }
 }
 
-pub fn ability_target_legality_needs_chosen_x(ability: &ResolvedAbility) -> bool {
+pub fn ability_target_legality_needs_chosen_x(
+    ability: &ResolvedAbility,
+    distribute: Option<&crate::types::game_state::DistributionUnit>,
+) -> bool {
     if ability.chosen_x.is_some() {
         return false;
     }
     ability_target_legality_needs_chosen_x_inner(ability)
+        // CR 601.2c + CR 601.2d: A divided spell's legal target count is bounded
+        // by the divisible pool (each target needs ≥1). When that pool is an
+        // X-dependent amount divided among "up to N" targets (Shatterskull
+        // Smashing: "X damage divided among up to two target creatures"), the
+        // effective target ceiling `min(N, X)` can't be computed until X is
+        // announced — so defer target selection to ChooseXValue even though the
+        // printed `multi_target.max` is a fixed value (issue #2856).
+        || ability_distribution_pool_needs_chosen_x(ability, distribute)
 }
 
 fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bool {
@@ -1674,6 +1745,28 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 
 fn quantity_expr_has_unresolved_x(ability: &ResolvedAbility, expr: &QuantityExpr) -> bool {
     ability.chosen_x.is_none() && expr.contains_x()
+}
+
+/// CR 601.2c + CR 601.2d: True when `ability` divides a damage/counter pool
+/// whose amount still references an unannounced X. The number of targets such a
+/// spell may have is `min(printed cap, pool)`, so the pool — and therefore X —
+/// must be known before target slots are built. Used to route Shatterskull-class
+/// X-divided spells through `ChooseXValue` ahead of target selection even though
+/// their `multi_target.max` is a fixed printed value.
+fn ability_distribution_pool_needs_chosen_x(
+    ability: &ResolvedAbility,
+    distribute: Option<&crate::types::game_state::DistributionUnit>,
+) -> bool {
+    if distribute.is_none() {
+        return false;
+    }
+    let amount = match &ability.effect {
+        Effect::DealDamage { amount, .. } => amount,
+        Effect::PutCounter { count, .. } => count,
+        _ => return false,
+    };
+    let (inner, _) = amount.peel_up_to();
+    quantity_expr_has_unresolved_x(ability, inner)
 }
 
 /// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion
@@ -7645,6 +7738,77 @@ mod tests {
 
         assert_eq!(slots.len(), 2);
         assert!(slots.iter().all(|slot| slot.optional));
+    }
+
+    /// CR 601.2c + CR 601.2d (issue #2856): `cap_distribution_target_slots`
+    /// clamps a divided spell's "up to N" target slots to its divisible pool —
+    /// each chosen target needs ≥1, so a pool of K can be split among at most K
+    /// targets. Exercises the class: pool below cap (clamps), pool at/above cap
+    /// (no-op), no-distribute (no-op), and a non-divisible effect (no-op).
+    #[test]
+    fn cap_distribution_target_slots_clamps_to_divisible_pool() {
+        use crate::types::game_state::DistributionUnit;
+
+        let state = crate::types::game_state::GameState::new_two_player(42);
+        let damage = DistributionUnit::Damage;
+
+        let make = |x: u32| {
+            let mut ability = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                },
+                vec![],
+                ObjectId(10),
+                PlayerId(0),
+            );
+            ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
+            ability.set_chosen_x_recursive(x);
+            ability
+        };
+        let two_optional_slots = || {
+            vec![
+                TargetSelectionSlot {
+                    legal_targets: vec![],
+                    optional: true,
+                },
+                TargetSelectionSlot {
+                    legal_targets: vec![],
+                    optional: true,
+                },
+            ]
+        };
+
+        // X = 1: pool of one clamps two "up to two" slots down to one.
+        let mut slots = two_optional_slots();
+        cap_distribution_target_slots(&state, &make(1), Some(&damage), &mut slots);
+        assert_eq!(slots.len(), 1, "X=1 → at most one slot");
+
+        // X = 0: distributes nothing, target count collapses to zero.
+        let mut slots = two_optional_slots();
+        cap_distribution_target_slots(&state, &make(0), Some(&damage), &mut slots);
+        assert_eq!(slots.len(), 0, "X=0 → no slots");
+
+        // X = 2: pool meets the printed cap — both slots survive.
+        let mut slots = two_optional_slots();
+        cap_distribution_target_slots(&state, &make(2), Some(&damage), &mut slots);
+        assert_eq!(slots.len(), 2, "X=2 → printed cap of two retained");
+
+        // X = 5: pool exceeds the printed cap — still capped by the printed two.
+        let mut slots = two_optional_slots();
+        cap_distribution_target_slots(&state, &make(5), Some(&damage), &mut slots);
+        assert_eq!(slots.len(), 2, "pool > cap is a no-op");
+
+        // No distribute flag: never clamp (a non-divided "to each of" multi-target
+        // deals the full amount to every chosen target — CR 601.2d does not apply).
+        let mut slots = two_optional_slots();
+        cap_distribution_target_slots(&state, &make(1), None, &mut slots);
+        assert_eq!(slots.len(), 2, "non-distributing ability is untouched");
     }
 
     #[test]

@@ -6,8 +6,9 @@ use crate::types::mana::ManaCost;
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain,
     auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
-    build_target_slots_labelled, flatten_targets_in_chain, random_select_targets_for_ability,
-    record_modal_mode_choices, target_constraints_from_modal, validate_modal_indices,
+    build_target_slots_labelled, cap_distribution_target_slots, flatten_targets_in_chain,
+    random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
+    validate_modal_indices,
 };
 use super::engine::EngineError;
 use super::engine_stack;
@@ -110,14 +111,19 @@ fn handle_activated_mode_choice(
     // announcement steps. If an activated modal ability's target legality depends
     // on an {X} activation cost, choose X after modes and before targets, then
     // resume through the same deferred target-selection path modal spells use so
-    // per-mode labels and X-dependent legality stay in sync.
-    if ability_target_legality_needs_chosen_x(&resolved) {
+    // per-mode labels and X-dependent legality stay in sync. CR 601.2d: a chosen
+    // mode that divides an X-dependent pool is likewise X-bounded (issue #2856).
+    let mode_distribute = indices
+        .iter()
+        .find_map(|&i| mode_abilities.get(i).and_then(|m| m.distribute.clone()));
+    if ability_target_legality_needs_chosen_x(&resolved, mode_distribute.as_ref()) {
         if let Some(cost) = ability_cost.as_ref() {
             if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
                 let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
                 pending_x.activation_cost = remaining;
                 pending_x.activation_ability_index = ability_index;
                 pending_x.target_constraints = target_constraints;
+                pending_x.distribute = mode_distribute.clone();
                 pending_x.deferred_target_selection = true;
                 let mut chosen_modes = indices.clone();
                 chosen_modes.sort_unstable();
@@ -144,6 +150,7 @@ fn handle_activated_mode_choice(
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = ability_index;
             pending_x.target_constraints = target_constraints;
+            pending_x.distribute = mode_distribute.clone();
             pending_x.deferred_target_selection = true;
             let mut chosen_modes = indices.clone();
             chosen_modes.sort_unstable();
@@ -159,7 +166,7 @@ fn handle_activated_mode_choice(
     // SAME post-flush state (Finding 4 — never let the two vectors diverge in
     // length). `resolved.context` is the chained ability's context, reapplied
     // per-mode by the labelled builder.
-    let (target_slots, mode_labels) = build_target_slots_labelled(
+    let (mut target_slots, mode_labels) = build_target_slots_labelled(
         state,
         &mode_abilities,
         &indices,
@@ -169,6 +176,12 @@ fn handle_activated_mode_choice(
         &resolved.context,
         resolved.chosen_x,
     )?;
+    cap_distribution_target_slots(
+        state,
+        &resolved,
+        mode_distribute.as_ref(),
+        &mut target_slots,
+    );
 
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target modal activated abilities — the

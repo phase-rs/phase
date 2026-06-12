@@ -3271,6 +3271,17 @@ fn self_die_exile_anaphor_execute(
 /// chain and run via the mandatory post-replacement-effect hook after the
 /// redirected ZoneChange physically resolves. Owner-routing (CR 400.3) is
 /// enforced at the zone layer, which reads `obj.owner` when writing to a library.
+///
+/// CR 614.1a + CR 608.2n: Self-referential subjects (`~`, "this spell", …) must
+/// carry `valid_card: SelfRef` so `find_applicable_replacements` discovers the
+/// def while the spell is still on the stack (Nexus of Fate / Progenitus class).
+fn graveyard_replacement_subject_is_self_referential(subject: &str) -> bool {
+    let subject = subject.trim();
+    subject == "~"
+        || matches!(subject, "this spell" | "this card")
+        || crate::parser::oracle_util::SELF_REF_TYPE_PHRASES.contains(&subject)
+}
+
 fn parse_graveyard_exile_replacement(
     norm_lower: &str,
     original_text: &str,
@@ -3306,74 +3317,78 @@ fn parse_graveyard_exile_replacement(
         NonToken,
     }
 
-    let ((scope, token_scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
-        // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
-        let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
-        // Subject: accept any phrase up to " would be put into " — covers
-        // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
-        // — and classify its token axis (CR 730.3e) from the captured slice.
-        let (i, subject) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
-        // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
-        // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
-        // phrasing ("a card or token") names tokens explicitly and stays
-        // unscoped. The token-rider check wins over the bare-card check, so
-        // "a card or token" is never misread as token-excluding.
-        //
-        // The token axis is a terminal-noun classification of the noun phrase
-        // `take_until` already tokenized off. "Ends with <noun>" is expressed as
-        // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
-        // classification stays combinator-pure (no raw tail string-ops) and is
-        // correct for arbitrarily long subjects ("a nontoken creature card",
-        // "a creature an opponent controls") where a first-word split would not
-        // be.
-        fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
-            terminated(
-                (take_until(noun), tag(noun)),
-                eof::<&'a str, OracleError<'a>>,
-            )
-            .parse(subject)
-            .is_ok()
-        }
-        let names_token =
-            subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
-        let names_card =
-            subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
-        let token_scope = if names_card && !names_token {
-            TokenScope::NonToken
-        } else {
-            TokenScope::Unscoped
-        };
-        let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
-        let (i, scope) = alt((
-            value(Scope::Opponent, tag("an opponent's graveyard")),
-            value(Scope::Opponent, tag("an opponents graveyard")),
-            value(Scope::Opponent, tag("opponent's graveyard")),
-            value(
-                Scope::Any,
-                preceded(take_until(" graveyard"), tag(" graveyard")),
-            ),
-        ))
-        .parse(i)?;
-        let (i, _) = opt(tag(" from anywhere")).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
+    let ((scope, token_scope, outcome, subject), _rest) =
+        nom_on_lower(original_text, norm_lower, |i| {
+            // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
+            let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
+            // Subject: accept any phrase up to " would be put into " — covers
+            // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
+            // — and classify its token axis (CR 730.3e) from the captured slice.
+            let (i, subject) =
+                take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+            // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
+            // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
+            // phrasing ("a card or token") names tokens explicitly and stays
+            // unscoped. The token-rider check wins over the bare-card check, so
+            // "a card or token" is never misread as token-excluding.
+            //
+            // The token axis is a terminal-noun classification of the noun phrase
+            // `take_until` already tokenized off. "Ends with <noun>" is expressed as
+            // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
+            // classification stays combinator-pure (no raw tail string-ops) and is
+            // correct for arbitrarily long subjects ("a nontoken creature card",
+            // "a creature an opponent controls") where a first-word split would not
+            // be.
+            fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
+                terminated(
+                    (take_until(noun), tag(noun)),
+                    eof::<&'a str, OracleError<'a>>,
+                )
+                .parse(subject)
+                .is_ok()
+            }
+            let names_token =
+                subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
+            let names_card =
+                subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
+            let token_scope = if names_card && !names_token {
+                TokenScope::NonToken
+            } else {
+                TokenScope::Unscoped
+            };
+            let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+            let (i, scope) = alt((
+                value(Scope::Opponent, tag("an opponent's graveyard")),
+                value(Scope::Opponent, tag("an opponents graveyard")),
+                value(Scope::Opponent, tag("opponent's graveyard")),
+                value(
+                    Scope::Any,
+                    preceded(take_until(" graveyard"), tag(" graveyard")),
+                ),
+            ))
+            .parse(i)?;
+            let (i, _) = opt(tag(" from anywhere")).parse(i)?;
+            let (i, _) = tag(", ").parse(i)?;
 
-        // Outcome dispatch. The shuffle-back variant optionally prefixes
-        // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
-        let (i, outcome) = alt((
-            value(Outcome::Exile, tag("exile it instead")),
-            value(
-                Outcome::ShuffleBack { reveal: true },
-                tag("reveal ~ and shuffle it into its owner's library instead"),
-            ),
-            value(
-                Outcome::ShuffleBack { reveal: false },
-                tag("shuffle it into its owner's library instead"),
-            ),
-        ))
-        .parse(i)?;
+            // Outcome dispatch. The shuffle-back variant optionally prefixes
+            // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
+            let (i, outcome) = alt((
+                value(Outcome::Exile, tag("exile it instead")),
+                value(
+                    Outcome::ShuffleBack { reveal: true },
+                    tag("reveal ~ and shuffle it into its owner's library instead"),
+                ),
+                value(
+                    Outcome::ShuffleBack { reveal: false },
+                    tag("shuffle it into its owner's library instead"),
+                ),
+            ))
+            .parse(i)?;
 
-        Ok((i, (scope, token_scope, outcome)))
-    })?;
+            Ok((i, (scope, token_scope, outcome, subject.to_string())))
+        })?;
+
+    let subject = subject.trim();
 
     // Destination routing is determined by the outcome branch.
     let destination = match &outcome {
@@ -3396,8 +3411,15 @@ fn parse_graveyard_exile_replacement(
     if let TokenScope::NonToken = token_scope {
         props.push(FilterProp::NonToken);
     }
-    let valid_card =
-        (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
+    let valid_card = if graveyard_replacement_subject_is_self_referential(subject) {
+        Some(TargetFilter::SelfRef)
+    } else if !props.is_empty() {
+        Some(TargetFilter::Typed(
+            TypedFilter::default().properties(props),
+        ))
+    } else {
+        None
+    };
 
     // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
     // the `destination` field from this top-level ChangeZone — other fields here
@@ -7133,6 +7155,11 @@ mod tests {
             assert_eq!(def.event, ReplacementEvent::Moved);
             assert_eq!(def.destination_zone, Some(Zone::Graveyard));
             assert!(matches!(def.mode, ReplacementMode::Mandatory));
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "{card}: shuffle-back graveyard replacement must be self-scoped for stack resolution"
+            );
 
             // Execute: ChangeZone { destination: Library, target: SelfRef }
             let execute = def.execute.as_ref().unwrap();
@@ -7194,6 +7221,42 @@ mod tests {
         assert!(
             shuffle.sub_ability.is_none(),
             "no-reveal branch must not stash a trailing sub_ability"
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "tilde subject must be self-scoped for stack resolution"
+        );
+    }
+
+    /// CR 608.2n + CR 614.1a (issue #2897): card-name subjects normalize to `~`
+    /// and must carry `valid_card: SelfRef`, not an absent filter that the
+    /// stack-self-move gate would reject.
+    #[test]
+    fn graveyard_shuffle_back_card_name_subject_is_selfref() {
+        let def = parse_replacement_line(
+            "If Nexus of Fate would be put into a graveyard from anywhere, reveal Nexus of Fate \
+             and shuffle it into its owner's library instead.",
+            "Nexus of Fate",
+        )
+        .expect("Nexus of Fate shuffle-back must parse");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Board-wide graveyard replacements keep their external typed filter.
+    #[test]
+    fn graveyard_exile_card_subject_stays_external_nontoken() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+        let def = parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .expect("Leyline-style exile must parse");
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::NonToken])
+            ))
         );
     }
 

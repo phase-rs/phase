@@ -114,6 +114,7 @@ fn translate_trigger_mode(mode: &str) -> Result<TriggerMode, ForgeTranslateError
         "AttackerBlocked" => Ok(TriggerMode::AttackerBlocked),
         "AttackerBlockedByCreature" => Ok(TriggerMode::AttackerBlockedByCreature),
         "AttackerUnblocked" => Ok(TriggerMode::AttackerUnblocked),
+        "YouAttackUnblocked" => Ok(TriggerMode::YouAttackUnblocked),
 
         // Combat — blockers (CR 509)
         "Blocks" => Ok(TriggerMode::Blocks),

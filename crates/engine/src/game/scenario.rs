@@ -1675,6 +1675,7 @@ pub struct SpellCast<'a> {
     target_objects: Vec<ObjectId>,
     convoke_with: Vec<ObjectId>,
     optional: OptionalPolicy,
+    search_pick: SearchPolicy,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1689,7 +1690,15 @@ impl<'a> SpellCast<'a> {
             target_objects: Vec::new(),
             convoke_with: Vec::new(),
             optional: OptionalPolicy::default(),
+            search_pick: SearchPolicy::default(),
         }
+    }
+
+    /// Submit the first legal candidates at any `SearchChoice` during
+    /// resolution (CR 701.23).
+    pub fn search_first_legal(mut self) -> Self {
+        self.search_pick = SearchPolicy::FirstLegal;
+        self
     }
 
     /// Accept optional ("you may") effects/costs during resolution
@@ -1775,6 +1784,7 @@ impl<'a> SpellCast<'a> {
             target_objects,
             convoke_with,
             optional,
+            search_pick,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1943,6 +1953,7 @@ impl<'a> SpellCast<'a> {
             declared_players,
             selected_casting_variant,
             optional,
+            search_pick,
         }
     }
 
@@ -1966,6 +1977,7 @@ pub struct CastCommit<'a> {
     declared_players: Vec<PlayerId>,
     selected_casting_variant: Option<CastingVariantChoiceOption>,
     optional: OptionalPolicy,
+    search_pick: SearchPolicy,
 }
 
 impl<'a> CastCommit<'a> {
@@ -1989,6 +2001,7 @@ impl<'a> CastCommit<'a> {
             remaining_objects,
             declared_players,
             optional,
+            search_pick,
             ..
         } = self;
 
@@ -2004,7 +2017,7 @@ impl<'a> CastCommit<'a> {
             targets_objects: remaining_objects,
             targets_players: declared_players,
             optional,
-            ..ResolutionPolicy::default()
+            search_pick,
         };
         drive_resolution(runner, &policy);
 
