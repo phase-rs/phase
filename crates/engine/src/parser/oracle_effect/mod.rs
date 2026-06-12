@@ -2773,6 +2773,32 @@ fn try_parse_choose_one_of_inline(
     let (before_lower, after_lower) =
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
 
+    // CR 205.2 + CR 112.1: A bare " or " between two card-type words is a TYPE
+    // disjunction ("an instant or sorcery spell", "an artifact or creature
+    // spell"), not a disjunction of two imperative clauses. Splitting here
+    // truncates the type phrase — "you may cast an instant" / "sorcery spell
+    // ..." — and silently drops the cast-from-exile grant. `before_lower` and
+    // `after_lower` are contiguous slices of `tp.lower` around the separator,
+    // so running the shared `parse_type_phrase` combinator from the last word
+    // of the left half scans straight across the " or " into the right half. If
+    // it yields a multi-type `AnyOf`, the coordinator is part of the type list
+    // and this is not a clause boundary. Reusing the filter combinator covers
+    // every type pair the engine recognizes (instant/sorcery, artifact/creature,
+    // etc.), not just one hard-coded pair.
+    let last_word_start = before_lower.rfind(' ').map_or(0, |i| i + 1);
+    let type_probe = &tp.lower[last_word_start..];
+    if let Ok((_, TargetFilter::Typed(tf))) =
+        super::oracle_nom::target::parse_type_phrase(type_probe)
+    {
+        if tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::AnyOf(items) if items.len() > 1))
+        {
+            return None;
+        }
+    }
+
     // CR 119.7 + CR 119.8 + CR 104.2 + CR 104.3: When the left half contains a
     // restriction-predicate marker ("can't", "cannot", "doesn't", "don't") at
     // any word boundary, the "or" coordinates predicates within a single
@@ -5994,6 +6020,9 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),
@@ -6027,11 +6056,52 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// `mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor)`,
 /// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Prefix: "you may cast spells from among [those|the] exiled cards"
-    let ((), rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("you may cast spells from among ").parse(i)?;
+    // CR 601.2a: Two grant shapes share the "...from among [those|the] exiled
+    // cards" anaphor:
+    //   * Plural unbounded — "you may cast spells from among those exiled cards"
+    //     (Nassari, Stolen Strategy): any number of casts, any type.
+    //   * Singular bounded — "you may cast a[n] [type-phrase] spell from among
+    //     those exiled cards" (Chandra, Hope's Beacon +1): at most ONE cast,
+    //     restricted to the typed filter.
+    // The singular determiner ("a"/"an"/"one") encodes the single-use cap; the
+    // optional type phrase encodes the card filter.
+    let ((card_filter, single_use), rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("you may cast ").parse(i)?;
+        // Singular bounded: a[n]/one [type-phrase] spell → single-use + filter.
+        let singular = |i| {
+            let (i, _) = alt((tag("an "), tag("a "), tag("one "))).parse(i)?;
+            // CR 601.2a: the printed type-phrase ("instant or sorcery", a bare
+            // "spell") restricts WHICH exiled cards this single-use grant
+            // authorizes. `parse_type_phrase` maps a bare "spell" → `Card`; a
+            // typed phrase ("instant or sorcery") → the `AnyOf` type filter.
+            let (i, filter) = super::oracle_nom::target::parse_type_phrase.parse(i)?;
+            // A typed phrase ("instant or sorcery") is followed by the " spell"
+            // noun; a bare "spell" already consumed it. The card filter is a
+            // printed quality (no stack pin) so the exile object matches it.
+            let is_bare_card = matches!(
+                &filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.as_slice() == [TypeFilter::Card]
+            );
+            let (i, card_filter) = match tag::<_, _, OracleError<'_>>(" spell").parse(i) {
+                Ok((i, _)) => (i, Some(filter)),
+                Err(e) => {
+                    if is_bare_card {
+                        // "a spell" — single-use but no type restriction.
+                        (i, None)
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            Ok((i, (card_filter, true)))
+        };
+        // Plural unbounded: "spells" → unlimited within the window, any type.
+        let plural = value((None, false), tag("spells"));
+        let (i, parsed) = alt((singular, plural)).parse(i)?;
+        let (i, _) = tag(" from among ").parse(i)?;
         let (i, _) = alt((tag("those exiled cards"), tag("the exiled cards"))).parse(i)?;
-        Ok((i, ()))
+        Ok((i, parsed))
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
@@ -6067,6 +6137,9 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission,
+            card_filter,
+            single_use_group: None,
+            single_use,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
         // normalizes `TrackedSetId(0)` to the most recently published set
@@ -6126,6 +6199,9 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         target: TargetFilter::Any,
         grantee: Default::default(),
@@ -6253,6 +6329,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
         // (the cards exiled by the prior clause) rather than fall back to the
@@ -6289,6 +6368,9 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         target: tracked_set_filter(),
         grantee: Default::default(),
@@ -6318,6 +6400,9 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -36808,6 +36893,51 @@ mod tests {
         );
     }
 
+    /// CR 107.3i + CR 613.4c: Craterhoof Behemoth — the +X/+X grant's dynamic
+    /// P/T must bind X to "the number of creatures you control" (an ObjectCount)
+    /// from the trailing where-clause, not default to `CostXPaid` (which is 0 on
+    /// a card with no {X} in its cost, so the buff was always +0/+0). Issue
+    /// #2875.
+    #[test]
+    fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
+        let def = parse_effect_chain(
+            "creatures you control gain trample and get +X/+X until end of turn, where X is the number of creatures you control",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let dynamic_values: Vec<&QuantityExpr> = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .filter_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value }
+                | ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dynamic_values.len(),
+            2,
+            "expected dynamic +X/+X power and toughness modifications, got {:?}",
+            static_abilities
+        );
+        for value in dynamic_values {
+            assert!(
+                matches!(
+                    value,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ),
+                "X must bind to ObjectCount(creatures you control), got {value:?}"
+            );
+        }
+    }
+
     #[test]
     fn duration_preserved_with_for_each_suffix() {
         // Goblin Piledriver pattern: "gets +2/+0 until end of turn for each other attacking Goblin"
@@ -41558,6 +41688,25 @@ mod tests {
             !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
             "target-phrase disjunction must not be split into ChooseOneOf"
         );
+    }
+
+    /// CR 205.2 + CR 112.1 (issue #2851): A " or " between two card-type words
+    /// is a TYPE disjunction, not a disjunction of two imperative clauses. The
+    /// detector must reject the split so the whole grant clause survives — for
+    /// any type pair the engine recognizes, not just instant/sorcery.
+    #[test]
+    fn choose_one_of_rejects_type_word_disjunction() {
+        for text in [
+            "you may cast an instant or sorcery spell from among those exiled cards",
+            "you may cast an artifact or creature spell from among those exiled cards",
+        ] {
+            let ability = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
+                "type-word disjunction must not be split into ChooseOneOf for {text:?}, got {:?}",
+                ability.effect
+            );
+        }
     }
 
     /// CR 701.21a + CR 608.2k: Promise of Aclazotz / Burnt Offering / Greater

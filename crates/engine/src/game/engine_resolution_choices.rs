@@ -2509,6 +2509,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        moved_count: None,
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -2536,6 +2537,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        moved_count: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
