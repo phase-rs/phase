@@ -2155,14 +2155,17 @@ pub(crate) fn create_warp_delayed_trigger(
 mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
-    use crate::game::zones::{self, create_object};
+    use crate::game::triggers::check_delayed_triggers;
+    use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
-        CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-        TypedFilter,
+        CastingPermission, CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
     fn setup() -> GameState {
@@ -2978,12 +2981,6 @@ mod tests {
         // CR 400.7: A blinked creature is a new object (higher incarnation).
         // The warp delayed trigger's SelfRef must fail to resolve against the
         // re-entered permanent, leaving it on the battlefield.
-        use crate::game::triggers::check_delayed_triggers;
-        use crate::game::zones::move_to_zone;
-        use crate::types::events::GameEvent;
-        use crate::types::game_state::{StackEntry, StackEntryKind};
-        use crate::types::mana::ManaCost;
-        use crate::types::phase::Phase;
 
         let mut state = setup();
         state.turn_number = 3;
@@ -3051,6 +3048,68 @@ mod tests {
             state.objects[&obj_id].zone,
             Zone::Battlefield,
             "a blinked warp creature must NOT be exiled by the stale delayed trigger"
+        );
+    }
+
+    #[test]
+    fn warp_delayed_trigger_exiles_same_incarnation_creature_and_grants_recast_permission() {
+        // CR 702.185a + CR 400.7: the delayed trigger still finds the same
+        // object instance and grants its exile casting permission.
+        let mut state = setup();
+        state.turn_number = 3;
+        state.active_player = PlayerId(0);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quantum Riddler".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.keywords.push(Keyword::Warp(ManaCost::generic(3)));
+            obj.mana_cost = ManaCost::generic(4);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Warp,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.delayed_triggers.len(), 1);
+
+        state.phase = Phase::End;
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert!(
+            !stacked.is_empty(),
+            "the warp delayed trigger should fire at end step"
+        );
+        resolve_top(&mut state, &mut Vec::new());
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            obj.zone,
+            Zone::Exile,
+            "an unblinked warp creature should be exiled by its delayed trigger"
+        );
+        assert!(
+            obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::WarpExile {
+                    castable_after_turn: 3
+                }
+            )),
+            "the exiled warp creature should receive WarpExile permission"
         );
     }
 
