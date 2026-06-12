@@ -2615,6 +2615,18 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<ObjectId>,
     },
+    /// CR 508.1g + CR 702.154a: As attackers are declared, the active player
+    /// may tap up to one eligible creature for each Enlist instance on an
+    /// attacking creature. `eligible` is the current legal tap set for this
+    /// instance; `remaining` is the queue of later Enlist instances this
+    /// declaration.
+    EnlistChoice {
+        player: PlayerId,
+        attacker: ObjectId,
+        eligible: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<ObjectId>,
+    },
     GameOver {
         winner: Option<PlayerId>,
     },
@@ -3986,6 +3998,7 @@ impl WaitingFor {
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
             WaitingFor::ExertChoice { .. } => "ExertChoice",
+            WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
@@ -4121,6 +4134,7 @@ impl WaitingFor {
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::UntapChoice { player, .. }
             | WaitingFor::ExertChoice { player, .. }
+            | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }

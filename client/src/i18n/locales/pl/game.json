@@ -762,6 +762,15 @@
       "decline": "Nie wysilaj",
       "declineDescription": "{{name}} atakuje normalnie i odwraca się jak zwykle."
     },
+    "enlist": {
+      "attackerFallback": "Attacker",
+      "creatureFallback": "Creature",
+      "title": "Enlist for {{name}}?",
+      "subtitle": "Choose a creature to tap for this Enlist instance.",
+      "tapDescription": "Tap {{name}} so {{attacker}} gets power from it.",
+      "decline": "Don't enlist",
+      "declineDescription": "{{attacker}} attacks without enlisting a creature."
+    },
     "cost": {
       "discardCard": "odrzuć kartę",
       "life": "{{amount}} życia",

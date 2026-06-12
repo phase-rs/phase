@@ -3444,6 +3444,45 @@ fn apply_action(
                     attacker: *next,
                     remaining: rest.to_vec(),
                 }
+            } else if let Some(waiting_for) =
+                engine_combat::next_current_enlist_choice(state, *player)
+            {
+                waiting_for
+            } else {
+                engine_combat::finish_declare_attackers(state, &mut events, false)?
+            }
+        }
+        // CR 508.1g + CR 702.154a: the active player may tap up to one eligible
+        // creature for each Enlist instance as the source attacks. As with
+        // exert, declaration/tap/enlist triggers are deferred until all optional
+        // attack costs are decided.
+        (
+            WaitingFor::EnlistChoice {
+                player,
+                attacker,
+                eligible,
+                remaining,
+            },
+            GameAction::ChooseEnlist { target },
+        ) => {
+            triggers_processed_inline = true;
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if let Some(target) = target {
+                if !eligible.contains(&target) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "{target:?} is not an eligible Enlist target"
+                    )));
+                }
+                engine_combat::apply_attack_enlist(state, *attacker, target, &mut events)?;
+            }
+            if let Some(waiting_for) =
+                engine_combat::next_enlist_choice(state, *player, remaining.clone())
+            {
+                waiting_for
             } else {
                 engine_combat::finish_declare_attackers(state, &mut events, false)?
             }

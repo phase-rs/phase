@@ -641,13 +641,24 @@ fn collect_matching_triggers(
                 } else {
                     None
                 };
+                let mut pending_ability = ability.clone();
+                if let GameEvent::CreatureEnlisted {
+                    tapped_snapshot, ..
+                } = &trigger_event
+                {
+                    // CR 608.2h + CR 113.7a: Enlist's linked trigger resolves
+                    // after the tapped creature may have left the battlefield, so
+                    // seed the cost-time LKI snapshot for "that creature's power."
+                    pending_ability
+                        .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
+                }
                 pending.push(MatchedTrigger {
                     trig_idx,
                     pending: PendingTrigger {
                         source_id: obj_id,
                         controller,
                         condition: trig_def.condition.clone(),
-                        ability: ability.clone(),
+                        ability: pending_ability,
                         timestamp,
                         target_constraints: trig_def
                             .execute

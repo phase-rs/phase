@@ -1205,6 +1205,7 @@ export type WaitingFor =
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
   | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
+  | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   // CR 510.1d + CR 702.22k: a blocking creature blocking a banded attacker —
@@ -1546,6 +1547,7 @@ export type GameAction =
   | { type: "PayCombatTax"; data: { accept: boolean } }
   | { type: "ChooseUntap"; data: { object_id: ObjectId; untap: boolean } }
   | { type: "ChooseExert"; data: { exert: boolean } }
+  | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }

@@ -160,6 +160,8 @@ pub enum TriggerEventKey {
     AdaptResolved,
     /// CR 701.43d: A creature was exerted.
     Exerted,
+    /// CR 702.154c: A creature enlisted another creature.
+    Enlisted,
     /// CR 702.143a: A card was foretold.
     Foretold,
     /// CR 701.14: A fight resolution (separate from generic deals-damage

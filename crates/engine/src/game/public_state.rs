@@ -186,6 +186,12 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::Foretold { object_id, .. } => {
                 mark_public_state_object_dirty(state, *object_id);
             }
+            GameEvent::CreatureEnlisted {
+                attacker, tapped, ..
+            } => {
+                mark_public_state_object_dirty(state, *attacker);
+                mark_public_state_object_dirty(state, *tapped);
+            }
             GameEvent::ManaAdded { player_id, .. }
             | GameEvent::ManaPoolEmptied { player_id, .. }
             | GameEvent::ManaRecolored { player_id, .. } => {

@@ -762,6 +762,15 @@
       "decline": "Ne pas surmener",
       "declineDescription": "{{name}} attaque normalement et se dégage comme d'habitude."
     },
+    "enlist": {
+      "attackerFallback": "Attacker",
+      "creatureFallback": "Creature",
+      "title": "Enlist for {{name}}?",
+      "subtitle": "Choose a creature to tap for this Enlist instance.",
+      "tapDescription": "Tap {{name}} so {{attacker}} gets power from it.",
+      "decline": "Don't enlist",
+      "declineDescription": "{{attacker}} attacks without enlisting a creature."
+    },
     "cost": {
       "discardCard": "se défausser d'une carte",
       "life": "{{amount}} points de vie",

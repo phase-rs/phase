@@ -1440,6 +1440,7 @@ impl GameRunner {
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
             WaitingFor::ExertChoice { .. } => "ExertChoice",
+            WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",

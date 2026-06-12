@@ -237,8 +237,8 @@ impl KeywordTriggerInstaller {
             // CR 702.39a: Provoke — attacks trigger that may untap a creature the
             // defending player controls and force it to block this attacker.
             Keyword::Provoke => vec![build_provoke_trigger()],
-            // CR 702.154a: Enlist — optional attacks trigger that taps an
-            // untapped creature you control and pumps the attacker by its power.
+            // CR 702.154a-b: Enlist — linked "when you do" trigger after the
+            // optional attack cost is paid during declare attackers.
             Keyword::Enlist => vec![build_enlist_trigger()],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Mentor => vec![build_mentor_trigger()],
@@ -4226,10 +4226,9 @@ pub fn synthesize_melee(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Melee));
 }
 
-/// CR 702.154a: Enlist — install the optional attacks trigger that taps an
-/// untapped creature you control and pumps this creature by that creature's
-/// power. CR 702.154 is a single static+triggered ability; one trigger is
-/// synthesized per `Keyword::Enlist`.
+/// CR 702.154a-b: Enlist — install the linked "when you do" trigger. The
+/// optional tap cost is paid by the declare-attackers state machine; one linked
+/// trigger is synthesized per `Keyword::Enlist`.
 pub fn synthesize_enlist(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Enlist));
 }
@@ -4794,18 +4793,14 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
 /// began. When you do, this creature gets +X/+0 until end of turn, where X is the
 /// tapped creature's power."
 ///
-/// Synthesized as an optional `Attacks` trigger (the Provoke shape): the optional
-/// parent body taps an eligible creature; the reflexive sub-ability pumps the
-/// attacker (`SelfRef`) by that creature's power, read anaphorically — the
-/// just-tapped permanent is captured as the resolution's "that creature" referent
-/// (CR 608.2c) and reached via `QuantityRef::Power { scope: Anaphoric }`.
+/// Synthesized as the linked `Enlisted` trigger only. The combat state machine
+/// pays the optional attack cost (tap an eligible creature) before CR 508.2
+/// priority and seeds the tapped creature's snapshot into the resolved trigger.
 ///
 fn build_enlist_trigger() -> TriggerDefinition {
-    let tap_target = enlist_tap_target_filter();
-
     // CR 702.154a: "this creature gets +X/+0 until end of turn, where X is the
     // tapped creature's power." `Power { scope: Anaphoric }` reads the
-    // just-tapped creature (the chain's `effect_context_object` referent).
+    // enlisted creature from the linked trigger's `effect_context_object`.
     let pump = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Pump {
@@ -4824,36 +4819,18 @@ fn build_enlist_trigger() -> TriggerDefinition {
             .to_string(),
     );
 
-    // CR 702.154a: "you may tap … when you do, [pump]." The optional parent taps
-    // the eligible creature; the reflexive pump rides as its sub-ability.
-    let execute = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::SetTapState {
-            target: tap_target,
-            scope: EffectScope::Single,
-            state: TapStateChange::Tap,
-        },
-    )
-    .optional()
-    .sub_ability(pump)
-    .description(
-        "Enlist — you may tap an untapped creature you control; if you do, this \
-             creature gets +X/+0 where X is that creature's power"
-            .to_string(),
-    );
-
-    TriggerDefinition::new(TriggerMode::Attacks)
+    TriggerDefinition::new(TriggerMode::Enlisted)
         .valid_card(TargetFilter::SelfRef)
-        .execute(execute)
+        .execute(pump)
         .description(
-            "CR 702.154a: Enlist — as this creature attacks, you may tap an untapped \
-             creature you control; this creature gets +X/+0 until end of turn, where X \
-             is the tapped creature's power."
+            "CR 702.154a-b: Enlist — when this creature enlists another creature, \
+             this creature gets +X/+0 until end of turn, where X is the tapped \
+             creature's power."
                 .to_string(),
         )
 }
 
-fn enlist_tap_target_filter() -> TargetFilter {
+pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
     // CR 702.154a-c: the enlisted creature must be another untapped creature you
     // control, must not be a creature you chose to attack with, and must either
     // have haste or have been controlled continuously since turn began.
@@ -4878,11 +4855,11 @@ fn enlist_tap_target_filter() -> TargetFilter {
     }
 }
 
-/// CR 702.154a: Identity predicate for a synthesized Enlist trigger — an optional
-/// `Attacks` self-trigger whose body taps a creature and whose reflexive
-/// sub-ability is a `Pump`. Used for idempotent synthesis / symmetric removal.
+/// CR 702.154a-b: Identity predicate for a synthesized Enlist linked trigger —
+/// an `Enlisted` self-trigger whose body is the pump. Used for idempotent
+/// synthesis / symmetric removal.
 fn is_enlist_trigger(t: &TriggerDefinition) -> bool {
-    if !matches!(t.mode, TriggerMode::Attacks)
+    if !matches!(t.mode, TriggerMode::Enlisted)
         || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
     {
         return false;
@@ -4890,19 +4867,7 @@ fn is_enlist_trigger(t: &TriggerDefinition) -> bool {
     let Some(execute) = t.execute.as_deref() else {
         return false;
     };
-    execute.optional
-        && matches!(
-            &*execute.effect,
-            Effect::SetTapState {
-                scope: EffectScope::Single,
-                state: TapStateChange::Tap,
-                ..
-            }
-        )
-        && execute
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| matches!(&*sub.effect, Effect::Pump { .. }))
+    !execute.optional && matches!(&*execute.effect, Effect::Pump { .. })
 }
 
 /// CR 702.39a: Provoke — "Whenever this creature attacks, you may have target
@@ -12957,100 +12922,39 @@ mod provoke_synthesis_tests {
         face
     }
 
-    /// CR 702.154a: synthesizer emits an optional `Attacks` trigger whose body
-    /// taps an untapped creature you control, with a reflexive `Pump` of the
-    /// attacker (`SelfRef`) by `Power { Anaphoric }` (the tapped creature).
+    /// CR 702.154a-b: synthesizer emits the linked `Enlisted` trigger. The
+    /// declare-attackers state machine pays the optional tap cost.
     #[test]
-    fn synthesize_enlist_adds_optional_tap_and_anaphoric_pump_attack_trigger() {
+    fn synthesize_enlist_adds_linked_anaphoric_pump_trigger() {
         let mut face = enlist_face();
         synthesize_enlist(&mut face);
 
         let trigger = face
             .triggers
             .iter()
-            .find(|t| matches!(t.mode, TriggerMode::Attacks))
-            .expect("enlist should add an Attacks trigger");
+            .find(|t| matches!(t.mode, TriggerMode::Enlisted))
+            .expect("enlist should add an Enlisted trigger");
         assert!(
             matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
-            "valid_card must be SelfRef (only when the enlisting creature attacks)"
+            "valid_card must be SelfRef (only when this creature enlists)"
         );
 
         let execute = trigger.execute.as_deref().expect("execute body required");
-        // CR 702.154a: "you may tap …" — optional.
         assert!(
-            execute.optional,
-            "Enlist is a 'you may' trigger (CR 702.154a)"
+            !execute.optional,
+            "the Enlisted trigger is mandatory once the optional attack cost was paid"
         );
 
-        // Parent body taps an eligible Enlist creature.
-        let Effect::SetTapState {
-            target,
-            scope: EffectScope::Single,
-            state: TapStateChange::Tap,
-        } = &*execute.effect
-        else {
-            panic!("execute body must be Effect::Tap");
-        };
-        let TargetFilter::And { filters } = target else {
-            panic!("tap target must compose Enlist eligibility with TargetFilter::And");
-        };
-        let tf = filters
-            .iter()
-            .find_map(|filter| match filter {
-                TargetFilter::Typed(tf) => Some(tf),
-                _ => None,
-            })
-            .expect("tap target must include the creature eligibility typed filter");
-        let excludes_attackers = filters.iter().any(|filter| {
-            matches!(
-                filter,
-                TargetFilter::Not { filter }
-                    if matches!(
-                        filter.as_ref(),
-                        TargetFilter::Typed(tf)
-                            if tf.properties.contains(&FilterProp::Attacking { defender: None })
-                    )
-            )
-        });
-        assert!(
-            excludes_attackers,
-            "tap target must exclude creatures chosen to attack with (CR 702.154a)"
-        );
-        assert!(
-            tf.properties.contains(&FilterProp::Another),
-            "tap target must exclude the enlisting creature itself (CR 702.154c)"
-        );
-        assert_eq!(
-            tf.controller,
-            Some(ControllerRef::You),
-            "tap target must be a creature you control (CR 702.154a)"
-        );
-        assert!(
-            tf.properties.contains(&FilterProp::Untapped),
-            "tap target must be untapped (CR 702.154a), got {:?}",
-            tf.properties
-        );
-        assert!(
-            tf.properties
-                .contains(&FilterProp::HasHasteOrControlledSinceTurnBegan),
-            "tap target must either have haste or have been controlled since turn began \
-             (CR 702.154a), got {:?}",
-            tf.properties
-        );
-
-        // Reflexive sub-ability: pump SelfRef by Power{Anaphoric} (the tapped
-        // creature's power, CR 608.2c).
-        let pump = execute
-            .sub_ability
-            .as_deref()
-            .expect("pump sub-ability required");
         let Effect::Pump {
             power,
             toughness,
             target,
-        } = &*pump.effect
+        } = &*execute.effect
         else {
-            panic!("sub-ability must be Effect::Pump, got {:?}", pump.effect);
+            panic!(
+                "execute body must be Effect::Pump, got {:?}",
+                execute.effect
+            );
         };
         assert!(
             matches!(target, TargetFilter::SelfRef),

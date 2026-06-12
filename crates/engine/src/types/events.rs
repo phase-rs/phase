@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
 
-use super::ability::{AbilityTag, EffectKind, TargetRef};
+use super::ability::{AbilityTag, CostPaidObjectSnapshot, EffectKind, TargetRef};
 use super::game_state::ZoneChangeRecord;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
@@ -252,6 +252,14 @@ pub enum GameEvent {
     /// Glory-Bound Initiate, ...).
     CreatureExerted {
         object_id: ObjectId,
+    },
+    /// CR 702.154c: A creature enlisted another creature as it attacked. Fires
+    /// the linked `TriggerMode::Enlisted` "when you do" trigger and carries the
+    /// tapped creature's LKI snapshot for CR 608.2h resolution.
+    CreatureEnlisted {
+        attacker: ObjectId,
+        tapped: ObjectId,
+        tapped_snapshot: Box<CostPaidObjectSnapshot>,
     },
     /// CR 702.143a: A player foretold a card from their hand.
     Foretold {

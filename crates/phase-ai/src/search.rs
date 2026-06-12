@@ -356,6 +356,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // declines (never has a downside). Real exert decisions come from the
         // evaluated candidate actions.
         WaitingFor::ExertChoice { .. } => Some(GameAction::ChooseExert { exert: false }),
+        // CR 508.1g + CR 702.154a: Enlist is optional; the conservative
+        // fallback declines while normal search evaluates legal tap choices.
+        WaitingFor::EnlistChoice { .. } => Some(GameAction::ChooseEnlist { target: None }),
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
