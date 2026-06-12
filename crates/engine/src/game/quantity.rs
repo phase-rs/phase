@@ -2970,23 +2970,21 @@ where
         //   3. `effect_context_object` — effect-driven sacrifices captured
         //      mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
         //      Bombardiers).
-        //   4. CR 608.2c: chosen target — when the ability has none of the
-        //      above referents but DID target a creature, "that creature" is
-        //      the anaphor to that chosen target (Xenagos, God of Revels:
-        //      "another target creature you control … gets +X/+X … where X is
-        //      that creature's power"). The parser maps the context-free phrase
-        //      "that creature's power" to `CostPaidObject`; this slot lets the
-        //      same ref resolve against the target slot when no cost/trigger/
-        //      effect referent exists, so a targeted +X/+X-by-its-own-power pump
-        //      reads the recipient's power. Live battlefield state is preferred
-        //      over a same-step LKI snapshot (mirrors the `Target` arm above).
         // Slots 1 and 3 are PINNED in this order by the
         // `resolve_object_mana_value` regression guard; slot 2 is inserted
-        // strictly between them (insert-only — never reorders 1 vs 3); slot 4 is
-        // a strict last-resort appended after all three. CR 608.2k names cost
-        // and trigger referents but does not adjudicate priority between them;
-        // the engine's pinned `cost_paid_object`-first choice stands. Exact
-        // parity with the `resolve_object_mana_value` `CostPaidObject` arm.
+        // strictly between them (insert-only — never reorders 1 vs 3). CR
+        // 608.2k names cost and trigger referents but does not adjudicate
+        // priority between them; the engine's pinned `cost_paid_object`-first
+        // choice stands. Exact parity with the `resolve_object_mana_value`
+        // `CostPaidObject` arm.
+        //
+        // This arm is deliberately NOT a "maybe the target" fallback: a
+        // chosen-target anaphor ("that creature's power" on a targeted grant —
+        // Xenagos, God of Revels) is rebound to `ObjectScope::Target` at the
+        // parser/lowering seam (`apply_where_x_continuous_modification`), so it
+        // never reaches this arm. `CostPaidObject` stays the specific
+        // cost/trigger/effect-context object (Greater Good, sacrifice-cost and
+        // trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
@@ -3003,24 +3001,6 @@ where
                 ability
                     .and_then(|a| a.effect_context_object.as_ref())
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
-            })
-            .or_else(|| {
-                // CR 608.2c: chosen-target anaphor fallback. Prefer live
-                // battlefield state, then LKI, then any live state (parity with
-                // the `ObjectScope::Target` arm's read order).
-                targets
-                    .iter()
-                    .find_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        _ => None,
-                    })
-                    .and_then(|id| {
-                        let live = state.objects.get(&id);
-                        live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-                            .and_then(&obj_extract)
-                            .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
-                            .or_else(|| live.and_then(&obj_extract))
-                    })
             })
             .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its power") in a triggered ability
