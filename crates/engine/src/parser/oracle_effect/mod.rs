@@ -12129,7 +12129,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
-            // CR 118.9 + CR 119.4: "cast that card by discarding a card rather
+            // CR 118.9 + CR 701.9a: "cast that card by discarding a card rather
             // than paying its mana cost" (The Infamous Cruelclaw).
             alt_ability_cost: parse_alt_ability_cost_rider(lower),
             constraint,
@@ -12324,19 +12324,18 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     Some(CastPermissionConstraint::ManaValue { comparator, value })
 }
 
-/// CR 118.9 + CR 119.4: Parse `<ability-cost> rather than paying its mana cost`
-/// from Oracle text that carries an alternative-casting-cost rider. Shared by
-/// standalone rider clauses and inline `CastFromZone` anaphor arms (The Infamous
-/// Cruelclaw, Nashi, Moon Sage's Scion).
+/// CR 118.9: Parse `<ability-cost> rather than paying its mana cost` from
+/// Oracle text that carries an alternative-casting-cost rider. Shared by
+/// standalone rider clauses and inline `CastFromZone` anaphor arms.
 fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::AbilityCost> {
     if !nom_primitives::scan_contains(lower, "rather than paying its mana cost")
         && !nom_primitives::scan_contains(lower, "rather than pay its mana cost")
     {
         return None;
     }
-    // CR 119.4 + CR 701.16a: "by discarding a card" — Cruelclaw's Heist /
-    // The Infamous Cruelclaw class. Word-scan rather than start-anchored `tag`
-    // so inline "cast that card by discarding ..." arms match too.
+    // CR 701.9a: "by discarding a card" — The Infamous Cruelclaw class.
+    // Word-scan rather than start-anchored `tag` so inline "cast that card
+    // by discarding ..." arms match too.
     if nom_primitives::scan_contains(lower, "by discarding a card")
         || nom_primitives::scan_contains(lower, "by discarding one card")
     {
@@ -12347,8 +12346,9 @@ fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::Ab
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         });
     }
-    // CR 119.4: "pay life equal to its mana value" (Nashi, Moon Sage's Scion).
-    if nom_primitives::scan_contains(lower, "pay life equal to its mana value") {
+    // CR 119.4 + CR 202.3: pay life equal to the spell's mana value (Nashi,
+    // Moon Sage's Scion / Ulamog, the Defiler class).
+    if has_pay_life_equal_to_spell_mana_value_rider(lower) {
         return Some(crate::types::ability::AbilityCost::PayLife {
             amount: crate::types::ability::QuantityExpr::Ref {
                 qty: crate::types::ability::QuantityRef::SelfManaValue,
@@ -12358,7 +12358,23 @@ fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::Ab
     None
 }
 
-/// CR 118.9 + CR 119.4: Recognise an "alternative-cost rider" — text of the
+fn has_pay_life_equal_to_spell_mana_value_rider(lower: &str) -> bool {
+    [
+        "pay life equal to its mana value",
+        "pay life equal to that spell's mana value",
+        "pay life equal to the spell's mana value",
+        "paying life equal to its mana value",
+        "paying life equal to that spell's mana value",
+        "paying life equal to the spell's mana value",
+        "you pay life equal to its mana value",
+        "you pay life equal to that spell's mana value",
+        "you pay life equal to the spell's mana value",
+    ]
+    .iter()
+    .any(|phrase| nom_primitives::scan_contains(lower, phrase))
+}
+
+/// CR 118.9: Recognise an "alternative-cost rider" — text of the
 /// form "[If you cast a spell this way,] pay <ability-cost> rather than
 /// paying its mana cost". The body parses to an `AbilityCost` that the
 /// runtime pays in lieu of the spell's mana cost when casting via a granted
@@ -15207,7 +15223,7 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // CR 118.9 + CR 119.4: Alternative-cost rider — "[If you cast a spell
+        // CR 118.9: Alternative-cost rider — "[If you cast a spell
         // this way,] pay <ability-cost> rather than paying its mana cost."
         // This is a *modifier* on the previous chain entry's `CastFromZone`
         // grant rather than its own effect. Fold the cost onto the most
@@ -42612,6 +42628,37 @@ mod tests {
                 })
             ),
             "expected discard alt cost, got {alt_ability_cost:?}"
+        );
+    }
+
+    #[test]
+    fn exile_until_chains_pay_life_alt_cast_for_spell_mana_value_wording() {
+        let def = parse_effect_chain(
+            "Exile cards from the top of your library until you exile a nonland card. \
+             You may cast that card by paying life equal to the spell's mana value \
+             rather than paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        let cast = def
+            .sub_ability
+            .as_ref()
+            .expect("cast sub-ability must chain after exile-until");
+        let Effect::CastFromZone {
+            alt_ability_cost, ..
+        } = &*cast.effect
+        else {
+            panic!("expected CastFromZone sub-ability, got {:?}", cast.effect);
+        };
+        assert!(
+            matches!(
+                alt_ability_cost,
+                Some(AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::SelfManaValue,
+                    },
+                })
+            ),
+            "expected pay-life alt cost, got {alt_ability_cost:?}"
         );
     }
 
