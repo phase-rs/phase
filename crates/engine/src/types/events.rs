@@ -638,7 +638,7 @@ pub enum GameEvent {
         player_id: PlayerId,
         dungeon: crate::game::dungeon::DungeonId,
     },
-    /// CR 725: A player took the initiative.
+    /// CR 726.2: A player took the initiative.
     InitiativeTaken {
         player_id: PlayerId,
     },

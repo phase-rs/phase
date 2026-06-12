@@ -375,7 +375,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::UnlockDoor, match_unlock_door);
     r.insert(TriggerMode::FullyUnlock, match_fully_unlock);
     r.insert(TriggerMode::BecomesPlotted, match_becomes_plotted);
-    // CR 725: Initiative triggers
+    // CR 726: Initiative triggers
     r.insert(TriggerMode::TakesInitiative, match_takes_initiative);
 
     // CR 104.3a: "Whenever a player loses the game" — player-loss trigger.
@@ -3499,7 +3499,7 @@ pub(super) fn match_becomes_plotted(
     }
 }
 
-/// CR 725.2: Match "takes the initiative" events.
+/// CR 726.2: Match "takes the initiative" events.
 pub(super) fn match_takes_initiative(
     event: &GameEvent,
     trigger: &TriggerDefinition,

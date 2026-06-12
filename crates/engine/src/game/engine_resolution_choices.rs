@@ -2967,6 +2967,10 @@ pub(super) fn handle_resolution_choice(
             }
             let events_before_venture = events.len();
             effects::venture::handle_choose_dungeon(state, player, dungeon, events);
+            if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)?
+            {
+                state.waiting_for = waiting_for.clone();
+            }
             // CR 603.2 + CR 309.4c: RoomEntered from the chosen dungeon must dispatch
             // card triggers such as "Whenever you venture into the dungeon" (issue #1297).
             // The resolution-choice path does not run `run_post_action_pipeline`.
@@ -2974,6 +2978,11 @@ pub(super) fn handle_resolution_choice(
                 batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
             {
                 return Ok(outcome);
+            }
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -2993,10 +3002,19 @@ pub(super) fn handle_resolution_choice(
             }
             let events_before_venture = events.len();
             effects::venture::handle_choose_room(state, player, dungeon, room_index, events);
+            if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)?
+            {
+                state.waiting_for = waiting_for.clone();
+            }
             if let Some(outcome) =
                 batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
             {
                 return Ok(outcome);
+            }
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

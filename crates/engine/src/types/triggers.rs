@@ -338,7 +338,7 @@ pub enum TriggerMode {
     // Monarch / initiative
     /// CR 725: Triggers when a player becomes the monarch.
     BecomeMonarch,
-    /// CR 725: Triggers when a player takes the initiative.
+    /// CR 726.2: Triggers when a player takes the initiative.
     TakesInitiative,
 
     // Game state
