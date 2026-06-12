@@ -12145,6 +12145,20 @@ pub enum TriggerCondition {
     /// as a normal target filter evaluated against the trigger source.
     SourceMatchesFilter { filter: TargetFilter },
 
+    /// CR 603.4 + CR 120.1: Intervening-if predicate whose subject is the set
+    /// of objects that dealt the triggering combat damage ("if any of that
+    /// damage was dealt by a Warrior"). An object that deals damage is the
+    /// source of that damage (CR 120.1); this condition is true when ANY source
+    /// recorded in the triggering `CombatDamageDealtToPlayer` event's
+    /// `source_amounts` matches `filter`. Distinct from `SourceMatchesFilter`
+    /// (the ability's own permanent) and `ZoneChangeObjectMatchesFilter` (the
+    /// zone-change object) — it evaluates the event's damage sources, extending
+    /// the established source-vs-event-object split. Used by Mindblade Render
+    /// ("Whenever your opponents are dealt combat damage, if any of that damage
+    /// was dealt by a Warrior, ..."). Checked at both fire-time and
+    /// resolution-time per CR 603.4.
+    EventDamageSourceMatchesFilter { filter: TargetFilter },
+
     /// CR 614.12c + CR 607.2d + CR 603.4: True when the trigger source's
     /// persisted `ChosenAttribute::Label` matches the given anchor word.
     /// Used by anchor-word modal permanents (Khans of Tarkir Sieges, Tarkir:

@@ -4437,6 +4437,36 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
             matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
         }),
+        // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
+        // — true when ANY source of the triggering damage matches `filter`. An
+        // object that deals damage is the source of that damage (CR 120.1).
+        // Both damage-event shapes are handled because a `DamageReceived`
+        // trigger ("your opponents are dealt combat damage") is dispatched on
+        // the per-source `DamageDealt` event, while the batched
+        // `CombatDamageDealtToPlayer` event carries the step-local per-source
+        // amounts; checking either keeps the predicate correct regardless of
+        // which event the matcher fired on. Reuses `target_filter_matches_object`
+        // — the same matcher the trigger source-filter layer uses — relative to
+        // the ability's own source for context. The `unwrap_or` fallback is only
+        // reached if `source_id` is absent, which does not occur for a
+        // battlefield-bound triggered ability.
+        TriggerCondition::EventDamageSourceMatchesFilter { filter } => {
+            let ctx_source = source_id.unwrap_or(ObjectId(0));
+            let source_matches = |id: ObjectId| {
+                crate::game::trigger_matchers::target_filter_matches_object(
+                    state, id, filter, ctx_source,
+                )
+            };
+            match trigger_event {
+                Some(GameEvent::DamageDealt {
+                    source_id: dmg_src, ..
+                }) => source_matches(*dmg_src),
+                Some(GameEvent::CombatDamageDealtToPlayer { source_amounts, .. }) => {
+                    source_amounts.iter().any(|(src, _)| source_matches(*src))
+                }
+                _ => false,
+            }
+        }
         // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
         // persisted `ChosenAttribute::Label` (set when the anchor-word
         // permanent entered the battlefield) matches the linked anchor word.

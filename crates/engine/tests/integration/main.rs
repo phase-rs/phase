@@ -193,6 +193,7 @@ mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
 mod mill_double_redirect_choice_continuation;
 mod mill_rest_in_peace_redirect;
+mod mindblade_render_warrior_intervening_if_2867;
 mod mogg_war_marshal_echo_dies_trigger;
 mod morophon_chosen_type_1653;
 mod multi_upkeep_triggers_suspend;

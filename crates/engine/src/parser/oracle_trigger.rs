@@ -3045,6 +3045,12 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return result;
     }
 
+    // CR 603.4 + CR 120.1: "if any of that [combat] damage was dealt by
+    // <source-chain>" — damage-source-type intervening-if (Mindblade Render).
+    if let Some(result) = try_extract_event_damage_source_condition(&lower, text) {
+        return result;
+    }
+
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
     // Nom combinator prefix dispatch + parse_type_phrase for the remainder.
     {
@@ -3156,6 +3162,62 @@ fn try_extract_zone_change_object_filter_condition(
         strip_condition_clause(text, before.len(), consumed),
         Some(condition),
     ))
+}
+
+/// CR 603.4 + CR 120.1: "if any of that [combat] damage was dealt by
+/// <source-chain>" — intervening-if whose subject is the set of sources that
+/// dealt the triggering combat damage. An object that deals damage is the
+/// source of that damage (CR 120.1); the predicate is true when ANY of those
+/// sources matches the parsed `TargetFilter`. Used by Mindblade Render
+/// ("Whenever your opponents are dealt combat damage, if any of that damage
+/// was dealt by a Warrior, ..."). The source phrase reuses the same
+/// `parse_target` + " or " + `merge_or_filters` chain as the
+/// `OpponentDealtCombatDamage { source }` PlayerFilter so a `~ or a Dragon`
+/// style disjunction composes uniformly.
+fn try_extract_event_damage_source_condition(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    fn damage_source_prefix(i: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        let (i, _) = tag("if any of that ").parse(i)?;
+        // "combat " is optional: the canonical Oracle wording is "that damage",
+        // but "that combat damage" appears on related cards.
+        let (i, _) = opt(tag("combat ")).parse(i)?;
+        let (i, _) = tag("damage was dealt by ").parse(i)?;
+        Ok((i, ()))
+    }
+    let (before, _, after) = scan_preceded(lower, damage_source_prefix)?;
+    let prefix_len = lower.len() - before.len() - after.len();
+    let phrase_start = before.len() + prefix_len;
+    // The source phrase ends at the clause boundary (comma) or sentence end.
+    let phrase_end = after.find([',', '.']).unwrap_or(after.len());
+    // Parse the original-case source phrase ("a Warrior", "~ or a Dragon") so
+    // subtype canonicalization in `parse_target` sees the printed casing.
+    let phrase = &text[phrase_start..phrase_start + phrase_end];
+    let filter = parse_event_damage_source_chain(phrase);
+    if matches!(filter, TargetFilter::None | TargetFilter::Any) {
+        return None;
+    }
+    let clause_len = prefix_len + phrase_end;
+    Some((
+        strip_condition_clause(text, before.len(), clause_len),
+        Some(TriggerCondition::EventDamageSourceMatchesFilter { filter }),
+    ))
+}
+
+/// CR 120.1 + CR 608.2i: Fold a "X or Y or ..." damage-source phrase into a
+/// single `TargetFilter` via `parse_target` + `merge_or_filters`. Mirrors
+/// `parse_source_chain_phrase` in `oracle_quantity.rs` (the
+/// `OpponentDealtCombatDamage { source }` builder) so source-restriction
+/// parsing stays consistent across the quantity and trigger-condition layers.
+fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
+    let (first, rest) = super::oracle_target::parse_target(phrase.trim());
+    let rest = rest.trim_start();
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or ").parse(rest) {
+        let second = parse_event_damage_source_chain(after);
+        return merge_or_filters(first, second);
+    }
+    first
 }
 
 /// CR 603.4 + CR 111.1: Token intervening-if with `'s not` contraction
@@ -20194,6 +20256,48 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
+        );
+    }
+
+    #[test]
+    fn mindblade_render_intervening_if_warrior_source_parsed() {
+        // CR 603.4 + CR 120.1: the "if any of that damage was dealt by a
+        // Warrior" intervening-if must be hoisted to the trigger condition, not
+        // dropped (issue #2867).
+        let def = parse_trigger_line(
+            "Whenever your opponents are dealt combat damage, if any of that damage was dealt by a Warrior, you draw a card and you lose 1 life.",
+            "Mindblade Render",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::EventDamageSourceMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Warrior".to_string())],
+                    controller: None,
+                    properties: vec![],
+                }),
+            }),
+        );
+    }
+
+    #[test]
+    fn event_damage_source_intervening_if_handles_disjunction_and_combat_word() {
+        // The class generalizes past one card: a "~ or a Dragon" source
+        // disjunction and the optional "combat" qualifier both compose via the
+        // shared `parse_target` + `merge_or_filters` chain (CR 120.1 + CR 608.2i).
+        let def = parse_trigger_line(
+            "Whenever your opponents are dealt combat damage, if any of that combat damage was dealt by a Dragon, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::EventDamageSourceMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Dragon".to_string())],
+                    controller: None,
+                    properties: vec![],
+                }),
+            }),
         );
     }
 
