@@ -41541,7 +41541,7 @@ mod tests {
             name: "this".to_string(),
             description: Some("this token gains haste".to_string()),
         };
-        let rewritten = rewrite_token_created_this_way_unimplemented(&effect)
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect, None)
             .expect("recognizer must accept 'this token' prefix");
         match rewritten {
             Effect::GenericEffect {
@@ -41574,7 +41574,7 @@ mod tests {
             name: "that".to_string(),
             description: Some("that token gains flying".to_string()),
         };
-        let rewritten = rewrite_token_created_this_way_unimplemented(&effect)
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect, None)
             .expect("recognizer must accept 'that token' prefix");
         match rewritten {
             Effect::GenericEffect {
@@ -41587,6 +41587,34 @@ mod tests {
                     m,
                     ContinuousModification::AddKeyword {
                         keyword: Keyword::Flying,
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 611.2c + CR 701.15b: "the tokens are goaded" anaphor after token creation.
+    #[test]
+    fn rewrite_recognizer_accepts_the_tokens_goaded_prefix() {
+        let effect = Effect::unimplemented(
+            "the_tokens_goaded_anaphor",
+            "The tokens are goaded for the rest of the game",
+        );
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect, None)
+            .expect("recognizer must accept 'the tokens' goad prefix");
+        match rewritten {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert_eq!(duration, Some(Duration::Permanent));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
                     }
                 )));
             }

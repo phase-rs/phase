@@ -43,8 +43,6 @@ use crate::types::ability::{
     TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier, ZoneChangeClause,
 };
-#[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject, EffectScope, TapStateChange};
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -3141,7 +3139,24 @@ fn try_extract_zone_change_object_filter_condition(
     ))
 }
 
+/// CR 603.4 + CR 111.1: Token intervening-if with `'s not` contraction
+/// ("if it's not a token"). The legacy `if it ` + `isn't`/`is not` path
+/// already covers explicit negation; only the apostrophe contraction needs
+/// a dedicated arm so attachment lookbacks (`if it was enchanted`) keep their
+/// leading `was` for `parse_zone_change_object_filter_predicate`.
+fn parse_zone_change_object_token_contraction_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it's not a ").parse(input)?;
+    let (rest, _) = tag("token").parse(rest)?;
+    Ok((rest, zone_change_object_token_condition(true)))
+}
+
 fn parse_zone_change_object_filter_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    if let Ok((rest, condition)) = parse_zone_change_object_token_contraction_intervening_if(input)
+    {
+        return Ok((rest, condition));
+    }
     preceded(tag("if it "), parse_zone_change_object_filter_predicate).parse(input)
 }
 
@@ -3180,6 +3195,20 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
     }
 }
 
+fn zone_change_object_token_condition(negated: bool) -> TriggerCondition {
+    // CR 111.1: Tokens represent permanents that are not represented by cards.
+    let prop = if negated {
+        FilterProp::NonToken
+    } else {
+        FilterProp::Token
+    };
+    TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: None,
+        destination: Zone::Battlefield,
+        filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![prop])),
+    }
+}
+
 fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, contracted_negation) = alt((
         value(true, alt((tag("isn't"), tag("wasn't")))),
@@ -3192,21 +3221,8 @@ fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, Tri
     let (rest, _) = space1.parse(rest)?;
     let (rest, _) = tag("token").parse(rest)?;
 
-    // CR 111.1: Tokens represent permanents that are not represented by cards.
-    let prop = if contracted_negation || explicit_negation.is_some() {
-        FilterProp::NonToken
-    } else {
-        FilterProp::Token
-    };
-
-    Ok((
-        rest,
-        TriggerCondition::ZoneChangeObjectMatchesFilter {
-            origin: None,
-            destination: Zone::Battlefield,
-            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![prop])),
-        },
-    ))
+    let negated = contracted_negation || explicit_negation.is_some();
+    Ok((rest, zone_change_object_token_condition(negated)))
 }
 
 fn map_attachment_kind_filter_prop(input: &str) -> OracleResult<'_, FilterProp> {
@@ -11544,19 +11560,20 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
-        CardSelectionMode, CastingPermission, ChosenAttribute, Comparator, ContinuousModification,
-        ControllerRef, CountScope, DamageModification, DamageSource, DelayedTriggerCondition,
-        DiscardSelfScope, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
-        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        SharedQuality, TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, AttackScope, AttackSubject,
+        BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute, Comparator,
+        ContinuousModification, ControllerRef, CountScope, DamageModification, DamageSource,
+        DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
+        ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, SharedQuality, TapStateChange, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::WaitingFor;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::statics::CastFrequency;
+    use crate::types::statics::{CastFrequency, StaticMode};
 
     fn blocking_source_beyond_first_expr() -> QuantityExpr {
         let count_minus_one = QuantityExpr::Offset {
@@ -11967,6 +11984,66 @@ mod tests {
         ));
     }
 
+    /// CR 603.4 + CR 111.1: Life of the Party — "if it's not a token" uses the
+    /// `'s not` contraction axis; must hoist to the same NonToken intervening-if
+    /// as the explicit "if it isn't a token" form.
+    #[test]
+    fn trigger_etb_self_if_its_not_token_attaches_zone_change_non_token_condition() {
+        for text in [
+            "When this creature enters, if it's not a token, each opponent creates a token that's a copy of it.",
+            "When this creature enters, if it is not a token, each opponent creates a token that's a copy of it.",
+        ] {
+            let def = parse_trigger_line(text, "Life of the Party");
+            assert_eq!(def.mode, TriggerMode::ChangesZone);
+            assert_eq!(def.destination, Some(Zone::Battlefield));
+            match def.condition {
+                Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    filter: TargetFilter::Typed(typed),
+                    ..
+                }) => assert!(
+                    typed.properties.contains(&FilterProp::NonToken),
+                    "expected NonToken for {text:?}, got {typed:?}"
+                ),
+                other => panic!("expected NonToken intervening-if for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 603.4 + CR 701.15b: Life of the Party — token-copy ETB sub-clause
+    /// "The tokens are goaded for the rest of the game" must rewrite to a
+    /// permanent GenericEffect on LastCreated, not Unimplemented.
+    #[test]
+    fn trigger_life_of_the_party_etb_goads_created_tokens() {
+        let def = parse_trigger_line(
+            "When this creature enters, if it's not a token, each opponent creates a token that's a copy of it. The tokens are goaded for the rest of the game.",
+            "Life of the Party",
+        );
+        let execute = def.execute.as_ref().expect("execute ability");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::CopyTokenOf { .. }),
+            "expected CopyTokenOf primary, got {:?}",
+            execute.effect
+        );
+        let sub = execute.sub_ability.as_ref().expect("goad sub_ability");
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::Permanent));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
+    }
+
     #[test]
     fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
         for (text, expected_prop) in [
@@ -11991,6 +12068,46 @@ mod tests {
                 ),
                 other => panic!("expected token filter condition for {text}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
+        let def = parse_trigger_line(
+            "When this creature dies, if it was enchanted, create a Junk token.",
+            "Gunner Conscript",
+        );
+        match def.condition {
+            Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                ..
+            }) => {
+                let has_aura = typed.properties.iter().any(|p| match p {
+                    FilterProp::HasAttachment { kind, .. } => *kind == AttachmentKind::Aura,
+                    FilterProp::HasAnyAttachmentOf { kinds, .. } => {
+                        kinds.contains(&AttachmentKind::Aura)
+                    }
+                    _ => false,
+                });
+                assert!(has_aura, "expected enchanted lookback, got {typed:?}");
+            }
+            other => panic!("expected attachment intervening-if, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zone_change_token_contraction_intervening_if_parses_its_not_a_token() {
+        let (rest, condition) = parse_zone_change_object_token_contraction_intervening_if(
+            "if it's not a token, create a token",
+        )
+        .expect("contraction intervening-if parses");
+        assert_eq!(rest, ", create a token");
+        match condition {
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                ..
+            } => assert!(typed.properties.contains(&FilterProp::NonToken)),
+            other => panic!("expected NonToken condition, got {other:?}"),
         }
     }
 

@@ -578,6 +578,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::AssignDamageFromToughness);
     }
 
+    // CR 701.15b: Positive goaded designation on token anaphors and compound
+    // statics ("The tokens are goaded for the rest of the game", Life of the
+    // Party; "Enchanted creature … is goaded").
+    if nom_primitives::scan_contains(unquoted_lower.as_str(), "is goaded")
+        || nom_primitives::scan_contains(unquoted_lower.as_str(), "are goaded")
+    {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        });
+    }
+
     // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
     // type" predicate — the Changeling-class type grant when it appears as
     // one conjunct in an Aura/Equipment compound static ("Enchanted creature
