@@ -5326,26 +5326,32 @@ fn parse_damage_prevention_replacement(
     // `damage_target_filter = None` caused the shield to prevent ALL damage to
     // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
     // class of bug.
-    let valid_card_filter: Option<TargetFilter> =
-        if nom_primitives::scan_contains(working_lower, "dealt to ~")
+    let valid_card_filter: Option<TargetFilter> = if nom_primitives::scan_contains(working_lower, "dealt to ~")
             || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
-        {
-            // CR 615.1a: Self-scoped prevention ("If damage would be dealt to ~")
-            // must gate on `valid_card: SelfRef`, not a broad creature damage filter.
-            Some(TargetFilter::SelfRef)
-        } else {
-            nom_primitives::scan_at_word_boundaries(working_lower, |input| {
-                preceded(
-                    tag::<_, _, OracleError<'_>>("dealt to "),
-                    terminated(
-                        parse_attached_subject_target_filter,
-                        alt((value((), eof), value((), multispace1), value((), tag(".")))),
-                    ),
-                )
-                .parse(input)
-            })
-            .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
-        };
+            // CR 615.1a: Subject-first self-recipient form — "If ~ would be dealt
+            // damage, prevent that damage ..." (Unbreathing Horde — issue #2888).
+            // `~` is the source card, so the shield is self-scoped; without
+            // `SelfRef` `valid_card` stays None and the shield wrongly prevents
+            // ALL damage (including damage dealt to players).
+            || nom_primitives::scan_contains(working_lower, "~ would be dealt")
+            || nom_primitives::scan_contains(working_lower, "this creature would be dealt")
+    {
+        // CR 615.1a: Self-scoped prevention ("If damage would be dealt to ~")
+        // must gate on `valid_card: SelfRef`, not a broad creature damage filter.
+        Some(TargetFilter::SelfRef)
+    } else {
+        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+            preceded(
+                tag::<_, _, OracleError<'_>>("dealt to "),
+                terminated(
+                    parse_attached_subject_target_filter,
+                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                ),
+            )
+            .parse(input)
+        })
+        .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
+    };
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(working_lower);
@@ -6336,6 +6342,26 @@ mod tests {
             )
             .as_deref(),
             Some("You gain life equal to the damage prevented this way.")
+        );
+    }
+
+    #[test]
+    fn unbreathing_horde_self_damage_prevention_is_self_scoped() {
+        // CR 615.1a + issue #2888: "If ~ would be dealt damage, prevent that
+        // damage and remove a +1/+1 counter from it" must scope the shield to
+        // the source itself (valid_card SelfRef), not prevent ALL damage
+        // (including damage dealt to players).
+        let def = parse_replacement_line(
+            "If ~ would be dealt damage, prevent that damage and remove a +1/+1 counter from it.",
+            "Unbreathing Horde",
+        )
+        .expect("Unbreathing Horde damage-prevention replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "self-damage prevention must be scoped to the source, got {:?}",
+            def.valid_card
         );
     }
 

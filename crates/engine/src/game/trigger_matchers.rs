@@ -774,6 +774,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CreatureDestroyed { object_id }
         | GameEvent::Evolved { object_id }
         | GameEvent::PermanentSacrificed { object_id, .. }
+        | GameEvent::ControllerChanged { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
         | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
         // CR 702.140c + CR 730.2c: the merged (surviving) permanent is the subject.
@@ -2557,10 +2558,11 @@ pub(super) fn match_changes_controller(
 ) -> bool {
     matches!(
         event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::GainControl,
-            ..
-        }
+        GameEvent::ControllerChanged { .. }
+            | GameEvent::EffectResolved {
+                kind: EffectKind::GainControl,
+                ..
+            }
     )
 }
 

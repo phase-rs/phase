@@ -6,8 +6,9 @@ use super::support::*;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, ObjectProperty, PlayerFilter, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -2975,6 +2976,80 @@ fn static_cost_floor_canonical_form_no_condition() {
     );
 }
 
+/// CR 601.2f + CR 107.3 + CR 122.1a: Zimone, Infinite Analyst's per-counter
+/// cost reduction — "The first spell you cast with {X} in its mana cost each
+/// turn costs {1} less to cast for each +1/+1 counter on ~." This regressed
+/// (issue #1359): the static dropped both the `{X}`-cost spell filter and the
+/// "first spell each turn" gate, so the reduction applied to every spell, every
+/// time. Asserts all three load-bearing axes are present:
+///   1. `spell_filter` carries `HasXInManaCost` (CR 107.3) — only {X}-spells.
+///   2. `condition` gates on `SpellsCastThisTurn(HasXInManaCost) == 0` — only
+///      the FIRST such spell each turn. "each turn" carries NO `DuringYourTurn`,
+///      so the first {X}-spell qualifies on any player's turn.
+///   3. `dynamic_count` is `CountersOn { Source, Plus1Plus1 }` — reduces by K
+///      for K +1/+1 counters on the source (CR 122.1a).
+#[test]
+fn static_zimone_first_x_spell_each_turn_reduces_per_plus1_counter() {
+    let def = parse_static_line(
+        "The first spell you cast with {X} in its mana cost each turn costs {1} less to cast for each +1/+1 counter on ~.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ref dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    // Axis 1: only spells with {X} in their mana cost are reduced.
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected {X}-cost spell filter");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed spell filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::HasXInManaCost),
+        "reduction must be gated on HasXInManaCost, got {tf:?}"
+    );
+
+    // Axis 3: per-+1/+1-counter dynamic quantity on the source.
+    assert!(
+        matches!(
+            dynamic_count,
+            Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Plus1Plus1),
+            })
+        ),
+        "reduction amount must be per +1/+1 counter on the source, got {dynamic_count:?}"
+    );
+
+    // Axis 2: only the FIRST {X}-spell each turn — no DuringYourTurn for the
+    // "each turn" timing (any player's turn qualifies).
+    let condition = def.condition.expect("expected first-spell-each-turn gate");
+    assert!(
+        matches!(
+            &condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(inner),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } if matches!(inner, TargetFilter::Typed(itf) if itf.properties.contains(&FilterProp::HasXInManaCost))
+        ),
+        "expected SpellsCastThisTurn(HasXInManaCost) == 0 with no DuringYourTurn, got {condition:?}"
+    );
+}
+
 #[test]
 fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
     let def = parse_static_line(
@@ -3026,6 +3101,115 @@ fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
                 rhs: QuantityExpr::Fixed { value: 0 },
             } if inner == spell_filter.as_ref().unwrap()
         )));
+}
+
+#[test]
+fn static_first_qualified_spell_costs_more_handles_each_opponent_casts() {
+    let def = parse_static_line(
+        "The first noncreature spell each opponent casts each turn costs {1} more to cast.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected RaiseCost, got {:?}", def.mode);
+    };
+
+    let filter = spell_filter.as_ref().expect("expected spell filter");
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf
+                .type_filters
+                .iter()
+                .any(|entry| matches!(entry, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)))
+    ));
+
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::Opponent)
+        ))
+    );
+
+    let condition = def.condition.expect("expected first-spell condition");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if matches!(
+            inner,
+            TargetFilter::Typed(tf)
+                if tf
+                    .type_filters
+                    .iter()
+                    .any(|entry| matches!(entry, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)))
+        )
+    ));
+}
+
+#[test]
+fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
+    let def =
+        parse_static_line("The first spell you cast each turn costs {1} less to cast.").unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(
+        spell_filter,
+        &Some(TargetFilter::Typed(TypedFilter::card()))
+    );
+
+    let condition = def.condition.expect("expected first-spell condition");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if inner == spell_filter.as_ref().unwrap()
+    ));
+}
+
+/// CR 601.2f + CR 702.33d: "The first kicked spell you cast each turn costs {1}
+/// less to cast." (Vine Gecko). The "kicked" qualifier — whether the spell's
+/// kicker additional cost was paid — is not a representable spell-cost filter,
+/// so the parser must DECLINE the cost static rather than emit a filterless,
+/// conditionless reducer. A broad reducer would silently drop both the printed
+/// "first … each turn" once-per-turn gate and the "kicked" qualifier, reducing
+/// every spell the controller casts (the bug this guards against).
+#[test]
+fn static_first_kicked_spell_does_not_emit_broad_reducer() {
+    let parsed =
+        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.");
+
+    assert!(
+        parsed.is_none(),
+        "kicked-spell cost reducer must be declined until paid-kicker state is representable; got {parsed:?}"
+    );
 }
 
 #[test]
@@ -4365,6 +4549,17 @@ fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
         .contains(&ContinuousModification::AddToughness { value: 3 }));
     assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
     assert_eq!(defs[1].affected, defs[0].affected);
+}
+
+#[test]
+fn parse_continuous_modifications_are_goaded_emits_goaded_static_mode() {
+    let mods = parse_continuous_modifications("are goaded for the rest of the game");
+    assert!(mods.iter().any(|m| matches!(
+        m,
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded
+        }
+    )));
 }
 
 #[test]

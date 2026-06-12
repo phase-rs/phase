@@ -1941,6 +1941,7 @@ pub fn resolve_effect(
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
+        Effect::GainControlAll { .. } => gain_control::resolve_all(state, ability, events),
         Effect::Goad { .. } | Effect::GoadAll { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
@@ -1979,6 +1980,7 @@ pub fn resolve_effect(
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),
+        Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)
@@ -2255,6 +2257,16 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    if let Effect::SetTapState {
+        scope: EffectScope::All,
+        target,
+        ..
+    } = effect
+    {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     // `GrantCastingPermission` has a `target` field that is not exposed by
     // `Effect::target_filter()` (it selects objects to grant permission to,
     // not spell/ability targets). Inspect directly so "the rest" / "those
@@ -2354,6 +2366,13 @@ fn affected_objects_from_events(
             .filter_map(|target| match target {
                 TargetRef::Object(id) => Some(*id),
                 TargetRef::Player(_) => None,
+            })
+            .collect(),
+        Effect::GainControlAll { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ControllerChanged { object_id, .. } => Some(*object_id),
+                _ => None,
             })
             .collect(),
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
@@ -6073,10 +6092,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
-        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        ControllerRef, DelayedTriggerCondition, Duration, EffectScope, FilterProp,
+        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
+        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -9125,6 +9144,93 @@ mod tests {
             .filter(|o| o.name == "Treasure")
             .count();
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
+    }
+
+    /// CR 613.1b + CR 608.2c: a mass gain-control effect publishes the objects
+    /// actually gained so a downstream "those creatures" continuation can act on
+    /// that exact set (Call for Aid / Mob Rule class). This exercises both the
+    /// `GainControlAll` publication arm and the `SetTapState(All)` tracked-set
+    /// consumer path; without either, the creatures remain tapped.
+    #[test]
+    fn gain_control_all_publishes_tracked_set_for_those_creatures_tail() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Call for Aid".to_string(),
+            Zone::Stack,
+        );
+
+        let make_tapped_creature = |state: &mut GameState, card_id: u64, name: &str| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.tapped = true;
+            id
+        };
+        let creature_a = make_tapped_creature(&mut state, 2, "Stolen A");
+        let creature_b = make_tapped_creature(&mut state, 3, "Stolen B");
+        let noncreature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Ignored Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&noncreature).unwrap().tapped = true;
+
+        let untap_those_creatures = ResolvedAbility::new(
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let gain_control = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(untap_those_creatures);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &gain_control, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        for id in [creature_a, creature_b] {
+            let obj = state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.controller,
+                PlayerId(0),
+                "gained creature should be controlled by P0"
+            );
+            assert!(
+                !obj.tapped,
+                "gained creature should be untapped by the tracked-set tail"
+            );
+        }
+        assert!(
+            state.objects.get(&noncreature).unwrap().tapped,
+            "non-gained object must not be included in the tracked set"
+        );
     }
 
     /// CR 701.20b + CR 608.2c: `RevealTop` publishes `CardsRevealed`, not

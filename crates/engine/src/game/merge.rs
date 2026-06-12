@@ -142,6 +142,10 @@ pub fn merge_object_onto(
 
     if let Some(survivor) = state.objects.get_mut(&target_id) {
         survivor.merged_components = ordered;
+        // CR 730.2: mark this pile as Mutate-built so the CR 712.4c transform
+        // guard can distinguish it from a Meld survivor (a two-creature mutate
+        // also has `merged_components.len() == 2`).
+        survivor.merge_kind = Some(crate::game::game_object::MergeKind::Mutate);
     }
 
     // CR 730.2d: a merged permanent is a token only if its TOPMOST component is a
@@ -262,7 +266,7 @@ fn remove_merge_layer_effect(state: &mut GameState, target_id: ObjectId) {
     crate::game::layers::mark_layers_full(state);
 }
 
-fn install_merge_layer_effect(
+pub(crate) fn install_merge_layer_effect(
     state: &mut GameState,
     target_id: ObjectId,
     controller: crate::types::player::PlayerId,

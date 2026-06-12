@@ -8678,6 +8678,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // that fires from exile when the haunted creature dies. Runs after parser
     // triggers so the creature-form payoff can clone the parsed ETB effect.
     crate::database::haunt::synthesize_haunt(face);
+    // CR 701.42 / CR 712.4: Meld parity hook. The parser fully wires the meld
+    // instigator's gated ability + `Effect::Meld`; this hook exists for parity
+    // with sibling keyword synthesizers and as a future-proofing seam.
+    crate::database::meld::synthesize_meld(face);
     // CR 702.75a: Hideaway ETB look-and-exile-face-down — self-contained
     // building block (Dig + conceal continuation).
     crate::database::hideaway::synthesize_hideaway(face);

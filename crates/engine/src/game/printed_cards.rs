@@ -407,6 +407,33 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
     }
 }
 
+/// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent
+/// DIRECTLY from the `result` card's face. Meld is LAYER-ONLY: this converter
+/// feeds `install_merge_layer_effect`, so the melded permanent presents the
+/// combined back faces (the named result card) WITHOUT mutating the survivor's
+/// `base_*` — each component returns as its own front face on leave (CR 712.21).
+/// Parameterized over any result face (a building block, not a per-card path);
+/// mirrors `apply_card_face_to_object`'s field derivations without writing base.
+pub(crate) fn meld_copiable_values(result_face: &CardFace) -> CopiableValues {
+    CopiableValues {
+        name: result_face.name.clone(),
+        mana_cost: result_face.mana_cost.clone(),
+        color: printed_colors_from_face(result_face),
+        card_types: result_face.card_type.clone(),
+        power: parse_pt(&result_face.power),
+        toughness: parse_pt(&result_face.toughness),
+        loyalty: result_face
+            .loyalty
+            .as_ref()
+            .and_then(|value| value.parse::<u32>().ok()),
+        keywords: result_face.keywords.clone(),
+        abilities: Arc::new(result_face.abilities.clone()),
+        trigger_definitions: Arc::new(result_face.triggers.clone()),
+        replacement_definitions: Arc::new(result_face.replacements.clone()),
+        static_definitions: Arc::new(result_face.static_abilities.clone()),
+    }
+}
+
 pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
     obj.name = values.name.clone();
     obj.mana_cost = values.mana_cost.clone();
@@ -675,6 +702,13 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
                 }
             }
         }
+        // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
+        // card's characteristics, but `result` is an outside-the-game third card.
+        // Seed its name so `build_conjure_registry` preloads its `CardFace` into
+        // `card_face_registry`. `source` and `partner` are live battlefield
+        // objects the resolver finds by printed identity — they need no registry
+        // seeding.
+        Effect::Meld { result, .. } => out.push(result.clone()),
         // A spellbook draft conjures the chosen card, but the list lives on the
         // card face (`metadata.spellbook`), not in the effect — the registry
         // seed collects it directly from the face (see
@@ -792,6 +826,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
