@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
-use crate::types::statics::{CrewAction, CrewContributionKind};
+use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
@@ -2477,6 +2477,93 @@ fn static_opponent_spells_targeting_commanders_cost_more() {
     assert_eq!(commander_tf.controller, Some(ControllerRef::You));
     assert!(commander_tf.type_filters.contains(&TypeFilter::Permanent));
     assert!(commander_tf.properties.contains(&FilterProp::IsCommander));
+}
+
+#[test]
+fn parse_static_line_imposes_terror_tax() {
+    let def = parse_static_line(
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.",
+    )
+    .expect("parse_static_line should recognize terror tax");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ImposeAdditionalCost {
+            action: AdditionalCostTaxAction::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn try_parse_impose_additional_cost_terror_line() {
+    let text =
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.";
+    let lower = text.to_lowercase();
+    let def = try_parse_impose_additional_cost(text, &lower).expect("should parse terror tax");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ImposeAdditionalCost {
+            action: AdditionalCostTaxAction::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn static_opponent_spells_targeting_self_cost_additional_life_to_cast() {
+    let def = parse_static_line(
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+    let StaticMode::ImposeAdditionalCost {
+        cost: AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+        },
+        spell_filter: Some(TargetFilter::Typed(target_tf)),
+        action: AdditionalCostTaxAction::Cast,
+    } = def.mode
+    else {
+        panic!(
+            "expected ImposeAdditionalCost PayLife(3), got {:?}",
+            def.mode
+        );
+    };
+    let filter = target_tf
+        .properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::Targets { filter } => Some(filter.as_ref()),
+            _ => None,
+        })
+        .expect("expected Targets property on spell filter");
+    assert!(matches!(filter, TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_mana_abilities_cost_additional_life_to_activate() {
+    let def =
+        parse_static_line("Mana abilities of this land cost an additional 1 life to activate.")
+            .unwrap();
+
+    let StaticMode::ImposeAdditionalCost {
+        cost: AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+        },
+        action: AdditionalCostTaxAction::Activate,
+        ..
+    } = def.mode
+    else {
+        panic!("expected activate-life tax, got {:?}", def.mode);
+    };
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
 }
 
 #[test]

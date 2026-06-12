@@ -255,6 +255,7 @@ mod teferi_time_raveler_sorcery_speed_lock;
 mod tempt_with_discovery;
 mod terra_herald_optional_prompt;
 mod terra_magical_adept_milled_enchantment;
+mod terror_of_the_peaks_issue_2911;
 mod the_chain_veil_loyalty_grants;
 mod the_ur_dragon_eminence;
 mod thoughtweft_trample_regression;

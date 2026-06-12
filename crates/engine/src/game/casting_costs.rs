@@ -2925,6 +2925,30 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         });
     }
 
+    let imposed_costs =
+        super::casting::collect_imposed_additional_cast_costs(state, player, object_id, &ability);
+    if !imposed_costs.is_empty() {
+        let combined = match imposed_costs.len() {
+            1 => imposed_costs.into_iter().next().expect("checked len"),
+            _ => AbilityCost::Composite {
+                costs: imposed_costs,
+            },
+        };
+        if !combined.is_payable(state, player, object_id) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay imposed additional cost".to_string(),
+            ));
+        }
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        return pay_additional_cost(state, player, combined, pending, events);
+    }
+
     let waiting_for = pay_and_push(
         state,
         player,

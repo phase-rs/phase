@@ -21,8 +21,9 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
-    CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming, ProhibitionScope, StaticMode,
+    ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
+    CastingProhibitionCondition, CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -4409,15 +4410,18 @@ fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
 
 fn target_ref_matches_cost_filter(
     state: &GameState,
+    static_source_id: ObjectId,
     source_controller: PlayerId,
-    ability: &ResolvedAbility,
     target: &TargetRef,
     filter: &TargetFilter,
 ) -> bool {
     match target {
         TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_ability_with_controller(
-                ability,
+            // CR 601.2f: Target-referenced cost filters ("that target this creature")
+            // resolve SelfRef against the static's source permanent, not the spell
+            // being cast.
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                static_source_id,
                 source_controller,
             );
             if super::filter::matches_stack_target_filter(state, *object_id, filter, &ctx) {
@@ -4436,6 +4440,7 @@ fn target_ref_matches_cost_filter(
 
 fn selected_targets_match_filter(
     state: &GameState,
+    static_source_id: ObjectId,
     source_controller: PlayerId,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
@@ -4448,11 +4453,23 @@ fn selected_targets_match_filter(
 
     if require_all {
         targets.iter().all(|target| {
-            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
+            target_ref_matches_cost_filter(
+                state,
+                static_source_id,
+                source_controller,
+                target,
+                filter,
+            )
         })
     } else {
         targets.iter().any(|target| {
-            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
+            target_ref_matches_cost_filter(
+                state,
+                static_source_id,
+                source_controller,
+                target,
+                filter,
+            )
         })
     }
 }
@@ -4494,10 +4511,24 @@ fn spell_matches_cost_filter_with_selected_targets(
 
             tf.properties.iter().all(|prop| match prop {
                 crate::types::ability::FilterProp::Targets { filter } => {
-                    selected_targets_match_filter(state, source_controller, ability, filter, false)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        false,
+                    )
                 }
                 crate::types::ability::FilterProp::TargetsOnly { filter } => {
-                    selected_targets_match_filter(state, source_controller, ability, filter, true)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        true,
+                    )
                 }
                 _ => true,
             })
@@ -4693,6 +4724,77 @@ fn collect_battlefield_cost_modifiers(
     }
 
     collected
+}
+
+/// CR 601.2f + CR 118.8: Collect additional non-mana costs imposed by battlefield
+/// statics once targets are chosen. Terror of the Peaks class.
+pub(super) fn collect_imposed_additional_cast_costs(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> Vec<AbilityCost> {
+    use crate::types::ability::ControllerRef;
+
+    let mut costs = Vec::new();
+    for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let bf_id = src_obj.id;
+        let source_controller = src_obj.controller;
+
+        let StaticMode::ImposeAdditionalCost {
+            cost,
+            spell_filter,
+            action: AdditionalCostTaxAction::Cast,
+        } = &def.mode
+        else {
+            continue;
+        };
+
+        let has_target_filter = spell_filter
+            .as_ref()
+            .is_some_and(cost_filter_has_target_ref);
+        if !has_target_filter {
+            continue;
+        }
+
+        if matches!(def.affected, Some(TargetFilter::SelfRef)) {
+            continue;
+        }
+
+        if def.active_zones.is_empty() {
+            if src_obj.zone != Zone::Battlefield {
+                continue;
+            }
+        } else if !def.active_zones.contains(&src_obj.zone) {
+            continue;
+        }
+
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            match tf.controller {
+                Some(ControllerRef::You) if caster != source_controller => continue,
+                Some(ControllerRef::Opponent) if caster == source_controller => continue,
+                _ => {}
+            }
+        }
+
+        if let Some(ref cond) = def.condition {
+            if !super::layers::evaluate_condition(state, cond, caster, bf_id) {
+                continue;
+            }
+        }
+
+        if let Some(ref filter) = spell_filter {
+            if !spell_matches_cost_filter_with_selected_targets(
+                state, caster, spell_id, filter, bf_id, ability,
+            ) {
+                continue;
+            }
+        }
+
+        costs.push(cost.clone());
+    }
+
+    costs
 }
 
 fn apply_cost_modifications_in_order(mana_cost: &mut ManaCost, collected: &[CostModification]) {
