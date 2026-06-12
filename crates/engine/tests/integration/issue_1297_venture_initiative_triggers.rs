@@ -7,6 +7,7 @@
 //!   - CR 701.49: venture into the dungeon moves the venture marker.
 //!   - CR 726.2 / CR 726.3: taking and holding the initiative.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -26,8 +27,8 @@ fn zombie_giant_tokens(state: &engine::types::game_state::GameState) -> usize {
                 o.is_token
                     && o.card_types.subtypes.iter().any(|s| s == "Zombie")
                     && o.card_types.subtypes.iter().any(|s| s == "Giant")
-                    && o.power == 5
-                    && o.toughness == 5
+                    && o.power == Some(5)
+                    && o.toughness == Some(5)
             })
         })
         .count()
@@ -102,7 +103,7 @@ fn takes_initiative_trigger_resolves_on_initiative_taken() {
 #[test]
 fn initiative_attack_trigger_skips_without_initiative() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::CombatPhase);
+    scenario.at_phase(Phase::PreCombatMain);
 
     let attacker = scenario
         .add_creature_from_oracle(P0, "Initiative Attacker", 3, 3, INITIATIVE_ATTACK)
@@ -112,9 +113,11 @@ fn initiative_attack_trigger_skips_without_initiative() {
     runner.state_mut().initiative = None;
     let hand_before = runner.state().players[0].hand.len();
 
+    runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attackers: vec![(attacker, P1)],
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers");
     drain_to_priority(&mut runner);
@@ -130,7 +133,7 @@ fn initiative_attack_trigger_skips_without_initiative() {
 #[test]
 fn initiative_attack_trigger_draws_with_initiative() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::CombatPhase);
+    scenario.at_phase(Phase::PreCombatMain);
     scenario.add_card_to_library_top(P0, "Island");
 
     let attacker = scenario
@@ -141,9 +144,11 @@ fn initiative_attack_trigger_draws_with_initiative() {
     runner.state_mut().initiative = Some(P0);
     let hand_before = runner.state().players[0].hand.len();
 
+    runner.pass_both_players();
     runner
         .act(GameAction::DeclareAttackers {
-            attackers: vec![(attacker, P1)],
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers with initiative");
     drain_to_priority(&mut runner);
