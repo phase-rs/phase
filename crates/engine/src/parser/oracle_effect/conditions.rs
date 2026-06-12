@@ -2312,6 +2312,7 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::DayNightIs { state: *state })
         }
         StaticCondition::SourceEnteredThisTurn => None,
+        StaticCondition::WasCast { .. } => None,
         StaticCondition::IsPresent { filter } => {
             let filter = match filter {
                 Some(f) => f.clone(),

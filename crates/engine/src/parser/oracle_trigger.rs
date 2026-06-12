@@ -2493,6 +2493,10 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
+        // CR 601.2 + CR 611.3a: "as long as it was cast" — 1:1 bridge to the
+        // trigger-side cast-origin check (same `cast_from_zone` field).
+        StaticCondition::WasCast { zone } => Some(TriggerCondition::WasCast { zone: *zone }),
+
         // CR 702.176a + CR 603.4: Impending's battlefield trigger checks the
         // persistent alternative-cost marker, not whether it was paid this turn.
         StaticCondition::CastVariantPaid { variant } => {
