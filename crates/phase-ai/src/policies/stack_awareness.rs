@@ -202,7 +202,7 @@ pub(crate) fn assess_spell_impact(state: &GameState, entry: &StackEntry) -> f64 
                     Effect::DestroyAll { .. }
                     | Effect::DamageAll { .. }
                     | Effect::ChangeZoneAll { .. } => 4.0,
-                    Effect::GainControl { .. } => 2.5,
+                    Effect::GainControl { .. } | Effect::GainControlAll { .. } => 2.5,
                     Effect::Destroy { .. } | Effect::Fight { .. } => 1.5,
                     Effect::Counter { .. } => 1.5,
                     Effect::Draw {

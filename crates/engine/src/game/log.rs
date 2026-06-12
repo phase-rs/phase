@@ -153,6 +153,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
         | GameEvent::CounterRemoved { .. }
+        | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::Regenerated { .. }
@@ -749,6 +750,18 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" sacrifices "),
             card_seg(state, *object_id),
+        ],
+
+        GameEvent::ControllerChanged {
+            object_id,
+            old_controller,
+            new_controller,
+        } => vec![
+            card_seg(state, *object_id),
+            text(" changed controller from "),
+            player_seg(state, *old_controller),
+            text(" to "),
+            player_seg(state, *new_controller),
         ],
 
         GameEvent::EffectResolved { kind, source_id } => vec![
