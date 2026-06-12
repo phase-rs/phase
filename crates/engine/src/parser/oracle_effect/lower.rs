@@ -24,9 +24,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
@@ -4110,12 +4110,16 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
 /// established, mirroring how the "that player" event-context anaphor resolves.
 ///
 /// Returns `None` for any recipient that is not the bare anaphor, and for
-/// contexts with no player scope — so the caller's generic target parse (and
-/// the object "them" → `ParentTarget` anaphor used by, e.g., "destroy them")
-/// is left untouched. The scope mapping matches `that_player_library_filter`:
-/// `ScopedPlayer` (per-player phase triggers) stays `ScopedPlayer`; the
-/// triggering-event and target-player scopes resolve to `TriggeringPlayer`;
-/// attack triggers resolve to the `DefendingPlayer`.
+/// contexts with neither a player scope nor a player-actor trigger subject — so
+/// the caller's generic target parse (and the object "them" → `ParentTarget`
+/// anaphor used by, e.g., "destroy them") is left untouched. The scope mapping
+/// matches `that_player_library_filter`: `ScopedPlayer` (per-player phase
+/// triggers) stays `ScopedPlayer`; the triggering-event and target-player scopes
+/// resolve to `TriggeringPlayer`; attack triggers resolve to the
+/// `DefendingPlayer`. When no explicit scope is set, a player-actor trigger
+/// subject ("an opponent draws a card") makes "them"/"they" the triggering
+/// player — the same subject fallback `that_player_library_filter` uses
+/// (Razorkin Needlehead, issue #2869).
 fn resolve_player_anaphor_damage_recipient(
     after_to: &str,
     ctx: &ParseContext,
@@ -4139,7 +4143,22 @@ fn resolve_player_anaphor_damage_recipient(
             Some(TargetFilter::TriggeringPlayer)
         }
         Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
-        _ => None,
+        // CR 608.2k: No explicit player scope — fall back to the trigger
+        // subject. A player-actor subject (a bare player filter: empty type
+        // filters with a controller ref, e.g. "an opponent draws a card", or
+        // `TargetFilter::Player`) makes "them"/"they" the triggering player,
+        // not the object the generic pronoun resolver would bind. An
+        // object-typed subject (non-empty type filters) keeps that object
+        // anaphor. Mirrors `that_player_library_filter`'s subject fallback.
+        _ => match &ctx.subject {
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters.is_empty() && tf.controller.is_some() =>
+            {
+                Some(TargetFilter::TriggeringPlayer)
+            }
+            Some(TargetFilter::Player) => Some(TargetFilter::TriggeringPlayer),
+            _ => None,
+        },
     }
 }
 
@@ -4892,9 +4911,86 @@ pub(super) fn apply_where_x_effect_expression(
                 if let Some(condition) = static_def.condition.as_mut() {
                     apply_where_x_static_condition(condition, where_x_expression);
                 }
+                // CR 107.3i: A continuous grant's dynamic P/T ("creatures you
+                // control get +X/+X …, where X is the number of creatures you
+                // control" — Craterhoof Behemoth) parses its X in isolation and
+                // defaults to `CostXPaid`; the surrounding where-clause is the
+                // more specific binding and must own every X reference, including
+                // those nested in the grant's continuous modifications.
+                for modification in static_def.modifications.iter_mut() {
+                    apply_where_x_continuous_modification(modification, where_x_expression);
+                }
             }
         }
         _ => {}
+    }
+}
+
+/// CR 107.3i: Propagate a "where X is <expression>" binding into the dynamic
+/// `QuantityExpr` carried by a continuous modification (the +X/+X / set-P/T /
+/// dynamic-keyword grants). `apply_where_x_quantity_expression` only rewrites a
+/// `CostXPaid` / bare `Variable("X")` value, so a modification whose quantity is
+/// already a concrete reference is left unchanged.
+fn apply_where_x_continuous_modification(
+    modification: &mut ContinuousModification,
+    where_x_expression: Option<&str>,
+) {
+    match modification {
+        ContinuousModification::SetDynamicPower { value, .. }
+        | ContinuousModification::SetDynamicToughness { value, .. }
+        | ContinuousModification::SetPowerDynamic { value, .. }
+        | ContinuousModification::SetToughnessDynamic { value, .. }
+        | ContinuousModification::AddDynamicPower { value, .. }
+        | ContinuousModification::AddDynamicToughness { value, .. }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
+            *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+        }
+        // Resolution-time-consumed; where-X counter quantities are applied by
+        // the counter/enter-with parser paths before this continuous grant pass.
+        ContinuousModification::AddCounterOnEnter { .. } => {}
+        // Non-dynamic modifications carry fixed integers, enum payloads, or
+        // nested definitions that are already parsed/lowered independently.
+        // Keep this wildcard-free so a future QuantityExpr-carrying variant
+        // forces a deliberate where-X decision.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => {}
     }
 }
 
