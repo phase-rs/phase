@@ -11604,13 +11604,12 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-        AttackScope, AttackSubject,
-        BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute, Comparator,
-        ContinuousModification, ControllerRef, CountScope, DamageModification, DamageSource,
-        DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-        ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-        PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TapStateChange,
-        TargetFilter, TypeFilter, TypedFilter,
+        AttackScope, AttackSubject, BounceSelection, CardSelectionMode, CastingPermission,
+        ChosenAttribute, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration,
+        Effect, EffectScope, FilterProp, ManaProduction, ManaSpendPermission, ObjectScope,
+        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::WaitingFor;
