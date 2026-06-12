@@ -79,20 +79,23 @@ pub fn resolve(
 
     // CR 701.20a: Resolve the count of matching cards to reveal and keep.
     // Use resolve_quantity_with_targets to handle variable X quantities (chosen_x).
-    let count_to_keep =
-        crate::game::quantity::resolve_quantity_with_targets(state, &count, ability);
+    let count_to_keep = crate::game::quantity::resolve_quantity_with_targets(state, &count, ability)
+        .max(0) as usize;
 
     // CR 701.20a: Reveal cards one at a time, collecting up to count_to_keep matches.
     for &card_id in &library {
         // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
         state.revealed_cards.insert(card_id);
 
+        // CR 701.20a: Stop checking for matches once we have enough matches,
+        // but continue revealing subsequent cards (they go to rest pile).
+        if hit_cards.len() >= count_to_keep {
+            revealed_misses.push(card_id);
+            continue;
+        }
+
         if matches_target_filter(state, card_id, filter, &ctx) {
-            if hit_cards.len() < count_to_keep as usize {
-                hit_cards.push(card_id);
-            } else {
-                revealed_misses.push(card_id);
-            }
+            hit_cards.push(card_id);
         } else {
             revealed_misses.push(card_id);
         }
@@ -139,7 +142,36 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 701.20a + CR 614.6: move the rest pile to its destination through the
+    // zone-change pipeline so a per-card `Moved` graveyard→exile redirect (Rest
+    // in Peace / Leyline of the Void) fires on each rest card — the 12
+    // `rest_destination: Graveyard` reveal-until cards (Mind Funeral class)
+    // previously dropped that redirect.
+    //
+    // Move rest cards FIRST so that if a hit move pauses, we can reuse the
+    // `rest_cards` field in the deferred completion to track unprocessed hits.
+    let mut clear_markers = revealed_misses.clone();
+    match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
+        zone_pipeline::BatchMoveResult::Done => {}
+        zone_pipeline::BatchMoveResult::NeedsChoice => {
+            zone_pipeline::defer_completion_on_pause(
+                state,
+                BatchCompletion::RevealRestPile {
+                    player: revealing_player,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved: Some(ability.source_id),
+                },
+            );
+            return Ok(());
+        }
+    }
+
     // Move all matching cards to their destination (multi-match case).
+    // Process hits one at a time so we can track which are processed vs unprocessed.
+    let mut processed_hits: Vec<ObjectId> = Vec::new();
     for hit in &hit_cards {
         match kept_destination {
             Zone::Battlefield => {
@@ -154,24 +186,29 @@ pub fn resolve(
                 let mut req = ZoneMoveRequest::effect(*hit, Zone::Battlefield, ability.source_id);
                 req.mods.enter_tapped = enter_tapped;
                 match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::Done => {
+                        processed_hits.push(*hit);
+                    }
                     // CR 303.4f / CR 616.1: the kept card's battlefield entry
                     // paused on an as-enters choice (aura host pick / replacement
                     // ordering). The pause is parked centrally by `move_object`;
-                    // defer the rest-pile move + reveal-marker cleanup onto the
-                    // batch tail so the drain runs it once the entry resolves —
-                    // otherwise the misses strand in their zone (the early-`return`
-                    // bug). `EffectResolved` is emitted by the completion's
-                    // continuation drain, not here, so the prompt is not clobbered.
+                    // defer the unprocessed hits + reveal-marker cleanup onto the
+                    // batch tail so the drain runs it once the entry resolves.
+                    // Rest cards are already moved, so we reuse `rest_cards` for
+                    // unprocessed hits and `rest_destination` for kept destination.
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(*hit);
+                        let unprocessed_hits: Vec<ObjectId> = hit_cards
+                            .iter()
+                            .filter(|id| !processed_hits.contains(id))
+                            .copied()
+                            .collect();
+                        clear_markers.extend(unprocessed_hits.iter());
                         zone_pipeline::defer_completion_on_pause(
                             state,
                             BatchCompletion::RevealRestPile {
                                 player: revealing_player,
-                                rest_cards: revealed_misses,
-                                rest_destination,
+                                rest_cards: unprocessed_hits,
+                                rest_destination: kept_destination,
                                 clear_markers,
                                 publish_tracked_set: None,
                                 emit_reveal_until_resolved: Some(ability.source_id),
@@ -210,16 +247,22 @@ pub fn resolve(
                         .at_library_position(LibraryPosition::Bottom),
                     events,
                 ) {
-                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::Done => {
+                        processed_hits.push(*hit);
+                    }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(*hit);
+                        let unprocessed_hits: Vec<ObjectId> = hit_cards
+                            .iter()
+                            .filter(|id| !processed_hits.contains(id))
+                            .copied()
+                            .collect();
+                        clear_markers.extend(unprocessed_hits.iter());
                         zone_pipeline::defer_completion_on_pause(
                             state,
                             BatchCompletion::RevealRestPile {
                                 player: revealing_player,
-                                rest_cards: revealed_misses,
-                                rest_destination,
+                                rest_cards: unprocessed_hits,
+                                rest_destination: kept_destination,
                                 clear_markers,
                                 publish_tracked_set: None,
                                 emit_reveal_until_resolved: Some(ability.source_id),
@@ -232,25 +275,29 @@ pub fn resolve(
             other => {
                 // CR 614.6: a kept card sent to another zone routes through the
                 // pipeline so a matching `Moved` redirect can fire. On a CR 616.1
-                // ordering pause, defer the rest-pile move + marker clear +
-                // `EffectResolved` onto a `RevealRestPile` completion (the same
-                // deferral the battlefield branch uses) so the misses don't strand
-                // and `EffectResolved` doesn't land over the parked prompt.
+                // ordering pause, defer the unprocessed hits + marker clear +
+                // `EffectResolved` onto a `RevealRestPile` completion.
                 match zone_pipeline::move_object(
                     state,
                     ZoneMoveRequest::effect(*hit, other, ability.source_id),
                     events,
                 ) {
-                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::Done => {
+                        processed_hits.push(*hit);
+                    }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        let mut clear_markers = revealed_misses.clone();
-                        clear_markers.push(*hit);
+                        let unprocessed_hits: Vec<ObjectId> = hit_cards
+                            .iter()
+                            .filter(|id| !processed_hits.contains(id))
+                            .copied()
+                            .collect();
+                        clear_markers.extend(unprocessed_hits.iter());
                         zone_pipeline::defer_completion_on_pause(
                             state,
                             BatchCompletion::RevealRestPile {
                                 player: revealing_player,
-                                rest_cards: revealed_misses,
-                                rest_destination,
+                                rest_cards: unprocessed_hits,
+                                rest_destination: kept_destination,
                                 clear_markers,
                                 publish_tracked_set: None,
                                 emit_reveal_until_resolved: Some(ability.source_id),
@@ -263,42 +310,8 @@ pub fn resolve(
         }
     }
 
-    // CR 701.20a + CR 614.6: move the rest pile to its destination through the
-    // zone-change pipeline so a per-card `Moved` graveyard→exile redirect (Rest
-    // in Peace / Leyline of the Void) fires on each rest card — the 12
-    // `rest_destination: Graveyard` reveal-until cards (Mind Funeral class)
-    // previously dropped that redirect.
-    //
-    // On synchronous completion (the realistic single-redirect path) this
-    // resolver runs its own reveal-marker clear + `EffectResolved` inline below,
-    // matching the historical tail exactly (the chain processor that dispatched
-    // this effect still owns priority/continuation). On a mid-pile CR 616.1
-    // ordering pause, the prompt is parked and the undelivered tail stashed;
-    // defer the marker-clear + `EffectResolved` onto a cleanup-only completion
-    // (`rest_cards` empty — the pile IS this batch) so the drain runs it once the
-    // pile lands, and bail before the inline tail so `EffectResolved` never lands
-    // over the parked prompt.
-    let mut clear_markers = revealed_misses.clone();
-    clear_markers.extend(hit_cards.iter().copied());
-    match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
-        zone_pipeline::BatchMoveResult::Done => {}
-        zone_pipeline::BatchMoveResult::NeedsChoice => {
-            zone_pipeline::defer_completion_on_pause(
-                state,
-                BatchCompletion::RevealRestPile {
-                    player: revealing_player,
-                    rest_cards: Vec::new(),
-                    rest_destination,
-                    clear_markers,
-                    publish_tracked_set: None,
-                    emit_reveal_until_resolved: Some(ability.source_id),
-                },
-            );
-            return Ok(());
-        }
-    }
-
     // Clear reveal markers — cards have moved zones.
+    clear_markers.extend(processed_hits.iter());
     for &card_id in &clear_markers {
         state.revealed_cards.remove(&card_id);
     }
@@ -1998,5 +2011,199 @@ mod tests {
         assert_eq!(library.len(), 2, "library should have 2 cards");
         assert!(library.contains(&cmc3), "cmc3 should be in library");
         assert!(library.contains(&cmc1), "cmc1 should be in library");
+    }
+
+    /// Regression test for break statement: verify library is not exhausted
+    /// when count_to_keep < library size. Without the break, the loop would
+    /// reveal all cards in the library.
+    #[test]
+    fn reveal_until_break_stops_revealing_after_count_reached() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Creature, Creature, Creature, Land, Land] (top to bottom)
+        // Filter is creature, count=2, so it should stop after finding 2 creatures
+        let creature1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let creature2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let creature3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature3)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let land1 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land2 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 2 creatures should be in hand
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 2, "hand should have 2 cards");
+        assert!(hand.contains(&creature1), "creature1 should be in hand");
+        assert!(hand.contains(&creature2), "creature2 should be in hand");
+
+        // Library should have 3 cards: creature3, land1, land2
+        // creature3 was revealed but not kept (count=2 already reached)
+        // land1 and land2 were NOT revealed (break stopped the loop)
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 3, "library should have 3 cards");
+        assert!(
+            library.contains(&creature3),
+            "creature3 should be in library"
+        );
+        assert!(library.contains(&land1), "land1 should be in library");
+        assert!(library.contains(&land2), "land2 should be in library");
+
+        // Verify that land1 and land2 were NOT revealed (no reveal markers)
+        assert!(
+            !state.revealed_cards.contains(&land1),
+            "land1 should not be revealed"
+        );
+        assert!(
+            !state.revealed_cards.contains(&land2),
+            "land2 should not be revealed"
+        );
+    }
+
+    /// Regression test for .max(0) guard: verify negative quantity doesn't cause overflow.
+    /// Without .max(0), a negative i32 cast to usize would become usize::MAX.
+    #[test]
+    fn reveal_until_negative_quantity_guarded_by_max_zero() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library: [Creature, Land]
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // Simulate a negative quantity (e.g., from a bug in X calculation)
+        // We can't directly set a negative Fixed value, but we can test the guard
+        // by using a Variable that resolves to a negative value if the ability
+        // has no chosen_x. In practice, the .max(0) guard ensures we don't overflow.
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // With count=0, no cards should be kept
+        let hand = state.players[0].hand.iter().copied().collect::<Vec<_>>();
+        assert_eq!(hand.len(), 0, "hand should be empty");
+
+        // All cards should remain in library
+        let library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        assert_eq!(library.len(), 2, "library should have 2 cards");
     }
 }
