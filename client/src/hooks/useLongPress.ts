@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 const MOVE_THRESHOLD = 10;
 
@@ -7,7 +7,7 @@ interface UseLongPressOptions {
 }
 
 /**
- * Long-press hook for touch devices. Returns touch event handlers and a
+ * Long-press hook for pointer devices. Returns pointer event handlers and a
  * `firedRef` so callers can suppress click events that follow a long press.
  *
  * Usage:
@@ -22,19 +22,29 @@ export function useLongPress(
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firedRef = useRef(false);
   const startPos = useRef<{ x: number; y: number } | null>(null);
+  const pointerIdRef = useRef<number | null>(null);
 
   const clear = useCallback(() => {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    pointerIdRef.current = null;
   }, []);
 
-  const onTouchStart = useCallback(
-    (e: React.TouchEvent) => {
+  useEffect(() => clear, [clear]);
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (!e.isPrimary || e.button !== 0) return;
       firedRef.current = false;
-      const touch = e.touches[0];
-      startPos.current = { x: touch.clientX, y: touch.clientY };
+      pointerIdRef.current = e.pointerId;
+      startPos.current = { x: e.clientX, y: e.clientY };
+      try {
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+      } catch {
+        // Pointer capture is best-effort; long-press still works without it.
+      }
       timerRef.current = setTimeout(() => {
         firedRef.current = true;
         callback();
@@ -43,12 +53,12 @@ export function useLongPress(
     [callback, delay],
   );
 
-  const onTouchMove = useCallback(
-    (e: React.TouchEvent) => {
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (pointerIdRef.current !== e.pointerId) return;
       if (!startPos.current || !timerRef.current) return;
-      const touch = e.touches[0];
-      const dx = touch.clientX - startPos.current.x;
-      const dy = touch.clientY - startPos.current.y;
+      const dx = e.clientX - startPos.current.x;
+      const dy = e.clientY - startPos.current.y;
       if (dx * dx + dy * dy > MOVE_THRESHOLD * MOVE_THRESHOLD) {
         clear();
       }
@@ -56,24 +66,47 @@ export function useLongPress(
     [clear],
   );
 
-  const onTouchEnd = useCallback(() => {
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    if (pointerIdRef.current !== e.pointerId) return;
+    try {
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // Ignore capture-release mismatches from browsers/test harnesses.
+    }
     clear();
   }, [clear]);
 
-  const onTouchCancel = useCallback(() => {
+  const onPointerCancel = useCallback((e: React.PointerEvent) => {
+    if (pointerIdRef.current !== e.pointerId) return;
+    try {
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // Ignore capture-release mismatches from browsers/test harnesses.
+    }
     clear();
   }, [clear]);
 
-  // Prevent the native context menu on long press (iOS/Android) but allow desktop right-click
+  const onPointerLeave = useCallback((e: React.PointerEvent) => {
+    if (pointerIdRef.current !== e.pointerId) return;
+    clear();
+  }, [clear]);
+
+  // Prevent the native context menu after a long press, but allow desktop right-click.
   const onContextMenu = useCallback((e: React.MouseEvent) => {
-    // Only suppress context menu triggered by touch (long-press), not mouse right-click
     if (timerRef.current || firedRef.current) {
       e.preventDefault();
     }
   }, []);
 
   return {
-    handlers: { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel, onContextMenu },
+    handlers: {
+      onPointerDown,
+      onPointerMove,
+      onPointerUp,
+      onPointerCancel,
+      onPointerLeave,
+      onContextMenu,
+    },
     firedRef,
   };
 }

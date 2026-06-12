@@ -15070,6 +15070,40 @@ mod tests {
     }
 
     #[test]
+    fn body_of_knowledge_damage_received_draws_event_amount() {
+        let result = parse(
+            "Body of Knowledge's power and toughness are each equal to the number of cards in your hand.\n\
+             You have no maximum hand size.\n\
+             Whenever this creature is dealt damage, draw that many cards.",
+            "Body of Knowledge",
+            &[],
+            &["Creature"],
+            &["Avatar"],
+        );
+        assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+        let trigger = &result.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::DamageReceived);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, None);
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("Body of Knowledge trigger must have an execute body");
+        match execute.effect.as_ref() {
+            Effect::Draw { count, target, .. } => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }
+                ));
+                assert_eq!(*target, TargetFilter::Controller);
+            }
+            other => panic!("expected Draw effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn heroic_trigger_not_misrouted_to_replacement() {
         // Favored Hoplite: "Heroic — Whenever you cast a spell that targets this creature,
         // put a +1/+1 counter on this creature and prevent all damage that would be dealt

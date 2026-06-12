@@ -1176,6 +1176,30 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
     )
 }
 
+/// Rebind a `GenericEffect` grant's `SelfRef` recipient(s) to `LastCreated`.
+/// No-op for any other effect, and for grants that already name a concrete
+/// recipient — only the source-defaulted `SelfRef` is the misbound "it".
+fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return;
+    };
+    let mut rebound = false;
+    for static_def in static_abilities.iter_mut() {
+        if matches!(static_def.affected, Some(TargetFilter::SelfRef)) {
+            static_def.affected = Some(TargetFilter::LastCreated);
+            rebound = true;
+        }
+    }
+    if rebound && matches!(target, None | Some(TargetFilter::SelfRef)) {
+        *target = Some(TargetFilter::LastCreated);
+    }
+}
+
 /// Walk an ability definition, rewriting the populated-token anaphor at
 /// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
 /// the "sacrifice it" pattern inside a delayed trigger also rewrites.
@@ -1209,6 +1233,13 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
         rewrite_parent_target_to_last_created(&mut inner.effect);
         rewrite_populated_anaphor_in_effect(&mut inner.effect);
     }
+
+    // Case 3: a bare "it gains/gets X" grant that parsed to a `GenericEffect`
+    // targeting `SelfRef` (the imperative parser's default for the bare pronoun
+    // "it") — directly after a token-creating effect, "it" is the created token
+    // (God-Pharaoh's Gift: "create a token … It gains haste"). Rebind to the
+    // just-created token.
+    rebind_self_ref_grant_to_last_created(effect);
 }
 
 /// If `effect` is `Unimplemented { description: "<anaphor> <verb-phrase>" }`,

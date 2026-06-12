@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
@@ -87,7 +88,7 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
   if (mode === "inline") {
     return (
       <div
-        className="flex max-w-[28vw] flex-col items-end gap-1"
+        className="flex max-w-none flex-col items-end gap-1 overflow-visible"
         style={dockStyle(INLINE_SCALE)}
         data-debug-label="Command"
       >
@@ -127,6 +128,10 @@ function CompactCommandDock({
   children,
 }: CompactCommandDockProps) {
   const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
   const firstCommander = commanders[0];
   const { src } = useCardImage(firstCommander?.name ?? "", { size: "normal" });
   const totalDamage = damageEntries.reduce(
@@ -134,50 +139,125 @@ function CompactCommandDock({
     0,
   );
 
+  useEffect(() => {
+    if (!open) return;
+
+    function onPointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (anchorRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setOpen(false);
+    }
+
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function updatePosition() {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setPopoverPos({
+        left: rect.right,
+        top: isMirrored ? rect.bottom + 4 : rect.top - 4,
+      });
+    }
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [isMirrored, open]);
+
+  useEffect(() => () => {
+    if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+  }, []);
+
+  const openDock = () => {
+    if (closeTimerRef.current != null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setOpen(true);
+  };
+  const scheduleCloseDock = () => {
+    if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpen(false);
+      closeTimerRef.current = null;
+    }, 120);
+  };
+
   return (
     <div
-      className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      ref={anchorRef}
+      className="relative overflow-visible"
+      onMouseEnter={openDock}
+      onMouseLeave={scheduleCloseDock}
       data-debug-label="Command"
     >
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-lg border border-amber-400/60 bg-stone-900 shadow-md transition-transform hover:scale-105"
+        onClick={openDock}
+        className="relative flex h-12 w-12 items-center justify-center rounded-lg border border-amber-400/60 bg-stone-900 shadow-md transition-transform hover:scale-105"
         title={label}
         aria-expanded={open}
       >
         {firstCommander && src ? (
-          <img src={src} alt={firstCommander.name} className="h-full w-full object-cover" draggable={false} />
+          <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg bg-black/70">
+            <img src={src} alt={firstCommander.name} className="h-full w-full object-contain" draggable={false} />
+          </span>
         ) : (
           <span aria-hidden className="text-2xl leading-none text-amber-500/80">✦</span>
         )}
-        {commanders.length > 1 && (
-          <span className="absolute left-0 top-0 rounded-br bg-amber-700 px-1 text-[9px] font-bold text-amber-100">
-            ×{commanders.length}
-          </span>
-        )}
-        {emblemCount > 0 && (
-          <span className="absolute -bottom-1 -left-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-black/70 bg-amber-600 px-1 text-[9px] font-bold text-black shadow">
-            ✦{emblemCount}
-          </span>
-        )}
-        {totalDamage > 0 && (
-          <span className="absolute -bottom-1 -right-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-black/70 bg-red-700 px-1 text-[9px] font-bold text-red-100 shadow">
-            {totalDamage}
-          </span>
-        )}
       </button>
-      {open && (
+      {commanders.length > 1 && (
+        <span className="pointer-events-none absolute left-0 top-0 rounded-br bg-amber-700 px-1 text-[9px] font-bold text-amber-100">
+          ×{commanders.length}
+        </span>
+      )}
+      {emblemCount > 0 && (
+        <span className="pointer-events-none absolute -bottom-1 -left-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-black/70 bg-amber-600 px-1 text-[9px] font-bold text-black shadow">
+          ✦{emblemCount}
+        </span>
+      )}
+      {totalDamage > 0 && (
+        <span className="pointer-events-none absolute -bottom-1 -right-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-black/70 bg-red-700 px-1 text-[9px] font-bold text-red-100 shadow">
+          {totalDamage}
+        </span>
+      )}
+      {open && popoverPos && createPortal(
         <div
-          className={`absolute right-0 z-50 rounded-lg border border-white/15 bg-black/85 p-2 shadow-xl backdrop-blur-md ${
-            isMirrored ? "top-full mt-1" : "bottom-full mb-1"
-          }`}
-          style={dockStyle(POPOVER_SCALE)}
+          ref={popoverRef}
+          className="fixed z-50 rounded-lg border border-white/15 bg-black/85 p-2 shadow-xl backdrop-blur-md"
+          onMouseEnter={openDock}
+          onMouseLeave={scheduleCloseDock}
+          style={{
+            ...dockStyle(POPOVER_SCALE),
+            left: popoverPos.left,
+            top: popoverPos.top,
+            transform: isMirrored ? "translateX(-100%)" : "translate(-100%, -100%)",
+          }}
         >
           {children}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

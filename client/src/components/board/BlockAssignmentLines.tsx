@@ -7,6 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
+import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getOpponentIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 
@@ -191,7 +192,7 @@ function useHudBlockIndicators(
 
       for (const { attackerId, blockingPlayerId } of offScreenBlockedAttackers) {
         const hudEl = document.querySelector(`[data-player-hud="${blockingPlayerId}"]`);
-        const attackerEl = document.querySelector(`[data-object-id="${attackerId}"]`);
+        const attackerEl = document.querySelector(objectAnchorSelector(attackerId));
         if (!hudEl || !attackerEl) continue;
         const hudRect = hudEl.getBoundingClientRect();
         const attackerRect = attackerEl.getBoundingClientRect();

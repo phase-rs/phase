@@ -12,8 +12,8 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
 import {
-  GROUP_STAGGER_PX,
   getGroupRenderMode,
+  groupStaggerPx,
   type BattlefieldRowType,
 } from "./groupRenderMode.ts";
 
@@ -249,12 +249,14 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     );
   }
 
+  const staggerPx = groupStaggerPx(rowType);
+
   return (
     <div
       className="relative"
       style={{
         // Reserve width for staggered cards beyond the first
-        paddingRight: `${(group.count - 1) * GROUP_STAGGER_PX}px`,
+        paddingRight: `${(group.count - 1) * staggerPx}px`,
       }}
     >
       {/* Each card staggered to the right, last card on top */}
@@ -263,7 +265,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
           key={id}
           className="absolute top-0"
           style={{
-            left: `${i * GROUP_STAGGER_PX}px`,
+            left: `${i * staggerPx}px`,
             zIndex: i,
           }}
         >

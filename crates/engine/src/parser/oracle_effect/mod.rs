@@ -3056,13 +3056,30 @@ fn try_parse_have_causative(
                 let after_damage = after_count_lower
                     .strip_prefix("damage to ") // allow-noncombinator: structural tail check on classified count remainder
                     .unwrap_or("");
-                let recipient_implicit = after_damage
+                let recipient = after_damage
                     .trim_end_matches('.')
                     .trim_end_matches(',')
-                    .trim()
-                    .eq("them")
-                    || after_damage.trim_end_matches('.').trim().eq("that player");
-                if recipient_implicit {
+                    .trim();
+                // CR 608.2c + CR 115.10a + CR 120.1: "that player" is an untargeted anaphoric
+                // reference to the player named by the trigger condition (the
+                // drawing opponent in "Whenever an opponent draws a card, ... you
+                // may have ~ deal N damage to that player" — Kederekt Parasite).
+                // It binds to the triggering player, not a fresh chooseable
+                // `Player` target. `parse_event_context_ref_with_ctx` resolves
+                // it to `TriggeringPlayer` (rebound to `ScopedPlayer` /
+                // `SourceChosenPlayer` / `ParentTargetController` when the trigger
+                // carries one of those player scopes), matching the non-causative
+                // "deals N damage to that player" path (issue #2893).
+                if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(recipient, ctx) {
+                    if ecr_rem.trim().is_empty() {
+                        return Some(parsed_clause(Effect::DealDamage {
+                            amount,
+                            target,
+                            damage_source: None,
+                        }));
+                    }
+                }
+                if recipient.eq("them") {
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::Player,
@@ -3072,7 +3089,7 @@ fn try_parse_have_causative(
                 // CR 608.2d: "have this artifact deal 1 damage to it" (Requiem
                 // Monolith) — optional self-damage the targeted creature's
                 // controller may cause the source artifact to deal.
-                if after_damage.trim_end_matches('.').trim() == "it" {
+                if recipient == "it" {
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::ParentTarget,

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { GroupedPermanent } from "../../../viewmodel/battlefieldProps.ts";
 import {
   getGroupRenderMode,
+  groupStaggerPx,
   visibleCardSlotCount,
   visibleStaggerCount,
 } from "../groupRenderMode.ts";
@@ -62,5 +63,9 @@ describe("getGroupRenderMode", () => {
     expect(visibleStaggerCount("expanded", five)).toBe(0);
     expect(visibleCardSlotCount("staggered", five)).toBe(1);
     expect(visibleStaggerCount("staggered", five)).toBe(4);
+  });
+
+  it("stacks lands tighter than creatures", () => {
+    expect(groupStaggerPx("lands")).toBeLessThan(groupStaggerPx("creatures"));
   });
 });

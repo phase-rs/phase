@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
+import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 
 interface BlockerArrowProps {
   blockerId: number;
@@ -18,10 +19,10 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
 
   useEffect(() => {
     const blockerEl = document.querySelector(
-      `[data-object-id="${blockerId}"]`,
+      objectAnchorSelector(blockerId),
     );
     const attackerEl = document.querySelector(
-      `[data-object-id="${attackerId}"]`,
+      objectAnchorSelector(attackerId),
     );
     if (!blockerEl || !attackerEl) return;
 

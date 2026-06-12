@@ -77,9 +77,10 @@ interface ManaGroup {
 
 interface ManaPoolSummaryProps {
   playerId: number;
+  size?: "default" | "sm";
 }
 
-export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
+export function ManaPoolSummary({ playerId, size = "default" }: ManaPoolSummaryProps) {
   const { t } = useTranslation("game");
   const manaUnits = useGameStore(
     (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? EMPTY_MANA,
@@ -119,7 +120,7 @@ export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
   if (entries.length === 0) return null;
 
   return (
-    <div className="flex items-center gap-1">
+    <div className={`flex items-center ${size === "sm" ? "gap-0.5" : "gap-1"}`}>
       {entries.map((group, index) => {
         const special =
           group.restrictions.length > 0 || group.grants.length > 0;
@@ -132,7 +133,7 @@ export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
           <span
             key={index}
             title={title}
-            className={`relative inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[11px] font-bold tabular-nums ${MANA_COLORS[group.color]} ${
+            className={`relative inline-flex items-center justify-center rounded-full font-bold tabular-nums ${size === "sm" ? "h-5 min-w-5 px-1 text-[10px]" : "h-6 min-w-6 px-1.5 text-[11px]"} ${MANA_COLORS[group.color]} ${
               special ? "ring-2 ring-dashed ring-white/70" : ""
             }`}
           >
