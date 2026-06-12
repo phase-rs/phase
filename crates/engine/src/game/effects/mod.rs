@@ -2426,11 +2426,18 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         static_abilities, ..
     } = effect
     {
+        // CR 608.2c + CR 613: A continuous grant whose `affected` filter either
+        // names the tracked set directly (`TrackedSet`) or is the `ParentTarget`
+        // anaphor ("They gain trample…", Najeela — issue #2898) consumes the
+        // chain's tracked object set. `ParentTarget` with no inherited targets
+        // resolves against `chain_tracked_set_id` in `effect.rs`, so the parent
+        // instruction (e.g. `Untap all attacking creatures`) must publish that
+        // set for the grant to bind to the affected permanents.
         if static_abilities.iter().any(|static_def| {
-            static_def
-                .affected
-                .as_ref()
-                .is_some_and(filter_references_tracked_set)
+            static_def.affected.as_ref().is_some_and(|affected| {
+                filter_references_tracked_set(affected)
+                    || matches!(affected, TargetFilter::ParentTarget)
+            })
         }) {
             return true;
         }
@@ -2536,14 +2543,15 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
-        // CR 701.26a + CR 608.2c: single-target tap/untap publishes the tapped
-        // set for downstream "each of those <type>" continuations (Urge to Feed
-        // class). The mass (`All`) scope is not a target source — it falls
-        // through to the default arm, matching the legacy `TapAll`/`UntapAll`.
-        Effect::SetTapState {
-            scope: EffectScope::Single,
-            ..
-        } => {
+        // CR 701.26a/b + CR 608.2c: tap/untap publishes the affected set for
+        // downstream continuations that bind to "those creatures" / "they".
+        // Single-target tap/untap feeds "each of those <type>" riders (Urge to
+        // Feed class). Mass (`All`) tap/untap feeds `affected: ParentTarget`
+        // keyword grants chained on the same instruction — Najeela's "Untap all
+        // attacking creatures. They gain trample, lifelink, and haste"
+        // (issue #2898). Both scopes read the same tap/untap events, so the
+        // untapped permanents become the chain's tracked set.
+        Effect::SetTapState { .. } => {
             let from_events: Vec<ObjectId> = events
                 .iter()
                 .filter_map(|event| match event {
