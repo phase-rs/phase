@@ -2184,41 +2184,28 @@ fn parse_for_each_any_counters_on_source(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
-/// CR 122.1: Match a source self-reference phrase: "~", "it", or "this <type>"
-/// for any type that can appear as a self-reference in Oracle text.
-/// Mirrors `oracle_util::SELF_REF_TYPE_PHRASES`; update both when adding types.
-/// Longer compound types are listed before shorter prefixes to prevent shadowing.
+/// CR 122.1: Match a source self-reference phrase: "~", "it", or any shared
+/// self-reference type phrase from Oracle text.
 fn parse_source_self_ref(input: &str) -> OracleResult<'_, ()> {
-    alt((
+    if let Ok(result) = alt((
         value((), tag::<_, _, OracleError<'_>>("~")),
         value((), tag("it")),
-        value(
-            (),
-            preceded(
-                tag("this "),
-                alt((
-                    tag("creature"),
-                    tag("permanent"),
-                    tag("enchantment"),
-                    tag("planeswalker"),
-                    tag("spacecraft"),
-                    tag("attraction"),
-                    tag("equipment"),
-                    tag("artifact"),
-                    tag("vehicle"),
-                    tag("battle"),
-                    tag("token"),
-                    tag("land"),
-                    tag("saga"),
-                    tag("class"),
-                    tag("case"),
-                    tag("room"),
-                    tag("aura"),
-                )),
-            ),
-        ),
     ))
     .parse(input)
+    {
+        return Ok(result);
+    }
+
+    for phrase in crate::parser::oracle_util::SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+
+    Err(nom::Err::Error(OracleError::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// CR 400.7: Parse "[type] that entered (the battlefield) this turn" into
