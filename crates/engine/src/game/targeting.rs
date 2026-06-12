@@ -856,26 +856,20 @@ pub fn resolve_effect_player_ref(
             TargetRef::Player(player) => Some(*player),
             _ => None,
         }),
-        TargetFilter::ParentTargetController => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => state
-                    .stack
-                    .iter()
-                    .find(|entry| entry.id == *id || entry.source_id == *id)
-                    .map(|entry| entry.controller)
-                    .or_else(|| state.objects.get(id).map(|obj| obj.controller)),
-                TargetRef::Player(player) => Some(*player),
-            })
-            .or_else(|| {
+        TargetFilter::ParentTargetController => {
+            crate::game::ability_utils::parent_target_controller(ability, state).or_else(|| {
                 resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
                     match target {
                         TargetRef::Player(player) => Some(player),
-                        TargetRef::Object(id) => state.objects.get(&id).map(|obj| obj.controller),
+                        TargetRef::Object(id) => state
+                            .objects
+                            .get(&id)
+                            .map(|obj| obj.controller)
+                            .or_else(|| state.lki_cache.get(&id).map(|lki| lki.controller)),
                     }
                 })
-            }),
+            })
+        }
         // CR 108.3 + CR 608.2c: Parent target's *owner* — mirrors the controller
         // path above, but resolves through `parent_target_owner` and falls back
         // to the event-context resolver (which itself may fall back to the

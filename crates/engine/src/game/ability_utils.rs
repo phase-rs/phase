@@ -417,7 +417,7 @@ pub fn build_target_slots_labelled(
 /// object target (CR 109.4 — controller of an object), in target-list order.
 /// Returns `None` if the ability has no targets.
 pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
-    ability.targets.iter().find_map(|t| match t {
+    if let Some(player) = ability.targets.iter().find_map(|t| match t {
         // CR 608.2h (issue #1582): If the parent target has left the
         // battlefield — e.g. a token Recoil bounced to hand, which then ceases
         // to exist per CR 704.5d before the chained "that player discards"
@@ -429,7 +429,20 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
             .map(|obj| obj.controller)
             .or_else(|| state.lki_cache.get(id).map(|lki| lki.controller)),
         TargetRef::Player(pid) => Some(*pid),
-    })
+    }) {
+        return Some(player);
+    }
+
+    // CR 608.2c + CR 608.2h + CR 400.7j (issue #2890): A chained instruction
+    // may inherit the parent effect's singular referent only through
+    // `effect_context_object` — e.g. Reality Shift's manifest after the
+    // exiled creature left the battlefield and parent targets were not copied
+    // onto the sub-ability. The propagated snapshot carries the at-departure
+    // controller per CR 608.2h.
+    ability
+        .effect_context_object
+        .as_ref()
+        .map(|snapshot| snapshot.lki.controller)
 }
 
 /// CR 108.3 + CR 608.2c: Resolve the owner of an ability's first parent target.
@@ -443,7 +456,7 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 /// ability has no targets, or an object target is absent from both the live
 /// object map and the LKI cache.
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
-    ability.targets.iter().find_map(|t| match t {
+    if let Some(player) = ability.targets.iter().find_map(|t| match t {
         // CR 608.2h (issue #1582): Mirror the controller lookup — fall back to
         // last-known information so "its owner" still resolves after the
         // referenced object (e.g. a bounced token) has ceased to exist.
@@ -453,7 +466,15 @@ pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Opti
             .map(|obj| obj.owner)
             .or_else(|| state.lki_cache.get(id).map(|lki| lki.owner)),
         TargetRef::Player(_) => None,
-    })
+    }) {
+        return Some(player);
+    }
+
+    // CR 608.2c + CR 400.7j: Mirror the controller fallback for owner anaphors.
+    ability
+        .effect_context_object
+        .as_ref()
+        .map(|snapshot| snapshot.lki.owner)
 }
 
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
@@ -8337,6 +8358,49 @@ mod tests {
             parent_target_controller(&ability, &state),
             None,
             "An ability with no targets has no parent target controller"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7j (issue #2890): Parent-target player anaphors must
+    /// resolve from `effect_context_object` when inherited targets are absent.
+    #[test]
+    fn parent_target_controller_falls_back_to_effect_context_object() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::game_state::LKISnapshot;
+
+        let state = GameState::new_two_player(42);
+        let gone_id = ObjectId(77);
+        let mut ability = make_simple_ability(vec![], ObjectId(0));
+        ability.effect_context_object = Some(CostPaidObjectSnapshot {
+            object_id: gone_id,
+            lki: LKISnapshot {
+                name: "Exiled Creature".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: std::collections::HashMap::new(),
+            },
+        });
+
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(1)),
+            "effect_context_object must supply the parent controller when targets are empty"
+        );
+        assert_eq!(
+            parent_target_owner(&ability, &state),
+            Some(PlayerId(1)),
+            "effect_context_object must supply the parent owner when targets are empty"
         );
     }
 

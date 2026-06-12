@@ -238,6 +238,54 @@ mod tests {
     }
 
     #[test]
+    fn manifest_parent_target_controller_falls_back_to_effect_context_object() {
+        // CR 608.2c + CR 400.7j (issue #2890): Reality Shift's chained manifest
+        // must resolve the exiled creature's controller from the propagated
+        // referent snapshot when inherited targets are absent.
+        let mut state = GameState::new_two_player(42);
+        let target_controller = PlayerId(1);
+
+        let lib_card = create_object(
+            &mut state,
+            CardId(1),
+            target_controller,
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut ability =
+            make_manifest_ability_for_target(1, TargetFilter::ParentTargetController, vec![]);
+        ability.effect_context_object = Some(crate::types::ability::CostPaidObjectSnapshot {
+            object_id: ObjectId(404),
+            lki: crate::types::game_state::LKISnapshot {
+                name: "Exiled Creature".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: target_controller,
+                owner: target_controller,
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: std::collections::HashMap::new(),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&lib_card];
+        assert!(obj.face_down);
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.controller, target_controller);
+    }
+
+    #[test]
     fn manifest_triggering_player_uses_damaged_players_library() {
         let mut state = GameState::new_two_player(42);
         let caster = PlayerId(0);

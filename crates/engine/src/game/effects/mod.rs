@@ -5277,6 +5277,28 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
             );
             resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && ability.targets.is_empty()
+            && effect_refs_parent_target(&sub.effect)
+            && effect_context_object.is_some()
+        {
+            // CR 608.2c + CR 400.7j (issue #2890): When neither the parent nor
+            // the sub carries propagated `targets`, but the parent instruction
+            // stamped a singular referent snapshot (exile/move/sacrifice), seed
+            // the sub's target list so every ParentTarget* consumer — not only
+            // `parent_target_controller` — can bind to the departed object.
+            let mut sub_with_referent = sub.as_ref().clone();
+            if let Some(snapshot) = &effect_context_object {
+                sub_with_referent
+                    .targets
+                    .push(TargetRef::Object(snapshot.object_id));
+            }
+            apply_parent_chain_context(
+                &mut sub_with_referent,
+                ability,
+                effect_context_object.as_ref(),
+            );
+            resolve_ability_chain(state, &sub_with_referent, events, depth + 1)?;
         } else {
             // Propagate SpellContext so additional_cost_paid and other flags
             // survive through the chain (e.g., Gift delivery → spell effects
@@ -7821,6 +7843,69 @@ mod tests {
             resolve_player_for_context_ref(&state, &ability, &TargetFilter::ParentTargetController,),
             PlayerId(1),
         );
+    }
+
+    /// CR 701.34 + CR 608.2c (issue #2890): Reality Shift — exile then manifest
+    /// for the exiled creature's controller, including when the chained manifest
+    /// sub inherits only `effect_context_object` and not parent targets.
+    #[test]
+    fn change_zone_exile_then_manifest_parent_target_controller_chain() {
+        let mut state = GameState::new_two_player(42);
+        let victim = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_top = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Top".to_string(),
+            Zone::Library,
+        );
+
+        let manifest = ResolvedAbility::new(
+            Effect::Manifest {
+                target: TargetFilter::ParentTargetController,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let exile = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(manifest);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &exile, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.objects.get(&victim).map(|o| o.zone),
+            Some(Zone::Exile)
+        );
+        let manifested = state.objects.get(&opponent_top).expect("manifested card");
+        assert!(manifested.face_down);
+        assert_eq!(manifested.zone, Zone::Battlefield);
+        assert_eq!(manifested.controller, PlayerId(1));
     }
 
     #[test]
