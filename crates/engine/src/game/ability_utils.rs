@@ -424,10 +424,17 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
         // resolves — fall back to last-known information so the player anaphor
         // still resolves.
         TargetRef::Object(id) => state
-            .objects
-            .get(id)
-            .map(|obj| obj.controller)
-            .or_else(|| state.lki_cache.get(id).map(|lki| lki.controller)),
+            .stack
+            .iter()
+            .find(|entry| entry.id == *id || entry.source_id == *id)
+            .map(|entry| entry.controller)
+            .or_else(|| {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| obj.controller)
+                    .or_else(|| state.lki_cache.get(id).map(|lki| lki.controller))
+            }),
         TargetRef::Player(pid) => Some(*pid),
     }) {
         return Some(player);
@@ -8321,6 +8328,42 @@ mod tests {
             parent_target_controller(&ability, &state),
             Some(PlayerId(1)),
             "Object target should resolve to that object's controller"
+        );
+    }
+
+    /// CR 608.2c: Stack-object targets resolve to the stack entry controller.
+    /// This covers targeted activated/triggered abilities where the parent
+    /// target object id is a stack entry, not a battlefield object.
+    #[test]
+    fn parent_target_controller_resolves_stack_entry_controller() {
+        let mut state = GameState::new_two_player(42);
+        let stack_id = ObjectId(77);
+        let source_id = ObjectId(12);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: stack_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(make_simple_ability(vec![], source_id)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Stack Source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        let by_entry_id = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
+        let by_source_id = make_simple_ability(vec![TargetRef::Object(source_id)], ObjectId(0));
+
+        assert_eq!(
+            parent_target_controller(&by_entry_id, &state),
+            Some(PlayerId(1))
+        );
+        assert_eq!(
+            parent_target_controller(&by_source_id, &state),
+            Some(PlayerId(1))
         );
     }
 

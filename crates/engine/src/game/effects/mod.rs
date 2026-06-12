@@ -2822,7 +2822,9 @@ pub(crate) fn publish_fresh_tracked_set(
 /// surfaces `SearchLibrary::target_player`, so iterated-search variants are
 /// covered through the same single path.
 fn effect_refs_parent_target(effect: &Effect) -> bool {
-    effect_target_filter(effect).is_some_and(filter_refs_parent_target)
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|filter| filter_refs_parent_target(filter))
 }
 
 /// Every object-target filter slot of an effect that may carry a parent-ref,
@@ -2908,6 +2910,10 @@ fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::ParentTarget => true,
+        TargetFilter::Typed(typed) => matches!(
+            typed.controller,
+            Some(ControllerRef::ParentTargetController)
+        ),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_refs_parent_target)
         }
