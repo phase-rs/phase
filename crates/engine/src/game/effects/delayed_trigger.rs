@@ -1936,8 +1936,10 @@ mod tests {
         let dying = ObjectId(10);
         state.current_trigger_event = Some(dies_event(dying));
 
-        let effect_def =
-            AbilityDefinition::new(AbilityKind::Spell, copy_token_of(TargetFilter::TriggeringSource));
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            copy_token_of(TargetFilter::TriggeringSource),
+        );
         let ability = ResolvedAbility::new(
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
