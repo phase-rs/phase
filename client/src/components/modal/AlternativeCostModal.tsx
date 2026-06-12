@@ -24,11 +24,13 @@ interface KeywordCopy {
   normalLabel: string;
   altLabel: string;
   altSuffix?: string;
-  /** True when the card's printed Oracle text is helpful context. Warp's
-   * rider lives on the keyword itself; the other three meaningfully change
-   * the spell's behavior. */
+  /** True when the card's printed Oracle text is helpful context for the chosen keyword. */
   showOracleText: boolean;
   subtitle: string;
+}
+
+function assertNeverKeyword(keyword: never): never {
+  throw new Error(`Unhandled alternative cast keyword: ${String(keyword)}`);
 }
 
 // Per-keyword display copy. Driven by the engine-provided `keyword` axis;
@@ -169,18 +171,7 @@ function keywordCopy(
         subtitle: t("alternativeCost.spectacleSubtitle", { name: cardName }),
       };
   }
-  // Defense-in-depth: the engine's `AlternativeCastKeyword` enum is the source
-  // of truth and may add a variant before the FE catches up. Never return
-  // `undefined` (which would throw on `copy.eyebrow` and black-screen the
-  // client, per issue #2939) — fall back to a generic normal-vs-alternative
-  // prompt so an unrecognized keyword still renders a usable choice.
-  return {
-    eyebrow: t("alternativeCost.genericEyebrow"),
-    normalLabel: t("alternativeCost.genericNormalLabel"),
-    altLabel: t("alternativeCost.genericAltLabel"),
-    showOracleText: true,
-    subtitle: t("alternativeCost.genericSubtitle", { name: cardName }),
-  };
+  return assertNeverKeyword(keyword);
 }
 
 /**
