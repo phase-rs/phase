@@ -7073,15 +7073,13 @@ mod tests {
             "Attacker".to_string(),
             Zone::Battlefield,
         );
-        for id in [attacker] {
-            state
-                .objects
-                .get_mut(&id)
-                .unwrap()
-                .card_types
-                .core_types
-                .push(CoreType::Creature);
-        }
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         state.combat = Some(crate::game::combat::CombatState {
             attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
                 attacker,
