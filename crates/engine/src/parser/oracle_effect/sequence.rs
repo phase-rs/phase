@@ -3372,6 +3372,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
@@ -3399,6 +3400,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::Encore
+        | Effect::Meld { .. }
         | Effect::ExileHaunting { .. }
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
