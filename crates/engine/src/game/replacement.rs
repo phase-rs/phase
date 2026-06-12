@@ -5,7 +5,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope, PostReplacementContinuation,
     PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, ShieldKind, TapStateChange,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -537,17 +538,51 @@ fn replacement_mode_decline_cloned(mode: &ReplacementMode) -> Option<Box<Ability
     }
 }
 
+/// CR 614.12a: outcome of attempting to pay an optional `MayCost` replacement's
+/// accept-cost. The accept path applies the replacement only on [`Paid`]; on
+/// [`Unpaid`] it falls through to the decline branch (CR 614.12); on
+/// [`PausedForChoice`] the payment has set an interactive `WaitingFor` (e.g. a
+/// `DiscardChoice`) and the replacement must re-park itself so the post-choice
+/// resume can finish any remaining cost before entering the permanent — never
+/// let it enter early.
+///
+/// [`Paid`]: MayCostOutcome::Paid
+/// [`Unpaid`]: MayCostOutcome::Unpaid
+/// [`PausedForChoice`]: MayCostOutcome::PausedForChoice
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MayCostOutcome {
+    Paid,
+    Unpaid,
+    PausedForChoice { remaining_cost: Option<AbilityCost> },
+}
+
+fn combine_paused_may_cost(
+    paused_remaining: Option<AbilityCost>,
+    following_costs: &[AbilityCost],
+) -> Option<AbilityCost> {
+    let mut costs = Vec::new();
+    if let Some(cost) = paused_remaining {
+        costs.push(cost);
+    }
+    costs.extend(following_costs.iter().cloned());
+    match costs.len() {
+        0 => None,
+        1 => costs.into_iter().next(),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
 fn pay_replacement_may_cost(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
-) -> bool {
+) -> MayCostOutcome {
     if !cost.is_payable(state, player, source_id) {
-        return false;
+        return MayCostOutcome::Unpaid;
     }
-    match cost {
+    let paid = match cost {
         AbilityCost::Mana { cost } => {
             crate::game::casting::pay_unless_cost(state, player, cost, events).is_ok()
         }
@@ -560,10 +595,92 @@ fn pay_replacement_may_cost(
                 crate::game::life_costs::PayLifeCostResult::Paid { .. }
             )
         }
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|cost| pay_replacement_may_cost(state, player, source_id, cost, events)),
+        AbilityCost::Composite { costs } => {
+            // CR 614.12a: a composite accept-cost pays each sub-cost in order; a
+            // mid-composite pause carries the unpaid suffix so the resume
+            // completes the rest before the replacement applies.
+            for (index, sub_cost) in costs.iter().enumerate() {
+                match pay_replacement_may_cost(state, player, source_id, sub_cost, events) {
+                    MayCostOutcome::Paid => {}
+                    MayCostOutcome::PausedForChoice { remaining_cost } => {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: combine_paused_may_cost(
+                                remaining_cost,
+                                &costs[index + 1..],
+                            ),
+                        };
+                    }
+                    MayCostOutcome::Unpaid => return MayCostOutcome::Unpaid,
+                }
+            }
+            true
+        }
+        // CR 614.12a + CR 118.12 + CR 701.9a: a "discard a [type] card" cost
+        // paid as the replacement is applied (Mox Diamond, Chrome Mox-style
+        // as-enters discards). This is the chosen-from-hand discard shape, which
+        // only has a real payment arm in *resolution* scope — the activation-
+        // scope `pay_ability_cost` no-ops it (it expects the interactive
+        // `WaitingFor::PayCost`/`DiscardChoice` detour to have run first, which
+        // never happens on the replacement accept path). Routing through the
+        // resolution authority discards the card(s) for real: when the eligible
+        // set exactly fills the requirement the discard auto-pays synchronously
+        // (`PaymentOutcome::Paid`); otherwise the authority sets
+        // `WaitingFor::DiscardChoice` and returns `Paused`, which surfaces as
+        // `PausedForChoice` so the accept path re-parks the replacement and the
+        // permanent enters only after the card actually leaves the hand.
+        AbilityCost::Discard {
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            ..
+        } => {
+            // The synthesized ability is the payment context for the resolution
+            // authority: `pay_ability_cost_for_resolution` reads only its
+            // `source_id` and resolves the (here fixed) discard `count` against
+            // it. Modeling it as `Effect::PayCost { cost }` keeps the context
+            // self-describing without inventing a fake target chain.
+            let ability = ResolvedAbility::new(
+                crate::types::ability::Effect::PayCost {
+                    cost: cost.clone(),
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                player,
+            );
+            // CR 118.12 + CR 701.9b: when the eligible set exceeds the requirement
+            // the resolution authority sets `WaitingFor::DiscardChoice` for the
+            // player to pick *which* card(s) to discard. The non-composite discard
+            // arm reports `Paid` in that case (the pending choice IS the payment),
+            // so the set `waiting_for` — not just the `PaymentOutcome` — signals
+            // the interactive pause. Snapshot it to distinguish a synchronous
+            // forced/auto discard (`Paid`, no choice) from a paused one.
+            let prior_waiting_for = state.waiting_for.clone();
+            match crate::game::costs::pay_ability_cost_for_resolution(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => {
+                    if state.waiting_for != prior_waiting_for
+                        && matches!(state.waiting_for, WaitingFor::DiscardChoice { .. })
+                    {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: None,
+                        };
+                    }
+                    true
+                }
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
+            }
+        }
         _ => crate::game::casting::pay_ability_cost(state, player, source_id, cost, events).is_ok(),
+    };
+    if paid {
+        MayCostOutcome::Paid
+    } else {
+        MayCostOutcome::Unpaid
     }
 }
 
@@ -3402,9 +3519,10 @@ pub fn find_applicable_replacements(
             {
                 continue;
             }
-            // CR 614.12: a stack-resident object reached only via the
+            // CR 614.12 + CR 608.2n: a stack-resident object reached only via the
             // stack-self-move exception can apply only its own self-replacement
-            // effects (mirrors the entering-object / discarded-card guards).
+            // effects. Explicit `SelfRef` is the canonical marker (Invoke
+            // Calamity rider, Nexus of Fate).
             if is_stack_self_move
                 && !in_scanned_zone
                 && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
@@ -4867,6 +4985,10 @@ fn pipeline_loop(
                     // CR 701.24a: set by the W3 library-placement arm after parking
                     // (the pipeline doesn't know the caller's placement here).
                     library_placement: None,
+                    // CR 614.12a: first park of this choice — no MayCost has been
+                    // paid yet. Set only when re-parking after a paused accept.
+                    may_cost_paid: false,
+                    may_cost_remaining: None,
                 });
                 return ReplacementResult::NeedsChoice(affected);
             }
@@ -4896,6 +5018,9 @@ fn pipeline_loop(
                 is_optional: false,
                 // CR 701.24a: set by the W3 library-placement arm after parking.
                 library_placement: None,
+                // CR 614.12a: distinct-replacement choices carry no MayCost.
+                may_cost_paid: false,
+                may_cost_remaining: None,
             });
             return ReplacementResult::NeedsChoice(affected);
         } else {
@@ -5030,6 +5155,15 @@ pub fn continue_replacement(
     if pending.is_optional {
         let rid = pending.candidates[0];
         let payer = pending.proposed.affected_player(state);
+        // CR 614.12a: a `true` flag means this is the post-choice resume of an
+        // accept whose `MayCost` payment paused for an interactive sub-choice
+        // (e.g. a `DiscardChoice`). Re-park fields are captured up front so a
+        // fresh pause can re-stash the same record.
+        let resuming_after_paid_cost = pending.may_cost_paid;
+        let remaining_may_cost = pending.may_cost_remaining.clone();
+        let reparked_candidates = pending.candidates.clone();
+        let reparked_depth = pending.depth;
+        let reparked_library_placement = pending.library_placement.clone();
         let mut proposed = pending.proposed;
         proposed.mark_applied(rid);
 
@@ -5049,12 +5183,51 @@ pub fn continue_replacement(
             })
             .unwrap_or((None, None, None));
 
-        let paid_may_cost = if chosen_index == 0 {
-            may_cost
-                .as_ref()
-                .is_none_or(|cost| pay_replacement_may_cost(state, payer, rid.source, cost, events))
+        // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
+        // `PausedForChoice` outcome means the payment surfaced an interactive
+        // sub-choice (`WaitingFor` already set) — re-park the SAME pending record
+        // with `may_cost_paid: true` plus any unpaid suffix so the post-choice
+        // resume re-enters here, continues payment, and finishes entering the
+        // permanent. The permanent must NOT enter until the card actually leaves
+        // the hand.
+        let pay_outcome = if chosen_index != 0 {
+            MayCostOutcome::Unpaid
+        } else if resuming_after_paid_cost {
+            match &remaining_may_cost {
+                None => MayCostOutcome::Paid,
+                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+            }
         } else {
-            false
+            match &may_cost {
+                None => MayCostOutcome::Paid,
+                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+            }
+        };
+
+        let paid_may_cost = match pay_outcome {
+            MayCostOutcome::Paid => true,
+            MayCostOutcome::Unpaid => false,
+            MayCostOutcome::PausedForChoice { remaining_cost } => {
+                // CR 614.12a: the payment surfaced an interactive sub-choice (e.g. a
+                // `DiscardChoice`); `state.waiting_for` is already set to it. Re-park
+                // the SAME pending record with `may_cost_paid: true` and flag the
+                // pause so `handle_replacement_choice` surfaces the live sub-choice
+                // (not a fresh ReplacementChoice). The permanent enters only when
+                // the resume finishes any `may_cost_remaining`. The carried
+                // `Execute` payload is inert — the flag short-circuits the caller
+                // before it is read.
+                state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+                    proposed: proposed.clone(),
+                    candidates: reparked_candidates,
+                    depth: reparked_depth,
+                    is_optional: true,
+                    library_placement: reparked_library_placement,
+                    may_cost_paid: true,
+                    may_cost_remaining: remaining_cost,
+                });
+                state.replacement_may_cost_paused = true;
+                return ReplacementResult::Execute(proposed);
+            }
         };
 
         let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
@@ -6288,6 +6461,8 @@ mod tests {
             depth: 0,
             is_optional: true,
             library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
         });
 
         let WaitingFor::ReplacementChoice {

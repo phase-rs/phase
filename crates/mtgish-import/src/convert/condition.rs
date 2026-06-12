@@ -867,7 +867,10 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         // CR 601.2: "if it was cast" / "if you cast it" — entering permanent
         // entered via the stack rather than a non-cast zone change. Engine's
         // `WasCast` predicate is zoneless (mirrors Discover ETB usage).
-        Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast { zone: None },
+        Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast {
+            zone: None,
+            controller: None,
+        },
         // CR 702.33d-f + CR 603.4: ETB intervening-if "if it was kicked".
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,

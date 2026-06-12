@@ -141,7 +141,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
 /// owner's library (CR 401.4); every other zone uses the standard cross-zone
 /// mover. Extracted from the Dig rest-move block so the search-partition handler
 /// reuses the exact same routing.
-fn route_rest_partition(
+pub(crate) fn route_rest_partition(
     state: &mut GameState,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
@@ -2312,6 +2312,33 @@ pub(super) fn handle_resolution_choice(
                 kind: effect_kind,
                 source_id,
             });
+
+            // CR 614.12a: this `DiscardChoice` was the interactive payment of an
+            // optional `MayCost` replacement's accept (e.g. Mox Diamond's
+            // "discard a land card" with multiple eligible lands). The cost is
+            // now paid, so resume the parked replacement with the accept index —
+            // `continue_replacement` sees `may_cost_paid: true`, pays any
+            // `may_cost_remaining`, and finishes entering the permanent. This
+            // runs instead of the ordinary continuation drain (there is no
+            // `Effect::PayCost` chain behind a replacement-originated discard).
+            if state
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.may_cost_paid)
+            {
+                let waiting_for =
+                    super::engine_replacement::handle_replacement_choice(state, 0, events)?;
+                if let Some(outcome) = batch_or_drain_observer_triggers(
+                    state,
+                    events,
+                    events_before_effect,
+                    events_after_move,
+                ) {
+                    return Ok(outcome);
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
+
             let waiting_for = finish_with_continuation(state, player, events);
 
             // CR 603.2c: each opponent's discard is a separate occurrence of a
@@ -2965,7 +2992,25 @@ pub(super) fn handle_resolution_choice(
                     "Invalid dungeon choice".to_string(),
                 ));
             }
+            let events_before_venture = events.len();
             effects::venture::handle_choose_dungeon(state, player, dungeon, events);
+            if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)?
+            {
+                state.waiting_for = waiting_for.clone();
+            }
+            // CR 603.2 + CR 309.4c: RoomEntered from the chosen dungeon must dispatch
+            // card triggers such as "Whenever you venture into the dungeon" (issue #1297).
+            // The resolution-choice path does not run `run_post_action_pipeline`.
+            if let Some(outcome) =
+                batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
+            {
+                return Ok(outcome);
+            }
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
@@ -2982,7 +3027,22 @@ pub(super) fn handle_resolution_choice(
                     "Invalid dungeon room choice".to_string(),
                 ));
             }
+            let events_before_venture = events.len();
             effects::venture::handle_choose_room(state, player, dungeon, room_index, events);
+            if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)?
+            {
+                state.waiting_for = waiting_for.clone();
+            }
+            if let Some(outcome) =
+                batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
+            {
+                return Ok(outcome);
+            }
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (

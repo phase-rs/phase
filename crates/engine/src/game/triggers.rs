@@ -28,10 +28,13 @@ use crate::types::zones::Zone;
 use super::ability_utils::build_resolved_from_def;
 use super::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
+    eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped,
 };
-use super::filter::{matches_target_filter, spell_record_matches_filter, FilterContext};
+use super::filter::{
+    matches_target_filter, matches_target_filter_on_damage_record_source,
+    spell_record_matches_filter, FilterContext,
+};
 use super::game_object::GameObject;
 use super::speed::{
     effective_speed, has_max_speed, mark_speed_trigger_used, speed_key_source,
@@ -249,25 +252,49 @@ fn contextual_batched_trigger_event(
     trig_def: &TriggerDefinition,
     obj_id: ObjectId,
 ) -> Option<GameEvent> {
-    let GameEvent::AttackersDeclared {
-        defending_player, ..
-    } = event
-    else {
-        return Some(event.clone());
-    };
-
-    let matching_attacks = match trig_def.mode {
-        TriggerMode::Attacks => {
+    let (defending_player, matching_attacks) = match (event, trig_def.mode.clone()) {
+        (
+            GameEvent::AttackersDeclared {
+                defending_player, ..
+            },
+            TriggerMode::Attacks,
+        ) => (
+            *defending_player,
             super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
                 .into_iter()
                 .flat_map(|event| match event {
                     GameEvent::AttackersDeclared { attacks, .. } => attacks,
                     _ => Vec::new(),
                 })
-                .collect()
-        }
-        TriggerMode::YouAttack => {
-            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state)
+                .collect(),
+        ),
+        (
+            GameEvent::AttackersDeclared {
+                defending_player, ..
+            },
+            TriggerMode::YouAttack,
+        ) => (
+            *defending_player,
+            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state),
+        ),
+        (GameEvent::BlockersDeclared { .. }, TriggerMode::YouAttackUnblocked) => {
+            let matching = super::trigger_matchers::matching_you_attack_unblocked_pairs(
+                event, trig_def, obj_id, state,
+            );
+            let fallback = state
+                .objects
+                .get(&obj_id)
+                .map(|o| o.controller)
+                .unwrap_or(PlayerId(0));
+            let defending_player = matching
+                .first()
+                .map(|(_, target)| {
+                    super::trigger_matchers::attack_target_defending_player(
+                        state, *target, fallback,
+                    )
+                })
+                .unwrap_or(fallback);
+            (defending_player, matching)
         }
         _ => return Some(event.clone()),
     };
@@ -285,7 +312,7 @@ fn contextual_batched_trigger_event(
     // event subset, not every attacker in the declaration.
     Some(GameEvent::AttackersDeclared {
         attacker_ids: matching_attackers,
-        defending_player: *defending_player,
+        defending_player,
         attacks: matching_attacks,
     })
 }
@@ -1704,7 +1731,10 @@ fn collect_pending_triggers(
                 // the SpellCast event itself).
                 let cascade_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                     .description("Cascade".to_string())
-                    .condition(TriggerCondition::WasCast { zone: None });
+                    .condition(TriggerCondition::WasCast {
+                        zone: None,
+                        controller: None,
+                    });
                 let cascade_ability =
                     ResolvedAbility::new(Effect::Cascade, Vec::new(), *cast_obj_id, controller);
                 let timestamp = state.next_timestamp() as u32;
@@ -1745,7 +1775,10 @@ fn collect_pending_triggers(
             for n in ripple_instances {
                 let ripple_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                     .description("Ripple".to_string())
-                    .condition(TriggerCondition::WasCast { zone: None });
+                    .condition(TriggerCondition::WasCast {
+                        zone: None,
+                        controller: None,
+                    });
                 let ripple_ability = ResolvedAbility::new(
                     Effect::Ripple { count: n },
                     Vec::new(),
@@ -4279,9 +4312,14 @@ pub(crate) fn check_trigger_condition(
         // anyway per CR 603.4 if the source has left the relevant zone).
         // CR 601.2 + CR 603.4: cast-origin check. zone=None → cast from anywhere
         // (Discover/Wedding Ring/Satoru back-compat). zone=Some(z) → cast specifically
-        // from zone z (Twilight Diviner: graveyard). Reads the ENTERING object's
-        // cast_from_zone, never the trigger source.
-        TriggerCondition::WasCast { zone } => {
+        // from zone z (Twilight Diviner: graveyard). controller=Some(c) additionally
+        // gates the caster relative to the trigger controller (Prized Amalgam:
+        // "you cast it from your graveyard"). Reads the ENTERING object's cast
+        // provenance, never the trigger source.
+        TriggerCondition::WasCast {
+            zone,
+            controller: caster_scope,
+        } => {
             let checked_id = trigger_event
                 .and_then(|e| match e {
                     GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
@@ -4290,8 +4328,15 @@ pub(crate) fn check_trigger_condition(
                 .or(source_id);
             checked_id
                 .and_then(|id| state.objects.get(&id))
-                .and_then(|obj| obj.cast_from_zone)
-                .is_some_and(|cz| zone.is_none_or(|z| cz == z))
+                .is_some_and(|obj| {
+                    obj.cast_from_zone
+                        .is_some_and(|cz| zone.is_none_or(|z| cz == z))
+                        && caster_scope.as_ref().is_none_or(|scope| {
+                            obj.cast_controller.is_some_and(|caster| {
+                                controller_ref_matches_player(caster, controller, scope)
+                            })
+                        })
+                })
         }
         // CR 603.4 + CR 603.6a: "put onto the battlefield with this ability" —
         // the entering object was placed by THIS trigger's source ability.
@@ -4437,6 +4482,58 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
             matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
         }),
+        // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
+        // evaluates the triggering damage source as it was when the damage was
+        // dealt. Reuse the same DamageRecord snapshot matcher as
+        // PlayerFilter::OpponentDealtCombatDamage so later type changes or zone
+        // moves do not change what "that damage was dealt by" refers to.
+        TriggerCondition::EventDamageSourceMatchesFilter { filter } => trigger_event
+            .and_then(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id: dmg_src,
+                    target,
+                    amount,
+                    is_combat,
+                    ..
+                } => {
+                    let ctx = FilterContext::from_source_with_controller(
+                        source_id.unwrap_or(ObjectId(0)),
+                        controller,
+                    );
+                    state.damage_dealt_this_turn.iter().rev().find(|record| {
+                        record.source_id == *dmg_src
+                            && record.target == *target
+                            && record.amount == *amount
+                            && record.is_combat == *is_combat
+                            && matches_target_filter_on_damage_record_source(
+                                state, record, filter, &ctx,
+                            )
+                    })
+                }
+                GameEvent::CombatDamageDealtToPlayer {
+                    player_id,
+                    source_amounts,
+                    ..
+                } => {
+                    let ctx = FilterContext::from_source_with_controller(
+                        source_id.unwrap_or(ObjectId(0)),
+                        controller,
+                    );
+                    source_amounts.iter().find_map(|(dmg_src, amount)| {
+                        state.damage_dealt_this_turn.iter().rev().find(|record| {
+                            record.source_id == *dmg_src
+                                && record.target == TargetRef::Player(*player_id)
+                                && record.amount == *amount
+                                && record.is_combat
+                                && matches_target_filter_on_damage_record_source(
+                                    state, record, filter, &ctx,
+                                )
+                        })
+                    })
+                }
+                _ => None,
+            })
+            .is_some(),
         // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
         // persisted `ChosenAttribute::Label` (set when the anchor-word
         // permanent entered the battlefield) matches the linked anchor word.
@@ -4633,6 +4730,8 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 725.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => eval_is_monarch(state, controller),
+        // CR 726.3: True when the controller has the initiative.
+        TriggerCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
         TriggerCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
@@ -13666,7 +13765,10 @@ pub mod tests {
         // WasCast must read the Aura's cast_from_zone, not Light-Paws's.
         assert!(check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast { zone: None },
+            &TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+            },
             PlayerId(0),
             Some(light_paws),
             Some(&event),
@@ -13704,11 +13806,72 @@ pub mod tests {
 
         assert!(!check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast { zone: None },
+            &TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+            },
             PlayerId(0),
             Some(light_paws),
             Some(&event),
         ));
+    }
+
+    #[test]
+    fn was_cast_controller_scope_checks_caster() {
+        let mut state = setup();
+        let prized_amalgam = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prized Amalgam".to_string(),
+            Zone::Graveyard,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(1));
+        }
+        let condition = TriggerCondition::WasCast {
+            zone: Some(Zone::Graveyard),
+            controller: Some(ControllerRef::You),
+        };
+        let event = zone_changed_event(
+            entering,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(prized_amalgam),
+                Some(&event),
+            ),
+            "opponent-cast creature must not satisfy 'you cast it from your graveyard'"
+        );
+
+        state.objects.get_mut(&entering).unwrap().cast_controller = Some(PlayerId(0));
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(prized_amalgam),
+                Some(&event),
+            ),
+            "controller-scoped WasCast should pass when the trigger controller cast it"
+        );
     }
 
     /// CR 603.4 + CR 601.2h: Satoru's intervening-if must fail at resolution
@@ -13777,7 +13940,10 @@ pub mod tests {
 
         assert!(check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast { zone: None },
+            &TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+            },
             PlayerId(0),
             Some(cast_spell),
             None,
@@ -13787,7 +13953,10 @@ pub mod tests {
         state.objects.get_mut(&cast_spell).unwrap().cast_from_zone = None;
         assert!(!check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast { zone: None },
+            &TriggerCondition::WasCast {
+                zone: None,
+                controller: None,
+            },
             PlayerId(0),
             Some(cast_spell),
             None,

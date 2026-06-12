@@ -789,7 +789,7 @@ pub(crate) fn begin_deferred_target_selection(
     // CR 601.2b + CR 601.2c: modes/X are announced (601.2b) before targets are
     // chosen (601.2c), since target legality (e.g. "mana value X or less") can
     // depend on the chosen X.
-    let (target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
+    let (mut target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
         (build_target_slots(state, &pending.ability)?, Vec::new())
     } else {
         let obj = state.objects.get(&pending.object_id).ok_or_else(|| {
@@ -836,6 +836,16 @@ pub(crate) fn begin_deferred_target_selection(
             pending.ability.chosen_x,
         )?
     };
+    // CR 601.2c + CR 601.2d: X is now known (deferred selection runs after the
+    // ChooseXValue round-trip), so a divided spell's slot count can be clamped to
+    // its divisible pool — each target needs ≥1, so picking more targets than the
+    // pool can never be legally divided (Shatterskull Smashing X=1, issue #2856).
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &pending.ability,
+        pending.distribute.as_ref(),
+        &mut target_slots,
+    );
     if target_slots.is_empty() {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
@@ -4566,6 +4576,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // evaluate conditions like "if you cast it from your hand".
     let mut ability = ability;
     ability.context.cast_from_zone = Some(source_zone);
+    ability.context.cast_controller = Some(player);
     ability.context.cast_phase = Some(state.phase);
     stamp_controller_controlled_as_cast(state, &mut ability, player, object_id);
 
@@ -4612,6 +4623,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         // directly on the object since there's no ability context to carry it.
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_from_zone = Some(source_zone);
+            obj.cast_controller = Some(player);
         }
         None
     };

@@ -4570,6 +4570,8 @@ pub enum StaticCondition {
     SourceIsBlocked,
     /// CR 725.1: True when the controller is the monarch.
     IsMonarch,
+    /// CR 726.3: True when the controller has the initiative.
+    IsInitiative,
     /// CR 725.1: True when no player holds the monarch designation. Distinct
     /// from `Not(IsMonarch)`, which is also true when an opponent is monarch.
     NoMonarch,
@@ -11512,6 +11514,9 @@ pub enum AbilityCondition {
     HasMaxSpeed,
     /// CR 725.1: "if you're the monarch" is true when the ability controller has the monarch designation.
     IsMonarch,
+    /// CR 726.3: "if you have the initiative" is true when the ability controller
+    /// has the initiative designation.
+    IsInitiative,
     /// CR 702.131c: "if you have the city's blessing" is true when the ability
     /// controller has the city's blessing designation.
     HasCityBlessing,
@@ -11820,6 +11825,10 @@ pub struct SpellContext {
     /// to ETB triggers so conditions like "if you cast it from your hand" can evaluate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
+    /// CR 601.2a + CR 603.4: The player who cast the spell. Propagated with
+    /// `cast_from_zone` for caster-scoped intervening-if conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
     /// CR 601.2: Phase at the time the spell was cast. Used by addendum-style
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11977,10 +11986,12 @@ pub enum TriggerCondition {
     /// the roll from `AttractionVisited` must fall within the printed range.
     AttractionVisitRoll { min: u8, max: u8 },
 
-    /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
+    /// CR 601.2 + CR 603.4: reads the ENTERING object's cast provenance, never the source.
     WasCast {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         zone: Option<Zone>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<ControllerRef>,
     },
     /// CR 305.1 + CR 603.4: Intervening/event condition for zone-change
     /// triggers whose subject must have been played as a land. Negation
@@ -12065,6 +12076,9 @@ pub enum TriggerCondition {
 
     /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
     IsMonarch,
+    /// CR 726.3: "if you have the initiative" is true when the controller has
+    /// the initiative designation.
+    IsInitiative,
     /// CR 725.1: "if there is no monarch" is true when no player holds the
     /// monarch designation. Distinct from `Not(IsMonarch)`.
     NoMonarch,
@@ -12180,6 +12194,19 @@ pub enum TriggerCondition {
     /// CR 603.4 + CR 611.2b: Source-bound intervening-if predicate expressed
     /// as a normal target filter evaluated against the trigger source.
     SourceMatchesFilter { filter: TargetFilter },
+
+    /// CR 603.4 + CR 120.1: Intervening-if predicate whose subject is the set
+    /// of objects that dealt the triggering combat damage ("if any of that
+    /// damage was dealt by a Warrior"). An object that deals damage is the
+    /// source of that damage (CR 120.1); this condition is true when the
+    /// triggering damage event's source snapshot matches `filter`. Distinct
+    /// from `SourceMatchesFilter` (the ability's own permanent) and
+    /// `ZoneChangeObjectMatchesFilter` (the zone-change object) — it evaluates
+    /// the event's damage source, extending the established source-vs-event-
+    /// object split. Used by Mindblade Render ("Whenever your opponents are
+    /// dealt combat damage, if any of that damage was dealt by a Warrior, ...").
+    /// Checked at both fire-time and resolution-time per CR 603.4.
+    EventDamageSourceMatchesFilter { filter: TargetFilter },
 
     /// CR 614.12c + CR 607.2d + CR 603.4: True when the trigger source's
     /// persisted `ChosenAttribute::Label` matches the given anchor word.

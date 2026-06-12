@@ -730,6 +730,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let Some(cast_from_zone) = ability.context.cast_from_zone {
                         obj.cast_from_zone = Some(cast_from_zone);
                     }
+                    obj.cast_controller =
+                        ability.context.cast_controller.or(Some(entry.controller));
                 }
             }
             let cast_timing_permission = state
@@ -966,6 +968,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             controller: entry.controller,
                             casting_variant,
                             cast_from_zone,
+                            cast_controller: Some(entry.controller),
                             cast_timing_permission,
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
@@ -2392,6 +2395,8 @@ mod tests {
             obj.kickers_paid = vec![KickerVariant::First];
             obj.additional_cost_payment_count = 1;
             obj.convoked_creatures = vec![ObjectId(900)];
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
             obj.cast_timing_permission =
                 Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
         }
@@ -2422,6 +2427,8 @@ mod tests {
         );
         assert_eq!(obj.additional_cost_payment_count, 1);
         assert_eq!(obj.convoked_creatures, vec![ObjectId(900)]);
+        assert_eq!(obj.cast_from_zone, Some(Zone::Graveyard));
+        assert_eq!(obj.cast_controller, Some(PlayerId(0)));
         assert_eq!(
             obj.cast_timing_permission,
             Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
@@ -7284,6 +7291,46 @@ mod tests {
             },
         });
         obj_id
+    }
+
+    /// CR 608.2n + CR 614.6 (issue #2897): a resolving instant carrying its own
+    /// shuffle-back graveyard replacement must land in its owner's library, not
+    /// the graveyard.
+    #[test]
+    fn nexus_of_fate_class_shuffle_back_on_resolution() {
+        use crate::parser::oracle_replacement::parse_replacement_line;
+
+        let mut state = setup();
+        let spell = push_plain_instant(&mut state);
+        let repl = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it into its \
+             owner's library instead.",
+            "Nexus of Fate",
+        )
+        .expect("shuffle-back replacement must parse");
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .replacement_definitions
+            .push(repl);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Library,
+            "shuffle-back replacement must redirect the resolved spell into its owner's library"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the spell must not also reach the graveyard"
+        );
+        assert!(
+            state.players[0].library.contains(&spell),
+            "the spell must be in its owner's library after resolution"
+        );
     }
 
     /// CR 608.2n + CR 614.6 (PLAN §8 Risk #2 bug-fix): a plain instant resolving

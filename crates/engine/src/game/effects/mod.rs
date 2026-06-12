@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_monarch, eval_source_entered_this_turn, eval_source_is_tapped,
+    eval_has_city_blessing, eval_is_initiative, eval_is_monarch, eval_source_entered_this_turn,
+    eval_source_is_tapped,
 };
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
@@ -1306,6 +1307,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::HasMaxSpeed
             | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
@@ -5499,6 +5501,8 @@ pub(crate) fn evaluate_condition(
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         AbilityCondition::IsMonarch => eval_is_monarch(state, ability.controller),
+        // CR 726.3: The initiative is a player designation that effects can identify.
+        AbilityCondition::IsInitiative => eval_is_initiative(state, ability.controller),
         // CR 702.131c: The city's blessing is a player designation that effects
         // can identify.
         AbilityCondition::HasCityBlessing => eval_has_city_blessing(state, ability.controller),

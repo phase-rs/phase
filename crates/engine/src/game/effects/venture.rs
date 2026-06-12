@@ -39,9 +39,9 @@ pub fn resolve_venture_into(
     )
 }
 
-/// CR 725.2: Take the initiative.
+/// CR 726.2: Take the initiative.
 ///
-/// CR 725.5: Re-taking initiative when you already have it still triggers
+/// CR 726.5: Re-taking initiative when you already have it still triggers
 /// the venture into Undercity — the set is idempotent but the venture always fires.
 pub fn resolve_take_initiative(
     state: &mut GameState,
@@ -50,7 +50,7 @@ pub fn resolve_take_initiative(
 ) -> Result<(), EffectError> {
     let player = ability.controller;
 
-    // CR 725.3: Only one player can have the initiative at a time.
+    // CR 726.3: Only one player can have the initiative at a time.
     state.initiative = Some(player);
 
     events.push(GameEvent::InitiativeTaken { player_id: player });
@@ -59,7 +59,7 @@ pub fn resolve_take_initiative(
         source_id: ability.source_id,
     });
 
-    // CR 725.2: "Whenever a player takes the initiative, that player ventures into Undercity."
+    // CR 726.2: "Whenever a player takes the initiative, that player ventures into Undercity."
     resolve_venture_for_player(
         state,
         player,
@@ -268,6 +268,8 @@ pub fn handle_choose_dungeon(
     dungeon: DungeonId,
     events: &mut Vec<GameEvent>,
 ) {
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = player;
     start_dungeon_and_enter(state, player, dungeon, events);
 }
 
@@ -279,6 +281,8 @@ pub fn handle_choose_room(
     room_index: u8,
     events: &mut Vec<GameEvent>,
 ) {
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = player;
     let progress = state.dungeon_progress.entry(player).or_default();
     progress.current_room = room_index;
 
@@ -500,7 +504,7 @@ mod tests {
 
         resolve_take_initiative(&mut state, &ability, &mut events).unwrap();
 
-        // CR 725.5: Re-taking initiative still triggers venture.
+        // CR 726.5: Re-taking initiative still triggers venture.
         // Undercity room 0 → [1, 2] (branch), so should present choice.
         match &state.waiting_for {
             WaitingFor::ChooseDungeonRoom { dungeon, .. } => {

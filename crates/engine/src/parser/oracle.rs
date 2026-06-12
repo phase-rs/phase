@@ -14676,6 +14676,69 @@ mod tests {
         }
     }
 
+    /// Issue #2896 (Muxus, Goblin Grandee). The "and the rest on the bottom of
+    /// your library in a random order" rider rides in the SAME clause as the
+    /// from-among put-step (the rest-subject "the rest" does not begin with an
+    /// imperative verb, so `split_clause_sequence` never breaks it off into a
+    /// standalone PutRest). The from-among parser must capture it as
+    /// `rest_destination = Some(Library)` — otherwise the unmatched rest falls
+    /// through to the graveyard default. The mass "Put all" form must lower to
+    /// the unbounded keep sentinel with `up_to == false` (no choice).
+    #[test]
+    fn muxus_put_all_from_among_sets_rest_to_library() {
+        let r = parse(
+            "When Muxus, Goblin Grandee enters, reveal the top six cards of your library. Put all Goblin creature cards with mana value 5 or less from among them onto the battlefield and the rest on the bottom of your library in a random order.",
+            "Muxus, Goblin Grandee",
+            &[],
+            &["Creature"],
+            &["Goblin"],
+        );
+        assert_eq!(r.triggers.len(), 1, "ETB trigger should parse");
+        let exec = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger must carry an execute effect");
+        match &*exec.effect {
+            Effect::Dig {
+                count,
+                destination,
+                keep_count,
+                up_to,
+                filter,
+                rest_destination,
+                ..
+            } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 6 }, "dig six");
+                assert_eq!(
+                    *destination,
+                    Some(Zone::Battlefield),
+                    "matching Goblins go to the battlefield"
+                );
+                assert_eq!(
+                    *keep_count,
+                    Some(u32::MAX),
+                    "'put all' lowers to the unbounded keep sentinel"
+                );
+                assert!(!*up_to, "'put all' is not an up-to selection");
+                assert!(
+                    matches!(filter, TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                        if type_filters.contains(&TypeFilter::Creature)
+                            && type_filters.iter().any(|tf| matches!(tf, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Goblin")))),
+                    "filter should require Goblin creatures, got {filter:?}",
+                );
+                assert_eq!(
+                    *rest_destination,
+                    Some(Zone::Library),
+                    "the in-clause 'and the rest on the bottom' rider must route the rest to the library, not the graveyard",
+                );
+            }
+            other => panic!(
+                "Expected Dig effect, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
     #[test]
     fn commune_with_nature_dig_from_among() {
         let r = parse(
