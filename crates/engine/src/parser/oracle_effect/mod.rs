@@ -5,6 +5,7 @@ pub(crate) mod counter;
 pub(crate) mod imperative;
 pub(super) mod lower;
 pub(crate) mod mana;
+pub(crate) mod meld;
 mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
@@ -2771,6 +2772,32 @@ fn try_parse_choose_one_of_inline(
     }
     let (before_lower, after_lower) =
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
+
+    // CR 205.2 + CR 112.1: A bare " or " between two card-type words is a TYPE
+    // disjunction ("an instant or sorcery spell", "an artifact or creature
+    // spell"), not a disjunction of two imperative clauses. Splitting here
+    // truncates the type phrase — "you may cast an instant" / "sorcery spell
+    // ..." — and silently drops the cast-from-exile grant. `before_lower` and
+    // `after_lower` are contiguous slices of `tp.lower` around the separator,
+    // so running the shared `parse_type_phrase` combinator from the last word
+    // of the left half scans straight across the " or " into the right half. If
+    // it yields a multi-type `AnyOf`, the coordinator is part of the type list
+    // and this is not a clause boundary. Reusing the filter combinator covers
+    // every type pair the engine recognizes (instant/sorcery, artifact/creature,
+    // etc.), not just one hard-coded pair.
+    let last_word_start = before_lower.rfind(' ').map_or(0, |i| i + 1);
+    let type_probe = &tp.lower[last_word_start..];
+    if let Ok((_, TargetFilter::Typed(tf))) =
+        super::oracle_nom::target::parse_type_phrase(type_probe)
+    {
+        if tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::AnyOf(items) if items.len() > 1))
+        {
+            return None;
+        }
+    }
 
     // CR 119.7 + CR 119.8 + CR 104.2 + CR 104.3: When the left half contains a
     // restriction-predicate marker ("can't", "cannot", "doesn't", "don't") at
@@ -5993,6 +6020,9 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),
@@ -6026,11 +6056,52 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// `mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor)`,
 /// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Prefix: "you may cast spells from among [those|the] exiled cards"
-    let ((), rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("you may cast spells from among ").parse(i)?;
+    // CR 601.2a: Two grant shapes share the "...from among [those|the] exiled
+    // cards" anaphor:
+    //   * Plural unbounded — "you may cast spells from among those exiled cards"
+    //     (Nassari, Stolen Strategy): any number of casts, any type.
+    //   * Singular bounded — "you may cast a[n] [type-phrase] spell from among
+    //     those exiled cards" (Chandra, Hope's Beacon +1): at most ONE cast,
+    //     restricted to the typed filter.
+    // The singular determiner ("a"/"an"/"one") encodes the single-use cap; the
+    // optional type phrase encodes the card filter.
+    let ((card_filter, single_use), rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("you may cast ").parse(i)?;
+        // Singular bounded: a[n]/one [type-phrase] spell → single-use + filter.
+        let singular = |i| {
+            let (i, _) = alt((tag("an "), tag("a "), tag("one "))).parse(i)?;
+            // CR 601.2a: the printed type-phrase ("instant or sorcery", a bare
+            // "spell") restricts WHICH exiled cards this single-use grant
+            // authorizes. `parse_type_phrase` maps a bare "spell" → `Card`; a
+            // typed phrase ("instant or sorcery") → the `AnyOf` type filter.
+            let (i, filter) = super::oracle_nom::target::parse_type_phrase.parse(i)?;
+            // A typed phrase ("instant or sorcery") is followed by the " spell"
+            // noun; a bare "spell" already consumed it. The card filter is a
+            // printed quality (no stack pin) so the exile object matches it.
+            let is_bare_card = matches!(
+                &filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.as_slice() == [TypeFilter::Card]
+            );
+            let (i, card_filter) = match tag::<_, _, OracleError<'_>>(" spell").parse(i) {
+                Ok((i, _)) => (i, Some(filter)),
+                Err(e) => {
+                    if is_bare_card {
+                        // "a spell" — single-use but no type restriction.
+                        (i, None)
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            Ok((i, (card_filter, true)))
+        };
+        // Plural unbounded: "spells" → unlimited within the window, any type.
+        let plural = value((None, false), tag("spells"));
+        let (i, parsed) = alt((singular, plural)).parse(i)?;
+        let (i, _) = tag(" from among ").parse(i)?;
         let (i, _) = alt((tag("those exiled cards"), tag("the exiled cards"))).parse(i)?;
-        Ok((i, ()))
+        Ok((i, parsed))
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
@@ -6066,6 +6137,9 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission,
+            card_filter,
+            single_use_group: None,
+            single_use,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
         // normalizes `TrackedSetId(0)` to the most recently published set
@@ -6125,6 +6199,9 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         target: TargetFilter::Any,
         grantee: Default::default(),
@@ -6252,6 +6329,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
         // (the cards exiled by the prior clause) rather than fall back to the
@@ -6288,6 +6368,9 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             source_id: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
         },
         target: tracked_set_filter(),
         grantee: Default::default(),
@@ -6317,6 +6400,9 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -7836,6 +7922,12 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
     {
+        // CR 613.1b: untargeted mass form "gain control of all/each <filter>"
+        // (Hellkite Tyrant) lowers to `Effect::GainControlAll`.
+        let rest_lower = rest.to_ascii_lowercase();
+        let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
+            .parse(rest_lower.as_str())
+            .is_ok();
         let (target_text, _) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
@@ -7864,7 +7956,7 @@ fn try_parse_verb_and_target<'a>(
                 rem,
             ));
         }
-        return Some((TargetedImperativeAst::GainControl { target }, rem));
+        return Some((TargetedImperativeAst::GainControl { target, all }, rem));
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("earthbend ").parse(lower) {
@@ -11172,6 +11264,15 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // LoseLife.target is Option<TargetFilter>, unlike other effects' non-optional targets.
         // Guard on is_none() to only inject when no target was explicitly parsed.
         Effect::LoseLife { ref mut target, .. } if target.is_none() => {
+            *target = Some(subject_filter);
+        }
+        // CR 106.4 + CR 505.1 + CR 608.2c: "<player> adds {mana}" — subject-predicate
+        // classification deconjugates "adds" → "add" and routes through the imperative
+        // mana parser with `target: None`. Stamp the stripped subject ("that player",
+        // "the active player") as the mana recipient (Blinkmoth Urn, issue #2900).
+        Effect::Mana { ref mut target, .. }
+            if target.is_none() && target_filter_can_target_player(&subject_filter) =>
+        {
             *target = Some(subject_filter);
         }
         // CR 608.2c + CR 113.7a + CR 120.3: When the stripped subject is the
@@ -14622,6 +14723,35 @@ fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
 /// parsing, continuation recognition — producing a flat `Vec<AbilityDefinition>`
 /// (pre-assembled defs). Post-loop assembly (demoting Dig, sub_ability chaining,
 /// anaphoric resolution, etc.) is handled by [`lower_effect_chain_ir`].
+/// CR 701.42a: Build the single `ClauseIr` for an atomic meld effect clause.
+/// All chain-assembly fields are inert (no condition/continuation/scope) — the
+/// own/control gate rides the trigger's intervening-if, not the effect chain.
+fn meld_single_clause(effect: Effect, source_text: &str) -> ClauseIr {
+    ClauseIr {
+        parsed: parsed_clause(effect),
+        boundary: Some(ClauseBoundary::Sentence),
+        condition: None,
+        is_optional: false,
+        opponent_may_scope: None,
+        repeat_for: None,
+        player_scope: None,
+        starting_with: None,
+        delayed_condition: None,
+        prefix_delayed_condition: None,
+        intrinsic_continuation: None,
+        followup_continuation: None,
+        absorbed_by_followup: false,
+        multi_target: None,
+        where_x_expression: None,
+        is_otherwise: false,
+        unless_pay: None,
+        special: None,
+        source_text: source_text.to_string(),
+        target_selection_mode: TargetSelectionMode::Chosen,
+        target_chooser: None,
+    }
+}
+
 pub(crate) fn parse_effect_chain_ir(
     text: &str,
     kind: AbilityKind,
@@ -14677,6 +14807,45 @@ pub(crate) fn parse_effect_chain_ir(
         .map_or(text, |(_, body)| *body);
     let full_text = text; // bind AFTER the strip so diagnostics track the parsed chunks
     ctx.effect_chain_full_lower = Some(full_text.to_ascii_lowercase());
+    // CR 701.42a: The meld effect clause "exile them, then meld them into
+    // [result]" is a single atomic instruction whose ", then " comma would
+    // otherwise be split into two clauses by `split_clause_sequence`. Intercept
+    // the bare clause BEFORE chunking and emit it as one `Effect::Meld`.
+    //
+    // Only the TRIGGERED forms (Gisela, Graf Rats) are handled here: their
+    // own/control gate was already hoisted to the trigger's intervening-if (in
+    // `oracle_trigger.rs`) and the partner staged in `ctx.pending_meld_partner`,
+    // so `full_text` is the bare residual "exile them, then meld them into R".
+    //
+    // The ACTIVATED / inline-gate forms (Hanweir Battlements, Urza, Lord
+    // Protector) are deliberately NOT handled here. Their text leads with the
+    // inline "if you both own and control ..." gate, which `parse_meld_effect_clause`
+    // cannot consume (its `tag("exile them, then meld them into ")` fails), so
+    // they fall through to baseline parsing and remain `Unimplemented`. Swallowing
+    // that inline `Condition_If` would be a coverage-honesty regression; an honest
+    // activated-ability condition node for these is a follow-up.
+    //
+    // Cheap fast-reject: only the ~6 meld cards carry the meld signature, so a
+    // byte-substring check on the lowercase form already computed above
+    // (`effect_chain_full_lower`) gates the full nom parse. This is a perf
+    // guard, not parsing dispatch — a positive hit still routes through the
+    // nom-combinator `parse_meld_effect_clause`, which remains the sole
+    // authority on whether the text forms a meld clause.
+    if ctx
+        .effect_chain_full_lower
+        .as_deref()
+        .is_some_and(|lower| lower.contains(meld::MELD_EFFECT_MARKER))
+    {
+        if let Some(effect) = meld::parse_meld_effect_clause(full_text.trim(), ctx) {
+            return EffectChainIr {
+                clauses: vec![meld_single_clause(effect, full_text)],
+                kind,
+                chain_rounding,
+                actor: ctx.actor.clone(),
+                repeat_until: None,
+            };
+        }
+    }
     let chunks = split_clause_sequence(text);
     // CR 107.3i: "Normally, all instances of X on an object have the same value."
     // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
@@ -23957,6 +24126,41 @@ mod tests {
     fn effect_manifest_dread() {
         let e = parse_effect("Manifest dread");
         assert!(matches!(e, Effect::ManifestDread));
+    }
+
+    #[test]
+    fn each_player_may_discard_is_optional_per_player() {
+        // CR 603.5 / CR 608.2d + issue #2901: Mog, Moogle Warrior — "each
+        // player MAY discard a card" must be an optional per-player discard, not
+        // a forced one. The subject-stripped "may discard a card" is lowered via
+        // the `YouMay` wrapper, which previously dropped the optionality.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of your end step, each player may discard a card.",
+            "Mog, Moogle Warrior",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1, "expected one triggered ability");
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("trigger must have an execute body");
+        assert!(
+            execute.optional,
+            "discard must be optional (each player MAY), got optional=false: {:?}",
+            execute.effect
+        );
+        assert_eq!(
+            execute.player_scope,
+            Some(crate::types::ability::PlayerFilter::All),
+            "discard must apply to each player (player_scope All)"
+        );
+        assert!(
+            matches!(&*execute.effect, Effect::Discard { .. }),
+            "expected Discard, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
@@ -36689,6 +36893,51 @@ mod tests {
         );
     }
 
+    /// CR 107.3i + CR 613.4c: Craterhoof Behemoth — the +X/+X grant's dynamic
+    /// P/T must bind X to "the number of creatures you control" (an ObjectCount)
+    /// from the trailing where-clause, not default to `CostXPaid` (which is 0 on
+    /// a card with no {X} in its cost, so the buff was always +0/+0). Issue
+    /// #2875.
+    #[test]
+    fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
+        let def = parse_effect_chain(
+            "creatures you control gain trample and get +X/+X until end of turn, where X is the number of creatures you control",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let dynamic_values: Vec<&QuantityExpr> = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .filter_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value }
+                | ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dynamic_values.len(),
+            2,
+            "expected dynamic +X/+X power and toughness modifications, got {:?}",
+            static_abilities
+        );
+        for value in dynamic_values {
+            assert!(
+                matches!(
+                    value,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ),
+                "X must bind to ObjectCount(creatures you control), got {value:?}"
+            );
+        }
+    }
+
     #[test]
     fn duration_preserved_with_for_each_suffix() {
         // Goblin Piledriver pattern: "gets +2/+0 until end of turn for each other attacking Goblin"
@@ -39317,6 +39566,35 @@ mod tests {
         }
     }
 
+    /// CR 106.4 + CR 608.2c (issue #2900): Blinkmoth Urn — subject-predicate
+    /// "that player adds {C} for each artifact they control" must stamp
+    /// `Effect::Mana.target = ScopedPlayer` after imperative lowering.
+    #[test]
+    fn that_player_adds_mana_injects_scoped_player_recipient() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let clause = parse_effect_clause(
+            "that player adds {C} for each artifact they control.",
+            &mut ctx,
+        );
+        match clause.effect {
+            Effect::Mana {
+                target,
+                produced: ManaProduction::Colorless { .. },
+                ..
+            } => {
+                assert_eq!(
+                    target,
+                    Some(TargetFilter::ScopedPlayer),
+                    "subject-predicate path must stamp ScopedPlayer recipient"
+                );
+            }
+            other => panic!("expected Effect::Mana, got {other:?}"),
+        }
+    }
+
     /// CR 503.1a + CR 608.2d (issue #1535): Braids, Conjurer Adept — "at the
     /// beginning of each player's upkeep, that player may put a ... card from
     /// their hand onto the battlefield." Under the scoped-player context the
@@ -41410,6 +41688,25 @@ mod tests {
             !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
             "target-phrase disjunction must not be split into ChooseOneOf"
         );
+    }
+
+    /// CR 205.2 + CR 112.1 (issue #2851): A " or " between two card-type words
+    /// is a TYPE disjunction, not a disjunction of two imperative clauses. The
+    /// detector must reject the split so the whole grant clause survives — for
+    /// any type pair the engine recognizes, not just instant/sorcery.
+    #[test]
+    fn choose_one_of_rejects_type_word_disjunction() {
+        for text in [
+            "you may cast an instant or sorcery spell from among those exiled cards",
+            "you may cast an artifact or creature spell from among those exiled cards",
+        ] {
+            let ability = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
+                "type-word disjunction must not be split into ChooseOneOf for {text:?}, got {:?}",
+                ability.effect
+            );
+        }
     }
 
     /// CR 701.21a + CR 608.2k: Promise of Aclazotz / Burnt Offering / Greater
@@ -44849,9 +45146,13 @@ mod tests {
         // Should have player_scope: All for "Each player"
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
 
-        // The effect should be GainControl with target filter including ownership
-        let Effect::GainControl { target } = &*def.effect else {
-            panic!("expected GainControl, got {:#?}", def.effect);
+        // CR 613.1b: "gain control of ALL creatures they own" is the untargeted
+        // mass form → `GainControlAll`. Under the `player_scope: All` fanout
+        // (effects/mod.rs sets `ability.controller = scoped_player` per player),
+        // each player gains control of the creatures matching the ScopedPlayer
+        // ownership filter — i.e. their own — which is what Homeward Path does.
+        let Effect::GainControlAll { target } = &*def.effect else {
+            panic!("expected GainControlAll, got {:#?}", def.effect);
         };
 
         // Target should be Typed filter with ownership property
@@ -44867,7 +45168,7 @@ mod tests {
                     controller: ControllerRef::ScopedPlayer
                 }
             )),
-            "\"they own\" must add ownership filter to GainControl target, got {:#?}",
+            "\"they own\" must add ownership filter to the mass target, got {:#?}",
             typed
         );
     }

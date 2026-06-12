@@ -773,6 +773,9 @@ pub(crate) enum TargetedImperativeAst {
     },
     GainControl {
         target: TargetFilter,
+        /// True for the untargeted mass form ("gain control of all/each …"),
+        /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
+        all: bool,
     },
     ControlNextTurn {
         target: TargetFilter,

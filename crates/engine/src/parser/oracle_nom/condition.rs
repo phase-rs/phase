@@ -3077,7 +3077,13 @@ fn parse_youve_life_history_condition(input: &str) -> OracleResult<'_, StaticCon
 fn parse_youve_combat_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you've attacked this turn" / "you've attacked with a creature this turn"
     value(
-        make_quantity_ge(QuantityRef::AttackedThisTurn { filter: None }, 1),
+        make_quantity_ge(
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+            1,
+        ),
         alt((
             tag("attacked with a creature this turn"),
             tag("attacked this turn"),
@@ -3110,6 +3116,7 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_life_history_condition,
         parse_discard_history_condition,
         parse_combat_history_condition,
+        parse_no_attacked_this_turn,
         parse_player_action_this_turn,
         parse_spell_history_condition,
         parse_counter_history_condition,
@@ -3420,7 +3427,13 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
     alt((
         // "you attacked this turn" (without "you've" prefix)
         value(
-            make_quantity_ge(QuantityRef::AttackedThisTurn { filter: None }, 1),
+            make_quantity_ge(
+                QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+                1,
+            ),
             alt((
                 tag("you attacked with a creature this turn"),
                 tag("you attacked this turn"),
@@ -3428,6 +3441,38 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
         ),
     ))
     .parse(input)
+}
+
+/// Parse "no [type] attacked this turn" → global AttackedThisTurn count EQ 0.
+///
+/// CR 508.1a + CR 603.4: Global absence of attackers this turn (Charging
+/// Cinderhorn, Keldon Twilight). Composed as `AttackedThisTurn { scope: All,
+/// filter: Some(type) } == 0` rather than a battlefield ObjectCount check so
+/// attackers that left the battlefield still satisfy "attacked this turn".
+fn parse_no_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no ").parse(input)?;
+    let (rest, type_text) = take_until(" attacked this turn").parse(rest)?;
+    let (rest, _) = tag(" attacked this turn").parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::AttackedThisTurn {
+                    scope: CountScope::All,
+                    filter: Some(filter),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+    ))
 }
 
 fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4545,7 +4590,10 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         ),
         value(
             make_quantity_comparison(
-                QuantityRef::AttackedThisTurn { filter: None },
+                QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
                 Comparator::EQ,
                 0,
             ),
@@ -9492,8 +9540,37 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AttackedThisTurn { filter: None }
+                        qty: QuantityRef::AttackedThisTurn {
+                            scope: CountScope::Controller,
+                            filter: None,
+                        }
                     }
+                ));
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn test_no_creatures_attacked_this_turn() {
+        let (rest, c) = parse_inner_condition("no creatures attacked this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AttackedThisTurn {
+                            scope: CountScope::All,
+                            filter: Some(TargetFilter::Typed(ref tf)),
+                        },
+                    } if tf.type_filters.contains(&TypeFilter::Creature)
                 ));
                 assert_eq!(comparator, Comparator::EQ);
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
