@@ -3279,9 +3279,7 @@ fn graveyard_replacement_subject_is_self_referential(subject: &str) -> bool {
     let subject = subject.trim();
     subject == "~"
         || matches!(subject, "this spell" | "this card")
-        || crate::parser::oracle_util::SELF_REF_TYPE_PHRASES
-            .iter()
-            .any(|phrase| subject == *phrase)
+        || crate::parser::oracle_util::SELF_REF_TYPE_PHRASES.contains(&subject)
 }
 
 fn parse_graveyard_exile_replacement(
