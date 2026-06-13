@@ -3900,6 +3900,18 @@ fn resolve_chain_body(
     };
     let ability = ability.as_ref();
 
+    if effect_depends_on_missing_chosen_player(ability) {
+        state.cost_payment_failed_flag = true;
+        if let Some(ref next) = ability.sub_ability {
+            if next.sub_link == SubAbilityLink::SequentialSibling {
+                let mut sibling = next.as_ref().clone();
+                apply_parent_chain_context(&mut sibling, ability, None);
+                resolve_ability_chain(state, &sibling, events, depth + 1)?;
+            }
+        }
+        return Ok(());
+    }
+
     if repeat_for_outermost_with_scope_or_unless(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
     {
@@ -5416,6 +5428,14 @@ fn resolve_chain_body(
     }
 
     Ok(())
+}
+
+fn effect_depends_on_missing_chosen_player(ability: &ResolvedAbility) -> bool {
+    ability
+        .effect
+        .target_filter()
+        .and_then(crate::game::ability_utils::filter_chosen_player_index)
+        .is_some_and(|index| ability.chosen_players.get(index as usize).is_none())
 }
 
 /// CR 608.2c + CR 109.5: Spell-effect "if you sacrificed a [filter] this way"

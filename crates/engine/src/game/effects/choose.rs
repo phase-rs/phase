@@ -40,15 +40,18 @@ pub fn resolve(
     // choice and the list is empty (e.g. "choose a player" once every eligible
     // player has already been chosen earlier in this resolution, or a "choose
     // an ability the target has" with no abilities to remove), there is nothing
-    // to choose — the choice does nothing and resolution continues with the
-    // rest of the chain. Emitting a `WaitingFor::NamedChoice` with no options
-    // would wedge the game (issue #3040): the legal-action enumerator yields no
-    // `ChooseOption`, so no player can advance the decision. `CardName` / `Word`
-    // / `Artist` are excluded because their value is player-supplied, so an
-    // empty engine list there is expected, not impossible (only `CardName` has
-    // a wired free-text supply path today; `Word` / `Artist` are a separate
-    // known frontend gap — see `options_supplied_by_player`).
+    // to choose. The choice does nothing; the chain driver then skips any
+    // continuation that depends on the missing chosen value while allowing
+    // independent siblings to proceed. Emitting a `WaitingFor::NamedChoice`
+    // with no options would wedge the game (issue #3040): the legal-action
+    // enumerator yields no `ChooseOption`, so no player can advance the
+    // decision. `CardName` / `Word` / `Artist` are excluded because their value
+    // is player-supplied, so an empty engine list there is expected, not
+    // impossible (only `CardName` has a wired free-text supply path today;
+    // `Word` / `Artist` are a separate known frontend gap — see
+    // `options_supplied_by_player`).
     if options.is_empty() && !choice_type.options_supplied_by_player() {
+        state.cost_payment_failed_flag = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
