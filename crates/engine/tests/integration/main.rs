@@ -148,6 +148,7 @@ mod issue_2435_traumatic_critique;
 mod issue_2439_wayta_trigger_doubling;
 mod issue_2856_shatterskull_divide_softlock;
 mod issue_2857_caesar_reflexive_modal;
+mod issue_2864_kaldra_compleat_haste;
 mod issue_2871_currency_converter;
 mod issue_2872_drc_flashback_cast_trigger;
 mod issue_2881_infamous_cruelclaw;

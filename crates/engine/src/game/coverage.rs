@@ -5,6 +5,7 @@ use crate::game::static_abilities::{build_static_registry, static_registry, Stat
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::{
     is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
+    is_draft_matters_sentence,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
@@ -4555,6 +4556,13 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
             continue;
         }
         if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+        // Draft-time "draft matters" lines (CR 905) are consumed as no-ops by
+        // the parser, so they produce no parse item — don't count them as
+        // effective Oracle lines either, or the silent-drop guard would flag
+        // these cards as unsupported.
+        if is_draft_matters_sentence(stripped) {
             continue;
         }
 

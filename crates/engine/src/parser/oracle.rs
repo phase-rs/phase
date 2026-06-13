@@ -353,6 +353,26 @@ pub(crate) fn is_deck_construction_copy_limit_sentence(line: &str) -> bool {
         || lower.trim() == "megalegendary"
 }
 
+/// Recognizer for draft-time procedural sentences on Conspiracy / "draft
+/// matters" cards (CR 905). These instruct the booster draft itself — "Draft
+/// this card face up.", "As you draft a card, …", "During the draft, …",
+/// "Immediately after the draft, …", "Instead of drafting …", "As long as this
+/// card is face up during the draft, …" — and have no function during normal
+/// play, where the engine never simulates a draft. Consumed silently so they
+/// do not fall through to `Effect::Unimplemented`; any constructed-play
+/// abilities printed on the same card (keywords, ETBs, activated abilities)
+/// still parse through the normal line dispatch.
+pub(crate) fn is_draft_matters_sentence(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower_starts_with(&lower, "draft this card face up")
+        || lower_starts_with(&lower, "as you draft ")
+        || lower_starts_with(&lower, "during the draft")
+        || lower_starts_with(&lower, "immediately after the draft")
+        || lower_starts_with(&lower, "instead of drafting ")
+        || lower_starts_with(&lower, "as long as this card is face up during the draft")
+        || lower_starts_with(&lower, "each player passes the last card")
+}
+
 /// Whether Oracle text explicitly permits this card to be a commander.
 pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool {
     let normalized = normalize_card_name_refs(oracle_text, card_name);
@@ -1216,6 +1236,7 @@ fn is_spell_resolution_instruction_line(
     ctx.diagnostics.truncate(loyalty_snap);
     if is_commander_permission_sentence(line)
         || is_deck_construction_copy_limit_sentence(line)
+        || is_draft_matters_sentence(line)
         || is_loyalty
     {
         return false;
@@ -2210,6 +2231,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_deck_construction_copy_limit_sentence(&line) {
+            i += 1;
+            continue;
+        }
+
+        if is_draft_matters_sentence(&line) {
             i += 1;
             continue;
         }
@@ -3561,7 +3587,25 @@ pub(crate) fn parse_oracle_ir(
     // (Phase 1: observability only — see swallow_check.rs for detector
     // catalog and Phase 2 demotion plan).
     let mut swallow_diags = Vec::new();
-    super::swallow_check::check_swallowed_clauses(oracle_text, &result, &mut swallow_diags);
+    // Draft-time "draft matters" lines (CR 905) are intentionally consumed as
+    // no-ops by `is_draft_matters_sentence` — they never produce a parsed
+    // ability, so the swallow detectors must not scan them (their "you may",
+    // "if you do", and "as long as" markers would otherwise be reported as
+    // swallowed clauses). Strip them before the audit; constructed-play lines
+    // on the same card remain and are still checked. Cards with no draft text
+    // (the overwhelming majority) feed the unmodified Oracle text unchanged.
+    let swallow_text;
+    let swallow_input: &str = if oracle_text.lines().any(is_draft_matters_sentence) {
+        swallow_text = oracle_text
+            .lines()
+            .filter(|line| !is_draft_matters_sentence(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        &swallow_text
+    } else {
+        oracle_text
+    };
+    super::swallow_check::check_swallowed_clauses(swallow_input, &result, &mut swallow_diags);
     for d in swallow_diags {
         ctx.push_diagnostic(d);
     }
@@ -6665,6 +6709,65 @@ mod tests {
         ));
         assert!(!is_deck_construction_copy_limit_sentence(
             "A deck can have any number of cards named"
+        ));
+    }
+
+    #[test]
+    fn draft_matters_sentence_positive_cases() {
+        // Every "draft matters" card opens with the face-up instruction.
+        assert!(is_draft_matters_sentence("Draft this card face up."));
+        // The draft-time procedural lines across the Conspiracy cycle.
+        assert!(is_draft_matters_sentence(
+            "As you draft a card, you may draft an additional card from that booster pack. \
+             If you do, put this card into that booster pack."
+        ));
+        assert!(is_draft_matters_sentence(
+            "As you draft a creature card, you may reveal it, note its name, then turn this \
+             card face down."
+        ));
+        assert!(is_draft_matters_sentence(
+            "During the draft, you may turn this card face down. If you do, look at the next \
+             card drafted by a player of your choice."
+        ));
+        assert!(is_draft_matters_sentence(
+            "Immediately after the draft, you may reveal a card in your card pool."
+        ));
+        assert!(is_draft_matters_sentence(
+            "Instead of drafting a card from a booster pack, you may draft each card in that \
+             booster pack, one at a time."
+        ));
+        assert!(is_draft_matters_sentence(
+            "As long as this card is face up during the draft, you can't look at booster packs \
+             and must draft cards at random."
+        ));
+        assert!(is_draft_matters_sentence(
+            "Each player passes the last card from each booster pack to a player who drafted a \
+             card named Canal Dredger."
+        ));
+    }
+
+    #[test]
+    fn draft_matters_sentence_negative_cases() {
+        // Constructed-play text on the same cards must still parse normally.
+        assert!(!is_draft_matters_sentence("Flying"));
+        assert!(!is_draft_matters_sentence(
+            "{T}: Put target card from your graveyard on the bottom of your library."
+        ));
+        assert!(!is_draft_matters_sentence(
+            "When this creature enters, you may search your library for a card."
+        ));
+        // Draft-state setup lines feed constructed-play text on cards such as
+        // Regicide and Lurking Automaton, so they must remain represented rather
+        // than being silently consumed with draft-only procedure text.
+        assert!(!is_draft_matters_sentence(
+            "Reveal this card as you draft it and note how many cards you've drafted this draft round, including this card."
+        ));
+        assert!(!is_draft_matters_sentence(
+            "Reveal this card as you draft it. The player to your right chooses a color, you choose another color, then the player to your left chooses a third color."
+        ));
+        // "draft" appearing mid-sentence is not a draft-procedure line.
+        assert!(!is_draft_matters_sentence(
+            "Creatures you control get +1/+1."
         ));
     }
 
