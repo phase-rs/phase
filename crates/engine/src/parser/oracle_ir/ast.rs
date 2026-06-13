@@ -306,6 +306,12 @@ pub(crate) enum ContinuationAst {
         /// from-among put-step.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 701.20a vs 701.20e: True when the from-among clause's stripped verb
+        /// was "reveal" (a public action) rather than "put"/"choose" (a private
+        /// look). Promotes the patched Dig to `reveal: true` even when the kept
+        /// cards route to a fixed library position (Fertile Thicket).
+        #[serde(default)]
+        reveal_verb: bool,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -785,6 +791,12 @@ pub(crate) enum TargetedImperativeAst {
         /// `None` preserves default controller assignment.
         enters_under: Option<ControllerRef>,
         enter_tapped: bool,
+        /// CR 122.1 + CR 122.1h: Counters placed on each returned object as it
+        /// enters the battlefield (e.g. "return each creature card from your
+        /// graveyard to the battlefield. They enter with a finality counter").
+        /// Threaded onto `Effect::ChangeZoneAll.enter_with_counters`. Empty for
+        /// returns that carry no counters.
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     Fight {
         target: TargetFilter,

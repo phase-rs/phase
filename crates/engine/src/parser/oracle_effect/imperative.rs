@@ -1414,13 +1414,20 @@ pub(super) fn parse_targeted_action_ast(
         // `ReturnAll` ⇒ `Effect::BounceAll`.
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
-                if is_mass && d.enter_with_counters.is_empty() {
+                // CR 400.7: Mass returns to the battlefield route to
+                // `ChangeZoneAll` regardless of any `enter_with_counters` — the
+                // counters are threaded through so "return each creature card
+                // from your graveyard to the battlefield. They enter with a
+                // finality counter" (Shilgengar) applies the finality counter
+                // (CR 122.1h) to every returned object, not just one.
+                if is_mass {
                     Some(TargetedImperativeAst::ReturnAllToZone {
                         target,
                         origin,
                         destination: Zone::Battlefield,
                         enters_under: d.enters_under,
                         enter_tapped: d.enter_tapped,
+                        enter_with_counters: d.enter_with_counters,
                     })
                 } else {
                     Some(TargetedImperativeAst::ReturnToBattlefield {
@@ -1449,6 +1456,7 @@ pub(super) fn parse_targeted_action_ast(
                         destination: Zone::Hand,
                         enters_under: None,
                         enter_tapped: false,
+                        enter_with_counters: vec![],
                     })
                 } else {
                     Some(TargetedImperativeAst::Return { target, selection })
@@ -1462,6 +1470,7 @@ pub(super) fn parse_targeted_action_ast(
                         destination: d.zone,
                         enters_under: None,
                         enter_tapped: false,
+                        enter_with_counters: vec![],
                     })
                 } else {
                     Some(TargetedImperativeAst::ReturnToZone {
@@ -1699,6 +1708,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             destination,
             enters_under,
             enter_tapped,
+            enter_with_counters,
         } => {
             let origin = if matches!(target, TargetFilter::ExiledBySource) {
                 Some(Zone::Exile)
@@ -1711,6 +1721,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 target,
                 enters_under,
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                // CR 122.1 + CR 122.1h: each returned object enters with these
+                // counters (e.g. a finality counter on Shilgengar's mass return).
+                enter_with_counters,
                 face_down_profile: None,
             }
         }
@@ -2281,6 +2294,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             ])),
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
             face_down_profile: None,
         },
     }
@@ -3995,6 +4009,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             enters_under,
             enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+            enter_with_counters: vec![],
             face_down_profile: None,
         },
         PutImperativeAst::ZoneChange {
@@ -4026,6 +4041,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                    enter_with_counters: vec![],
                     face_down_profile: None,
                 }
             } else {
@@ -4766,6 +4782,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_with_counters: vec![],
         face_down_profile: None,
     }
 }
@@ -7188,6 +7205,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 target,
                 enters_under,
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enter_with_counters: vec![],
                 face_down_profile: None,
             };
             let complement = Effect::ChangeZoneAll {
@@ -7196,6 +7214,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 target: rest_target,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             };
             let mut clause = parsed_clause(primary);
@@ -7776,6 +7795,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
                     face_down_profile: None,
                 }
             } else {
@@ -9502,6 +9522,7 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 enters_under: None,
                 enter_tapped,
+                enter_with_counters: _,
                 face_down_profile: None,
             } => {
                 assert_eq!(origin, None);

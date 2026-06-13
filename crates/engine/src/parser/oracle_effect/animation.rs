@@ -775,13 +775,15 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
         .trim()
         .trim_end_matches('.')
         .trim_end_matches(" in addition to its other types");
-    // CR 305.7 + CR 613.1d (#2917): a trailing "that's still a land" rider
-    // (Nissa, Who Shakes the World and the land-animation family) confirms the
-    // permanent keeps its land type — it is NOT a keyword. Without stripping it
-    // the last keyword fuses with the rider ("haste that's still a land") and is
-    // dropped by `map_token_keyword`, so e.g. "with vigilance and haste that's
-    // still a land" silently lost haste.
-    let keyword_text = strip_still_a_land_rider(keyword_text);
+    // CR 205.1b + CR 305.7 + CR 613.1d (#2917, #1155): a trailing "that's still
+    // a <type>" rider confirms the permanent keeps a prior card type — it is NOT
+    // a keyword. The land family (Nissa, Who Shakes the World — "that's still a
+    // land") and the planeswalker family (Gideon Blackblade — "that's still a
+    // planeswalker") both carry such a rider. Without stripping it the last
+    // keyword fuses with the rider ("haste that's still a land" /
+    // "indestructible that's still a planeswalker") and is dropped by
+    // `map_token_keyword`.
+    let keyword_text = strip_still_a_type_rider(keyword_text);
     let keywords = split_token_keyword_list(keyword_text)
         .into_iter()
         .filter_map(map_token_keyword)
@@ -789,9 +791,13 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
     (prefix, keywords)
 }
 
-/// Cut a trailing "that's/that is/it's/they're still a[n] land[s]" rider off a
-/// keyword phrase so it cannot fuse with (and discard) the final keyword.
-fn strip_still_a_land_rider(text: &str) -> &str {
+/// Cut a trailing "that's/that is/it's/they're still a[n] <type>" rider off a
+/// keyword phrase so it cannot fuse with (and discard) the final keyword. The
+/// rider marker (" that's still" et al.) is the same regardless of the trailing
+/// type word, so truncating at the marker covers every "still a <type>" family
+/// ("still a land" — Nissa; "still a planeswalker" — Gideon Blackblade #1155;
+/// "still a creature"; "still an artifact") without enumerating type words.
+fn strip_still_a_type_rider(text: &str) -> &str {
     let lower = text.to_lowercase();
     [
         " that's still",
