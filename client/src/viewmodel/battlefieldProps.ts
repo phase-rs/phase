@@ -11,9 +11,10 @@ function groupKey(obj: GameObject): string {
   const colors = [...obj.color].sort().join("");
   // counters is a known-shape Partial<Record<CounterType, number>>. Build the
   // key from sorted entries rather than JSON.stringify — cheaper (no serialize
-  // allocation per permanent on every board rebuild) and insertion-order-stable,
-  // so two identical permanents always land in the same group regardless of the
-  // order their counters were applied (matches the sorted keyword key above).
+  // allocation per permanent on every board rebuild) and order-independent, so
+  // two identical permanents always land in the same group regardless of the
+  // order their counters were applied (the old stringify could split them by
+  // insertion order; this matches the sorted keyword key above).
   const counters = Object.entries(obj.counters)
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .map(([type, n]) => `${type}:${n}`)

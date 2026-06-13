@@ -103,10 +103,18 @@ let coveragePromise: Promise<CoverageSummary> | null = null;
 
 function loadCoverageData(): Promise<CoverageSummary> {
   if (!coveragePromise) {
-    coveragePromise = fetch(__COVERAGE_DATA_URL__).then((res) => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json() as Promise<CoverageSummary>;
-    });
+    coveragePromise = fetch(__COVERAGE_DATA_URL__)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<CoverageSummary>;
+      })
+      .catch((e) => {
+        // Don't cache failures: clear the shared slot so the next view mount
+        // (e.g. a tab switch) re-fetches, preserving the per-view retry the old
+        // per-component fetch had. Only successful results stay cached.
+        coveragePromise = null;
+        throw e;
+      });
   }
   return coveragePromise;
 }
