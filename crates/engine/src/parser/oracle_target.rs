@@ -2727,7 +2727,17 @@ fn distribute_shared_properties(filter: TargetFilter, shared_props: &[FilterProp
 /// only to the creature disjunct. Spreading `WithKeyword(Flying)` onto the
 /// artifact/enchantment legs would require those permanents to have flying and
 /// would block activation when only a legal enchantment is present (#2941).
-fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
+///
+/// SHARED LEG-LOCALITY AUTHORITY: this predicate is the single registry of
+/// inherently-leg-local `FilterProp`s for BOTH disjunctive grammars — the
+/// target-phrase grammar (`parse_type_phrase`) and the search-filter
+/// disjunction grammar (`oracle_effect::search::parse_search_filter_disjunction`,
+/// CR 701.23a). Every `FilterProp` that an adjective prefix or a type-scoped
+/// suffix binds to exactly one disjunct MUST be registered here, or it will be
+/// wrongly distributed across earlier `Or` legs and silently break the affected
+/// cards (e.g. #2892). When adding a new leg-local search/target prop, add it to
+/// this match.
+pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
         // CR 700.4 + CR 700.9: "modified [type]" adjective prefix.
@@ -2766,6 +2776,16 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::WithKeyword { .. }
             | FilterProp::WithoutKeyword { .. }
             | FilterProp::WithoutKeywordKind { .. }
+            // CR 702.1: "<type> with [keyword kind]" (e.g. "a card with
+            // augment", Clever Combo) is a keyword-membership predicate that
+            // binds only to its own disjunct — distributing it onto a sibling
+            // leg ("host card with augment") would empty that leg's match set.
+            | FilterProp::HasKeywordKind { .. }
+            // CR 201.2: "card named X" binds the name predicate only to its own
+            // disjunct (Journey for the Elixir, "a basic land card and a card
+            // named Jiang Yanggu") — distributing `Named` onto a sibling leg
+            // ("basic land named jiang yanggu") would empty that leg's match set.
+            | FilterProp::Named { .. }
     )
 }
 
@@ -2779,8 +2799,18 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
 /// produced by adjective prefixes (e.g. FilterProp::Modified from "modified
 /// creatures", FilterProp::EnchantedBy from "enchanted creature") are
 /// leg-local and retained only on their originating leg. See
-/// `is_trailing_suffix_prop`.
-fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter {
+/// `is_adjective_prefix_prop`.
+///
+/// Exposed `pub(crate)` so disjunctive grammars that compose their own `Or` from
+/// independently-parsed disjuncts can reuse this shared trailing-suffix
+/// distribution instead of duplicating it. In particular the search-filter
+/// disjunction grammar (CR 701.23a, "creature, instant, or sorcery card with
+/// mana value N", #2892) parses each comma/or segment independently, so only the
+/// final segment carries the "with mana value N" suffix — this distributes the
+/// `Cmc` prop back onto the earlier `Typed` legs. `is_adjective_prefix_prop` is
+/// the shared registry that keeps leg-local props (keyword/name/adjective) from
+/// being distributed; every leg-local search prop MUST be registered there.
+pub(crate) fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
     };

@@ -13,8 +13,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
-    parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
-    parse_zone_word,
+    distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
+    parse_target, parse_type_phrase, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -1030,7 +1030,14 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
         .collect();
     (filters.len() >= 2).then(|| {
         let filter = normalize_search_filter(TargetFilter::Or { filters });
-        apply_shared_leading_search_properties(filter_region, filter)
+        let filter = apply_shared_leading_search_properties(filter_region, filter);
+        // CR 701.23a: each comma/or disjunct is parsed independently, so a
+        // trailing "with mana value N" suffix lands only on the final leg
+        // ("creature, instant, or sorcery card with mana value N", #2892).
+        // Distribute that trailing predicate back onto the earlier `Typed`
+        // legs via the shared leg-locality authority, which keeps inherently
+        // leg-local props (keyword/name/adjective) on their originating leg.
+        distribute_properties_to_or(filter)
     })
 }
 
@@ -5019,5 +5026,126 @@ mod tests {
             }
             other => panic!("expected MostPrevalentCreatureTypeIn, got {other:?}"),
         }
+    }
+
+    /// Counts how many `Typed` legs of an `Or` carry a `FilterProp` of the given
+    /// discriminant. Building-block assertion over the leg-locality distribution.
+    fn legs_with_prop(
+        filter: &TargetFilter,
+        predicate: impl Fn(&FilterProp) -> bool,
+    ) -> (usize, usize) {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        let mut typed = 0;
+        let mut matching = 0;
+        for f in filters {
+            if let TargetFilter::Typed(t) = f {
+                typed += 1;
+                if t.properties.iter().any(&predicate) {
+                    matching += 1;
+                }
+            }
+        }
+        (matching, typed)
+    }
+
+    /// #2892 — CR 701.23a + CR 202.3: Bring to Light's "creature, instant, or
+    /// sorcery card with mana value less than or equal to N" parses each comma/or
+    /// disjunct independently, so the trailing mana-value predicate must be
+    /// distributed back across ALL three type legs. Pre-fix only the final
+    /// (Sorcery) leg carried `Cmc`, leaving the Creature/Instant legs
+    /// unconstrained (a MV-6 creature was wrongly findable).
+    #[test]
+    fn search_disjunction_distributes_trailing_mana_value_to_all_legs() {
+        let details = parse_search_library_details(
+            "search your library for a creature, instant, or sorcery card with mana value less than or equal to the number of colors of mana spent to cast this spell",
+            &mut ParseContext::default(),
+        );
+        let (with_cmc, typed) = legs_with_prop(&details.filter, |p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    ..
+                }
+            )
+        });
+        assert_eq!(typed, 3, "expected 3 type legs, got {:?}", details.filter);
+        assert_eq!(
+            with_cmc, 3,
+            "every leg must carry the trailing Cmc<=N predicate, got {:?}",
+            details.filter
+        );
+    }
+
+    /// CR 115.1: anti-regression — adjective/keyword-suffix props that bind to a
+    /// single disjunct ("creature, artifact, or enchantment with flying") must
+    /// stay leg-local. Only the creature leg may carry `WithKeyword(Flying)`.
+    #[test]
+    fn search_disjunction_keeps_with_keyword_leg_local() {
+        let details = parse_search_library_details(
+            "search your library for a creature, artifact, or enchantment with flying",
+            &mut ParseContext::default(),
+        );
+        let (with_flying, _typed) = legs_with_prop(&details.filter, |p| {
+            matches!(
+                p,
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }
+            )
+        });
+        assert_eq!(
+            with_flying, 1,
+            "WithKeyword(Flying) must remain on its originating leg only, got {:?}",
+            details.filter
+        );
+    }
+
+    /// #2892 anti-regression — Clever Combo: "a host card or a card with augment".
+    /// CR 702.1: the augment keyword-kind predicate must stay on its own
+    /// disjunct; distributing it onto the host leg ("host card with augment")
+    /// would empty that leg's match set.
+    #[test]
+    fn search_disjunction_keeps_keyword_kind_leg_local() {
+        let details = parse_search_library_details(
+            "search your library for a host card or a card with augment",
+            &mut ParseContext::default(),
+        );
+        let (with_augment, _typed) = legs_with_prop(&details.filter, |p| {
+            matches!(
+                p,
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Augment
+                }
+            )
+        });
+        assert_eq!(
+            with_augment, 1,
+            "HasKeywordKind(Augment) must remain on the non-host leg only, got {:?}",
+            details.filter
+        );
+    }
+
+    /// #2892 anti-regression — Journey for the Elixir: "a basic land card and a
+    /// card named Jiang Yanggu". CR 201.2: the name predicate must stay on its
+    /// own disjunct; distributing `Named` onto the basic-land leg ("basic land
+    /// named jiang yanggu") would empty that leg's match set.
+    #[test]
+    fn search_disjunction_keeps_named_leg_local() {
+        let details = parse_search_library_details(
+            "search your library and graveyard for a basic land card and a card named jiang yanggu",
+            &mut ParseContext::default(),
+        );
+        let (with_named, _typed) = legs_with_prop(
+            &details.filter,
+            |p| matches!(p, FilterProp::Named { name } if name == "jiang yanggu"),
+        );
+        assert_eq!(
+            with_named, 1,
+            "Named must remain on the non-land leg only, got {:?}",
+            details.filter
+        );
     }
 }
