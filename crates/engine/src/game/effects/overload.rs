@@ -148,6 +148,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             target,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
             face_down_profile: None,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for
