@@ -873,6 +873,9 @@ function GamePageContent({
 
   // Sync card size preference to CSS custom properties
   const cardSize = usePreferencesStore((s) => s.cardSize);
+  // Keys BattlefieldBackground so a mode/seat change remounts it with a fresh
+  // lock (see BattlefieldBackground) instead of resetting refs during render.
+  const boardBackground = usePreferencesStore((s) => s.boardBackground);
   useEffect(() => {
     const root = document.documentElement;
     const scale = cardSize === "small" ? 0.8 : cardSize === "large" ? 1.25 : 1;
@@ -1078,7 +1081,7 @@ function GamePageContent({
       }}
     >
       <SpectatorChrome />
-      <BattlefieldBackground />
+      <BattlefieldBackground key={`${boardBackground}-${playerId}`} />
       <StackDisplay />
 
       {/* Persistent Sandbox banner — visible to all players whenever the
