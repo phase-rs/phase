@@ -380,6 +380,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // token each of the five colors. Strip the clause before keyword parsing so
     // the trailing keyword ("... and haste that's all colors") still survives,
     // then set the colors.
+    let saved_all_colors_where_x_expr = extract_token_where_x_expression(suffix);
     let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix);
     if is_all_colors {
         colors = ManaColor::ALL.to_vec();
@@ -394,7 +395,9 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // CR 107.3: when the attacking clause was stripped and took the ", where X
     // is …" tail with it, `saved_where_x_expr` carries the expression; fall
     // back to it so the variable count is still resolved.
-    if let Some(where_expression) = extract_token_where_x_expression(suffix).or(saved_where_x_expr)
+    if let Some(where_expression) = extract_token_where_x_expression(suffix)
+        .or(saved_where_x_expr)
+        .or(saved_all_colors_where_x_expr)
     {
         // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
         // the Join-Forces normalization path with non-Token effects via
@@ -582,35 +585,41 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
 ///
 /// CR 105.1 + CR 105.2: a token that is "all colors" is each of the five
 /// WUBRG colors. The clause appears as a relative-pronoun suffix on the token
-/// description (e.g. Mechtitan Core's "... and haste that's all colors"), so it
-/// is detected by scanning word boundaries for the relative-pronoun variants
-/// followed by "all colors". Returns the suffix with the clause removed and a
-/// flag indicating whether it was present, so the caller can both set the five
-/// colors and keep the preceding keyword list intact.
+/// description (e.g. Mechtitan Core's "... and haste that's all colors" or a
+/// bare "... token that's all colors"), so it is detected by scanning word
+/// boundaries for the relative-pronoun variants followed by "all colors".
+/// Returns the suffix with the clause removed and a flag indicating whether it
+/// was present, so the caller can both set the five colors and keep the
+/// preceding keyword list intact.
 ///
 /// Building block for the whole class of "create <token> ... that's all colors"
 /// effects, not just Mechtitan Core.
 fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
-    let all_colors_clause = |i| -> OracleResult<'_, ()> {
-        let (i, _) = alt((
-            tag(" that's"),
-            tag(" that is"),
-            tag(" thats"),
-            tag(" that are"),
-        ))
-        .parse(i)?;
-        value((), tag(" all colors")).parse(i)
-    };
-    let lower = text.to_lowercase();
-    let hit = (0..lower.len()).find_map(|pos| {
-        (lower.as_bytes().get(pos) == Some(&b' '))
-            .then(|| all_colors_clause(&lower[pos..]).ok().map(|_| pos))
-            .flatten()
-    });
-    match hit {
-        Some(pos) => (text[..pos].trim_end(), true),
-        None => (text, false),
+    fn all_colors_clause(i: &str) -> OracleResult<'_, ()> {
+        let (i, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+        let (i, _) = value((), tag(" all colors")).parse(i)?;
+        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+        Ok((i, ()))
     }
+
+    let lower = text.to_lowercase();
+    if all_colors_clause(&lower).is_ok() {
+        return ("", true);
+    }
+
+    for (pos, ch) in text.char_indices() {
+        if ch != ' ' {
+            continue;
+        }
+        let candidate = &text[pos + ch.len_utf8()..];
+        let candidate_lower = candidate.to_lowercase();
+        if all_colors_clause(&candidate_lower).is_ok() {
+            return (text[..pos].trim_end(), true);
+        }
+    }
+
+    (text, false)
 }
 
 fn parse_token_color_prefix(mut text: &str) -> (Vec<ManaColor>, &str) {
@@ -1479,6 +1488,7 @@ mod tests {
         // CR 105.1/105.2: each relative-pronoun variant of the all-colors clause
         // is recognized; non-color "that's" clauses are left untouched.
         for clause in [
+            "that's all colors",
             "with flying that's all colors",
             "with flying that is all colors",
             "with flying thats all colors",
@@ -1486,8 +1496,20 @@ mod tests {
         ] {
             let (suffix, is_all_colors) = strip_token_all_colors_suffix(clause);
             assert!(is_all_colors, "must detect all-colors in {clause:?}");
-            assert_eq!(suffix, "with flying");
+            if clause == "that's all colors" {
+                assert_eq!(suffix, "");
+            } else {
+                assert_eq!(suffix, "with flying");
+            }
         }
+        let (suffix, is_all_colors) =
+            strip_token_all_colors_suffix("with flying that's all colors, where X is that value");
+        assert!(is_all_colors);
+        assert_eq!(suffix, "with flying");
+        let (suffix, is_all_colors) =
+            strip_token_all_colors_suffix("with flying that's all colors and haste");
+        assert!(!is_all_colors);
+        assert_eq!(suffix, "with flying that's all colors and haste");
         let (suffix, is_all_colors) = strip_token_all_colors_suffix("with flying");
         assert!(!is_all_colors);
         assert_eq!(suffix, "with flying");
@@ -1834,6 +1856,59 @@ mod tests {
             colors.len(),
             5,
             "all-colors must be exactly the five WUBRG colors: {colors:?}",
+        );
+    }
+
+    /// CR 111.3 + CR 105.1/105.2: the all-colors clause may be the whole token
+    /// suffix, without a preceding `with <keyword>` list.
+    #[test]
+    fn token_thats_all_colors_without_keywords_sets_colors() {
+        use crate::types::mana::ManaColor;
+
+        let text = "create a 2/2 elemental creature token that's all colors";
+        let effect = try_parse_token(
+            text,
+            "Create a 2/2 Elemental creature token that's all colors",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            colors, keywords, ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert!(keywords.is_empty());
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 105.1/105.2 + CR 107.3: stripping the all-colors suffix must not drop
+    /// the trailing `where X is ...` binding for variable token counts.
+    #[test]
+    fn token_all_colors_where_clause_keeps_x_binding() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create X 1/1 Stained Glass artifact creature tokens that are all colors, where X is the number of creatures you control";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { colors, count, .. } = effect else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = count
+        else {
+            panic!("expected where-clause to bind X to an ObjectCount, got {count:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "X must count controlled creatures, got {:?}",
+            tf.type_filters
         );
     }
 }
