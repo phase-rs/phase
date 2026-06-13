@@ -97,6 +97,20 @@ impl EtbTapState {
     }
 }
 
+/// CR 113.6 + CR 601.2f: Zones where a self-spell cost-reduction static must
+/// function during cast-time cost determination (hand, library cast, commander,
+/// graveyard cast, exile cast, and the stack step).
+pub fn self_spell_cost_mod_active_zones() -> Vec<Zone> {
+    vec![
+        Zone::Hand,
+        Zone::Stack,
+        Zone::Command,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Library,
+    ]
+}
+
 /// Serde adapter for on-disk `enter_tapped: bool` fields in card-data.json.
 pub mod etb_tap_bool_compat {
     use super::EtbTapState;

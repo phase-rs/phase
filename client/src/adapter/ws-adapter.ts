@@ -16,7 +16,7 @@ import {
   openPhaseSocket,
   type PhaseSocket,
 } from "../services/openPhaseSocket";
-import { isValidWebSocketUrl } from "../services/serverDetection";
+import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { WsSessionData } from "../services/multiplayerSession";
 
 /** Deck data format matching server protocol. */
@@ -50,6 +50,9 @@ export interface ServerInfo {
   buildCommit: string;
   protocolVersion: number;
   mode: "Full" | "LobbyOnly";
+  /** Public base URL the server advertises for `<code>@<host>` join strings
+   * (a tunnel/proxy URL), or undefined when the server has none to share. */
+  publicUrl?: string;
 }
 
 /** Events emitted by the WebSocketAdapter for UI state updates. */
@@ -195,6 +198,16 @@ export class WebSocketAdapter implements EngineAdapter {
 
       if (!isValidWebSocketUrl(this.serverUrl)) {
         reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
+        this.initResolve = null;
+        this.initReject = null;
+        return;
+      }
+
+      // A ws:// target from an HTTPS page is blocked by the browser before the
+      // handshake — surface why instead of letting it fail as "unreachable".
+      const blockReason = mixedContentBlockReason(this.serverUrl);
+      if (blockReason) {
+        reject(new AdapterError("WS_ERROR", blockReason, false));
         this.initResolve = null;
         this.initReject = null;
         return;

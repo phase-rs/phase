@@ -415,6 +415,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.players_attacked_this_step.clear();
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
+    // CR 607.2b + CR 603.10e: linked-exile LKI is likewise step-scoped — it only
+    // needs to outlive the resolution of the ability whose source just left.
+    state.linked_exile_lki.clear();
 
     events.push(GameEvent::PhaseChanged { phase: next });
 }
@@ -490,6 +493,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 500: Track per-player turn count for "your Nth turn of the game" conditions.
     state.players[state.active_player.0 as usize].turns_taken += 1;
+
+    // CR 311.5 / CR 312.4 / CR 901.6: the planar controller is normally whoever
+    // the active player is. The turn has committed here (past both turn-skip
+    // early-returns above), so `active_player` is final for this invocation —
+    // sync the planar controller (and the active plane's `.controller`) to it.
+    // No-op outside a Planechase game.
+    crate::game::planechase::set_planar_controller(state, state.active_player, events);
 
     if let Some(scheduled) = state
         .scheduled_turn_controls
@@ -1139,7 +1149,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // at cleanup (CR 514).
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.is_saddled {
+            // CR 702.171b: the designation (and the saddling-creature record) ends at end of turn.
             obj.is_saddled = false;
+            obj.saddled_by.clear();
         }
     }
 
@@ -1287,16 +1299,28 @@ pub fn should_skip_draw(state: &GameState) -> bool {
         || should_skip_step_static(state, Phase::Draw)
 }
 
-/// CR 614.1b + CR 614.10: Check whether the active player should skip the given step
-/// due to a "skip your [step] step" static ability on a permanent they control.
+/// CR 614.1b + CR 614.10: Check whether the active player should skip the given
+/// step due to a static step-skip replacement that affects them.
 fn should_skip_step_static(state: &GameState, step: Phase) -> bool {
     let active = state.active_player;
+    let context = super::static_abilities::StaticCheckContext {
+        player_id: Some(active),
+        ..Default::default()
+    };
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
-            obj.controller == active
-                && super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::SkipStep { step })
+            super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                if sd.mode != (StaticMode::SkipStep { step }) {
+                    return false;
+                }
+
+                if let Some(ref affected) = sd.affected {
+                    super::static_abilities::static_filter_matches(state, &context, affected, *id)
+                } else {
+                    obj.controller == active
+                }
+            })
         })
     })
 }
@@ -1396,6 +1420,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
+    let waiting_before = state.waiting_for.clone();
     super::triggers::process_triggers(state, &phase_event);
     // CR 603.3b: an unresolved ordering pass keeps its triggers in
     // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so it
@@ -1411,7 +1436,24 @@ fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let active_trigger_prompt = (order_triggers_prompt.is_none()
         && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
     .then(|| state.waiting_for.clone());
-    let prompt = order_triggers_prompt.or(active_trigger_prompt);
+    // CR 117.5 + CR 118.12a: Unless-pay and other inline resolution prompts arm
+    // `waiting_for` without `pending_trigger` after the trigger has reached the
+    // stack and begun resolving. Surface any non-priority prompt
+    // `process_triggers` left behind so auto_advance does not clobber it with an
+    // upkeep/draw/main priority window (Tabernacle #1326). The prompt must be
+    // newly produced by trigger processing; stale turn-action prompts from an
+    // earlier phase (DeclareAttackers, etc.) are not phase-trigger work.
+    let inline_resolution_prompt = (order_triggers_prompt.is_none()
+        && active_trigger_prompt.is_none()
+        && state.waiting_for != waiting_before
+        && !matches!(
+            state.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+        ))
+    .then(|| state.waiting_for.clone());
+    let prompt = order_triggers_prompt
+        .or(active_trigger_prompt)
+        .or(inline_resolution_prompt);
     let fired = state.stack.len() > stack_before
         || state.pending_trigger.is_some()
         || !state.deferred_triggers.is_empty()
@@ -4285,6 +4327,66 @@ mod tests {
             "draw step should be skipped when SkipStep(Draw) static is active"
         );
         assert!(!state.players[0].hand.contains(&card_id));
+    }
+
+    #[test]
+    fn all_player_static_step_skip_affects_noncontroller_active_player() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let hub_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Eon Hub".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&hub_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(StaticMode::SkipStep {
+                    step: Phase::Upkeep,
+                })
+                .affected(TargetFilter::Player),
+            );
+
+        assert!(should_skip_step_static(&state, Phase::Upkeep));
+    }
+
+    #[test]
+    fn controller_static_step_skip_does_not_affect_opponent() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let enchant_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Necropotence".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchant_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(StaticMode::SkipStep {
+                    step: Phase::Draw,
+                })
+                .affected(TargetFilter::Controller),
+            );
+
+        assert!(!should_skip_step_static(&state, Phase::Draw));
     }
 
     #[test]

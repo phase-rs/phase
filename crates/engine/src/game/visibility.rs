@@ -495,6 +495,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         enters_attacking,
         owner_library,
         track_exiled_by_source,
+        ref face_down_profile,
         count_param,
     } = state.waiting_for
     {
@@ -515,6 +516,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 enters_attacking,
                 owner_library,
                 track_exiled_by_source,
+                // Face-down entry characteristics are public effect parameters,
+                // not private hand info — pass them through the redaction.
+                face_down_profile: face_down_profile.clone(),
                 count_param,
             };
         }
@@ -740,6 +744,8 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,

@@ -119,7 +119,7 @@ export function DeckBuilderPage() {
   }, [updateSearchParams]);
 
   return (
-    <div className="menu-scene h-screen overflow-hidden">
+    <div className="menu-scene deck-builder-shell flex flex-col overflow-hidden">
       <DeckBuilder
         onCardHover={useCallback((name: string | null, scryfallId?: string) => {
           setHoveredCard(name ? { name, scryfallId } : null);

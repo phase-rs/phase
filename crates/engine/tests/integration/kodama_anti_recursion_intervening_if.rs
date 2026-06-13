@@ -40,6 +40,7 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -59,6 +60,8 @@ fn cast_free_creature(runner: &mut engine::game::scenario::GameRunner, id: Objec
             object_id: id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting a 0-cost creature should succeed");
 }

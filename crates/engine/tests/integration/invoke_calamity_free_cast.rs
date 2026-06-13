@@ -21,7 +21,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -95,6 +95,8 @@ fn invoke_calamity_opens_free_cast_window_and_exiles_cast_spells() {
             object_id: invoke_id,
             card_id: invoke_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Invoke Calamity must succeed");
 
@@ -268,6 +270,8 @@ fn invoke_calamity_free_casts_hand_spell_for_zero_mana() {
             object_id: invoke_id,
             card_id: invoke_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Invoke Calamity must succeed");
 

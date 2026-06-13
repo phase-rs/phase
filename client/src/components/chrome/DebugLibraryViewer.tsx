@@ -120,7 +120,6 @@ function LibraryCard({
   return (
     <div
       className="group relative shrink-0 cursor-pointer rounded-lg transition-transform hover:scale-[1.03] hover:ring-1 hover:ring-white/20"
-      data-card-hover
       {...hoverProps(obj.id)}
       onClick={(e) => {
         e.stopPropagation();

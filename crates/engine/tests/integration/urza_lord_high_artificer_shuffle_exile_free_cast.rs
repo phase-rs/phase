@@ -30,6 +30,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 /// Find the index (into `obj.abilities`) of Urza's `{5}` ability — the only one
 /// whose top-level effect is `Effect::Shuffle`. Robust against ability ordering.
@@ -151,6 +152,8 @@ fn urza_five_ability_exiles_top_and_offers_free_cast() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the exiled top card must be castable from exile without paying mana");
     assert_eq!(

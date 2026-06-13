@@ -114,12 +114,13 @@ pub fn resolve(
     );
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
-    // copy is or has certain characteristics" — re-evaluate layers so the
-    // copied card_types is realized. This is required for keyword grants
-    // (e.g., "except it has myriad") to synthesize their associated triggers.
-    // Counters are then placed via the shared replacement-aware primitive
-    // (Doubling Season etc. apply normally).
-    crate::game::layers::evaluate_layers(state);
+    // copy is or has certain characteristics" — flush the layer re-evaluation
+    // queued by `add_transient_continuous_effect` so the copied card_types is
+    // realized. This is required for keyword grants (e.g., "except it has
+    // myriad") to synthesize their associated triggers. Counters are then
+    // placed via the shared replacement-aware primitive (Doubling Season etc.
+    // apply normally).
+    crate::game::layers::flush_layers(state);
 
     if !resolution_mods.is_empty() {
         let mut additions = Vec::new();

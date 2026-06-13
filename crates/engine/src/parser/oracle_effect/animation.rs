@@ -775,6 +775,15 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
         .trim()
         .trim_end_matches('.')
         .trim_end_matches(" in addition to its other types");
+    // CR 205.1b + CR 305.7 + CR 613.1d (#2917, #1155): a trailing "that's still
+    // a <type>" rider confirms the permanent keeps a prior card type — it is NOT
+    // a keyword. The land family (Nissa, Who Shakes the World — "that's still a
+    // land") and the planeswalker family (Gideon Blackblade — "that's still a
+    // planeswalker") both carry such a rider. Without stripping it the last
+    // keyword fuses with the rider ("haste that's still a land" /
+    // "indestructible that's still a planeswalker") and is dropped by
+    // `map_token_keyword`.
+    let keyword_text = strip_still_a_type_rider(keyword_text);
     let keywords = split_token_keyword_list(keyword_text)
         .into_iter()
         .filter_map(map_token_keyword)
@@ -782,9 +791,49 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
     (prefix, keywords)
 }
 
+/// Cut a trailing "that's/that is/it's/they're still a[n] <type>" rider off a
+/// keyword phrase so it cannot fuse with (and discard) the final keyword. The
+/// rider marker (" that's still" et al.) is the same regardless of the trailing
+/// type word, so truncating at the marker covers every "still a <type>" family
+/// ("still a land" — Nissa; "still a planeswalker" — Gideon Blackblade #1155;
+/// "still a creature"; "still an artifact") without enumerating type words.
+fn strip_still_a_type_rider(text: &str) -> &str {
+    let lower = text.to_lowercase();
+    [
+        " that's still",
+        " that is still",
+        " it's still",
+        " they're still",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min()
+    .map_or(text, |idx| text[..idx].trim_end())
+}
+
 #[cfg(test)]
 mod test_den_bugbear {
     use super::*;
+
+    /// #2917 (CR 305.7 / 613.1d): a trailing "that's still a land" rider must
+    /// not truncate the keyword list. Nissa, Who Shakes the World grants the
+    /// animated land BOTH vigilance and haste — previously haste fused with the
+    /// rider ("haste that's still a land") and was dropped.
+    #[test]
+    fn animation_keywords_survive_still_a_land_rider() {
+        use crate::types::keywords::Keyword;
+        let (_, keywords) = split_animation_keyword_clause(
+            "a 0/0 Elemental creature with vigilance and haste that's still a land",
+        );
+        assert!(
+            keywords.contains(&Keyword::Vigilance),
+            "expected Vigilance, got {keywords:?}"
+        );
+        assert!(
+            keywords.contains(&Keyword::Haste),
+            "expected Haste (must not be dropped by the rider), got {keywords:?}"
+        );
+    }
 
     #[test]
     fn test_animation_with_quoted_trigger() {

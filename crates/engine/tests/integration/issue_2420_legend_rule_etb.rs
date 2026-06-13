@@ -5,6 +5,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
@@ -48,6 +49,8 @@ fn legend_rule_sacrifice_of_new_copy_still_stacks_etb_trigger() {
             object_id: second,
             card_id: runner.state().objects[&second].card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast second legendary copy");
 
@@ -164,6 +167,8 @@ fn legend_rule_does_not_drop_targeted_etb_trigger_from_sacrificed_copy() {
             object_id: second,
             card_id: runner.state().objects[&second].card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast second legendary copy");
 

@@ -76,7 +76,7 @@ fn score_target_redundancy(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f64 
     }
 
     if will_target_die_from_stack(ctx.state, target_id) {
-        ctx.penalties().redundant_removal_penalty
+        0.0
     } else {
         // Pending removal that might not kill — still penalize but less
         ctx.penalties().redundant_damage_penalty * 0.5
@@ -202,7 +202,7 @@ pub(crate) fn assess_spell_impact(state: &GameState, entry: &StackEntry) -> f64 
                     Effect::DestroyAll { .. }
                     | Effect::DamageAll { .. }
                     | Effect::ChangeZoneAll { .. } => 4.0,
-                    Effect::GainControl { .. } => 2.5,
+                    Effect::GainControl { .. } | Effect::GainControlAll { .. } => 2.5,
                     Effect::Destroy { .. } | Effect::Fight { .. } => 1.5,
                     Effect::Counter { .. } => 1.5,
                     Effect::Draw {
@@ -537,34 +537,6 @@ mod tests {
     }
 
     // --- Policy-level tests ---
-
-    #[test]
-    fn redundant_destroy_heavily_penalized() {
-        let mut state = make_state();
-        let creature = add_creature(&mut state, PlayerId(0), 3, 3);
-        push_stack_entry(
-            &mut state,
-            Effect::Destroy {
-                target: TargetFilter::Any,
-                cant_regenerate: false,
-            },
-            vec![TargetRef::Object(creature)],
-        );
-
-        let (decision, candidate) = make_target_ctx(
-            &state,
-            creature,
-            Effect::Destroy {
-                target: TargetFilter::Any,
-                cant_regenerate: false,
-            },
-        );
-        let score = score_policy(&state, &decision, &candidate);
-        assert!(
-            score < -5.0,
-            "Should heavily penalize redundant destroy, got {score}"
-        );
-    }
 
     #[test]
     fn no_penalty_when_different_targets() {

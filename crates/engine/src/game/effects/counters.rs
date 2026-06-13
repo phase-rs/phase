@@ -405,7 +405,7 @@ fn apply_pending_counter_post_action(
             // complete token entry exactly as the uninterrupted token path
             // does: abilities/bookkeeping, attachment, ETB events, and any
             // delayed sacrifice trigger.
-            super::token::inject_predefined_token_abilities(state, object_id);
+            super::token::inject_resolved_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
             crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
@@ -419,7 +419,7 @@ fn apply_pending_counter_post_action(
                     }
                 }
             }
-            push_token_entry_events(state, events, object_id, name);
+            push_token_entry_events(state, events, object_id, name, source_id);
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
                 state.delayed_triggers.push(DelayedTrigger {
                     condition: DelayedTriggerCondition::AtNextPhase {
@@ -486,7 +486,7 @@ fn apply_pending_counter_post_action(
             crate::game::layers::mark_layers_entered(state, object_id);
             crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
-            push_token_entry_events(state, events, object_id, name);
+            push_token_entry_events(state, events, object_id, name, source_id);
             state.last_created_token_ids.push(object_id);
             if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
                 pending.created_ids.push(object_id);
@@ -554,6 +554,7 @@ fn apply_pending_counter_post_action(
             source_id,
             duration,
             exile_tracking,
+            drain,
         } => {
             // CR 614.12a: the delivery tail may surface a Devour as-enters
             // sacrifice `EffectZoneChoice`. On that pause, return `false` so the
@@ -569,6 +570,14 @@ fn apply_pending_counter_post_action(
                 source_id,
                 duration.as_ref(),
                 exile_tracking,
+                drain,
+                // CR 701.24a: the counter-pause continuation never carries a
+                // library placement — library placements bear no enters-with
+                // counters and never enter the battlefield, so they never reach
+                // the counter-replacement pause that re-enters this tail. (A
+                // placement is not a shuffle; the tail's auto-shuffle gate is moot
+                // here because this path never delivers to the library.)
+                None,
                 events,
             ) {
                 super::change_zone::ZoneDeliveryResult::Done => true,
@@ -615,6 +624,7 @@ fn push_token_entry_events(
     events: &mut Vec<GameEvent>,
     object_id: ObjectId,
     name: String,
+    source_id: ObjectId,
 ) {
     let Some(obj) = state.objects.get(&object_id) else {
         return;
@@ -627,7 +637,11 @@ fn push_token_entry_events(
         to: crate::types::zones::Zone::Battlefield,
         record: Box::new(zone_change_record),
     });
-    events.push(GameEvent::TokenCreated { object_id, name });
+    events.push(GameEvent::TokenCreated {
+        object_id,
+        name,
+        source_id,
+    });
 }
 
 /// CR 122.1 + CR 122.6: Apply an already-accepted counter addition and record
@@ -1010,12 +1024,7 @@ pub fn resolve_add(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let (counter_type, counter_num) = match &ability.effect {
-        Effect::AddCounter {
-            counter_type,
-            count,
-            ..
-        }
-        | Effect::PutCounter {
+        Effect::PutCounter {
             counter_type,
             count,
             ..
@@ -1173,9 +1182,14 @@ pub fn resolve_add_all(
         TargetFilter::TrackedSetFiltered {
             id: crate::types::identifiers::TrackedSetId(0),
             filter,
+            caused_by,
         } => {
             if let Some(id) = state.chain_tracked_set_id {
-                TargetFilter::TrackedSetFiltered { id, filter }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by,
+                }
             } else if let Some(source_filter) =
                 crate::game::targeting::current_combat_damage_source_filter(state)
             {
@@ -1185,11 +1199,16 @@ pub fn resolve_add_all(
             } else if let Some((&id, _)) =
                 state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
             {
-                TargetFilter::TrackedSetFiltered { id, filter }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by,
+                }
             } else {
                 TargetFilter::TrackedSetFiltered {
                     id: crate::types::identifiers::TrackedSetId(0),
                     filter,
+                    caused_by,
                 }
             }
         }
@@ -1329,7 +1348,6 @@ fn resolve_defined_or_targets(
 ) -> Vec<crate::types::identifiers::ObjectId> {
     let target_spec = match &ability.effect {
         Effect::MultiplyCounter { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. } => Some(target),
         _ => None,
@@ -1338,7 +1356,7 @@ fn resolve_defined_or_targets(
     // CR 608.2c: SelfRef is the printed-name anaphor — always resolves to the
     // source object regardless of `ability.targets`. Mirrors the post-#323
     // short-circuit in `targeting::resolved_targets`. Without this, a chained
-    // `AddCounter { target: SelfRef }` sub-ability would inherit the parent's
+    // `PutCounter { target: SelfRef }` sub-ability would inherit the parent's
     // targets via chain propagation in `effects::mod.rs::resolve_ability_chain`.
     if let Some(TargetFilter::SelfRef) = target_spec {
         return vec![ability.source_id];
@@ -2136,7 +2154,7 @@ mod tests {
         resolve_add(
             &mut state,
             &make_counter_ability(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Any,
@@ -2277,7 +2295,7 @@ mod tests {
         resolve_add(
             &mut state,
             &make_counter_ability(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Generic("charge".to_string()),
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
@@ -2309,7 +2327,7 @@ mod tests {
         resolve_add(
             &mut state,
             &make_counter_ability(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Any,
@@ -2349,7 +2367,7 @@ mod tests {
             Zone::Battlefield,
         );
         let ability = ResolvedAbility::new(
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
@@ -2383,7 +2401,7 @@ mod tests {
         assert!(matches!(
             pending.completion,
             Some(PendingEffectResolved {
-                kind: EffectKind::AddCounter,
+                kind: EffectKind::PutCounter,
                 source_id: ObjectId(100),
                 player_action: None,
                 ..
@@ -2416,7 +2434,7 @@ mod tests {
         merge_pending_counter_completion_after_nested_pause(
             &mut state,
             PendingEffectResolved::with_post_actions(
-                EffectKind::AddCounter,
+                EffectKind::PutCounter,
                 ObjectId(40),
                 vec![PendingCounterPostAction::MarkMonstrous {
                     object_id: ObjectId(50),
@@ -2448,7 +2466,7 @@ mod tests {
                     object_id: ObjectId(50)
                 },
                 PendingCounterPostAction::EmitEffectResolved {
-                    kind: EffectKind::AddCounter,
+                    kind: EffectKind::PutCounter,
                     source_id: ObjectId(40)
                 }
             ]

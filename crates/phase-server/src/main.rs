@@ -67,6 +67,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
+use url::Url;
 
 type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
@@ -488,6 +489,14 @@ struct Cli {
     /// drift between host and server.
     #[arg(long, env = "PHASE_LOBBY_ONLY")]
     lobby_only: bool,
+
+    /// Public base URL to advertise to clients for sharing join codes (e.g.
+    /// `https://play.example.com` when running behind a TLS reverse proxy or
+    /// tunnel). Clients surface `<code>@<host>` so friends can join without the
+    /// host reading server logs. When the `ngrok` feature is built and
+    /// `NGROK_AUTHTOKEN` is set, the live tunnel URL is used when this is unset.
+    #[arg(long, env = "PUBLIC_URL")]
+    public_url: Option<String>,
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
@@ -1081,6 +1090,32 @@ async fn main() {
     let shutdown_draft_state = draft_sessions.clone();
     let shutdown_game_db = game_db.clone();
 
+    // Resolve the public URL advertised to clients for `<code>@<host>` join
+    // strings. An explicit `--public-url` (validated at the boundary) wins;
+    // otherwise an embedded ngrok tunnel supplies one when the `ngrok` feature
+    // is built and NGROK_AUTHTOKEN is set. `_ngrok_forwarder` keeps the tunnel
+    // open for the process lifetime (dropped on shutdown ⇒ tunnel closed); a
+    // tunnel that fails to establish never blocks local boot.
+    let configured_public_url = cli.public_url.as_deref().and_then(validate_public_url);
+    #[cfg(feature = "ngrok")]
+    let (advertised_public_url, _ngrok_forwarder) = match start_ngrok_tunnel(cli.port).await {
+        Some((url, fwd)) => (configured_public_url.clone().or(Some(url)), Some(fwd)),
+        None => (configured_public_url, None),
+    };
+    #[cfg(not(feature = "ngrok"))]
+    let advertised_public_url = {
+        if std::env::var_os("NGROK_AUTHTOKEN").is_some() {
+            warn!(
+                "NGROK_AUTHTOKEN is set but phase-server was built without the `ngrok` feature; \
+                 embedded tunnel disabled. Rebuild with `--features ngrok`."
+            );
+        }
+        configured_public_url
+    };
+    if let Some(url) = &advertised_public_url {
+        info!(public_url = %url, "advertising public URL for join-code sharing");
+    }
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
@@ -1108,6 +1143,7 @@ async fn main() {
             draft_spectators,
             game_spectators,
             mode,
+            public_url: advertised_public_url,
         });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
@@ -1192,6 +1228,59 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// Validate an operator-supplied public URL at the system boundary. It must
+/// parse as an absolute URL with a host; a malformed value is dropped (logged)
+/// rather than advertised to clients verbatim. Returns the URL with any
+/// trailing slash trimmed.
+fn validate_public_url(raw: &str) -> Option<String> {
+    match Url::parse(raw) {
+        Ok(u) if u.host_str().is_some() => Some(raw.trim_end_matches('/').to_string()),
+        _ => {
+            warn!(value = %raw, "ignoring malformed PUBLIC_URL (need an absolute URL with a host)");
+            None
+        }
+    }
+}
+
+/// Open an embedded ngrok HTTP tunnel that forwards public traffic to the local
+/// server on `port`, returning `(public_url, forwarder_handle)`. The handle
+/// keeps the tunnel open while held; dropping it closes the tunnel. Any failure
+/// (missing/invalid `NGROK_AUTHTOKEN`, network) is logged and returns `None` —
+/// the local server still runs, so the tunnel is strictly additive.
+#[cfg(feature = "ngrok")]
+async fn start_ngrok_tunnel(port: u16) -> Option<(String, Box<dyn std::any::Any + Send>)> {
+    use ngrok::prelude::*;
+
+    let upstream = match Url::parse(&format!("http://localhost:{port}")) {
+        Ok(u) => u,
+        Err(e) => {
+            error!(error = %e, "ngrok: invalid upstream URL; tunnel disabled");
+            return None;
+        }
+    };
+    let session = match ngrok::Session::builder()
+        .authtoken_from_env()
+        .connect()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "ngrok: session connect failed; tunnel disabled, local server still running");
+            return None;
+        }
+    };
+    let forwarder = match session.http_endpoint().listen_and_forward(upstream).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!(error = %e, "ngrok: tunnel start failed; disabled, local server still running");
+            return None;
+        }
+    };
+    let url = forwarder.url().to_string();
+    info!(url = %url, "ngrok tunnel established");
+    Some((url, Box::new(forwarder)))
+}
+
 #[derive(Clone)]
 struct AppState {
     sessions: SharedState,
@@ -1206,6 +1295,10 @@ struct AppState {
     draft_spectators: SharedDraftSpectators,
     game_spectators: SharedGameSpectators,
     mode: Mode,
+    /// Public base URL advertised in `ServerHello` (from `--public-url`/an
+    /// embedded ngrok tunnel), or `None` when the server has no reachable
+    /// address to share. Cloned per connection at greet time only.
+    public_url: Option<String>,
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> impl IntoResponse {
@@ -1235,6 +1328,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> 
                 app_state.draft_spectators,
                 app_state.game_spectators,
                 app_state.mode,
+                app_state.public_url,
             )
         })
         .into_response()
@@ -1255,6 +1349,7 @@ async fn handle_socket(
     draft_spectators: SharedDraftSpectators,
     game_spectators: SharedGameSpectators,
     mode: Mode,
+    public_url: Option<String>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
@@ -1291,6 +1386,7 @@ async fn handle_socket(
         build_commit: build_commit().to_string(),
         protocol_version: PROTOCOL_VERSION,
         mode,
+        public_url,
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if socket.send(Message::text(json)).await.is_err() {
@@ -1520,6 +1616,9 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
                 lobby_broker::ServerMode::Full => ServerMode::Full,
                 lobby_broker::ServerMode::LobbyOnly => ServerMode::LobbyOnly,
             },
+            // LobbyOnly brokers run no server-side game, so there is no
+            // game-server URL to advertise for a `<code>@<host>` share string.
+            public_url: None,
         },
         L::GameCreated {
             game_code,

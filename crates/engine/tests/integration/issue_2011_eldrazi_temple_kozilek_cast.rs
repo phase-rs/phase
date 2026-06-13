@@ -57,9 +57,10 @@ fn add_eldrazi_temple_two_abilities(state: &mut GameState) -> engine::types::ide
                 produced: ManaProduction::Colorless {
                     count: QuantityExpr::Fixed { value: 2 },
                 },
-                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                    "Colorless Eldrazi".to_string(),
-                )],
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Colorless Eldrazi".to_string(),
+                    ability: engine::types::mana::AbilityActivationScope::OfSpellType,
+                }],
                 grants: vec![],
                 expiry: None,
                 target: None,

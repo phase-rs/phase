@@ -10,9 +10,9 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
     Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
     EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -478,6 +478,9 @@ pub fn resolve(
     ) {
         if let Some((&id, _)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) {
             state.tracked_object_sets.remove(&id);
+            // CR 608.2c: drop the consumed set's member-cause provenance too so
+            // the side map never outlives its `tracked_object_sets` entry.
+            state.tracked_set_member_causes.remove(&id);
         }
     }
 
@@ -771,8 +774,9 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             }
         }
 
-        // CR 111.10: Inject predefined abilities for known token subtypes.
-        inject_predefined_token_abilities(state, obj_id);
+        // CR 111.4 + CR 707.2a: Predefined abilities first; catalog rules_text
+        // only when the predefined path contributed nothing.
+        inject_resolved_token_abilities(state, obj_id);
         // Battlefield entry: request an incremental layer re-derive for just this
         // token. `flush_layers` escalates to a full pass if the token sources a
         // continuous effect / carries counters / etc., or if any active effect
@@ -825,6 +829,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         events.push(GameEvent::TokenCreated {
             object_id: obj_id,
             name: spec.characteristics.display_name.clone(),
+            source_id: spec.source_id,
         });
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
@@ -1637,10 +1642,7 @@ fn treasure_ability() -> AbilityDefinition {
     .cost(AbilityCost::Composite {
         costs: vec![
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1667,10 +1669,10 @@ fn gold_ability() -> AbilityDefinition {
             target: None,
         },
     )
-    .cost(AbilityCost::Sacrifice {
-        target: TargetFilter::SelfRef,
-        count: 1,
-    })
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
 }
 
 /// CR 111.10b: Food — "{2}, {T}, Sacrifice this artifact: You gain 3 life."
@@ -1691,10 +1693,7 @@ fn food_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1716,10 +1715,7 @@ fn clue_ability() -> AbilityDefinition {
                     generic: 2,
                 },
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1748,10 +1744,7 @@ fn blood_ability() -> AbilityDefinition {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1773,10 +1766,10 @@ fn spawn_ability() -> AbilityDefinition {
             target: None,
         },
     )
-    .cost(AbilityCost::Sacrifice {
-        target: TargetFilter::SelfRef,
-        count: 1,
-    })
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
 }
 
 /// CR 111.10h: Powerstone — "{T}: Add {C}. This mana can't be spent to cast a nonartifact spell."
@@ -1788,9 +1781,10 @@ fn powerstone_ability() -> AbilityDefinition {
             produced: ManaProduction::Colorless {
                 count: QuantityExpr::Fixed { value: 1 },
             },
-            restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Artifact".to_string(),
-            )],
+            restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            }],
             grants: vec![],
             expiry: None,
             target: None,
@@ -1820,10 +1814,7 @@ fn map_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
     .activation_restrictions(vec![ActivationRestriction::AsSorcery])
@@ -1884,10 +1875,7 @@ fn lander_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1913,10 +1901,7 @@ fn mutagen_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
     // CR 307.5: "Activate only as a sorcery" — controller has priority, during
@@ -1945,6 +1930,9 @@ fn junk_ability() -> AbilityDefinition {
                 source_id: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -1955,10 +1943,7 @@ fn junk_ability() -> AbilityDefinition {
     .cost(AbilityCost::Composite {
         costs: vec![
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
     .activation_restrictions(vec![ActivationRestriction::AsSorcery])
@@ -2035,10 +2020,7 @@ fn shard_ability() -> AbilityDefinition {
                     generic: 2,
                 },
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -2375,13 +2357,88 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
 /// the layer pass rebuilds live from base on each pass, but several code
 /// paths (SBAs, action enumeration) consult the live set directly between
 /// passes so keeping them in sync here avoids a one-frame lag.
-pub(super) fn inject_predefined_token_abilities(
+/// CR 111.4 + CR 707.2a: Apply predefined token abilities first; fall back to
+/// catalog `rules_text` only when the predefined path contributed nothing
+/// (artifacts, Roles, Incubator, …).
+pub(super) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
+    let predefined_injected = inject_predefined_token_abilities(state, obj_id);
+    if !predefined_injected {
+        inject_catalog_token_abilities(state, obj_id);
+    }
+}
+
+/// CR 111.4 + CR 707.2a: Grant catalog `rules_text` when token creation resolved
+/// a `token_image_ref` preset whose abilities are not already covered by the
+/// predefined path (e.g. SOS Pest attack life gain).
+pub(super) fn inject_catalog_token_abilities(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return;
+    };
+    let Some(preset) = obj.token_image_ref.as_ref().and_then(|image_ref| {
+        crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+    }) else {
+        return;
+    };
+    let Some(rules_text) = preset.rules_text.as_deref().filter(|text| !text.is_empty()) else {
+        return;
+    };
+    let modifications = crate::parser::oracle_static::classify_quoted_inner(rules_text);
+    if modifications.is_empty() {
+        return;
+    }
+
+    let mut static_mods = Vec::new();
+    let mut triggers = Vec::new();
+    let mut abilities = Vec::new();
+    let mut keywords = Vec::new();
+    for modification in modifications {
+        match modification {
+            ContinuousModification::GrantTrigger { trigger } => triggers.push(*trigger),
+            ContinuousModification::AddKeyword { keyword } => keywords.push(keyword),
+            ContinuousModification::GrantAbility { definition } => abilities.push(*definition),
+            other => static_mods.push(other),
+        }
+    }
+
+    if !static_mods.is_empty() {
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(static_mods)
+            .description(rules_text.to_string());
+        Arc::make_mut(&mut obj.base_static_definitions).push(static_def.clone());
+        obj.static_definitions.push(static_def);
+    }
+    if !triggers.is_empty() {
+        Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers.iter().cloned());
+        for trigger in triggers {
+            obj.trigger_definitions.push(trigger);
+        }
+    }
+    if !abilities.is_empty() {
+        Arc::make_mut(&mut obj.abilities).extend(abilities.iter().cloned());
+        Arc::make_mut(&mut obj.base_abilities).extend(abilities);
+    }
+    if !keywords.is_empty() {
+        obj.keywords.extend(keywords);
+    }
+    if obj.token_rules_text.is_none() {
+        obj.token_rules_text = Some(rules_text.to_string());
+    }
+}
+
+pub(super) fn inject_predefined_token_abilities(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) -> bool {
     let (subtypes, name) = match state.objects.get(&obj_id) {
         Some(obj) => (obj.card_types.subtypes.clone(), obj.name.clone()),
-        None => return,
+        None => return false,
     };
     let mut abilities_to_add = Vec::new();
     for subtype in &subtypes {
@@ -2392,13 +2449,14 @@ pub(super) fn inject_predefined_token_abilities(
     } else {
         None
     };
+    let is_incubator = subtypes.iter().any(|s| s == "Incubator");
 
-    if abilities_to_add.is_empty() && role_spec.is_none() {
-        return;
+    if abilities_to_add.is_empty() && role_spec.is_none() && !is_incubator {
+        return false;
     }
 
     let Some(obj) = state.objects.get_mut(&obj_id) else {
-        return;
+        return false;
     };
 
     if !abilities_to_add.is_empty() {
@@ -2438,6 +2496,8 @@ pub(super) fn inject_predefined_token_abilities(
             }
         }
     }
+
+    true
 }
 
 #[cfg(test)]
@@ -3019,13 +3079,15 @@ mod tests {
                     }
                 )));
                 assert!(costs.iter().any(|c| matches!(c, AbilityCost::Tap)));
-                assert!(costs.iter().any(|c| matches!(
-                    c,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1
+                assert!(costs.iter().any(|c| {
+                    if let AbilityCost::Sacrifice(cost) = c {
+                        matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("Lander cost must be Composite, got {other:?}"),
         }
@@ -3357,13 +3419,15 @@ mod tests {
                     }
                 )));
                 assert!(costs.iter().any(|cost| matches!(cost, AbilityCost::Tap)));
-                assert!(costs.iter().any(|cost| matches!(
-                    cost,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1
+                assert!(costs.iter().any(|cost| {
+                    if let AbilityCost::Sacrifice(sc) = cost {
+                        matches!(sc.target, TargetFilter::SelfRef)
+                            && sc.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("expected composite cost, got {other:?}"),
         }
@@ -3408,13 +3472,15 @@ mod tests {
                     }
                 )));
                 assert!(costs.iter().any(|cost| matches!(cost, AbilityCost::Tap)));
-                assert!(costs.iter().any(|cost| matches!(
-                    cost,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1
+                assert!(costs.iter().any(|cost| {
+                    if let AbilityCost::Sacrifice(sc) = cost {
+                        matches!(sc.target, TargetFilter::SelfRef)
+                            && sc.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("expected composite cost, got {other:?}"),
         }
@@ -3428,13 +3494,14 @@ mod tests {
         let abilities = predefined_token_abilities("Spawn");
         assert_eq!(abilities.len(), 1);
         assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
-        assert!(matches!(
-            abilities[0].cost,
-            Some(AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            })
-        ));
+        assert!({
+            if let Some(AbilityCost::Sacrifice(sc)) = &abilities[0].cost {
+                matches!(sc.target, TargetFilter::SelfRef)
+                    && sc.requirement == crate::types::ability::SacrificeRequirement::count(1)
+            } else {
+                false
+            }
+        });
     }
 
     #[test]
@@ -3549,6 +3616,186 @@ mod tests {
                 .unwrap_or(0),
             1,
             "Writhing Chrysalis sacrifice trigger should resolve to a +1/+1 counter"
+        );
+    }
+
+    #[test]
+    fn catalog_pest_preset_grants_attack_life_trigger() {
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "00a0801d-0212-5890-8957-3cde30f382f9",
+        )
+        .expect("SOS Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            obj.trigger_definitions.len(),
+            1,
+            "catalog rules_text must install the attacks life trigger intrinsically"
+        );
+        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert_eq!(
+            obj.token_rules_text.as_deref(),
+            Some("Whenever this token attacks, you gain 1 life.")
+        );
+    }
+
+    #[test]
+    fn predefined_treasure_create_token_pipeline_has_exactly_one_mana_ability() {
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Rapacious Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .source_related_token_ids
+            .push("0060ce13-67e2-5607-a29b-721c743e6770".to_string());
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Treasure".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let treasure_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&treasure_id];
+        assert!(
+            obj.token_image_ref.is_some(),
+            "Treasure creation must resolve a catalog preset image ref"
+        );
+        assert_eq!(
+            obj.abilities.len(),
+            1,
+            "predefined Treasure must carry exactly one sacrifice-for-mana ability"
+        );
+        assert!(matches!(*obj.abilities[0].effect, Effect::Mana { .. }));
+        assert!(
+            obj.trigger_definitions.is_empty(),
+            "catalog injection must not double-grant predefined Treasure triggers"
+        );
+    }
+
+    #[test]
+    fn predefined_royal_role_create_token_pipeline_has_exactly_one_role_static() {
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Royal Treatment".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .source_related_token_ids
+            .push("48b5010a-9c00-5cc1-b5e1-f407670846ba".to_string());
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Royal".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Royal".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&role_id];
+        assert!(
+            obj.token_image_ref.is_some(),
+            "Royal Role creation must resolve a catalog preset image ref"
+        );
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "predefined Royal Role must carry exactly one enchanted-creature static"
+        );
+        assert_eq!(
+            obj.base_static_definitions.len(),
+            1,
+            "base_static_definitions must mirror the single role static"
+        );
+        assert!(
+            obj.abilities.is_empty(),
+            "Royal Role has no activated abilities from the predefined path"
+        );
+        assert!(
+            obj.trigger_definitions.is_empty(),
+            "catalog injection must not double-grant predefined Royal Role statics"
         );
     }
 
@@ -4556,6 +4803,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(903),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();

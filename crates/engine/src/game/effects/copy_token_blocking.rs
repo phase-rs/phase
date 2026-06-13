@@ -98,7 +98,7 @@ mod tests {
     use super::*;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::zones::create_object;
-    use crate::types::ability::{FilterProp, TypedFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, TypedFilter};
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -152,9 +152,12 @@ mod tests {
         state.combat = Some(combat);
 
         // Mirror Match: copy + block each creature attacking the controller.
-        let source_filter = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-        );
+        let source_filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                }]),
+            );
         let ability = ResolvedAbility::new(
             Effect::CopyTokenBlockingAttacker {
                 source_filter,

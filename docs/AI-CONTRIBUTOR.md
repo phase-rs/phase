@@ -117,6 +117,21 @@ If the contributor lacks `gh`, fall back to a plain `git clone` and tell them (i
 
 ---
 
+## 2.1. Sync your fork with upstream — every run
+
+Run this on **every** invocation, not just the first clone. A fork's `main` goes stale the moment upstream advances; working from a stale base produces spurious diffs against `origin/main`, risks textual merge-queue conflicts, and can revert other contributors' landed work. Always start from an up-to-date codebase.
+
+```bash
+git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/phase-rs/phase.git
+git fetch upstream main
+git checkout main && git merge --ff-only upstream/main   # fast-forward fork main to upstream
+git push origin main                                     # keep the fork's main in sync (best-effort)
+```
+
+If `git merge --ff-only` fails, your fork's `main` has diverged from upstream — do **not** force it. Proceed to §4 regardless: that step cuts your working branch directly from `upstream/main`, so a diverged fork `main` never contaminates your change.
+
+---
+
 ## 2.5. Bootstrap the repo (Developer track only)
 
 Run **once per fresh clone** before invoking `$engine-implementer`. This downloads MTGJSON, generates `client/public/card-data.json`, fetches the local copy of the Comprehensive Rules, installs frontend deps, and configures git hooks:
@@ -369,11 +384,16 @@ you can invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
 1. gh repo fork phase-rs/phase --clone --remote && cd phase
+1a. Sync your fork with upstream EVERY run (never work from a stale base):
+   git remote add upstream https://github.com/phase-rs/phase.git 2>/dev/null;
+   git fetch upstream main; git checkout main &&
+   git merge --ff-only upstream/main && git push origin main
 2. If I named a card, use it. Otherwise WebFetch
    https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json
    and pick a card with supported==false and small gap_count.
-3. git checkout -b card/<slug>  (if the branch already exists locally or on
-   origin, append "-2", "-3", etc. — see Step 4 in docs/AI-CONTRIBUTOR.md).
+3. git checkout -b card/<slug> upstream/main  (cut the branch from CURRENT
+   upstream/main, not stale fork main; if the branch already exists locally or
+   on origin, append "-2", "-3", etc. — see Step 4 in docs/AI-CONTRIBUTOR.md).
 4. Invoke the $engine-implementer skill to implement the card. Tell it: follow
    CLAUDE.md and AGENTS.md without exception, plan with engine-planner, review
    the plan with $review-engine-plan until clean, use nom combinators on first

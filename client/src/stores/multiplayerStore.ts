@@ -1015,6 +1015,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               matchType: settings.matchType,
             },
             playerSlots: adapter.getPlayerSlots(),
+            // P2P/broker hosting has no advertised game-server URL. Clear any
+            // serverInfo left by a prior online-host session so the P2P share
+            // string is the bare room code, never a stale `code@<old-server>`.
+            serverInfo: null,
           });
 
           for (const seat of settings.aiSeats) {

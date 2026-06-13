@@ -170,12 +170,14 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "beastie beatdown",
     "benalish faithbonder",
     "benalish knight-counselor",
+    "bionic blow",
     "bite down on crime",
     "blood poet",
     "bottle golems",
     "boulderbranch golem",
     "brainstealer dragon",
     "brokers charm",
+    "captain marvel, shooting star",
     "champion of the path",
     "champion of wits",
     "chastise",
@@ -183,11 +185,11 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "clear shot",
     "coalition skyknight",
     "coalition warbrute",
+    "colossal collision",
     "common black removal",
     "conclave mentor",
     "consume",
     "consuming ferocity",
-    "crumble",
     "crush underfoot",
     "dark confidant",
     "dark tutelage",
@@ -256,7 +258,9 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "nibelheim aflame",
     "nissa's judgment",
     "nissa's revelation",
+    "nova flame",
     "noxious gearhulk",
+    "origin of thor",
     "orzhov charm",
     "osseous sticktwister",
     "packsong pup",
@@ -284,7 +288,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "shriveling rot",
     "signature slam",
     "sister hospitaller",
-    "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
     "south wind avatar",
@@ -347,6 +350,7 @@ const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
     "consuming vapors",
     "cragganwick cremator",
     "creature bond",
+    "daredevil, fearless fighter",
     "daxos of meletis",
     "dead reckoning",
     "devour flesh",
@@ -424,8 +428,10 @@ const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
     "singe-mind ogre",
     "summon: kujata",
     "terror of the peaks",
+    "the frightful four",
     "the lord of pain",
     "the provider",
+    "thor, god of thunder",
     "tribute to hunger",
     "trostani, selesnya's voice",
     "twisted justice",
@@ -518,18 +524,27 @@ fn anaphoric_scope_set_is_frozen() {
     // creature, CR 603.2) — the category-2 trigger-subject fix #512 anticipated —
     // dropping both to 153. Enlist keyword synthesis then surfaced the tapped
     // creature's power anaphor for 15 Enlist cards, taking the count to 168. If
-    // #512/#511 land, this shrinks further.
+    // #512/#511 land, this shrinks further. Sly Spy added, taking count to 169.
+    // The ParentTargetController routing fix (#2741) let the anaphoric rebind
+    // resolve "its" to `Target` (the destroyed/exiled object, CR 608.2c) in
+    // "that X's controller gains life equal to its <stat>" for Crumble /
+    // Solitude, and the parser-grammar consolidation (PR #2802) reshaped Sly
+    // Spy's variant parse — dropping all three to 166. The trailing-`for each`
+    // multiplier fix broadened the shared quantity grammar so the category-3
+    // target/event pronoun ("it deals damage equal to its power") now parses on
+    // five more cards — Bionic Blow, Captain Marvel (Shooting Star), Colossal
+    // Collision, Nova Flame, and Origin of Thor — taking the count to 171.
     assert_eq!(
         observed.len(),
-        168,
-        "Expected exactly 168 cards retaining ObjectScope::Anaphoric (pronoun \
+        171,
+        "Expected exactly 171 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        168,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 168 cards."
+        171,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 171 cards."
     );
 }
 
@@ -565,17 +580,21 @@ fn demonstrative_scope_set_is_frozen() {
          ObjectScope::Demonstrative: {removed:?}. Remove the card(s) and update \
          the count assertion."
     );
+    // The trailing-`for each` multiplier fix broadened the shared quantity
+    // grammar so the category-4 bare demonstrative ("that spell's / that card's
+    // mana value") now parses on three more cards — Daredevil (Fearless Fighter),
+    // The Frightful Four, and Thor (God of Thunder) — taking the count to 114.
     assert_eq!(
         observed.len(),
-        111,
-        "Expected exactly 111 cards retaining ObjectScope::Demonstrative. Count \
+        114,
+        "Expected exactly 114 cards retaining ObjectScope::Demonstrative. Count \
          moved to {}.",
         observed.len()
     );
     assert_eq!(
         DEMONSTRATIVE_SCOPE_CARDS.len(),
-        111,
-        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 111 cards."
+        114,
+        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 114 cards."
     );
 }
 

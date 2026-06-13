@@ -56,10 +56,11 @@ mod prelude {
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType};
     pub(super) use crate::types::phase::Phase;
     pub(super) use crate::types::statics::{
-        ActivationExemption, BlockExceptionKind, CastFreeOrigin, CastFrequency,
-        CastingProhibitionCondition, CostModifyMode, CostPaymentProhibition, CrewAction,
-        CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming, HandSizeModification,
-        ProhibitionScope, StaticMode, TriggerCause,
+        ActivationExemption, AdditionalCostTaxAction, BlockExceptionKind, CastFreeOrigin,
+        CastFrequency, CastingProhibitionCondition, CombatAloneAction, CombatAloneRequirement,
+        CostModifyMode, CostPaymentProhibition, CrewAction, CrewContributionKind, ExileCardPool,
+        ExileCastCost, ExileCastTiming, HandSizeModification, ProhibitionScope, StaticMode,
+        TriggerCause,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -84,6 +85,7 @@ mod type_change;
 
 pub(crate) use shared::parse_commander_subject_filter_prefix;
 
+pub(crate) use dispatch::is_speed_unlock_sentence;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
 
@@ -103,9 +105,10 @@ mod support {
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
-        try_split_and_cant_be_attached, try_split_and_cant_be_blocked,
-        try_split_and_cant_be_sacrificed, try_split_and_cant_be_targeted, try_split_and_cant_block,
-        try_split_and_doesnt_untap, try_split_and_must_attack_block,
+        try_split_and_cant_attack_scoped, try_split_and_cant_be_attached,
+        try_split_and_cant_be_blocked, try_split_and_cant_be_sacrificed,
+        try_split_and_cant_be_targeted, try_split_and_cant_block, try_split_and_doesnt_untap,
+        try_split_and_foreign_keyword_grant, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{

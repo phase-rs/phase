@@ -6,9 +6,9 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ChoiceType, Effect, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, ReplacementDefinition,
-    StaticCondition, TargetFilter, TriggerCondition,
+    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ChoiceType,
+    Effect, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter,
+    ReplacementDefinition, StaticCondition, TargetFilter, TriggerCondition,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -99,11 +99,22 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
 
     if let Some((trigger_line, header)) = split_triggered_modal_header(&candidate) {
         if let Some(header) = parse_modal_header_ast(&header) {
+            // CR 603.12 + CR 700.2b: A reflexive optional-cost header
+            // ("Whenever you attack, you may sacrifice another creature. When
+            // you do, choose ...") gates the modal behind the paid cost. Split
+            // out the cost so the lowering builds an `Effect::Sacrifice` whose
+            // `WhenYouDo` sub carries the modal, instead of firing the modes
+            // unconditionally on the trigger.
+            let (trigger_line, optional_cost) = match split_reflexive_optional_cost(&trigger_line) {
+                Some((trigger, cost)) => (trigger, Some(cost)),
+                None => (trigger_line, None),
+            };
             return Some((
                 OracleBlockAst::TriggeredModal {
                     trigger_line,
                     header,
                     modes,
+                    optional_cost,
                 },
                 next,
             ));
@@ -484,6 +495,8 @@ fn parse_modal_additional_cost_condition(
             rest,
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Any,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,
@@ -503,6 +516,8 @@ fn parse_modal_additional_cost_condition(
         value(
             ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count: 2,
@@ -516,6 +531,8 @@ fn parse_modal_additional_cost_condition(
             ),
             |min_count| ModalSelectionCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
+                origin: None,
+                origin_ordinal: None,
                 variant: None,
                 kicker_cost: None,
                 min_count,
@@ -523,6 +540,8 @@ fn parse_modal_additional_cost_condition(
         ),
         success(ModalSelectionCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -544,6 +563,8 @@ fn parse_modal_specific_kicker_cost_condition(
         rest,
         ModalSelectionCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: Some(kicker_cost),
             min_count: 1,
@@ -578,6 +599,51 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
     None
 }
 
+/// CR 603.12 + CR 700.2b: Recognize a reflexive optional-cost trigger header of
+/// the shape `"<trigger>, you may <cost>. When you do"` (Caesar, Legion's
+/// Emperor) and split it into the bare trigger condition (`"Whenever you
+/// attack"`) and the cost effect text (`"Sacrifice another creature"`, with the
+/// `"you may "` optional marker and the trailing `". When you do"` reflexive
+/// connector stripped). Returns `None` for a plain triggered modal (Pip-Boy
+/// 3000's `"Whenever equipped creature attacks ..."`), which has neither a
+/// `"you may "` optional cost nor a `"when you do"` reflexive connector — that
+/// modal attaches directly to the trigger's execute.
+///
+/// The cost text is returned with an uppercased leading letter so it parses as
+/// an imperative effect clause (`parse_effect_chain` expects sentence case).
+fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)> {
+    // Combinator (run on lowercase, slice original by equal ASCII byte offset):
+    //   <trigger> ", you may " <cost> ". " match_when_you_do
+    let lower = trigger_line.to_lowercase();
+    let (after_marker, trigger_lower): (&str, &str) = terminated(
+        take_until::<_, _, OracleError<'_>>(", you may "),
+        tag(", you may "),
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    let (connector, cost_lower): (&str, &str) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
+            .parse(after_marker)
+            .ok()?;
+    // The connector remainder must be exactly the reflexive "when you do".
+    let (rest, ()) = nom_condition::match_when_you_do(connector).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    let trigger_len = trigger_lower.len();
+    let cost_start = trigger_line.len() - after_marker.len();
+    let cost_len = cost_lower.len();
+    let trigger_orig = trigger_line.get(..trigger_len)?.trim();
+    let cost_orig = trigger_line.get(cost_start..cost_start + cost_len)?.trim();
+
+    // Sentence-case the cost so `parse_effect_chain` reads it as an imperative.
+    let mut chars = cost_orig.chars();
+    let first = chars.next()?;
+    let cost_cased = first.to_uppercase().collect::<String>() + chars.as_str();
+    Some((trigger_orig.to_string(), cost_cased))
+}
+
 pub(crate) fn lower_oracle_block(
     block: OracleBlockAst,
     card_name: &str,
@@ -594,9 +660,6 @@ pub(crate) fn lower_oracle_block(
             let mut def =
                 build_modal_ability(AbilityKind::Activated, &header, &modes, host_self_reference)
                     .cost(parse_oracle_cost(&cost_text));
-            if constraints.sorcery_speed() {
-                def.sorcery_speed = true;
-            }
             def.activation_restrictions = constraints.restrictions;
             result.abilities.push(def);
         }
@@ -611,6 +674,7 @@ pub(crate) fn lower_oracle_block(
             trigger_line,
             header,
             modes,
+            optional_cost,
         } => {
             let mut triggers = parse_trigger_lines(&trigger_line, card_name);
             // CR 608.2k + CR 301.5a: Derive the trigger subject from the parsed
@@ -621,15 +685,41 @@ pub(crate) fn lower_oracle_block(
             // `GenericEffect` with no target, so without this threading the
             // "Pick a Perk" mode emits an unresolvable `ParentTarget`.
             let modal_subject = derive_modal_subject(&triggers);
-            let modal_execute = Box::new(build_modal_ability_with_subject(
+            let mut modal_ability = build_modal_ability_with_subject(
                 AbilityKind::Spell,
                 &header,
                 &modes,
                 modal_subject,
                 host_self_reference,
-            ));
+            );
+
+            let execute = match optional_cost {
+                // CR 603.12 + CR 700.2b: The modal is gated behind a reflexive
+                // optional cost. Build `Effect::Sacrifice { optional }` whose
+                // `WhenYouDo` sub_ability carries the modal, so the modes are
+                // chosen and resolved only after the controller pays the cost
+                // (Caesar, Legion's Emperor). The decline path is handled by
+                // `should_resolve_subability_on_optional_decline` (WhenYouDo →
+                // false), so declining the sacrifice resolves no modes.
+                Some(cost_text) => {
+                    modal_ability.condition = Some(AbilityCondition::WhenYouDo);
+                    let mut cost_ability = crate::parser::oracle_effect::parse_effect_chain(
+                        &cost_text,
+                        AbilityKind::Spell,
+                    );
+                    // CR 118.12 + CR 701.21: "you may sacrifice" makes the
+                    // sacrifice cost optional during resolution; the controller
+                    // is prompted before paying it.
+                    cost_ability.optional = true;
+                    cost_ability.sub_ability = Some(Box::new(modal_ability));
+                    Box::new(cost_ability)
+                }
+                // Plain triggered modal (Pip-Boy): the modal attaches directly.
+                None => Box::new(modal_ability),
+            };
+
             for trigger in &mut triggers {
-                trigger.execute = Some(modal_execute.clone());
+                trigger.execute = Some(execute.clone());
             }
             result.triggers.extend(triggers);
         }
@@ -951,9 +1041,28 @@ fn lower_mode_abilities_with_subject(
     subject: Option<TargetFilter>,
     host_self_reference: Option<TargetFilter>,
 ) -> Vec<AbilityDefinition> {
+    lower_mode_abilities_with_scope(modes, kind, subject, None, host_self_reference)
+}
+
+/// Variant of `lower_mode_abilities_with_subject` that additionally seeds
+/// `relative_player_scope` on the parse context so mode-body "that player"
+/// anaphora resolve to the correct player scope established by the trigger
+/// condition (e.g. `TriggeringPlayer` for DamageDone triggers).
+///
+/// CR 603.7c: For DamageDone triggers the damaged player is the triggering
+/// player; "that player" in each modal branch must resolve to them, not the
+/// caster or `ParentTargetController`.
+pub(crate) fn lower_mode_abilities_with_scope(
+    modes: &[ModeAst],
+    kind: AbilityKind,
+    subject: Option<TargetFilter>,
+    relative_player_scope: Option<crate::types::ability::ControllerRef>,
+    host_self_reference: Option<TargetFilter>,
+) -> Vec<AbilityDefinition> {
     let mut ctx = ParseContext {
         subject,
         host_self_reference,
+        relative_player_scope,
         ..Default::default()
     };
     modes
@@ -963,6 +1072,63 @@ fn lower_mode_abilities_with_subject(
             guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
         })
         .collect()
+}
+
+/// CR 700.2 + CR 608.2d: Try to parse an inline modal trigger body of the form
+/// `"choose one — <mode1>; or <mode2>[; or <modeN>]"` that appears as a single
+/// sentence (semicolon-separated modes, no bullet lines).
+///
+/// This handles cards like Grenzo, Havoc Raiser where the entire trigger
+/// including modal choices fits on one Oracle text line. Returns `None` if the
+/// text does not start with a recognised modal header or contains no `; or `
+/// separator.
+///
+/// The `relative_player_scope` from the trigger condition (e.g.
+/// `TriggeringPlayer` for DamageDone triggers) is propagated into every mode
+/// body so "that player" anaphora resolve to the correct player.
+pub(crate) fn try_parse_inline_modal(
+    effect_body: &str,
+    relative_player_scope: Option<crate::types::ability::ControllerRef>,
+) -> Option<AbilityDefinition> {
+    let em_dash_pos = effect_body.find('\u{2014}')?;
+    let header_text = effect_body[..em_dash_pos].trim();
+    let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
+
+    let header = parse_modal_header_ast(header_text)?;
+
+    let raw_modes: Vec<&str> = modes_text
+        .split("; or ") // allow-noncombinator: structural delimiter split for modal modes
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if raw_modes.len() < 2 {
+        return None;
+    }
+
+    let modes: Vec<ModeAst> = raw_modes
+        .iter()
+        .map(|body| {
+            let body = body.trim_end_matches('.');
+            ModeAst {
+                raw: body.to_string(),
+                label: None,
+                body: body.to_string(),
+                mode_cost: None,
+            }
+        })
+        .collect();
+
+    let mode_abilities = lower_mode_abilities_with_scope(
+        &modes,
+        AbilityKind::Spell,
+        None,
+        relative_player_scope,
+        None,
+    );
+    Some(
+        AbilityDefinition::new(AbilityKind::Spell, modal_marker_effect(&header))
+            .with_modal(build_modal_choice(&header, &modes), mode_abilities),
+    )
 }
 
 /// Replace a parsed mode ability with `Effect::Unimplemented` when the mode body
@@ -1703,5 +1869,108 @@ mod tests {
                 target: TargetFilter::Controller,
             }
         ));
+    }
+
+    // --- Caesar, Legion's Emperor (issue #2857): reflexive optional-cost
+    // gated modal trigger ---
+
+    const CAESAR_ORACLE: &str = "Whenever you attack, you may sacrifice another creature. When you do, choose two —\n\
+        • Create two 1/1 red and white Soldier creature tokens with haste that are tapped and attacking.\n\
+        • You draw a card and you lose 1 life.\n\
+        • Caesar deals damage equal to the number of creature tokens you control to target opponent.";
+
+    #[test]
+    fn match_when_you_do_absorbs_trailing_comma() {
+        // CR 603.12: the reflexive connector combinator consumes "when you do"
+        // and an optional trailing ", ".
+        let (rest, ()) =
+            nom_condition::match_when_you_do("when you do, choose two").expect("matches connector");
+        assert_eq!(rest, "choose two");
+        let (rest, ()) = nom_condition::match_when_you_do("when you do").expect("matches bare");
+        assert_eq!(rest, "");
+        assert!(nom_condition::match_when_you_do("if you do").is_err());
+    }
+
+    #[test]
+    fn split_reflexive_optional_cost_extracts_trigger_and_cost() {
+        // CR 603.12 + CR 700.2b: Caesar's trigger header splits into the bare
+        // attack trigger and the sentence-cased sacrifice cost; the "you may "
+        // marker and the trailing ". When you do" connector are stripped.
+        let (trigger, cost) = split_reflexive_optional_cost(
+            "Whenever you attack, you may sacrifice another creature. When you do",
+        )
+        .expect("Caesar's reflexive header must split");
+        assert_eq!(trigger, "Whenever you attack");
+        assert_eq!(cost, "Sacrifice another creature");
+    }
+
+    #[test]
+    fn split_reflexive_optional_cost_rejects_plain_triggered_modal() {
+        // Pip-Boy 3000's trigger has no "you may" optional cost nor a
+        // "when you do" reflexive connector — it stays a plain triggered modal.
+        assert_eq!(
+            split_reflexive_optional_cost("Whenever equipped creature attacks"),
+            None
+        );
+        // A "you may" with no reflexive connector is not a gated modal header.
+        assert_eq!(
+            split_reflexive_optional_cost("Whenever you attack, you may draw a card"),
+            None
+        );
+    }
+
+    #[test]
+    fn caesar_lowers_to_reflexive_gated_modal() {
+        // CR 603.12 + CR 700.2b: Caesar's attack trigger must lower to an
+        // `Effect::Sacrifice { optional }` whose `WhenYouDo` sub_ability carries
+        // the choose-two modal with three modes — NOT a bare modal attached
+        // directly to the trigger (which would fire the modes unconditionally).
+        let parsed = parse_oracle_text(
+            CAESAR_ORACLE,
+            "Caesar, Legion's Emperor",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Soldier".to_string()],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("Caesar has an attack trigger");
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("attack trigger has an execute chain");
+
+        assert!(
+            matches!(&*execute.effect, Effect::Sacrifice { .. }),
+            "the attack trigger executes an optional Sacrifice, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute.optional,
+            "the sacrifice is optional ('you may'), not a mandatory PayCost gate"
+        );
+
+        let modal_sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("the sacrifice has a WhenYouDo modal sub-ability");
+        assert_eq!(
+            modal_sub.condition,
+            Some(AbilityCondition::WhenYouDo),
+            "the modal is gated on WhenYouDo so it resolves only after the sacrifice"
+        );
+        let modal = modal_sub
+            .modal
+            .as_ref()
+            .expect("the WhenYouDo sub carries the modal choice");
+        assert_eq!(modal.mode_count, 3, "choose-two over three modes");
+        assert_eq!(modal.min_choices, 2);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(
+            modal_sub.mode_abilities.len(),
+            3,
+            "one AbilityDefinition per mode"
+        );
     }
 }

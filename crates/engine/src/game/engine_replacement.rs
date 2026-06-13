@@ -3,6 +3,8 @@ use crate::types::ability::{
     AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
     TargetRef,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, WaitingFor};
@@ -24,7 +26,6 @@ use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
-use super::zones;
 
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
 /// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
@@ -72,76 +73,107 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::MoveCounter { .. }));
-    match super::replacement::continue_replacement(state, index, events) {
+    // CR 701.24a: capture the parked library placement (W3) BEFORE
+    // `continue_replacement` consumes (`.take()`s) the pending record, so the
+    // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
+    // instead of hardcoding `None` (which would let the tail auto-shuffle the
+    // requested position away). `None` for every non-library parked event.
+    let parked_library_placement = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.library_placement.clone());
+    let result = super::replacement::continue_replacement(state, index, events);
+    // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
+    // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
+    // multiple eligible lands) re-parked the pending replacement with
+    // `may_cost_paid: true` plus any `may_cost_remaining`, and left
+    // `waiting_for` on the live sub-choice prompt.
+    // Surface that prompt as-is; the sub-choice's resolution re-enters
+    // `continue_replacement` (resume) to finish entering the permanent once the
+    // cost is paid. The carried `Execute` payload is inert and must not be
+    // delivered here.
+    if std::mem::take(&mut state.replacement_may_cost_paused) {
+        return Ok(state.waiting_for.clone());
+    }
+    match result {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;
             let mut enters_battlefield = false;
             match event {
-                ProposedEvent::ZoneChange {
-                    object_id,
-                    to,
-                    from,
-                    enter_tapped,
-                    enter_with_counters,
-                    controller_override,
-                    enter_transformed,
-                    ..
-                } => {
-                    let played_from_zone = state
-                        .objects
-                        .get(&object_id)
-                        .and_then(|obj| obj.played_from_zone);
-                    zones::move_to_zone(state, object_id, to, events);
-                    // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
-                    // defaults. Override only when the replacement pipeline changed them.
-                    if to == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get_mut(&object_id) {
-                            obj.played_from_zone = played_from_zone;
-                            if enter_tapped.resolve(false) {
-                                obj.tapped = true;
-                            }
-                        }
-                        if let Some(new_controller) = controller_override {
-                            zones::apply_battlefield_entry_controller_override(
-                                state,
-                                events,
-                                object_id,
-                                new_controller,
-                            );
-                        }
-                        // CR 614.1c: Apply counters from replacement pipeline.
-                        if !apply_etb_counters(state, object_id, &enter_with_counters, events) {
+                // Phase B (PLAN §6.2 / §7): the divergent partial copy of
+                // `deliver_replaced_zone_change` that used to live here is
+                // dissolved — the post-choice event is a
+                // `ReplacementResult::Execute` payload, so it is sealed through
+                // the third mint path (`approve_post_replacement`) and
+                // delivered by the shared `zone_pipeline::deliver` machinery.
+                // The resumed entry now gets the FULL delivery tail the copy
+                // skipped: the CR 614.12a devour snapshot, the CR 614.1c
+                // `EntersWithAdditionalCounters` statics snapshot, the
+                // CR 303.4f `attach_to` host, `entered_via_ability_source`
+                // provenance (CR 603.6a, from the event's `cause`), and the
+                // CR 701.24a library-shuffle arm.
+                //
+                // Divergence reconciliation (resolved by parameterizing the
+                // shared tail instead of keeping a copy):
+                // (1) `DeliveryCtx.drain = CallerEpilogue` — the tail skips the
+                //     `post_replacement_continuation` drain; the epilogue below
+                //     keeps draining WITH the spell-resolution ctx and with
+                //     `post_replacement_source` cleared for zone changes.
+                // (2) `pending_spell_resolution` ordering is therefore
+                //     untouched: `apply_pending_spell_resolution` still runs in
+                //     the epilogue before that drain.
+                // (3) PLAN OQ#3 (RESOLVED): play/cast provenance is not a ctx
+                //     knob. `played_from_zone` (CR 305.1 land-play provenance)
+                //     survives battlefield entry naturally — it is cleared only
+                //     on battlefield EXIT, so the pre-move capture that used to
+                //     ride `DeliveryCtx` here preserved a value that was never
+                //     destroyed (verified no-op). The cast-link family that IS
+                //     entry-cleared (kicker / convoke / cast-timing, CR 400.7d)
+                //     is restored structurally inside the shared delivery for
+                //     `Stack → Battlefield` events (`CastLinkSnapshot`).
+                event @ ProposedEvent::ZoneChange { .. } => {
+                    let (object_id, to, cause) = match &event {
+                        ProposedEvent::ZoneChange {
+                            object_id,
+                            to,
+                            cause,
+                            ..
+                        } => (*object_id, *to, *cause),
+                        _ => unreachable!("arm pattern guarantees ZoneChange"),
+                    };
+                    let Ok(approved) =
+                        crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(
+                            event,
+                        )
+                    else {
+                        unreachable!("arm pattern guarantees a ZoneChange payload");
+                    };
+                    match crate::game::zone_pipeline::deliver(
+                        state,
+                        approved,
+                        crate::game::zone_pipeline::DeliveryCtx {
+                            source_id: cause,
+                            exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                            drain:
+                                crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                            // CR 701.24a: thread the parked W3 library placement so
+                            // a resumed Library-targeting redirect lands at the
+                            // requested index instead of the tail auto-shuffling it
+                            // away. `None` for every non-library parked event.
+                            library_placement: parked_library_placement.clone(),
+                        },
+                        events,
+                    ) {
+                        crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
+                        // CR 614.1c / CR 614.12a: the delivery tail parked a
+                        // counter-replacement or devour prompt and stashed the
+                        // remaining tail as a `ContinueZoneDeliveryTail` record
+                        // (carrying `CallerEpilogue`, so the NEXT resume's
+                        // epilogue still owns the continuation drain). Surface
+                        // the parked prompt; the epilogue must not run yet.
+                        crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
                             return Ok(state.waiting_for.clone());
                         }
-                        // CR 614.1c: Apply pending ETB counters from delayed triggers
-                        // (e.g., "that creature enters with an additional +1/+1 counter").
-                        let pending: Vec<_> = state
-                            .pending_etb_counters
-                            .iter()
-                            .filter(|(oid, _, _)| *oid == object_id)
-                            .map(|(_, ct, n)| (ct.clone(), *n))
-                            .collect();
-                        if !pending.is_empty() {
-                            if !apply_etb_counters(state, object_id, &pending, events) {
-                                return Ok(state.waiting_for.clone());
-                            }
-                            state
-                                .pending_etb_counters
-                                .retain(|(oid, _, _)| *oid != object_id);
-                        }
-                    }
-                    // CR 712.14a: Apply transformation if entering the battlefield transformed.
-                    if enter_transformed && to == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get(&object_id) {
-                            if obj.back_face.is_some() && !obj.transformed {
-                                let _ = crate::game::transform::transform_permanent(
-                                    state, object_id, events,
-                                );
-                            }
-                        }
-                    }
-                    if to == Zone::Battlefield || from == Zone::Battlefield {
-                        crate::game::layers::mark_layers_full(state);
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
@@ -255,8 +287,24 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.
+                //
+                // CR 616.1: a milled card's own `Moved` replacements (Rest in
+                // Peace + Leyline of the Void class) can surface a per-card
+                // ordering choice mid-delivery. The helper parks that prompt
+                // (`state.waiting_for` set, tail in `pending_batch_deliveries`)
+                // and returns `false`. Early-return so the unconditional
+                // `waiting_for = Priority` reset below does NOT clobber the
+                // parked prompt — mirroring the `apply_etb_counters`
+                // early-return in the ZoneChange arm. The resume path drains the
+                // tail via `zone_pipeline::drain_pending_batch_deliveries`.
                 mill @ ProposedEvent::Mill { .. } => {
-                    let _ = apply_mill_after_replacement(state, mill, events);
+                    // `EffectError` has no `EngineError` conversion here, so the
+                    // prior `let _ =` swallowed it; preserve that by mapping an
+                    // error to "delivered" (no pause) and only reacting to the
+                    // pause signal.
+                    if !apply_mill_after_replacement(state, mill, events).unwrap_or(true) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 119.1: Life gain accepted after replacement choice.
                 gain @ ProposedEvent::LifeGain { .. } => {
@@ -271,14 +319,28 @@ pub(super) fn handle_replacement_choice(
                 // replacement pipeline may have modified `object_id`/`player_id`
                 // (e.g., Madness redirects surface as a ZoneChange variant handled
                 // by the ZoneChange arm above, not here).
+                //
+                // CR 614.6: the inner hand → graveyard move re-proposes a
+                // `ZoneChange` carrying `applied`, so `Moved` redirects (RIP
+                // class) are consulted here too. A redirect that itself needs a
+                // CR 616.1 choice parks `state.waiting_for`; early-return so the
+                // unconditional reset below does not clobber it.
                 ProposedEvent::Discard {
                     player_id,
                     object_id,
+                    source_id,
+                    applied,
                     ..
                 } => {
-                    effects::discard::complete_discard_to_graveyard(
-                        state, object_id, player_id, events,
-                    );
+                    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
+                        effects::discard::complete_discard_to_graveyard(
+                            state, object_id, player_id, source_id, applied, events,
+                        )
+                    {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(player, state);
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 106.3 + CR 106.4: Mana production accepted after replacement choice.
                 // In practice CR 614.5 mana-type replacements don't require a choice and
@@ -310,6 +372,9 @@ pub(super) fn handle_replacement_choice(
                                 source_id,
                                 tap_state: ManaTapState::from_tap(tapped_for_mana),
                             });
+                        }
+                        if count > 0 {
+                            state.layers_dirty.mark_full();
                         }
                     }
                 }
@@ -446,6 +511,22 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 603.10a + CR 616.1: A simultaneous zone-move batch (mill or
+            // mass bounce) paused mid-delivery because an object's Moved
+            // replacements needed an ordering choice (Rest in Peace + Leyline of
+            // the Void class). The chosen event was delivered by the ZoneChange
+            // arm above; drain the parked tail. The drain may re-park when the
+            // next object surfaces its own prompt — in that case it sets
+            // `state.waiting_for` for us to propagate.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_batch_deliveries.is_some()
+            {
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_copy_token_resolution.is_some()
             {
@@ -512,9 +593,23 @@ pub(super) fn handle_replacement_choice(
 
             Ok(waiting_for)
         }
-        super::replacement::ReplacementResult::NeedsChoice(player) => Ok(
-            super::replacement::replacement_choice_waiting_for(player, state),
-        ),
+        super::replacement::ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1 + CR 701.24a: a SECOND ordering choice on the same
+            // library-placement event re-parked a fresh `PendingReplacement`
+            // inside `pipeline_loop` with `library_placement: None`. Reapply the
+            // placement captured before `continue_replacement` consumed the prior
+            // record so the eventual delivery still honors the requested index
+            // instead of the tail auto-shuffling it away. `None` for every
+            // non-library parked event (no-op).
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                if pending.library_placement.is_none() {
+                    pending.library_placement = parked_library_placement.clone();
+                }
+            }
+            Ok(super::replacement::replacement_choice_waiting_for(
+                player, state,
+            ))
+        }
         super::replacement::ReplacementResult::Prevented => {
             if state.pending_counter_additions.is_some() {
                 state.waiting_for = WaitingFor::Priority {
@@ -545,12 +640,48 @@ pub(super) fn handle_replacement_choice(
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 return Ok(state.waiting_for.clone());
             }
+            // CR 603.10a + CR 616.1: the paused batch object's event was
+            // prevented outright — the remaining parked tail still delivers.
+            if state.pending_batch_deliveries.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                return Ok(state.waiting_for.clone());
+            }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
-            if let Some(ctx) = state.pending_spell_resolution.take() {
-                zones::move_to_zone(state, ctx.object_id, Zone::Graveyard, events);
-            }
+            //
+            // CR 614.6: this graveyard fallback is a FRESH, never-consulted
+            // event — the consulted (and prevented) event was the battlefield
+            // ENTRY (`to: Battlefield`), so routing the fallback through the
+            // pipeline cannot double-apply: the prevention definition is
+            // Battlefield-scoped and cannot re-match a →Graveyard move. A
+            // board-wide `Moved` graveyard→exile redirect (Rest in Peace /
+            // Leyline of the Void) now fires on the discarded spell — the
+            // un-migrated twin of stack.rs's C2 prevented-permanent site. The
+            // dead continuation is cleared BEFORE the move so a CR 616.1
+            // ordering pause (two simultaneous redirects) cannot leave it for
+            // the next resume's epilogue to drain; on a pause, surface the
+            // parked prompt (its resume delivers the chosen event through the
+            // ZoneChange arm above).
             state.pending_continuation = None;
+            if let Some(ctx) = state.pending_spell_resolution.take() {
+                match crate::game::zone_pipeline::move_object(
+                    state,
+                    crate::game::zone_pipeline::ZoneMoveRequest::spell_resolution_default(
+                        ctx.object_id,
+                        Zone::Graveyard,
+                    ),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                    | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
             Ok(WaitingFor::Priority {
                 player: state.active_player,
             })
@@ -608,7 +739,10 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
-    crate::game::layers::evaluate_layers(state);
+    // Force a full layer pass after the copy chain so the realized
+    // characteristics below (enter-tapped, ETB counters) read post-copy state.
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
     let enter_modifiers =
         super::replacement::current_self_enter_replacement_modifiers(state, source_id);
     if let Some(tapped) = enter_modifiers.enter_tapped {
@@ -634,6 +768,44 @@ pub(super) fn handle_copy_target_choice(
     // on the battlefield — concede / error / chained-replacement paths can
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
+    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+        return Ok(waiting_for);
+    }
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
+}
+
+/// CR 603.2 + CR 614.12a: Replay the deferred battlefield-entry `ZoneChanged`
+/// event(s) for `source_id` through the trigger pipeline after a mid-entry
+/// player choice (copy target, enters-with-counter branch, or as-enters named
+/// choice) has resolved, then surface any interactive trigger pause that
+/// replay raised. This is the single authority for deferred-entry replay — both
+/// the copy-completion site (`handle_copy_target_choice`) and the as-enters
+/// named-choice resume site (`engine_resolution_choices.rs`) route through it,
+/// so the pause-propagation logic is defined exactly once.
+///
+/// The entry event was captured into `state.deferred_entry_events` by
+/// `capture_deferred_entry_events_if_mid_entry_choice` *before* the choice was
+/// made, so that ETB observers (constellation, Soul Warden) and any granted
+/// ETB triggers (Callidus Assassin) match against the fully realized,
+/// post-choice object — not a half-entered one (CR 614.12a: the choice is made
+/// before the permanent enters). `process_triggers` (CR 603.2 event-based
+/// triggers) + `check_delayed_triggers` (CR 603.7c delayed triggers) collect
+/// against the realized object.
+///
+/// Drained via `std::mem::take` so replay is idempotent — the event is fired
+/// exactly once and can never also reach a later `Priority`-result pipeline
+/// pass. Returns `None` (no pause) when `deferred_entry_events` is empty (the
+/// no-op guard for non-entry persisted choices, e.g. Pithing Needle naming),
+/// or when the entering source has left the battlefield (concede / error /
+/// chained-replacement paths leave a stale event we discard rather than fire
+/// against a phantom object).
+pub(super) fn replay_deferred_entry_events(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
     let deferred = std::mem::take(&mut state.deferred_entry_events);
     let source_still_on_battlefield = state
         .objects
@@ -647,7 +819,7 @@ pub(super) fn handle_copy_target_choice(
     effects::drain_pending_continuation(state, events);
     // CR 113.2c + CR 603.3b + CR 707.10: `process_triggers` above may have
     // paused on an interactive replayed ETB trigger fired by the realized
-    // copy. When it pauses it sets `state.pending_trigger` for the active
+    // entry. When it pauses it sets `state.pending_trigger` for the active
     // instance and stashes any simultaneously-fired siblings into
     // `state.deferred_triggers`. This mirrors the priority-time
     // `process_triggers` call site in `engine_priority`, so the resumption
@@ -668,21 +840,20 @@ pub(super) fn handle_copy_target_choice(
     // `engine_modes::handle_triggered_mode_choice`, or the `DistributeAmong`
     // handler) once the player resolves the active trigger.
     if matches!(state.waiting_for, WaitingFor::DistributeAmong { .. }) {
-        return Ok(state.waiting_for.clone());
+        return Ok(Some(state.waiting_for.clone()));
     }
     // CR 603.3b (#531): propagate OrderTriggers pause from process_triggers
-    // above. Without this, a doubled replayed ETB trigger (e.g., Wedding
-    // Announcement's token + Ocelot Pride's life-gain rider both firing on the
-    // copy entry) would silently fall through to Priority.
+    // above. Without this, multiple simultaneously-fired ETB observers on one
+    // entry (e.g., two constellation triggers, or Wedding Announcement's token
+    // + Ocelot Pride's life-gain rider on a copy entry) would silently fall
+    // through to Priority.
     if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-        return Ok(state.waiting_for.clone());
+        return Ok(Some(state.waiting_for.clone()));
     }
     if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)? {
-        return Ok(waiting_for);
+        return Ok(Some(waiting_for));
     }
-    Ok(WaitingFor::Priority {
-        player: state.active_player,
-    })
+    Ok(None)
 }
 
 fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
@@ -827,7 +998,7 @@ pub(super) fn apply_pending_post_replacement_effect(
     // single producer site so both the stack-resolution path (non-optional
     // copy replacements) and the `handle_replacement_choice` path (optional
     // "you may have this enter as a copy" replacements) defer uniformly.
-    capture_deferred_entry_events_if_copy_target_choice(state, waiting_for.as_ref(), events);
+    capture_deferred_entry_events_if_mid_entry_choice(state, waiting_for.as_ref(), events);
     waiting_for
 }
 
@@ -850,20 +1021,35 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
         })
 }
 
-/// CR 614.12a + CR 707.9: If `waiting_for` is `CopyTargetChoice`, or a
-/// `ChooseOneOfBranch` that `is_enters_counter_choice` (the enters-with-choice-
-/// of-counter shape), clone any battlefield-entry `ZoneChanged` events for the
-/// entering source into `state.deferred_entry_events`. The original `events` vec
-/// is preserved so the frontend animates the entry as soon as the spell
-/// resolves; the deferred copy is replayed through `process_triggers` /
-/// `check_delayed_triggers` once the choice resolves (in
-/// `handle_copy_target_choice` for copies, in the `ChooseBranch` arm of
-/// `engine_resolution_choices.rs` for enters-counter choices).
+/// CR 603.2 + CR 614.12a: When a permanent's battlefield entry pauses on a
+/// mid-entry player choice — `CopyTargetChoice` (enter as a copy), a
+/// `ChooseOneOfBranch` that `is_enters_counter_choice` (enter with your choice
+/// of counter), or a persisted `NamedChoice` whose `source_id` is the entering
+/// permanent (the "As it enters, choose a color/creature type/…" shape, e.g.
+/// Valgavoth's Lair) — clone any battlefield-entry `ZoneChanged` events for the
+/// entering source into `state.deferred_entry_events`. The original `events`
+/// vec is preserved so the frontend animates the entry as soon as the spell /
+/// land-play resolves; the deferred copy is replayed through `process_triggers`
+/// / `check_delayed_triggers` once the choice resolves (in
+/// `handle_copy_target_choice` for copies, in the `ChooseBranch` arm and the
+/// `NamedChoice` + `ChooseOption` arm of `engine_resolution_choices.rs` for the
+/// other two shapes), so every ETB observer (constellation like Doomwake Giant,
+/// Soul Warden, …) sees the entry against the fully realized post-choice object.
+/// Without this, the entry event returns `WaitingFor::NamedChoice` instead of
+/// `Priority`, so the canonical priority-time trigger collection
+/// (`engine_priority::run_post_action_pipeline`) is skipped and every ETB
+/// observer is silently dropped for that entry (issue #830).
+///
+/// The `NamedChoice` arm is keyed on the structural fact that an entry
+/// `ZoneChanged` for the same source is present in `events` (the capture loop
+/// below only pushes matching events). Non-entry persisted `NamedChoice`s —
+/// Pithing Needle naming, a `Choose` resolved off the stack — carry no such
+/// entry event, so nothing is captured and the downstream replay is a no-op.
 ///
 /// Defense in depth: clears any stale events from a prior choice that exited
 /// abnormally (concede mid-choice, eliminate_player, error return before drain)
 /// so the replay never fires triggers against a phantom object.
-fn capture_deferred_entry_events_if_copy_target_choice(
+fn capture_deferred_entry_events_if_mid_entry_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
     events: &[GameEvent],
@@ -878,6 +1064,18 @@ fn capture_deferred_entry_events_if_copy_target_choice(
             branches,
             ..
         }) if is_enters_counter_choice(branches) => *source_id,
+        // CR 603.2 + CR 614.12a: an "As it enters, choose …" replacement
+        // (Valgavoth's Lair, the Thriving lands, Voice of All) pauses the entry
+        // on a persisted `NamedChoice` whose `source_id` is the entering
+        // permanent. Defer the entry event exactly like the copy/counter shapes
+        // so ETB observers fire against the post-choice object once the player
+        // answers. The entry-event filter in the capture loop scopes this to the
+        // entering source — a persisted `NamedChoice` with no matching entry
+        // event in `events` (Pithing Needle naming) captures nothing.
+        Some(WaitingFor::NamedChoice {
+            source_id: Some(source_id),
+            ..
+        }) => *source_id,
         _ => return,
     };
     // CR 614.12b boundary (inherited from the CopyTargetChoice path, NOT expanded
@@ -927,12 +1125,16 @@ fn apply_pending_spell_resolution(
     // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        obj.cast_controller = ctx.cast_controller;
         if let Some(permission) = ctx.cast_timing_permission {
             obj.cast_timing_permission = Some((permission, state.turn_number));
         }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
         obj.additional_cost_payment_count = ctx.additional_cost_payment_count;
+        obj.additional_cost_payments
+            .clone_from(&ctx.additional_cost_payments);
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
+        crate::database::synthesis::ensure_paid_offspring_etb_copy_triggers(obj);
     }
 
     // CR 303.4f: Aura resolving to battlefield attaches to its target.
@@ -1237,6 +1439,251 @@ mod tests {
         );
     }
 
+    /// CR 614.1c + CR 616.1 discriminating test (fail-first): a battlefield
+    /// entry that parks on a replacement-ordering prompt (two external
+    /// enter-tapped `Moved` defs — Authority of the Consuls + Imposing
+    /// Sovereign class) must, on resume, run the FULL shared delivery tail.
+    /// Here the missing piece is the `EntersWithAdditionalCounters` static
+    /// snapshot (Kalain / Counter Lord class — "other creatures you control
+    /// enter with an additional +1/+1 counter"): the divergent resume copy
+    /// applied only the event's own `enter_with_counters`, so a resumed entry
+    /// silently missed the static's counter while the never-paused path
+    /// granted it.
+    #[test]
+    fn resumed_entry_receives_enters_with_additional_counters_static() {
+        use std::sync::Arc;
+
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::ability::{
+            AbilityDefinition, ControllerRef, Effect, FilterProp, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        // CR 614.1c: P0 permanent granting "other creatures you control enter
+        // with an additional +1/+1 counter" — must be functioning BEFORE the
+        // entrant enters.
+        let lord = make_creature(&mut state, PlayerId(0), "Counter Lord");
+        {
+            let obj = state.objects.get_mut(&lord).unwrap();
+            let def = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        // Two external enter-tapped Moved replacements on the opponent's board
+        // — the same-field collision surfaces the CR 616.1 ordering prompt.
+        for (offset, name) in [
+            (0u64, "Authority of the Consuls"),
+            (1, "Imposing Sovereign"),
+        ] {
+            let oid = ObjectId(9000 + offset);
+            let mut src = GameObject::new(
+                oid,
+                CardId(900 + offset),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                ))
+                .destination_zone(Zone::Battlefield)
+                .description(name.to_string())]
+            .into();
+            state.objects.insert(oid, src);
+            state.battlefield.push_back(oid);
+        }
+
+        // P0 creature entering from hand through the pipeline.
+        let entrant = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entrant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::NeedsChoice(_)),
+            "the enter-tapped collision must park the entry"
+        );
+        let WaitingFor::ReplacementChoice {
+            player: chooser, ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected parked ReplacementChoice, got {:?}",
+                state.waiting_for
+            );
+        };
+        state.priority_player = chooser;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume replacement choice");
+
+        let obj = &state.objects[&entrant];
+        assert_eq!(obj.zone, Zone::Battlefield, "entry delivered after resume");
+        assert!(obj.tapped, "both enter-tapped replacements applied");
+        assert_eq!(
+            *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0),
+            1,
+            "resumed entry must receive the EntersWithAdditionalCounters static \
+             (CR 614.1c) — the divergent resume copy dropped the statics snapshot"
+        );
+    }
+
+    /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
+    /// spell's ETB is fully prevented after a replacement choice
+    /// (`ReplacementResult::Prevented` while `pending_spell_resolution` is set),
+    /// the graveyard fallback is a FRESH, never-consulted event — it must route
+    /// through the zone pipeline so a board-wide `Moved` graveyard→exile
+    /// redirect (Rest in Peace / Leyline of the Void) fires on the discarded
+    /// spell. The raw `move_to_zone` fallback dropped the redirect — the
+    /// un-migrated twin of the stack.rs C2 prevented-permanent site.
+    ///
+    /// STAGING NOTE: no ZoneChange registry applier can yield `Prevented`
+    /// today, so the natural entry-prevention pause is not constructible
+    /// end-to-end; the parked choice is staged as a regeneration-shield Destroy
+    /// prevention (the canonical `Prevented` producer) with
+    /// `pending_spell_resolution` set. The assertion target —
+    /// `handle_replacement_choice`'s Prevented-arm CR 608.3e fallback — is
+    /// driven through the real `GameAction::ChooseReplacement` resume entry.
+    #[test]
+    fn prevented_etb_graveyard_fallback_consults_moved_redirects() {
+        use crate::types::ability::AbilityDefinition;
+        use crate::types::ability::Effect;
+        use crate::types::ability::TargetFilter;
+        use crate::types::game_state::{CastingVariant, PendingSpellResolution};
+        use crate::types::proposed_event::ReplacementId;
+
+        let mut state = GameState::new_two_player(42);
+
+        // The resolving permanent spell, still on the stack (CR 608.3e: its
+        // prevented ETB routes it to its owner's graveyard instead).
+        let spell = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Prevented Permanent".to_string(),
+            Zone::Stack,
+        );
+
+        // Rest in Peace–class graveyard→exile Moved redirect on the battlefield.
+        let rip = make_creature(&mut state, PlayerId(1), "Rest in Peace");
+        state.objects.get_mut(&rip).unwrap().replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))]
+            .into();
+
+        // The paused entry's spell-resolution bookkeeping.
+        state.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: spell,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        // Staged Prevented producer: a regeneration shield on a creature being
+        // destroyed — choosing it yields `ReplacementResult::Prevented`.
+        let bear = make_creature(&mut state, PlayerId(0), "Bear");
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .regeneration_shield()
+            .description("Regenerate".to_string())]
+        .into();
+        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Destroy {
+                object_id: bear,
+                source: None,
+                cant_regenerate: false,
+                applied: std::collections::HashSet::new(),
+            },
+            candidates: vec![ReplacementId {
+                source: bear,
+                index: 0,
+            }],
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
+        state.priority_player = PlayerId(0);
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume replacement choice");
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "prevented-ETB graveyard fallback must consult the graveyard→exile \
+             Moved redirect (CR 614.6) — raw delivery left the spell in the graveyard"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the spell must not reach the graveyard with Rest in Peace out"
+        );
+    }
+
     #[test]
     fn zone_change_replacement_choice_preserves_land_play_provenance() {
         let mut state = GameState::new_two_player(42);
@@ -1265,6 +1712,130 @@ mod tests {
 
         assert_eq!(state.objects[&land].zone, Zone::Battlefield);
         assert_eq!(state.objects[&land].played_from_zone, Some(Zone::Hand));
+    }
+
+    /// CR 400.7d + CR 608.3 discriminating test (fail-first): a permanent
+    /// spell whose `Stack → Battlefield` entry parks on a replacement prompt
+    /// must, on resume, still carry its cast link — the kicker payments,
+    /// additional-cost count, convoked creatures, and cast-timing permission
+    /// that `reset_for_battlefield_entry` (CR 400.7) clears on entry. The
+    /// direct stack.rs resolution path restored these in its bespoke epilogue,
+    /// but the resume path delivered through the shared machinery with NO
+    /// restore (and no `PendingSpellResolution` is stashed when the pause comes
+    /// from the generic ZoneChange consult rather than stack.rs's own
+    /// NeedsChoice arm) — so a resumed kicked permanent was silently de-kicked
+    /// and "if it was kicked" ETB gates (CR 702.33f) failed. The
+    /// `CastLinkSnapshot` in `deliver_replaced_zone_change` restores the family
+    /// structurally for every `Stack → Battlefield` delivery.
+    #[test]
+    fn zone_change_replacement_choice_preserves_cast_link_for_resolving_spell() {
+        use crate::types::ability::{CastTimingPermission, KickerVariant};
+
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Kicked Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // The cast pathway (`finalize_cast_to_stack`) stamps the cast link
+            // onto the stack object; mirror that establishment here.
+            obj.kickers_paid = vec![KickerVariant::First];
+            obj.additional_cost_payment_count = 1;
+            obj.convoked_creatures = vec![ObjectId(777)];
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
+            obj.cast_timing_permission =
+                Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
+        }
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(spell, Zone::Stack, Zone::Battlefield, None);
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+
+        let obj = &state.objects[&spell];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.kickers_paid,
+            vec![KickerVariant::First],
+            "CR 400.7d: the resumed permanent must keep the kicker payments of \
+             the spell that became it — the entry reset cleared them and the \
+             resume path had no restore"
+        );
+        assert_eq!(obj.additional_cost_payment_count, 1);
+        assert_eq!(obj.convoked_creatures, vec![ObjectId(777)]);
+        assert_eq!(obj.cast_from_zone, Some(Zone::Graveyard));
+        assert_eq!(obj.cast_controller, Some(PlayerId(0)));
+        assert_eq!(
+            obj.cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
+            "CR 603.4: cast-timing permission is re-stamped with the resolution \
+             turn so same-turn trigger gates compare equal"
+        );
+    }
+
+    /// CR 400.7 rules pin for the `CastLinkSnapshot` establishment gate: an
+    /// effect-driven put (Reanimate class, `from != Stack`) must NOT resurrect
+    /// stale cast provenance. A graveyard card carrying leftover kicker memory
+    /// (simulating any exit-clear gap) enters the battlefield as a NEW object —
+    /// `reset_for_battlefield_entry` clears the cast link and the snapshot
+    /// restore must not re-apply it, or "if it was kicked" gates (CR 702.33f)
+    /// would wrongly fire on the reanimated permanent.
+    #[test]
+    fn effect_put_from_graveyard_does_not_resurrect_cast_link() {
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::ability::KickerVariant;
+
+        let mut state = GameState::new_two_player(42);
+        let corpse = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Buried Bear".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&corpse).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Stale cast memory on the graveyard object (must NOT survive an
+            // effect-driven battlefield entry).
+            obj.kickers_paid = vec![KickerVariant::First];
+            obj.additional_cost_payment_count = 2;
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
+        }
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(corpse, Zone::Battlefield, corpse),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+
+        let obj = &state.objects[&corpse];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(
+            obj.kickers_paid.is_empty(),
+            "CR 400.7: an effect-put permanent is a new object — stale kicker \
+             memory must not survive (the cast-link restore is gated on \
+             `from == Stack`)"
+        );
+        assert_eq!(obj.additional_cost_payment_count, 0);
+        assert_eq!(obj.cast_from_zone, None);
+        assert_eq!(obj.cast_controller, None);
     }
 
     /// CR 615.1: When the player declines (or the replacement pipeline returns
@@ -1847,6 +2418,120 @@ mod tests {
         assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 
+    /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
+    /// inject the source as a pre-selected sacrifice target. Re-broadening the
+    /// Devour guard to all events would route this through `EffectZoneChoice`.
+    #[test]
+    fn issue_575_dealt_damage_sacrifice_injects_source_target() {
+        let mut state = GameState::new_two_player(42);
+        let dralnu = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dralnu, Lich Lord".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &template,
+            Some(dralnu),
+            None,
+            Some(&ReplacementEvent::DealtDamage),
+            &mut events,
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "DealtDamage sacrifice must use injected source target, not a chooser; got {:?}",
+            state.waiting_for
+        );
+        assert!(waiting.is_none());
+        assert_eq!(state.objects[&dralnu].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+    }
+
+    /// Issue #575: Moved (ETB) `Sacrifice { Typed }` post-replacements (Devour)
+    /// suppress source injection so the chooser prompt opens.
+    #[test]
+    fn issue_575_moved_sacrifice_typed_opens_chooser_not_source_injection() {
+        let mut state = GameState::new_two_player(42);
+        let devourer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Devourer".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sacrifice Fodder A".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sacrifice Fodder B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [devourer, fodder_a, fodder_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &template,
+            Some(devourer),
+            None,
+            Some(&ReplacementEvent::Moved),
+            &mut events,
+        );
+
+        assert!(
+            matches!(waiting, Some(WaitingFor::EffectZoneChoice { .. }))
+                || matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "Moved Devour-shape sacrifice must prompt a chooser; waiting={waiting:?} state={:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.objects[&devourer].zone,
+            Zone::Battlefield,
+            "devourer must not be auto-sacrificed via source injection"
+        );
+    }
+
     /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
     /// the pre-fold `post_replacement_resolved_effect` field (Resolved
     /// binding state) migrates into the new unified slot. Resolved wins over
@@ -1898,8 +2583,10 @@ mod tests {
         // Legacy slots also populated (corrupted/hybrid input).
         state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
         )));
 

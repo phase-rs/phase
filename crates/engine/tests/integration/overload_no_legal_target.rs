@@ -18,7 +18,7 @@ use engine::game::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
-use engine::types::game_state::{AlternativeCastKeyword, WaitingFor};
+use engine::types::game_state::{AlternativeCastKeyword, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -57,6 +57,8 @@ fn cast_overload_and_resolve(runner: &mut GameRunner, spell: ObjectId) {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast overload spell");
     assert!(
@@ -178,6 +180,8 @@ fn mizzium_mortars_offers_both_modes_when_printed_target_legal() {
             object_id: mizzium,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Mizzium Mortars");
 

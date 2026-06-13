@@ -86,7 +86,7 @@ fn ancient_bronze_dragon_reflexive_counts_equal_d20_result() {
         .find_map(|e| match e {
             GameEvent::DieRolled {
                 result, sides: 20, ..
-            } => Some(*result as usize),
+            } => result.map(usize::from),
             _ => None,
         })
         .expect("Ancient Bronze Dragon should roll a d20 on combat damage");

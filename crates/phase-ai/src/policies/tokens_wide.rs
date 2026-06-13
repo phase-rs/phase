@@ -17,6 +17,8 @@ use crate::features::tokens_wide::{
     is_mass_pump_parts, is_token_generator_parts, COMMITMENT_FLOOR, WIDE_ATTACK_FLOOR,
 };
 use crate::features::DeckFeatures;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct TokensWidePolicy;
 
@@ -210,6 +212,8 @@ mod tests {
                 object_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(AI),

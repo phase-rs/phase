@@ -1,5 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -57,10 +57,33 @@ pub fn resolve(
     // `change_zone::resolve`, which likewise delegates publishing to the
     // chain processor.
     for object_id in top_cards {
-        zones::move_to_zone(state, object_id, Zone::Exile, events);
+        // CR 614.6: exile the top card via the zone-change pipeline so a
+        // board-wide `Moved` exile redirect is consulted (none target Exile today
+        // — behavior-preserving, future-proof). Exile-link tracking rides the
+        // pipeline's `.track_exiled_by_source()` builder so the link is recorded by
+        // the delivery tail ONLY if the card actually lands in exile — a `Moved`
+        // redirect that sends it elsewhere correctly records no link (redirect-
+        // safe), and the tail's `push_with_kind` keeps the per-turn rolling list in
+        // lockstep exactly as the former caller-side `push_tracked_by_source` did.
+        // No Exile-targeting `Moved` redirect exists in the current pool, so this
+        // does not pause today. CR 616.1: a future Exile-targeting redirect could
+        // surface an ordering choice mid-loop; park the prompt (mirrors
+        // `exile_from_top_until`'s NeedsChoice arm) and return rather than
+        // continuing to mutate/classify the remaining cards past a parked prompt.
+        let mut request = ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id);
         if track_exiled_by_source {
-            crate::game::exile_links::push_tracked_by_source(state, object_id, ability.source_id);
+            request = request.track_exiled_by_source();
         }
+        let result = zone_pipeline::move_object(state, request, events);
+        if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = result {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
+        // CR 406.3: The face-down mark stays in this caller's per-card epilogue —
+        // there is no pipeline knob for it (CR 708 face-down profiles are
+        // battlefield-only), so it is set directly after the move below.
+        //
         // CR 406.3: A card exiled face down can't be examined by any player
         // except when instructions allow it. Set the moved object's
         // face-down state immediately after the zone change (mirrors the

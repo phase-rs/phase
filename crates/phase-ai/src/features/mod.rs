@@ -8,6 +8,7 @@
 
 pub mod aggro_pressure;
 pub mod aristocrats;
+pub mod commitment;
 pub mod control;
 pub mod landfall;
 pub mod mana_ramp;

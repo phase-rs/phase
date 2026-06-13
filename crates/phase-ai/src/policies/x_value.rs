@@ -191,7 +191,6 @@ fn effect_references_x(effect: &Effect) -> bool {
         Effect::Draw { count, .. }
         | Effect::Mill { count, .. }
         | Effect::Discard { count, .. }
-        | Effect::AddCounter { count, .. }
         | Effect::Scry { count, .. }
         | Effect::Surveil { count, .. }
         | Effect::Sacrifice { count, .. }

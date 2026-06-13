@@ -21,6 +21,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 /// CR 712.11b: casting the modal DFC lets the caster choose the back face, so
 /// Amazing Spider-Man (4/4) comes down directly from hand for {1}{G}{W}{U}.
@@ -67,6 +68,8 @@ fn peter_parker_back_face_amazing_spider_man_is_castable_from_hand() {
             object_id: card,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell on Peter Parker accepted");
     assert!(
@@ -154,6 +157,8 @@ fn amazing_spider_man_grants_web_slinging_to_a_big_legendary_creature_in_hand() 
             hand_object: niv,
             card_id: niv_card_id,
             creature_to_return: mana_dork,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("web-sling cast accepted");
     runner.advance_until_stack_empty();

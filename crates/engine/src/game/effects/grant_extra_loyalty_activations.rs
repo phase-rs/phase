@@ -87,6 +87,7 @@ mod tests {
             scoped_player: None,
             target_chooser: None,
             source_id: ObjectId(1),
+            source_incarnation: None,
             targets: vec![],
             kind: AbilityKind::Activated,
             sub_ability: None,
@@ -119,6 +120,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         }
     }
 

@@ -109,8 +109,8 @@ pub(crate) fn parse_class_oracle_text(
             );
             def.cost = Some(cost);
             def.description = Some(description.clone());
-            def.sorcery_speed = true;
-            // CR 716.4: Level N+1 can only activate when at level N.
+            // CR 602.5d + CR 716.4: Level N+1 can only activate at sorcery speed
+            // and only when at level N.
             def.activation_restrictions
                 .push(ActivationRestriction::AsSorcery);
             def.activation_restrictions

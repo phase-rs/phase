@@ -76,7 +76,7 @@ mod tests {
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
 
     fn ninja_pump_static() -> StaticDefinition {
         StaticDefinition {
@@ -338,5 +338,87 @@ mod tests {
         let count =
             crate::game::functioning_abilities::active_trigger_definitions(&state, emblem).count();
         assert_eq!(count, 1, "command-zone emblem trigger must be active");
+    }
+
+    /// CR 114.4 + CR 601.2b (issue #1355): Tamiyo, Field Researcher's emblem
+    /// installs a functioning `CastFromHandFree` static in the command zone.
+    #[test]
+    fn create_tamiyo_emblem_grants_hand_free_cast_permission() {
+        use crate::game::casting::{can_cast_object_now, effective_spell_cost};
+        use crate::parser::oracle_static::parse_static_line;
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        use std::sync::Arc;
+
+        let static_def = parse_static_line(
+            "You may cast spells from your hand without paying their mana costs.",
+        )
+        .expect("Tamiyo emblem static should parse");
+        assert!(
+            matches!(
+                static_def.mode,
+                StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                }
+            ),
+            "expected CastFromHandFree static, got {:?}",
+            static_def.mode
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![static_def],
+                triggers: Vec::new(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let emblem_id = state.command_zone[0];
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Counterspell".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), spell_id)
+            .expect("hand spell cost should compute");
+        assert!(
+            matches!(cost, ManaCost::NoCost),
+            "Tamiyo emblem should zero the hand spell's mana cost, got {cost:?}"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell_id));
+        assert_eq!(
+            crate::game::casting::hand_cast_free_permission_source(
+                &state,
+                PlayerId(0),
+                state.objects.get(&spell_id).unwrap(),
+            ),
+            Some((emblem_id, CastFrequency::Unlimited)),
+            "permission source should be the created emblem"
+        );
     }
 }

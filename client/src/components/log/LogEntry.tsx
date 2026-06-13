@@ -1,7 +1,10 @@
+import { memo } from "react";
+
 import type { GameLogEntry, LogSegment, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
+import { assertNever } from "../../utils/assertNever.ts";
 import { categoryColorClass } from "../../viewmodel/logFormatting.ts";
 
 interface LogEntryProps {
@@ -67,10 +70,18 @@ function renderSegment(
           {segment.value}
         </span>
       );
+    default:
+      // Exhaustive over LogSegment — a new engine segment type fails to compile
+      // here instead of silently rendering nothing.
+      return assertNever(segment);
   }
 }
 
-export function LogEntry({ entry, onInspectObject }: LogEntryProps) {
+// Memoized: the log panel re-renders on every search keystroke, filter toggle,
+// and verbosity change. Entry objects are stable references (append-only log,
+// preserved through the filter pipeline) and onInspectObject is a stable store
+// action, so memo lets unchanged rows skip re-rendering on those panel updates.
+export const LogEntry = memo(function LogEntry({ entry, onInspectObject }: LogEntryProps) {
   const colorClass = categoryColorClass(entry);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
 
@@ -81,4 +92,4 @@ export function LogEntry({ entry, onInspectObject }: LogEntryProps) {
       )}
     </div>
   );
-}
+});

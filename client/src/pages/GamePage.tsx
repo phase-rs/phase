@@ -129,13 +129,21 @@ import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
-import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
+import {
+  getCastableZoneViewerTarget,
+  getWaitingForObjectChoiceIds,
+  type ZoneViewerTarget,
+} from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
   "--card-h": string;
 };
+
+function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
+  return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
+}
 
 /**
  * i18n keys for user-facing messages keyed by
@@ -709,6 +717,7 @@ function GamePageContent({
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const players = useGameStore((s) => s.gameState?.players);
   const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
@@ -748,7 +757,9 @@ function GamePageContent({
   const [viewingZone, setViewingZone] = useState<{
     zone: "graveyard" | "exile" | "library";
     playerId: number;
+    autoOpenKey?: string;
   } | null>(null);
+  const dismissedCastableZoneViewerKeyRef = useRef<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
     null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
   >(null);
@@ -862,6 +873,9 @@ function GamePageContent({
 
   // Sync card size preference to CSS custom properties
   const cardSize = usePreferencesStore((s) => s.cardSize);
+  // Keys BattlefieldBackground so a mode/seat change remounts it with a fresh
+  // lock (see BattlefieldBackground) instead of resetting refs during render.
+  const boardBackground = usePreferencesStore((s) => s.boardBackground);
   useEffect(() => {
     const root = document.documentElement;
     const scale = cardSize === "small" ? 0.8 : cardSize === "large" ? 1.25 : 1;
@@ -875,11 +889,18 @@ function GamePageContent({
     }
   }, []);
 
-  // Auto-open graveyard/exile viewer when the engine is waiting for an object choice in that zone.
+  // Auto-open graveyard/exile viewer when the engine is waiting for an object
+  // choice in that zone, or when Priority surfaces cast/play actions on cards
+  // in a single graveyard/exile pile (Retrace, Flashback, etc.).
   useEffect(() => {
-    if (!objects) return;
+    if (!objects) {
+      dismissedCastableZoneViewerKeyRef.current = null;
+      return;
+    }
     const wf = engineWaitingFor;
-    if (!canActForWaitingState) return;
+    if (!canActForWaitingState) {
+      return;
+    }
 
     // Collect distinct (zone, owner) groupings so we don't trap the user in one
     // graveyard when the effect can target either player's graveyard (e.g. Soul-Guide Lantern).
@@ -896,9 +917,37 @@ function GamePageContent({
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
+      dismissedCastableZoneViewerKeyRef.current = null;
       setViewingZone(firstHit);
+      return;
     }
-  }, [canActForWaitingState, engineWaitingFor, objects]);
+
+    const castableTarget = getCastableZoneViewerTarget(
+      wf,
+      objects,
+      legalActionsByObject,
+    );
+    if (castableTarget) {
+      const autoOpenKey = castableZoneViewerAutoOpenKey(castableTarget);
+      if (dismissedCastableZoneViewerKeyRef.current !== autoOpenKey) {
+        setViewingZone({
+          zone: castableTarget.zone,
+          playerId: castableTarget.playerId,
+          autoOpenKey,
+        });
+      }
+      return;
+    }
+
+    dismissedCastableZoneViewerKeyRef.current = null;
+  }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
+
+  const handleZoneViewerClose = useCallback(() => {
+    if (viewingZone?.autoOpenKey) {
+      dismissedCastableZoneViewerKeyRef.current = viewingZone.autoOpenKey;
+    }
+    setViewingZone(null);
+  }, [viewingZone]);
 
   const handleDeclareCompanion = useCallback(
     (cardIndex: number | null) => {
@@ -1032,7 +1081,7 @@ function GamePageContent({
       }}
     >
       <SpectatorChrome />
-      <BattlefieldBackground />
+      <BattlefieldBackground key={`${boardBackground}-${playerId}`} />
       <StackDisplay />
 
       {/* Persistent Sandbox banner — visible to all players whenever the
@@ -1324,14 +1373,6 @@ function GamePageContent({
       <DebugPanel />
       <ResolutionProgressOverlay />
 
-      {viewingZone && (
-        <ZoneViewer
-          zone={viewingZone.zone}
-          playerId={viewingZone.playerId}
-          onClose={() => setViewingZone(null)}
-        />
-      )}
-
       {preferencesOpen && (
         <PreferencesModal
           onClose={() => setPreferencesOpen(null)}
@@ -1471,6 +1512,12 @@ function GamePageContent({
             <ExertChoiceModal />
           )}
 
+        {/* CR 702.154a: Optional Enlist tap choice during declare attackers. */}
+        {waitingFor?.type === "EnlistChoice" &&
+          canActForWaitingState && (
+            <EnlistChoiceModal />
+          )}
+
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
@@ -1487,6 +1534,16 @@ function GamePageContent({
             <ActivationCostOneOfChoiceModal />
           )}
       </DialogHost>
+
+      {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
+          paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
+      {viewingZone && (
+        <ZoneViewer
+          zone={viewingZone.zone}
+          playerId={viewingZone.playerId}
+          onClose={handleZoneViewerClose}
+        />
+      )}
 
       {waitingFor?.type === "CompanionReveal" &&
         waitingFor.data.player === playerId && (
@@ -2687,6 +2744,55 @@ function ExertChoiceModal() {
         dispatch({
           type: "ChooseExert",
           data: { exert: id === "exert" },
+        })
+      }
+    />
+  );
+}
+
+// ── Enlist Choice Modal (CR 702.154a: enlist as it attacks) ─────────────
+
+function EnlistChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "EnlistChoice") return null;
+
+  const attackerId = waitingFor.data.attacker;
+  const attacker = objects?.[attackerId];
+  const attackerName = attacker?.name ?? t("gamePage.enlist.attackerFallback");
+  const creatureFallback = t("gamePage.enlist.creatureFallback");
+  const options = [
+    ...waitingFor.data.eligible.map((id) => {
+      const enlisted = objects?.[id];
+      const name = enlisted?.name ?? creatureFallback;
+      return {
+        id: String(id),
+        label: name,
+        description: t("gamePage.enlist.tapDescription", { name, attacker: attackerName }),
+      };
+    }),
+    {
+      id: "decline",
+      label: t("gamePage.enlist.decline"),
+      description: t("gamePage.enlist.declineDescription", { attacker: attackerName }),
+    },
+  ];
+
+  return (
+    <ChoiceModal
+      title={t("gamePage.enlist.title", { name: attackerName })}
+      subtitle={t("gamePage.enlist.subtitle")}
+      previewCardName={attacker?.name}
+      previewCardTypes={attacker?.card_types}
+      previewObjectId={attackerId}
+      options={options}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseEnlist",
+          data: { target: id === "decline" ? null : Number(id) },
         })
       }
     />

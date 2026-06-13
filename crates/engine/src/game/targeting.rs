@@ -434,11 +434,14 @@ pub fn resolve_event_context_targets(
 ///    "it" anaphor on top-level LTB triggers — Rancor, Spirit Loop). When
 ///    `ability.targets` is non-empty, `ParentTarget` semantically inherits
 ///    the parent's chosen targets, so fall through to tier 3.
-/// 3. **Event context**: filters like `TriggeringSource`, `DefendingPlayer`,
-///    `AttachedTo` resolve from `state.current_trigger_event` without
-///    requiring player selection (CR 603.7c).
-/// 4. **Pre-selected targets**: the ability's chosen targets from CR 601.2c
-///    casting / CR 603.3d trigger placement.
+/// 3. **Pre-selected targets that satisfy this filter**: the ability's chosen
+///    targets from CR 601.2c casting / CR 603.3d trigger placement. Matching
+///    chosen targets override event-context fallbacks so player-chosen stack
+///    targets are not replaced by the ETB trigger's `ZoneChanged` source
+///    (issue #2351).
+/// 4. **Event context**: filters like `TriggeringSource`, `DefendingPlayer`,
+///    `StackSpell` on spell-cast triggers, `AttachedTo` resolve from
+///    `state.current_trigger_event` without requiring player selection (CR 603.7c).
 ///
 /// Returns the targets from the first non-empty tier, owning the result so
 /// callers don't need to branch over which tier resolved.
@@ -453,7 +456,15 @@ pub fn resolved_targets(
     // don't accidentally inherit the parent's targets via the chain target
     // propagation in `effects::mod.rs::resolve_chain`.
     if matches!(target_filter, TargetFilter::SelfRef) {
-        return vec![TargetRef::Object(ability.source_id)];
+        // CR 400.7: The self-reference resolves to the source only while it is
+        // still the same object. A source that left and re-entered the
+        // battlefield (blink/flicker) since the ability was created is a new
+        // object (higher incarnation), so the self-reference finds nothing.
+        return if ability.source_is_current(state) {
+            vec![TargetRef::Object(ability.source_id)]
+        } else {
+            Vec::new()
+        };
     }
     if matches!(target_filter, TargetFilter::SourceOrPaired) {
         return state
@@ -480,6 +491,15 @@ pub fn resolved_targets(
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
+    // CR 701.20e: "it" / "that card" after a look-at or reveal instruction.
+    if matches!(target_filter, TargetFilter::LastRevealed) {
+        return state
+            .last_revealed_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+    }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
@@ -493,10 +513,121 @@ pub fn resolved_targets(
     if use_self {
         return vec![TargetRef::Object(ability.source_id)];
     }
+    // CR 603.7c: Pure event-context filters always resolve from the trigger
+    // event / combat state, even when parent chain propagation populated
+    // `ability.targets` with unrelated chosen targets (DefendingPlayer, etc.).
+    if is_pure_event_context_filter(target_filter) {
+        if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
+        {
+            return vec![target];
+        }
+    }
+    // CR 608.2c: ParentTarget / ParentTargetSlot inherit propagated targets;
+    // StackSpell uses player-chosen stack targets at ETB (issue #2351).
+    // Slot indexing for ParentTargetSlot happens in `effect_object_targets`.
+    if !ability.targets.is_empty()
+        && matches!(
+            target_filter,
+            TargetFilter::ParentTarget | TargetFilter::StackSpell
+        )
+    {
+        return ability.targets.clone();
+    }
+    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the entire
+    // chain, not just the current ability's targets. During normal resolution
+    // the root stack entry has already been popped and is exposed through
+    // `resolving_stack_entry`; the live stack lookup covers target resolution
+    // before the entry is popped.
+    if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
+        let root = state
+            .resolving_stack_entry
+            .as_ref()
+            .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+            .or_else(|| {
+                state.stack.iter().find(|entry| {
+                    entry.id == ability.source_id || entry.source_id == ability.source_id
+                })
+            })
+            .and_then(|entry| entry.ability())
+            .unwrap_or(ability);
+        return super::ability_utils::flatten_targets_in_chain(root);
+    }
+    // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
+    // event-context resolution when the player chose targets at activation/
+    // trigger placement. Per-opponent fanout stores `[Player, Object, …]`
+    // pairs — only the object slots must satisfy the resolving filter
+    // (Haytham Kenway exile). Without this ordering, a StackSpell filter on
+    // an ETB trigger would bind to the ZoneChanged source (issue #2351).
+    if !ability.targets.is_empty() && chosen_targets_satisfy_filter(state, ability, target_filter) {
+        return ability.targets.clone();
+    }
     if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id) {
         return vec![target];
     }
     ability.targets.clone()
+}
+
+fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
+    matches!(
+        target_filter,
+        TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTarget
+    )
+}
+
+/// True when every object target (or every target if there are no object
+/// targets) satisfies the resolving filter. Player targets in per-opponent
+/// fanout pairs are ignored for Typed filters.
+fn chosen_targets_satisfy_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> bool {
+    let object_targets: Vec<&TargetRef> = ability
+        .targets
+        .iter()
+        .filter(|t| matches!(t, TargetRef::Object(_)))
+        .collect();
+    let candidates = if object_targets.is_empty() {
+        ability.targets.iter().collect::<Vec<_>>()
+    } else {
+        object_targets
+    };
+    !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|target| target_ref_matches_resolved_filter(state, ability, target_filter, target))
+}
+
+fn target_ref_matches_resolved_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    target: &TargetRef,
+) -> bool {
+    let ctx = super::filter::FilterContext::from_ability(ability);
+    match target {
+        TargetRef::Object(id) if state.stack.iter().any(|entry| entry.id == *id) => {
+            super::filter::matches_stack_target_filter(state, *id, target_filter, &ctx)
+        }
+        TargetRef::Object(id) => {
+            super::filter::matches_target_filter(state, *id, target_filter, &ctx)
+        }
+        TargetRef::Player(player) => super::filter::player_matches_target_filter_in_state(
+            state,
+            target_filter,
+            *player,
+            ctx.source_controller,
+        ),
+    }
 }
 
 /// Resolve a `TargetFilter` to object ids for effects that operate over every
@@ -507,7 +638,13 @@ pub(crate) fn resolved_object_ids_for_filter(
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     match filter {
-        TargetFilter::SelfRef => vec![ability.source_id],
+        // CR 400.7: self-reference resolves only while the source is the same
+        // object; a blinked-and-returned source (higher incarnation) finds nothing.
+        TargetFilter::SelfRef => ability
+            .source_is_current(state)
+            .then_some(ability.source_id)
+            .into_iter()
+            .collect(),
         TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
         TargetFilter::ParentTargetSlot { index } => ability
             .targets
@@ -516,6 +653,7 @@ pub(crate) fn resolved_object_ids_for_filter(
             .into_iter()
             .collect(),
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
+        TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))
@@ -718,26 +856,20 @@ pub fn resolve_effect_player_ref(
             TargetRef::Player(player) => Some(*player),
             _ => None,
         }),
-        TargetFilter::ParentTargetController => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => state
-                    .stack
-                    .iter()
-                    .find(|entry| entry.id == *id || entry.source_id == *id)
-                    .map(|entry| entry.controller)
-                    .or_else(|| state.objects.get(id).map(|obj| obj.controller)),
-                TargetRef::Player(player) => Some(*player),
-            })
-            .or_else(|| {
+        TargetFilter::ParentTargetController => {
+            crate::game::ability_utils::parent_target_controller(ability, state).or_else(|| {
                 resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
                     match target {
                         TargetRef::Player(player) => Some(player),
-                        TargetRef::Object(id) => state.objects.get(&id).map(|obj| obj.controller),
+                        TargetRef::Object(id) => state
+                            .objects
+                            .get(&id)
+                            .map(|obj| obj.controller)
+                            .or_else(|| state.lki_cache.get(&id).map(|lki| lki.controller)),
                     }
                 })
-            }),
+            })
+        }
         // CR 108.3 + CR 608.2c: Parent target's *owner* — mirrors the controller
         // path above, but resolves through `parent_target_owner` and falls back
         // to the event-context resolver (which itself may fall back to the
@@ -923,9 +1055,11 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         // attackers that satisfied the trigger subject, so "that many" reads
         // the size of that contextual attack event.
         GameEvent::AttackersDeclared { attacker_ids, .. } => Some(attacker_ids.len() as i32),
-        // CR 706.2: the final number of a die roll is its result. Lets
-        // `EventContextAmount` resolve "where X is the result" pump effects.
-        GameEvent::DieRolled { result, .. } => Some(*result as i32),
+        // CR 706.2 / CR 706.7: the final number of a die roll is its result. Lets
+        // `EventContextAmount` resolve "where X is the result" pump effects. The
+        // symbolic planar die has no numeric result (`None`, CR 901.9d), so such
+        // effects ignore it.
+        GameEvent::DieRolled { result, .. } => result.map(i32::from),
         // CR 120.1 + CR 603.7c: total combat damage dealt to this player by the
         // matching source set. For DamageDoneOnceByController triggers, this is
         // the filtered total stamped by matching_damage_done_once_by_controller_event.
@@ -1002,7 +1136,7 @@ fn stack_ability_matches_filter(
     source_controller: PlayerId,
 ) -> bool {
     match filter {
-        TargetFilter::StackAbility { controller } => {
+        TargetFilter::StackAbility { controller, tag } => {
             if !matches!(
                 &entry.kind,
                 // CR 113.3b / CR 113.3c: Activated and triggered abilities are
@@ -1013,6 +1147,16 @@ fn stack_ability_matches_filter(
                     | StackEntryKind::KeywordAction { .. }
             ) {
                 return false;
+            }
+            // CR 113.7a + CR 115.1: when a keyword-origin `tag` is required (e.g.
+            // `AbilityTag::Backup` for "becomes the target of a backup ability"),
+            // the stack ability must carry that tag. The ability exists on the
+            // stack independently of its source, so the tag is read from the
+            // resolved ability itself.
+            if let Some(tag) = tag {
+                if entry.ability().and_then(|a| a.context.ability_tag.as_ref()) != Some(tag) {
+                    return false;
+                }
             }
             stack_entry_controller_matches(entry, controller.as_ref(), source_controller)
         }
@@ -1447,7 +1591,7 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
 }
 
 /// Extract all explicit zone restrictions from a target filter, recursing through combinators.
-fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
+pub(crate) fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => {
             let mut explicit_zones = Vec::new();
@@ -1546,19 +1690,29 @@ pub(crate) fn resolve_tracked_set_sentinel(
         TargetFilter::TrackedSetFiltered {
             id: TrackedSetId(0),
             filter,
+            caused_by,
         } => {
             if let Some(id) = state.chain_tracked_set_id {
-                TargetFilter::TrackedSetFiltered { id, filter }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by,
+                }
             } else if let Some(source_filter) = current_combat_damage_source_filter(state) {
                 TargetFilter::And {
                     filters: vec![source_filter, *filter],
                 }
             } else if let Some(id) = latest_tracked_set_id(state) {
-                TargetFilter::TrackedSetFiltered { id, filter }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by,
+                }
             } else {
                 TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter,
+                    caused_by,
                 }
             }
         }
@@ -3377,6 +3531,29 @@ mod tests {
         );
     }
 
+    /// CR 506.2 + CR 608.2c: event-context filters must not consume propagated
+    /// chosen targets that belong to a different effect in the same ability.
+    #[test]
+    fn resolved_targets_event_context_ignores_non_matching_chosen_targets() {
+        use crate::game::combat::{AttackTarget, AttackerInfo};
+        let (mut state, chosen_target, attacker) = setup_with_creatures();
+        let combat = state.combat.get_or_insert_with(Default::default);
+        combat.attackers.push(AttackerInfo::new(
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+            PlayerId(0),
+        ));
+
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(chosen_target)], attacker);
+        let result = resolved_targets(&ability, &TargetFilter::DefendingPlayer, &state);
+
+        assert_eq!(
+            result,
+            vec![TargetRef::Player(PlayerId(0))],
+            "DefendingPlayer must resolve from combat context, not the propagated chosen target"
+        );
+    }
+
     /// CR 608.2c (issue #323): `SelfRef` always resolves to the source object,
     /// even when `ability.targets` is non-empty. The chained "Exile ~"
     /// sub-ability of cards like Treasured Find / Arc Blade gets its
@@ -3418,6 +3595,44 @@ mod tests {
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
     }
 
+    /// CR 601.2c (issue #2351): player-chosen stack targets must not be replaced
+    /// by the ETB trigger's ZoneChanged source when resolving StackSpell.
+    #[test]
+    fn resolved_targets_stack_spell_prefers_chosen_target_over_etb_event() {
+        let mut state = GameState::new_two_player(42);
+        let aven = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aven Interrupter".to_string(),
+            Zone::Battlefield,
+        );
+        let bolt = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: aven,
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                aven,
+                Some(Zone::Stack),
+                Zone::Battlefield,
+            )),
+        });
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(bolt)], aven);
+        let result = resolved_targets(&ability, &TargetFilter::StackSpell, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(bolt)],
+            "chosen stack spell must win over the ETB ZoneChanged source"
+        );
+    }
+
     /// CR 601.2c: Tier 3 — when neither self-ref nor event-context applies,
     /// fall through to the ability's pre-selected targets.
     #[test]
@@ -3433,6 +3648,63 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: ParentTargetSlot indexes the targets announced for the whole
+    /// resolving ability, not only the nearest chained TargetOnly node.
+    #[test]
+    fn resolved_targets_parent_target_slot_uses_resolving_stack_entry_root_chain() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let first = TargetRef::Object(ObjectId(1));
+        let second = TargetRef::Object(ObjectId(2));
+        let body = ResolvedAbility::new(
+            crate::types::ability::Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTargetSlot { index: 1 },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![second.clone()],
+            source,
+            PlayerId(0),
+        );
+        let root = ResolvedAbility::new(
+            crate::types::ability::Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![first.clone()],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            crate::types::ability::Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![second.clone()],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: root,
+            },
+        });
+
+        let result = resolved_targets(&body, &TargetFilter::ParentTargetSlot { index: 1 }, &state);
+
+        assert_eq!(result, vec![first, second]);
+    }
+
     /// CR 706.2: a die roll's result is the amount `EventContextAmount`
     /// resolves "where X is the result" against.
     #[test]
@@ -3440,9 +3712,22 @@ mod tests {
         let event = crate::types::events::GameEvent::DieRolled {
             player_id: PlayerId(0),
             sides: 8,
-            result: 7,
+            result: Some(7),
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    /// CR 901.9d / CR 706.7: the symbolic planar die has no numeric result, so a
+    /// `DieRolled { result: None }` yields no amount — numeric-result effects
+    /// (e.g. "where X is the result") ignore the planar die.
+    #[test]
+    fn extract_amount_from_resultless_die_rolled_returns_none() {
+        let event = crate::types::events::GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: None,
+        };
+        assert_eq!(extract_amount_from_event(&event), None);
     }
 
     /// CR 602.2a: For Burning-Tree Shaman / Flamescroll Celebrant's "deals 1

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
+use crate::game::zones;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -273,13 +274,7 @@ pub fn resolve(
 
     if is_land {
         // CR 701.44a: Land revealed — put the card into the player's hand. No counter.
-        if let Some(player) = state.players.iter_mut().find(|p| p.id == controller) {
-            player.library.retain(|id| *id != top_card_id);
-            player.hand.push_back(top_card_id);
-        }
-        if let Some(obj) = state.objects.get_mut(&top_card_id) {
-            obj.zone = crate::types::zones::Zone::Hand;
-        }
+        zones::move_to_zone(state, top_card_id, crate::types::zones::Zone::Hand, events);
 
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),

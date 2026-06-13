@@ -91,7 +91,6 @@ expression: result
                       "duration": null,
                       "description": null,
                       "target_prompt": null,
-                      "sorcery_speed": false,
                       "condition": null,
                       "optional_targeting": false,
                       "optional": false,
@@ -101,7 +100,6 @@ expression: result
                     "duration": null,
                     "description": null,
                     "target_prompt": null,
-                    "sorcery_speed": false,
                     "condition": null,
                     "optional_targeting": false,
                     "optional": false,
@@ -111,11 +109,11 @@ expression: result
                   "duration": null,
                   "description": "Enchanted Forest has '{T}: Add three mana of any one color. You get two rad counters.'",
                   "target_prompt": null,
-                  "sorcery_speed": false,
                   "condition": null,
                   "optional_targeting": false,
                   "optional": false,
-                  "forward_result": false
+                  "forward_result": false,
+                  "is_mana_ability": true
                 }
               }
             ]
@@ -125,7 +123,6 @@ expression: result
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
@@ -135,7 +132,6 @@ expression: result
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

@@ -6,7 +6,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
-fn expiry_from_duration(
+pub(crate) fn expiry_from_duration(
     duration: Option<&Duration>,
     controller: crate::types::player::PlayerId,
 ) -> Option<RestrictionExpiry> {

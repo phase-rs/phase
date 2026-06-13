@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { isCommanderPreconDeck, useDecks, type DeckEntry } from "../../hooks/useDecks";
 import { preconExists, savePreconDeck } from "../../services/preconDecks";
 import { menuButtonClass } from "./buttonStyles";
+import { SelectField } from "../ui/SelectField";
 
 interface PreconDeckModalProps {
   open: boolean;
@@ -210,7 +211,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             className="flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-white/30 focus:outline-none"
             autoFocus
           />
-          <select
+          <SelectField
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
@@ -221,7 +222,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                 {type} ({n})
               </option>
             ))}
-          </select>
+          </SelectField>
         </div>
 
 

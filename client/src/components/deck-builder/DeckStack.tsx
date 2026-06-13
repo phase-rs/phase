@@ -528,7 +528,7 @@ export function DeckStack({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-3 pt-4 pb-16">
+      <div className="thin-scrollbar flex-1 overflow-auto px-3 pt-4 pb-16">
         {!hasCards ? (
           <div className="flex h-full items-center justify-center rounded-[20px] border border-dashed border-white/10 bg-black/12 text-sm text-slate-500">
             {t("stack.emptyHint")}

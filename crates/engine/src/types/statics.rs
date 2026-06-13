@@ -563,6 +563,14 @@ pub enum CostModifyMode {
     Minimum,
 }
 
+/// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
+/// Distinct from [`CostModifyMode`], which only adjusts the mana component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdditionalCostTaxAction {
+    /// "... cost an additional N life to cast."
+    Cast,
+}
+
 /// CR 702.122c: How a creature's contributed power is modified when it crews a
 /// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -580,6 +588,22 @@ pub enum CrewAction {
     Crew,
     Saddle,
     Station,
+}
+
+/// Which combat action the `CombatAlone` restriction governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatAloneAction {
+    Attack,
+    Block,
+}
+
+/// The polarity of a `CombatAlone` static.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatAloneRequirement {
+    /// "can't X alone" — the creature must NOT be the sole attacker/blocker.
+    NeedsCompanion,
+    /// "can only X alone" — the creature must BE the sole attacker; companions are prohibited.
+    MustBeSole,
 }
 
 /// All static ability modes from Forge's static ability registry.
@@ -718,6 +742,16 @@ pub enum StaticMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
+    /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
+    /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
+    /// which adjusts only the mana component. Terror of the Peaks class:
+    /// "Spells your opponents cast that target this creature cost an additional
+    /// 3 life to cast."
+    ImposeAdditionalCost {
+        cost: super::ability::AbilityCost,
+        spell_filter: Option<TargetFilter>,
+        action: AdditionalCostTaxAction,
+    },
     /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
     /// E.g., "Ninjutsu abilities you activate cost {1} less to activate."
     /// `keyword` identifies which ability type is reduced (e.g., "ninjutsu", "equip", "cycling").
@@ -814,6 +848,11 @@ pub enum StaticMode {
     /// Variants: "your library" (controller only) or "their libraries" (all players).
     RevealTopOfLibrary {
         all_players: bool,
+    },
+    /// CR 400.2 + CR 701.20a: Play with hands revealed.
+    /// `who` identifies whose hand is public: controller, opponents, or all players.
+    RevealHand {
+        who: ProhibitionScope,
     },
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
     /// matching cards from owner's graveyard.
@@ -1133,8 +1172,17 @@ pub enum StaticMode {
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
     Goaded,
-    CantAttackAlone,
-    CantBlockAlone,
+    /// CR 506.5 + CR 508.1c + CR 509.1b: Parameterized "alone" combat
+    /// restriction.  `action` selects whether it applies to attacking or
+    /// blocking; `requirement` selects the polarity:
+    /// - `NeedsCompanion` → "can't attack/block alone" (Bonded Construct,
+    ///   Mogg Flunkies) — the creature must NOT be the sole attacker/blocker.
+    /// - `MustBeSole` → "can only attack alone" (Master of Cruelties) — the
+    ///   creature must BE the sole attacker; no companions allowed.
+    CombatAlone {
+        action: CombatAloneAction,
+        requirement: CombatAloneRequirement,
+    },
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
     /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
@@ -1157,7 +1205,11 @@ pub enum StaticMode {
         count: u8,
     },
     EmblemStatic,
-    BlockRestriction,
+    /// CR 509.1b: Blocker-side restriction — this creature can block only
+    /// attackers matching `filter` (Cloud Sprite, Pinnacle Emissary Drone).
+    BlockRestriction {
+        filter: super::ability::TargetFilter,
+    },
     /// CR 402.2: No maximum hand size.
     NoMaximumHandSize,
     /// CR 402.2 + CR 514.1: Maximum hand size modification.
@@ -1339,12 +1391,14 @@ impl Hash for StaticMode {
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
+            StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
                 // TargetFilter does not implement Hash; discriminant only.
                 BlockExceptionKind::Quality(_) => {}
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::BlockRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::AttachmentRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
@@ -1398,6 +1452,7 @@ impl Hash for StaticMode {
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
@@ -1451,6 +1506,7 @@ impl StaticMode {
             | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::AlternativeKeywordCost { .. }
             | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
@@ -1467,6 +1523,7 @@ impl StaticMode {
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
             | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::RevealHand { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
@@ -1494,15 +1551,14 @@ impl StaticMode {
             | StaticMode::MustBeBlocked
             | StaticMode::MustBeBlockedByAll
             | StaticMode::Goaded
-            | StaticMode::CantAttackAlone
-            | StaticMode::CantBlockAlone
+            | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
             | StaticMode::CrewContribution { .. }
             | StaticMode::MayLookAtTopOfLibrary
             | StaticMode::MayChooseNotToUntap
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::EmblemStatic
-            | StaticMode::BlockRestriction
+            | StaticMode::BlockRestriction { .. }
             | StaticMode::NoMaximumHandSize
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::MayPlayAdditionalLand
@@ -1566,6 +1622,9 @@ impl fmt::Display for StaticMode {
                 CostModifyMode::Reduce => write!(f, "ReduceCost"),
                 CostModifyMode::Raise => write!(f, "RaiseCost"),
                 CostModifyMode::Minimum => write!(f, "MinimumCost"),
+            },
+            StaticMode::ImposeAdditionalCost { action, .. } => match action {
+                AdditionalCostTaxAction::Cast => write!(f, "ImposeAdditionalCastCost"),
             },
             StaticMode::ReduceAbilityCost {
                 keyword,
@@ -1687,6 +1746,7 @@ impl fmt::Display for StaticMode {
                     write!(f, "RevealTopOfLibrary(you)")
                 }
             }
+            StaticMode::RevealHand { who } => write!(f, "RevealHand({who})"),
             // Tier 1
             StaticMode::CantBeBlocked => write!(f, "CantBeBlocked"),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
@@ -1731,8 +1791,20 @@ impl fmt::Display for StaticMode {
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
-            StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
-            StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
+            StaticMode::CombatAlone {
+                action,
+                requirement,
+            } => {
+                let a = match action {
+                    CombatAloneAction::Attack => "Attack",
+                    CombatAloneAction::Block => "Block",
+                };
+                let r = match requirement {
+                    CombatAloneRequirement::NeedsCompanion => "NeedsCompanion",
+                    CombatAloneRequirement::MustBeSole => "MustBeSole",
+                };
+                write!(f, "CombatAlone({a},{r})")
+            }
             StaticMode::CantCrew => write!(f, "CantCrew"),
             // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
             StaticMode::CrewContribution { kind, actions } => {
@@ -1745,7 +1817,13 @@ impl fmt::Display for StaticMode {
                 write!(f, "AdditionalLandDrop({count})")
             }
             StaticMode::EmblemStatic => write!(f, "EmblemStatic"),
-            StaticMode::BlockRestriction => write!(f, "BlockRestriction"),
+            StaticMode::BlockRestriction { filter } => {
+                if *filter == block_only_creatures_with_flying_filter() {
+                    write!(f, "BlockRestriction")
+                } else {
+                    write!(f, "BlockRestriction:Quality({filter:?})")
+                }
+            }
             StaticMode::NoMaximumHandSize => write!(f, "NoMaximumHandSize"),
             StaticMode::MaximumHandSize { modification } => {
                 write!(f, "MaximumHandSize({modification})")
@@ -2070,15 +2148,27 @@ impl FromStr for StaticMode {
             "MustBeBlocked" => StaticMode::MustBeBlocked,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
-            "CantAttackAlone" => StaticMode::CantAttackAlone,
-            "CantBlockAlone" => StaticMode::CantBlockAlone,
+            "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            "CombatAlone(Block,NeedsCompanion)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            "CombatAlone(Attack,MustBeSole)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            },
             "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             // Tier 3
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
             // AdditionalLandDrop is parameterized — parsed in the `other` branch below
             "EmblemStatic" => StaticMode::EmblemStatic,
-            "BlockRestriction" => StaticMode::BlockRestriction,
+            "BlockRestriction" => StaticMode::BlockRestriction {
+                filter: block_only_creatures_with_flying_filter(),
+            },
             "NoMaximumHandSize" => StaticMode::NoMaximumHandSize,
             s if s.starts_with("MaximumHandSize(") => {
                 // MaximumHandSize is data-carrying; FromStr round-trip not required.
@@ -2255,6 +2345,14 @@ impl FromStr for StaticMode {
                     StaticMode::RevealTopOfLibrary {
                         all_players: rest == "all",
                     }
+                } else if let Some(inner) = other
+                    .strip_prefix("RevealHand(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::RevealHand { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(rest) = other.strip_prefix("AdditionalLandDrop(") {
                     let rest = rest.strip_suffix(')').unwrap_or(rest);
                     StaticMode::AdditionalLandDrop {
@@ -2303,6 +2401,16 @@ fn parse_static_mode_u32_arg(s: &str, prefix: &str) -> Option<u32> {
         .ok()
 }
 
+/// CR 509.1b: Canonical attacker filter for "can block only creatures with flying."
+pub fn block_only_creatures_with_flying_filter() -> TargetFilter {
+    use super::ability::{FilterProp, TypedFilter};
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+            value: Keyword::Flying,
+        }]),
+    )
+}
+
 /// Forward-compatible deserializer for `StaticMode` fields in persisted JSON
 /// (card-data.json). Handles the common case where a new unit-variant is added
 /// to the engine but an older WASM binary tries to load card data that contains
@@ -2334,6 +2442,11 @@ where
             // Unit variant path. Handle legacy cost-modify unit variants first.
             if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
                 return Ok(mode);
+            }
+            if s == "BlockRestriction" {
+                return Ok(StaticMode::BlockRestriction {
+                    filter: block_only_creatures_with_flying_filter(),
+                });
             }
             // Try the derived deserializer so all known unit variants
             // (e.g. "SpendManaAsAnyColor", "Flying", …) round-trip correctly.
@@ -2411,6 +2524,22 @@ fn deserialize_legacy_modify_cost_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_block_restriction_string_deserializes_with_flying_filter() {
+        use super::super::ability::StaticDefinition;
+
+        let def: StaticDefinition = serde_json::from_str(
+            r#"{"mode":"BlockRestriction","modifications":[],"affected":{"type":"SelfRef"}}"#,
+        )
+        .expect("legacy card-data unit variant");
+        assert_eq!(
+            def.mode,
+            StaticMode::BlockRestriction {
+                filter: block_only_creatures_with_flying_filter(),
+            }
+        );
+    }
 
     #[test]
     fn parse_known_static_modes() {
@@ -2498,6 +2627,12 @@ mod tests {
             StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::AllPlayers,
+            },
             // Tier 1: keyword/evasion statics
             StaticMode::CantBeBlocked,
             StaticMode::CantBeBlockedExceptBy {
@@ -2520,8 +2655,18 @@ mod tests {
             StaticMode::CantTap,
             StaticMode::CantUntap,
             StaticMode::MustBeBlocked,
-            StaticMode::CantAttackAlone,
-            StaticMode::CantBlockAlone,
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            },
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // Tier 3: parser-produced statics
@@ -2529,7 +2674,9 @@ mod tests {
             StaticMode::AdditionalLandDrop { count: 1 },
             StaticMode::AdditionalLandDrop { count: 2 },
             StaticMode::EmblemStatic,
-            StaticMode::BlockRestriction,
+            StaticMode::BlockRestriction {
+                filter: block_only_creatures_with_flying_filter(),
+            },
             StaticMode::NoMaximumHandSize,
             StaticMode::MayPlayAdditionalLand,
             // Graveyard cast/play permissions

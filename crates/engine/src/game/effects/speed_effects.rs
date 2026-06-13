@@ -48,6 +48,12 @@ fn players_for_filter(
             .filter(|player| player.id != controller && player.life_gained_this_turn > 0)
             .map(|player| player.id)
             .collect(),
+        // CR 104.5 / CR 800.4: Players who lost have left the game; this
+        // filter is quantity-only and has no live speed-effect recipient.
+        PlayerFilter::HasLostTheGame => Vec::new(),
+        // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard); it has
+        // no live speed-effect recipient meaning.
+        PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Vec::new(),
         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was
         // dealt combat damage this turn, optionally restricted to a matching
         // source.

@@ -5,7 +5,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{ChoiceType, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{TargetSelectionSlot, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, TargetSelectionSlot, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -75,6 +75,8 @@ fn baleful_mastery_cast_targeting_excludes_opponent_player_slot() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should start");
 
@@ -138,6 +140,8 @@ fn baleful_mastery_alternative_cost_makes_chosen_opponent_draw() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should start");
 

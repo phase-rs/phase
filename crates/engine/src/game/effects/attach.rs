@@ -2,7 +2,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -21,9 +22,19 @@ pub fn resolve(
         _ => (&TargetFilter::SelfRef, &TargetFilter::Any),
     };
 
+    // CR 608.2h + CR 608.2k: Typed attachment operands resolve from the
+    // battlefield/LKI unless they are explicit player-chosen targets.
+    // Typed/scan-based attachment filters (e.g. "Equipment attached to ~") resolve
+    // from the battlefield/LKI, not from explicit target slots. Consuming
+    // `ability.targets` here would steal the ParentTarget bearer (Zack Fair).
+    // `Any`/`Any` pairs share one iterator so [equipment, host] slots stay ordered.
     let mut target_slots = ability.targets.iter();
-    let attachment_id = resolve_object_filter(state, ability, attachment_filter, &mut target_slots)
-        .ok_or_else(|| EffectError::MissingParam("No attachment for Attach".to_string()))?;
+    let attachment_id = if attachment_filter_uses_explicit_target_slot(attachment_filter) {
+        resolve_object_filter(state, ability, attachment_filter, &mut target_slots)
+    } else {
+        resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
+    }
+    .ok_or_else(|| EffectError::MissingParam("No attachment for Attach".to_string()))?;
     let target_id = resolve_object_filter(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
@@ -120,6 +131,24 @@ fn current_attachment_target(state: &GameState, attachment_id: ObjectId) -> Opti
         .map(target_ref_from_attach_target)
 }
 
+/// Only explicit attachment choices consume player-chosen target slots.
+/// Scan-based filters (e.g. "Equipment that was attached to ~") resolve from
+/// the battlefield or LKI and must not steal `ParentTarget` slots.
+fn attachment_filter_uses_explicit_target_slot(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(tf) => !tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::AttachedToSource)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(attachment_filter_uses_explicit_target_slot),
+        TargetFilter::Not { filter } => attachment_filter_uses_explicit_target_slot(filter),
+        _ => false,
+    }
+}
+
 fn resolve_object_filter<'a>(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -145,11 +174,88 @@ fn resolve_object_filter<'a>(
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
-        _ => target_slots.find_map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        }),
+        _ => target_slots
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .or_else(|| {
+                resolved_object_ids_for_filter(state, ability, filter)
+                    .into_iter()
+                    .next()
+            })
+            .or_else(|| resolve_attached_to_source_lki_attachment(state, ability, filter)),
     }
+}
+
+fn filter_has_attached_to_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::AttachedToSource)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_has_attached_to_source)
+        }
+        TargetFilter::Not { filter } => filter_has_attached_to_source(filter),
+        _ => false,
+    }
+}
+
+fn strip_attached_to_source_prop(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
+            properties: tf
+                .properties
+                .iter()
+                .filter(|p| !matches!(p, FilterProp::AttachedToSource))
+                .cloned()
+                .collect(),
+            ..tf.clone()
+        }),
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.iter().map(strip_attached_to_source_prop).collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.iter().map(strip_attached_to_source_prop).collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(strip_attached_to_source_prop(filter)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// CR 400.7j + CR 608.2h: Zack Fair — after self-sacrifice the Equipment operand
+/// is no longer `AttachedToSource` on the battlefield; resolve it from the
+/// source's departure attachment snapshot instead of the global filter predicate.
+fn resolve_attached_to_source_lki_attachment(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<ObjectId> {
+    if !filter_has_attached_to_source(filter) {
+        return None;
+    }
+    let source_id = ability.source_id;
+    let ctx = FilterContext::from_ability(ability);
+    let without_attached = strip_attached_to_source_prop(filter);
+    state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.object_id == source_id)
+        .and_then(|record| {
+            record.attachments.iter().find_map(|snap| {
+                if state.objects.contains_key(&snap.object_id)
+                    && matches_target_filter(state, snap.object_id, &without_attached, &ctx)
+                {
+                    Some(snap.object_id)
+                } else {
+                    None
+                }
+            })
+        })
 }
 
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
@@ -228,6 +334,12 @@ pub(crate) fn attachment_illegality(
     attachment_id: ObjectId,
     host_id: ObjectId,
 ) -> Option<AttachIllegality> {
+    // CR 301.5c: "An Equipment can't equip itself." (And no permanent can be
+    // attached to itself.) Single-authority self-attach guard protecting both
+    // `can_attach_to_object` and `attach_to`.
+    if attachment_id == host_id {
+        return Some(AttachIllegality::Prohibited);
+    }
     // CR 701.3a: `CantBeAttached` blocks any attachment from being attached to
     // the host.
     if crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeAttached") {
@@ -440,8 +552,12 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
+    use crate::types::ability::{
+        AttachmentKind, ControllerRef, FilterProp, StaticDefinition, TargetFilter, TargetRef,
+        TypedFilter,
+    };
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
@@ -1225,5 +1341,131 @@ mod tests {
             state.objects.get(&aura).unwrap().attached_to,
             Some(AttachTarget::Object(legendary))
         );
+    }
+
+    /// CR 301.5c: "An Equipment can't equip itself." The single-authority
+    /// `attachment_illegality` self-attach guard makes `can_attach_to_object`
+    /// reject a self target and `attach_to(id, id)` a no-op.
+    #[test]
+    fn self_attach_is_prohibited_and_no_op() {
+        let mut state = setup();
+        // A reconfigure Equipment is itself a creature while unattached.
+        let equip = spawn_with_subtype(&mut state, "Self-Equip", "Equipment");
+        state
+            .objects
+            .get_mut(&equip)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert_eq!(
+            attachment_illegality(&state, equip, equip),
+            Some(AttachIllegality::Prohibited),
+            "self-attach is illegal (CR 301.5c)"
+        );
+        assert!(
+            !can_attach_to_object(&state, equip, equip),
+            "can_attach_to_object rejects self target"
+        );
+
+        assert_eq!(
+            attach_to(&mut state, equip, equip),
+            None,
+            "attach_to(id, id) is a no-op returning None"
+        );
+        assert_eq!(
+            state.objects.get(&equip).unwrap().attached_to,
+            None,
+            "self-attach leaves attached_to unset"
+        );
+        assert!(
+            state.objects.get(&equip).unwrap().attachments.is_empty(),
+            "self-attach adds nothing to attachments"
+        );
+    }
+
+    #[test]
+    fn attach_equipment_was_attached_to_sacrificed_source() {
+        use crate::game::sacrifice::sacrifice_permanent;
+
+        let mut state = setup();
+        let zack = spawn_creature(&mut state, "Zack Fair");
+        let bearer = spawn_creature(&mut state, "Bearer");
+        let equipment = spawn_with_subtype(&mut state, "Hero's Sword", "Equipment");
+        attach_to(&mut state, equipment, zack);
+
+        let mut events = Vec::new();
+        sacrifice_permanent(&mut state, zack, PlayerId(0), &mut events).unwrap();
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .properties(vec![FilterProp::AttachedToSource]),
+                ),
+                target: TargetFilter::ParentTarget,
+            },
+            vec![crate::types::ability::TargetRef::Object(bearer)],
+            zack,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(bearer))
+        );
+    }
+
+    #[test]
+    fn attach_equipment_was_attached_uses_latest_departure_snapshot() {
+        let mut state = setup();
+        let zack = spawn_creature(&mut state, "Zack Fair");
+        let bearer = spawn_creature(&mut state, "Bearer");
+        let old_equipment = spawn_with_subtype(&mut state, "Old Sword", "Equipment");
+        let new_equipment = spawn_with_subtype(&mut state, "New Sword", "Equipment");
+
+        state.zone_changes_this_turn.push(ZoneChangeRecord {
+            attachments: vec![AttachmentSnapshot {
+                object_id: old_equipment,
+                controller: PlayerId(0),
+                kind: AttachmentKind::Equipment,
+            }],
+            ..ZoneChangeRecord::test_minimal(zack, Some(Zone::Battlefield), Zone::Graveyard)
+        });
+        state.zone_changes_this_turn.push(ZoneChangeRecord {
+            attachments: vec![AttachmentSnapshot {
+                object_id: new_equipment,
+                controller: PlayerId(0),
+                kind: AttachmentKind::Equipment,
+            }],
+            ..ZoneChangeRecord::test_minimal(zack, Some(Zone::Battlefield), Zone::Graveyard)
+        });
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .properties(vec![FilterProp::AttachedToSource]),
+                ),
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(bearer)],
+            zack,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&new_equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(bearer))
+        );
+        assert_eq!(state.objects.get(&old_equipment).unwrap().attached_to, None);
     }
 }

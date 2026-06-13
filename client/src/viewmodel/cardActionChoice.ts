@@ -26,7 +26,10 @@ export function isManaObjectAction(action: GameAction, object: GameObject | unde
   // creatures get no clickable affordance and the player cannot tap them.
   if (action.type === "TapForConvoke") return true;
   if (action.type !== "ActivateAbility") return false;
-  return object?.abilities?.[action.data.ability_index]?.effect?.type === "Mana";
+  // CR 605.1a: the engine classifies mana abilities (mana_abilities::is_mana_ability)
+  // and exposes the verdict as the derived `is_mana_ability` key on the serialized
+  // ability — the frontend reads the flag rather than introspecting the effect AST.
+  return object?.abilities?.[action.data.ability_index]?.is_mana_ability === true;
 }
 
 /**

@@ -69,26 +69,26 @@ interface FormatPickerProps {
 
 export function FormatPicker({ onFormatSelect }: FormatPickerProps) {
   return (
-    <div className="flex w-full max-w-3xl flex-col gap-8 px-4">
+    <div className="flex w-full max-w-3xl flex-col gap-6 sm:gap-8">
       {FORMAT_GROUPS.map((group) => {
         const tone = GROUP_TONES[group.tone];
         return (
-          <div key={group.label} className="flex flex-col gap-3">
+          <div key={group.label} className="flex flex-col gap-2.5 sm:gap-3">
             <span className={`text-[0.68rem] uppercase tracking-[0.22em] ${tone.kicker}`}>
               {group.label}
             </span>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 sm:gap-3 lg:grid-cols-3 xl:grid-cols-4">
               {group.formats.map((opt) => (
                 <button
                   key={opt.format}
                   onClick={() => onFormatSelect(opt.format)}
-                  className={`group relative flex flex-col overflow-hidden rounded-[18px] border px-4 py-4 text-left transition-colors ${tone.border} ${tone.bg} ${tone.hover} cursor-pointer`}
+                  className={`group relative flex flex-col overflow-hidden rounded-[18px] border px-4 py-3.5 text-left transition-colors sm:py-4 ${tone.border} ${tone.bg} ${tone.hover} cursor-pointer`}
                 >
-                  <div className={`absolute inset-y-4 left-0 w-[3px] rounded-r ${tone.accent}`} />
-                  <div className="text-[1.05rem] font-semibold text-white">
+                  <div className={`absolute inset-y-3.5 left-0 w-[3px] rounded-r sm:inset-y-4 ${tone.accent}`} />
+                  <div className="text-base font-semibold text-white sm:text-[1.05rem]">
                     {opt.label}
                   </div>
-                  <p className="mt-1.5 text-[0.78rem] leading-5 text-slate-400">
+                  <p className="mt-1 text-[0.78rem] leading-5 text-slate-400">
                     {opt.description}
                   </p>
                 </button>

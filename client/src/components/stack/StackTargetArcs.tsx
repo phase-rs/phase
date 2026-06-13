@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getArcPath } from "../targeting/arcPath.ts";
 import type { ObjectId, StackEntry, StackEntryDisplay } from "../../adapter/types.ts";
 
@@ -61,7 +62,7 @@ export function StackTargetArcs({
           const representative = stackEntryRepresentatives.get(target.Object);
           targetSelector = representative != null
             ? `[data-stack-entry="${representative}"]`
-            : `[data-object-id="${target.Object}"]`;
+            : objectAnchorSelector(target.Object);
         } else {
           targetSelector = `[data-player-hud="${target.Player}"]`;
         }

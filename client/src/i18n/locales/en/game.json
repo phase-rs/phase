@@ -87,6 +87,56 @@
     "clickOpponent": "Click an opponent to view their board",
     "undo": "Undo"
   },
+  "battlefieldOverflow": {
+    "close": "Close",
+    "groupCount_one": "{{count}} group",
+    "groupCount_other": "{{count}} groups",
+    "noAvailablePips": "No pips",
+    "lands": {
+      "label": "Lands",
+      "open_one": "Open lands drawer ({{count}} land)",
+      "open_other": "Open lands drawer ({{count}} lands)",
+      "pipTooltip_one": "{{count}} hidden land can currently produce",
+      "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "title_one": "Lands ({{count}})",
+      "title_other": "Lands ({{count}})"
+    },
+    "support": {
+      "label": "Support",
+      "open_one": "Open support drawer ({{count}} permanent)",
+      "open_other": "Open support drawer ({{count}} permanents)",
+      "title_one": "Support ({{count}})",
+      "title_other": "Support ({{count}})",
+      "artifacts": "Art",
+      "enchantments": "Ench",
+      "planeswalkers": "PW",
+      "other": "Other"
+    },
+    "supportTooltips": {
+      "artifacts": "Hidden artifact permanents in this support drawer.",
+      "enchantments": "Hidden enchantment permanents in this support drawer.",
+      "planeswalkers": "Hidden planeswalkers in this support drawer.",
+      "other": "Other hidden nonland permanents in this support drawer."
+    },
+    "badges": {
+      "activate": "act",
+      "attack": "atk",
+      "attacking": "atk",
+      "incoming": "in",
+      "mana": "mana",
+      "selected": "sel",
+      "target": "target"
+    },
+    "badgeTooltips": {
+      "activate": "Hidden objects with activated abilities available.",
+      "attack": "Hidden creatures eligible to attack.",
+      "attacking": "Hidden creatures currently attacking.",
+      "incoming": "Attacks currently aimed at hidden objects in this drawer.",
+      "mana": "Hidden objects that can be tapped for mana.",
+      "selected": "Hidden objects currently selected for the active choice.",
+      "target": "Hidden objects that are legal targets."
+    }
+  },
   "permanent": {
     "expandGroup": "Expand {{name}} group",
     "collapseGroup": "Collapse {{name}} group",
@@ -712,6 +762,15 @@
       "decline": "Don't exert",
       "declineDescription": "{{name}} attacks normally and untaps as usual."
     },
+    "enlist": {
+      "attackerFallback": "Attacker",
+      "creatureFallback": "Creature",
+      "title": "Enlist for {{name}}?",
+      "subtitle": "Choose a creature to tap for this Enlist instance.",
+      "tapDescription": "Tap {{name}} so {{attacker}} gets power from it.",
+      "decline": "Don't enlist",
+      "declineDescription": "{{attacker}} attacks without enlisting a creature."
+    },
     "cost": {
       "discardCard": "discard a card",
       "life": "{{amount}} life",
@@ -1206,6 +1265,22 @@
     "evokeNormalLabel": "Cast Normally",
     "evokeAltLabel": "Cast with Evoke",
     "evokeSubtitle": "Cast {{name}} normally or cast it for its Evoke cost.",
+    "emergeEyebrow": "Emerge",
+    "emergeNormalLabel": "Cast Normally",
+    "emergeAltLabel": "Cast with Emerge",
+    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost, reduced by the mana value of a creature you sacrifice.",
+    "impendingEyebrow": "Impending",
+    "impendingNormalLabel": "Cast as Creature",
+    "impendingAltLabel": "Cast with Impending",
+    "impendingSubtitle": "Cast {{name}} normally as a creature, or pay its Impending cost — it enters with time counters and isn't a creature until the last is removed.",
+    "prototypeEyebrow": "Prototype",
+    "prototypeNormalLabel": "Cast Normally",
+    "prototypeAltLabel": "Cast with Prototype",
+    "prototypeSubtitle": "Cast {{name}} normally, or pay its Prototype cost to cast it with its prototype color, mana value, power, and toughness.",
+    "spectacleEyebrow": "Spectacle",
+    "spectacleNormalLabel": "Cast Normally",
+    "spectacleAltLabel": "Cast with Spectacle",
+    "spectacleSubtitle": "Cast {{name}} normally, or pay its Spectacle cost (available because an opponent lost life this turn).",
     "overloadEyebrow": "Overload",
     "overloadNormalLabel": "Cast Normally",
     "overloadAltLabel": "Cast with Overload",
@@ -1226,6 +1301,22 @@
     "mtmteNormalLabel": "Cast Normally",
     "mtmteAltLabel": "Cast Converted",
     "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
+    "emergeEyebrow": "Emerge",
+    "emergeNormalLabel": "Cast Normally",
+    "emergeAltLabel": "Cast with Emerge",
+    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost by sacrificing a creature, reducing the cost by that creature's mana value.",
+    "impendingEyebrow": "Impending",
+    "impendingNormalLabel": "Cast Normally",
+    "impendingAltLabel": "Cast with Impending",
+    "impendingSubtitle": "Cast {{name}} normally, or pay its Impending cost — it enters with time counters and isn't a creature until the last one is removed.",
+    "prototypeEyebrow": "Prototype",
+    "prototypeNormalLabel": "Cast Normally",
+    "prototypeAltLabel": "Cast with Prototype",
+    "prototypeSubtitle": "Cast {{name}} normally, or pay its Prototype cost to cast it with its smaller power, toughness, and color.",
+    "spectacleEyebrow": "Spectacle",
+    "spectacleNormalLabel": "Cast Normally",
+    "spectacleAltLabel": "Cast with Spectacle",
+    "spectacleSubtitle": "Cast {{name}} normally, or pay its Spectacle cost (available because an opponent lost life this turn).",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
@@ -1311,6 +1402,7 @@
     "eyebrow": "Choice",
     "title": "Choose one",
     "subtitle": "Select the option to resolve.",
+    "subtitleBinary": "Pick one of the two options below.",
     "optionFallback": "Option {{number}}"
   },
   "combatTax": {
@@ -1488,7 +1580,9 @@
     "scopeMulti": "Choose new targets for the spell",
     "subtitle": "{{scope}}. Current: {{current}}",
     "confirm": "Confirm",
-    "badgeNewTarget": "New target"
+    "badgeNewTarget": "New target",
+    "slotLabel": "Target {{index}}: {{current}} → {{chosen}}",
+    "unselected": "unchanged"
   },
   "separatePiles": {
     "chooserName": "Player {{number}}",

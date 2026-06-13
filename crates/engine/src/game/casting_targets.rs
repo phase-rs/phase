@@ -107,7 +107,7 @@ pub(crate) fn handle_select_modes(
     if pending.activation_ability_index.is_none()
         && pending.additional_cost_flow.is_none()
         && cost_has_x(&total_cost)
-        && ability_target_legality_needs_chosen_x(&resolved)
+        && ability_target_legality_needs_chosen_x(&resolved, pending.distribute.as_ref())
     {
         let mut pending_x =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
@@ -482,7 +482,7 @@ fn pay_activation_costs_after_target_selection(
     }
 
     if let Some(ref activation_cost) = pending.activation_cost {
-        let should_record_loyalty = matches!(activation_cost, AbilityCost::Loyalty { .. })
+        let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(activation_cost)
             && super::planeswalker::can_activate_loyalty_ability(
                 state,
                 pending.object_id,
@@ -495,7 +495,7 @@ fn pay_activation_costs_after_target_selection(
             &mut assigned_ability,
             activation_cost,
         );
-        if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
+        if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             pay_ability_cost_for_activation(
                 state,
                 player,
@@ -590,10 +590,6 @@ pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
         Effect::PutCounter {
             count: QuantityExpr::Fixed { value },
             ..
-        }
-        | Effect::AddCounter {
-            count: QuantityExpr::Fixed { value },
-            ..
         } => Some(*value as u32),
         _ => None,
     }
@@ -610,7 +606,7 @@ pub(super) fn extract_distribution_total(
     }
     let count_expr = match effect {
         Effect::DealDamage { amount, .. } => amount,
-        Effect::PutCounter { count, .. } | Effect::AddCounter { count, .. } => count,
+        Effect::PutCounter { count, .. } => count,
         _ => return None,
     };
     let (inner, _) = count_expr.peel_up_to();

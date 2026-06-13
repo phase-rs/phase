@@ -122,6 +122,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
       bodyClassName="flex min-h-0 flex-col"
+      overlayClassName="z-[60]"
     >
       <div className="min-h-0 flex-1 px-2 pb-2 lg:px-6 lg:pb-6">
         {cards.length === 0 ? (
@@ -219,7 +220,6 @@ function ZoneCard({
             ? "hover:scale-[1.03]"
             : "hover:ring-1 hover:ring-white/20"
       }`}
-      data-card-hover
       title={canCast && !isValidTarget ? castTitle : undefined}
       {...hoverProps(obj.id)}
       onClick={handleClick}

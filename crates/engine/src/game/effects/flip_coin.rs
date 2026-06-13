@@ -1011,4 +1011,273 @@ mod tests {
         assert_eq!(obj.zone, Zone::Battlefield, "Ral should not be exiled");
         assert!(!obj.transformed, "Ral should not transform on a loss");
     }
+
+    #[test]
+    fn krark_lose_branch_target_is_triggering_spell() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::ability::TargetFilter;
+
+        const KRARK_TRIGGER: &str = "Whenever you cast an instant or sorcery spell, flip a coin. \
+            If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+
+        let trig_def = parse_trigger_line(KRARK_TRIGGER, "Krark, the Thumbless");
+        let execute = trig_def.execute.as_ref().unwrap();
+        let Effect::FlipCoin { lose_effect, .. } = execute.effect.as_ref() else {
+            panic!("expected FlipCoin");
+        };
+        let lose = lose_effect.as_ref().unwrap();
+        match lose.effect.as_ref() {
+            Effect::Bounce { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "that spell in a SpellCast trigger must bounce TriggeringSource"
+                );
+            }
+            Effect::ChangeZone {
+                target,
+                destination: Zone::Hand,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "that spell in a SpellCast trigger must return TriggeringSource"
+                );
+            }
+            other => panic!("unexpected lose effect {other:?}"),
+        }
+    }
+
+    #[test]
+    fn krark_isolated_flip_seed0_emits_win_and_runs_copy_branch() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        const KRARK_TRIGGER: &str = "Whenever you cast an instant or sorcery spell, flip a coin. \
+            If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+
+        let trig_def = parse_trigger_line(KRARK_TRIGGER, "Krark, the Thumbless");
+        let execute = trig_def.execute.as_ref().expect("Krark trigger execute");
+
+        let mut state = GameState::new_two_player(0);
+        state.rng = ChaCha20Rng::seed_from_u64(0);
+
+        let krark_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Krark, the Thumbless".to_string(),
+            Zone::Battlefield,
+        );
+        let spell_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Draw Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Instant);
+        }
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("Library {i}"),
+                Zone::Library,
+            );
+        }
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            controller: PlayerId(0),
+            object_id: spell_id,
+            card_id: CardId(2),
+        });
+
+        let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let won = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .expect("CoinFlipped event");
+        assert!(won, "seed 0 must win the flip");
+
+        // Win branch copies the spell — stack should now have the copy above the original.
+        assert!(
+            state.stack.len() >= 2,
+            "win branch should copy onto stack; stack = {:?}",
+            state.stack.len()
+        );
+        assert_eq!(
+            state.objects.get(&spell_id).unwrap().zone,
+            Zone::Stack,
+            "win branch must not bounce the original spell"
+        );
+    }
+
+    #[test]
+    fn krark_isolated_flip_seed1_emits_loss_and_bounces_spell() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        const KRARK_TRIGGER: &str = "Whenever you cast an instant or sorcery spell, flip a coin. \
+            If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+
+        let trig_def = parse_trigger_line(KRARK_TRIGGER, "Krark, the Thumbless");
+        let execute = trig_def.execute.as_ref().expect("Krark trigger execute");
+
+        let mut state = GameState::new_two_player(1);
+        state.rng = ChaCha20Rng::seed_from_u64(1);
+
+        let krark_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Krark, the Thumbless".to_string(),
+            Zone::Battlefield,
+        );
+        let spell_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Draw Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Instant);
+        }
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            controller: PlayerId(0),
+            object_id: spell_id,
+            card_id: CardId(2),
+        });
+
+        let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let won = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .expect("CoinFlipped event");
+        assert!(!won, "seed 1 must lose the flip");
+        assert_eq!(
+            state.objects.get(&spell_id).unwrap().zone,
+            Zone::Hand,
+            "lose branch must return the spell to hand"
+        );
+        assert!(state.stack.is_empty(), "bounced spell must leave the stack");
+    }
+
+    // --- Issue #2940: Krark, the Thumbless win/lose flip branches ----------------
+
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    use crate::types::ability::CopyRetargetPermission;
+
+    const KRARK_TRIGGER: &str = "Whenever you cast an instant or sorcery spell, flip a coin. \
+        If you lose the flip, return that spell to its owner's hand. \
+        If you win the flip, copy that spell, and you may choose new targets for the copy.";
+
+    #[test]
+    fn krark_thumbless_parses_flip_branches_in_correct_slots() {
+        let def = parse_trigger_line(KRARK_TRIGGER, "Krark, the Thumbless");
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("Krark trigger should have execute ability");
+        let Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected FlipCoin execute, got {:?}", execute.effect);
+        };
+        let win = win_effect.as_ref().expect("win branch should be populated");
+        let lose = lose_effect
+            .as_ref()
+            .expect("lose branch should be populated");
+        assert!(
+            matches!(win.effect.as_ref(), Effect::CopySpell { .. }),
+            "win branch should copy the spell, got {:?}",
+            win.effect
+        );
+        assert!(
+            matches!(
+                lose.effect.as_ref(),
+                Effect::Bounce { .. }
+                    | Effect::ChangeZone {
+                        destination: Zone::Hand,
+                        ..
+                    }
+            ),
+            "lose branch should return spell to hand, got {:?}",
+            lose.effect
+        );
+        fn copy_retarget(def: &AbilityDefinition) -> CopyRetargetPermission {
+            match def.effect.as_ref() {
+                Effect::CopySpell { retarget, .. } => retarget.clone(),
+                _ => def
+                    .sub_ability
+                    .as_deref()
+                    .map(copy_retarget)
+                    .unwrap_or(CopyRetargetPermission::KeepOriginalTargets),
+            }
+        }
+        assert_eq!(
+            copy_retarget(win),
+            CopyRetargetPermission::MayChooseNewTargets,
+            "win copy should allow new targets, got {:?}",
+            win.effect
+        );
+    }
 }

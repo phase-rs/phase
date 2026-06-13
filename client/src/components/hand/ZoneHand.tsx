@@ -253,7 +253,6 @@ function ZoneHandCard({ objectId, cardName, zoneLabel, index, onClick }: ZoneHan
 
   return (
     <button
-      data-card-hover
       onClick={() => onClick(objectId)}
       {...hoverProps(objectId)}
       className="group relative cursor-pointer transition-transform hover:z-10 hover:scale-105"

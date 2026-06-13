@@ -8,7 +8,7 @@ pub use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 pub use engine::types::actions::GameAction;
 pub use engine::types::events::GameEvent;
 pub use engine::types::game_state::{
-    ActionResult, CostResume, DamageSlot, PayCostKind, WaitingFor,
+    ActionResult, CastPaymentMode, CostResume, DamageSlot, PayCostKind, WaitingFor,
 };
 pub use engine::types::identifiers::ObjectId;
 pub use engine::types::keywords::Keyword;

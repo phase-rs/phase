@@ -9,8 +9,8 @@
 use engine::types::ability::{
     AbilityCondition, AdditionalCostPaymentSource, AggregateFunction, CardTypeSetSource,
     Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TypeFilter,
-    TypedFilter, ZoneRef,
+    QuantityExpr, QuantityRef, RenownSubject, StaticCondition, TargetFilter, TriggerCondition,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterMatch;
@@ -323,6 +323,11 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
         Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
             left_battlefield_trigger_condition(filter)?
         }
+        // CR 508.1a + CR 603.4: "if no [type] attacked this turn" — global
+        // absence of attackers (Charging Cinderhorn, Keldon Twilight).
+        Condition::NoPermanentsPassFilter(type_filter, prop_filter) => {
+            no_permanents_pass_filter_trigger(type_filter, prop_filter)?
+        }
 
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -537,6 +542,34 @@ fn left_battlefield_static_condition(filter: &Permanents) -> ConvResult<StaticCo
         lhs: left_battlefield_lhs(filter)?,
         comparator: Comparator::GE,
         rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
+/// CR 508.1a + CR 603.4: "if no [type] [passes property filter]" where the
+/// property is attack-history (`AttackedThisTurn`). Maps onto a global
+/// `AttackedThisTurn` quantity gate (Charging Cinderhorn, Keldon Twilight).
+fn no_permanents_pass_filter_trigger(
+    type_filter: &Permanents,
+    prop_filter: &Permanents,
+) -> ConvResult<TriggerCondition> {
+    if !matches!(prop_filter, Permanents::AttackedThisTurn) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "TriggerCondition",
+            needed_variant: format!(
+                "NoPermanentsPassFilter with property {prop_filter:?} (only AttackedThisTurn supported)"
+            ),
+        });
+    }
+    let filter = convert_permanents(type_filter)?;
+    Ok(TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                scope: CountScope::All,
+                filter: Some(filter),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
     })
 }
 
@@ -834,28 +867,39 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         // CR 601.2: "if it was cast" / "if you cast it" — entering permanent
         // entered via the stack rather than a non-cast zone change. Engine's
         // `WasCast` predicate is zoneless (mirrors Discover ETB usage).
-        Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast { zone: None },
+        Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast {
+            zone: None,
+            controller: None,
+        },
         // CR 702.33d-f + CR 603.4: ETB intervening-if "if it was kicked".
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: None,
             min_count: 1,
         },
         Permanents::WasKickedWithKicker(cost) => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: Some(mana::convert(cost)?),
             min_count: 1,
         },
         Permanents::WasKickedTwice => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: None,
             min_count: 2,
         },
         // CR 702.112a: "if ~ is renowned" — source-bound renowned check.
-        Permanents::IsRenowned => TriggerCondition::SourceIsRenowned,
+        Permanents::IsRenowned => TriggerCondition::IsRenowned {
+            subject: RenownSubject::Source,
+        },
         // CR 208.3 + CR 603.4: "if its mana value is X" — comparison against the
         // source's current mana value via QuantityComparison.
         Permanents::ManaValueIs(cmp) => {
@@ -1029,6 +1073,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Neighbor { .. } => "Neighbor",
         TargetFilter::AttachedTo => "AttachedTo",
         TargetFilter::LastCreated => "LastCreated",
+        TargetFilter::LastRevealed => "LastRevealed",
         TargetFilter::CostPaidObject => "CostPaidObject",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
@@ -1059,8 +1104,10 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
     match p {
         FilterProp::Tapped => Some("Tapped"),
         FilterProp::Untapped => Some("Untapped"),
-        FilterProp::Attacking => Some("Attacking"),
-        FilterProp::AttackingController => Some("AttackingController"),
+        FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+        } => Some("AttackingController"),
+        FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
         FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),
@@ -1674,6 +1721,7 @@ pub fn convert_player_predicate_trigger(
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::Controller,
                     },
                 },
@@ -1963,6 +2011,7 @@ pub fn convert_player_predicate_ability(
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::Controller,
                     },
                 },
@@ -2005,7 +2054,10 @@ pub fn convert_player_predicate_ability(
             require_you_player(player, "Players::AttackedThisTurn (ability)")?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn { filter: None },
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2289,6 +2341,7 @@ pub fn convert_player_predicate_static(
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::Controller,
                     },
                 },
@@ -2351,7 +2404,10 @@ pub fn convert_player_predicate_static(
             require_you_player(player, "Players::AttackedThisTurn (static)")?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn { filter: None },
+                    qty: QuantityRef::AttackedThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -3389,6 +3445,8 @@ mod tests {
             TriggerCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
                 variant: None,
+                origin: None,
+                origin_ordinal: None,
                 kicker_cost: None,
                 min_count: 1,
             }

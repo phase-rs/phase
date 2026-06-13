@@ -359,7 +359,13 @@ mod tests {
                     filters: vec![TargetFilter::StackSpell, single.clone()],
                 },
                 TargetFilter::And {
-                    filters: vec![TargetFilter::StackAbility { controller: None }, single],
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                        },
+                        single,
+                    ],
                 },
             ],
         };

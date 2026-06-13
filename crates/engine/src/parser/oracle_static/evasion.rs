@@ -261,11 +261,13 @@ pub(crate) fn parse_compound_subject_rule_static(
     }
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    predicates.insert(0, first);
+    predicates.insert(0, (first, None));
     Some(
         predicates
             .into_iter()
-            .map(|predicate| lower_rule_static(predicate, affected.clone(), text))
+            .map(|(predicate, defended)| {
+                lower_rule_static(predicate, affected.clone(), text).attack_defended(defended)
+            })
             .collect(),
     )
 }
@@ -480,8 +482,9 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
         }
         defs.push(companion);
     }
-    for predicate in tail_predicates {
-        let mut companion = lower_rule_static(predicate, affected.clone(), text);
+    for (predicate, defended) in tail_predicates {
+        let mut companion =
+            lower_rule_static(predicate, affected.clone(), text).attack_defended(defended);
         if let Some(condition) = condition.clone() {
             companion = companion.condition(condition);
         }
@@ -822,6 +825,84 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     let condition = defs[0].condition.clone();
     let mut companion = StaticDefinition::new(StaticMode::CantAttack)
         .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
+/// CR 508.1b + CR 508.1c: Decompose `"<grant or restriction>[,] and can't
+/// attack you [or planeswalkers you control]"` (the Vow cycle — Vow of
+/// Lightning, Duty, Flight, Torment, Wildness) into the first conjunct's
+/// static(s) plus a companion `CantAttack` static scoped to the Aura
+/// controller's side of the board, sharing the same `affected` set.
+///
+/// Without this split the trailing attack restriction was silently dropped:
+/// Vow of Lightning ("Enchanted creature gets +2/+2, has first strike, and
+/// can't attack you or planeswalkers you control.") parsed to only the +2/+2
+/// grant and first-strike keyword — the lockout that defines the Vow cycle
+/// was completely inert and the enchanted creature could freely attack its
+/// Aura's controller.
+///
+/// Registered before `try_split_and_cant_attack` so the more specific scoped
+/// phrase is consumed first; the bare-attack splitter's terminal guard would
+/// decline the " you …" tail anyway, but ordering is belt-and-suspenders.
+///
+/// Handles two scoped forms:
+/// - `"and can't attack you"` → `CantAttack` with `defended = Player`
+/// - `"and can't attack you or planeswalkers you control"` → `CantAttack`
+///   with `defended = PlayerOrPlaneswalker`
+pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_ascii_lowercase();
+
+    let (before, defended, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        let (i, _) = alt((
+            tag::<_, _, VE>("and can't attack"),
+            tag::<_, _, VE>("and can\u{2019}t attack"),
+        ))
+        .parse(i)?;
+        let (i, defended) = parse_cant_attack_defended_scope_nom(i)?;
+        let Some(defended) = defended else {
+            return Err(nom::Err::Error(OracleError::new(
+                i,
+                nom::error::ErrorKind::Tag,
+            )));
+        };
+        // Optional trailing duration phrase.
+        let (i, _) = opt(alt((
+            tag::<_, _, VE>(" each combat"),
+            tag::<_, _, VE>(" this combat"),
+            tag::<_, _, VE>(" this turn"),
+        )))
+        .parse(i)?;
+        Ok((i, defended))
+    })?;
+
+    // Terminal guard: decline unless the tail is empty (punctuation only).
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(StaticMode::CantAttack)
+        .affected(affected)
+        .attack_defended(Some(defended))
         .description(text.to_string());
     if let Some(condition) = condition {
         companion = companion.condition(condition);
@@ -1605,6 +1686,14 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
         }
     }
 
+    if let Ok((rest, (predicate, defended))) =
+        parse_combat_rule_static_predicate_with_defended_nom(predicate_text)
+    {
+        if rest.trim().is_empty() {
+            return Some(lower_rule_static(predicate, affected, text).attack_defended(defended));
+        }
+    }
+
     let predicate = parse_rule_static_predicate(predicate_text)?;
     // CR 502.3: Extract trailing condition for CantUntap statics (e.g., "as long as [condition]")
     if matches!(predicate, RuleStaticPredicate::CantUntap) {
@@ -2253,4 +2342,150 @@ pub(crate) fn try_parse_scoped_must_attack_block(
             })
             .collect(),
     )
+}
+
+/// CR 611.3a + CR 613.1f: Detect and split
+/// `"PRIMARY and FOREIGN_SUBJECT have/has/gains/gain KEYWORD [as long as COND]"`
+/// (including the inverted form `"As long as COND, PRIMARY and FOREIGN_SUBJECT …"`).
+///
+/// A "foreign subject" is any noun phrase parseable by `parse_continuous_subject_filter`
+/// that does NOT resolve to `SelfRef`. Example: "creatures you control have vigilance"
+/// after "~ gets +2/+2 and" — Angelic Field Marshal's Lieutenant ability.
+///
+/// Returns two `StaticDefinition`s: one for the primary (existing `affected`) plus a
+/// companion `Continuous` def for the foreign-subject keyword grant. Both inherit the
+/// same `StaticCondition` when present so the gate applies to both effects.
+///
+/// CR 109.5 + CR 611.3a: the condition binds each effect independently (CR 611.3a),
+/// but MTG print convention always states one condition for the whole clause, so both
+/// defs receive the same condition object.
+pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Normalize the inverted "As long as COND, EFFECT" orientation so the rest
+    // of the logic always operates on EFFECT with an optional separate COND.
+    let (effect_original, condition_text): (String, Option<String>) =
+        if let Some(split) = try_split_inverted_as_long_as(&tp) {
+            (
+                split.effect_text.clone(),
+                Some(split.condition_text.clone()),
+            )
+        } else if let Some((before, after)) = tp.split_around(" as long as ") {
+            (
+                before.original.trim().to_string(),
+                Some(after.original.trim().trim_end_matches('.').to_string()),
+            )
+        } else {
+            (text.to_string(), None)
+        };
+
+    let effect_lower = effect_original.to_lowercase();
+
+    // Scan for "and FOREIGN_SUBJECT verb KEYWORD" in the effect text.
+    // We try each grant verb and check every " and " position.
+    for verb in [" have ", " has ", " gains ", " gain "] {
+        let mut search_lower = effect_lower.as_str();
+        let mut search_offset = 0;
+        while let Some((before_and, subject_lower, keyword_lower)) =
+            nom_primitives::scan_preceded(search_lower, |input| {
+                let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(input)?;
+                let (after_subject, subject) = take_until(verb).parse(after_and)?;
+                let (after_verb, _) = tag::<_, _, OracleError<'_>>(verb).parse(after_subject)?;
+                Ok((after_verb, subject))
+            })
+        {
+            let and_pos = search_offset + before_and.len();
+
+            let subject_lower = subject_lower.trim();
+            if subject_lower.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Subject must resolve to a recognised non-SelfRef filter.
+            let companion_filter = match parse_continuous_subject_filter(subject_lower) {
+                Some(f) if !matches!(f, TargetFilter::SelfRef) => f,
+                _ => {
+                    search_offset = and_pos + "and ".len();
+                    search_lower = &effect_lower[search_offset..];
+                    continue;
+                }
+            };
+
+            // Keyword text is everything after the verb.
+            let kw_start = effect_lower.len() - keyword_lower.len();
+            if kw_start >= effect_original.len() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+            let keyword_text = effect_original[kw_start..].trim().trim_end_matches('.');
+            if keyword_text.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Parse keyword list into companion modifications.
+            let mut companion_mods = Vec::new();
+            for part in split_keyword_list(keyword_text) {
+                push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+            }
+            if companion_mods.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Primary text is everything before " and FOREIGN_SUBJECT".
+            let primary_text = effect_original[..and_pos].trim_end_matches(',').trim();
+            if primary_text.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            // Re-parse the primary with the condition included so the primary def
+            // already carries the condition object.
+            let primary_full = if let Some(ref cond) = condition_text {
+                format!("{primary_text} as long as {cond}.")
+            } else {
+                format!("{primary_text}.")
+            };
+            let mut primary_defs = parse_static_line_multi(&primary_full);
+            if primary_defs.is_empty() {
+                search_offset = and_pos + "and ".len();
+                search_lower = &effect_lower[search_offset..];
+                continue;
+            }
+
+            for def in &mut primary_defs {
+                def.description = Some(text.to_string());
+            }
+
+            // Resolve the condition object for the companion.
+            let condition = condition_text.as_deref().and_then(|ct| {
+                parse_static_condition(ct).or(Some(StaticCondition::Unrecognized {
+                    text: ct.to_string(),
+                }))
+            });
+            let effective_condition =
+                condition.or_else(|| primary_defs.first().and_then(|d| d.condition.clone()));
+
+            let mut companion = StaticDefinition::continuous()
+                .affected(companion_filter)
+                .modifications(companion_mods)
+                .description(text.to_string());
+            if let Some(cond) = effective_condition {
+                companion.condition = Some(cond);
+            }
+
+            primary_defs.push(companion);
+            return Some(primary_defs);
+        }
+    }
+
+    None
 }

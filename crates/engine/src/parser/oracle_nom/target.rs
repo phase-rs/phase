@@ -18,13 +18,6 @@ use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
-/// Parse a "target <type phrase>" from Oracle text.
-///
-/// Matches "target creature", "target artifact or enchantment you control", etc.
-pub fn parse_target_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
-    preceded((tag("target"), space1), parse_type_phrase).parse(input)
-}
-
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
@@ -351,7 +344,10 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
             TargetFilter::Or {
                 filters: vec![
                     TargetFilter::StackSpell,
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                    },
                 ],
             },
             alt((
@@ -398,7 +394,10 @@ fn parse_ability_kind_with_optional_spell(input: &str) -> OracleResult<'_, Targe
     ))
     .parse(rest)?;
 
-    let ability = TargetFilter::StackAbility { controller: None };
+    let ability = TargetFilter::StackAbility {
+        controller: None,
+        tag: None,
+    };
     let filter = match spell_leg {
         Some(spell) => TargetFilter::Or {
             filters: vec![ability, spell],
@@ -503,8 +502,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_target_phrase_creature() {
-        let (rest, filter) = parse_target_phrase("target creature with power").unwrap();
+    fn test_parse_type_phrase_creature() {
+        let (rest, filter) = parse_type_phrase("creature with power").unwrap();
         assert_eq!(rest, " with power");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -515,9 +514,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_target_phrase_artifact_or_enchantment() {
-        let (rest, filter) =
-            parse_target_phrase("target artifact or enchantment you control").unwrap();
+    fn test_parse_type_phrase_artifact_or_enchantment() {
+        let (rest, filter) = parse_type_phrase("artifact or enchantment you control").unwrap();
         assert_eq!(rest, "");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -532,11 +530,6 @@ mod tests {
             }
             _ => panic!("expected Typed filter"),
         }
-    }
-
-    #[test]
-    fn test_parse_target_phrase_no_target_prefix() {
-        assert!(parse_target_phrase("creature").is_err());
     }
 
     #[test]
@@ -790,7 +783,10 @@ mod tests {
             filter,
             TargetFilter::Or {
                 filters: vec![
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None
+                    },
                     noncreature_spell_leg(),
                 ],
             }
@@ -828,14 +824,26 @@ mod tests {
         // Ability-only counter (e.g. Stifle / Disallow's ability disjunct).
         let (rest, filter) = parse_stack_object_target("activated or triggered ability").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        );
     }
 
     #[test]
     fn test_stack_object_activated_ability_only() {
         let (rest, filter) = parse_stack_object_target("activated ability").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        );
     }
 
     #[test]
@@ -850,7 +858,10 @@ mod tests {
             TargetFilter::Or {
                 filters: vec![
                     TargetFilter::StackSpell,
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None
+                    },
                 ],
             }
         );

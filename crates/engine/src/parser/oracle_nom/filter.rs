@@ -95,7 +95,9 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
         value(FilterProp::Tapped, tag("tapped")),
         value(FilterProp::Untapped, tag("untapped")),
-        value(FilterProp::Attacking, tag("attacking")),
+        // CR 702.171b: "saddled Mount/creature" selector.
+        value(FilterProp::IsSaddled, tag("saddled")),
+        value(FilterProp::Attacking { defender: None }, tag("attacking")),
         value(FilterProp::Blocking, tag("blocking")),
         value(FilterProp::Token, tag("token")),
         value(FilterProp::NonToken, tag("nontoken")),
@@ -404,10 +406,18 @@ mod tests {
         assert_eq!(rest, " creatures");
     }
 
+    // CR 702.171b: "saddled Mount/creature" selector → FilterProp::IsSaddled.
+    #[test]
+    fn test_parse_property_filter_saddled() {
+        let (rest, p) = parse_property_filter("saddled Mount you control").unwrap();
+        assert_eq!(p, FilterProp::IsSaddled);
+        assert_eq!(rest, " Mount you control");
+    }
+
     #[test]
     fn test_parse_property_filter_attacking() {
         let (rest, p) = parse_property_filter("attacking").unwrap();
-        assert_eq!(p, FilterProp::Attacking);
+        assert_eq!(p, FilterProp::Attacking { defender: None });
         assert_eq!(rest, "");
     }
 

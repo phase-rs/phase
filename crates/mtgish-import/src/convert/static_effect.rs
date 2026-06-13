@@ -9,7 +9,7 @@ use engine::types::ability::{
     AbilityKind, ContinuousModification, Duration, PlayerScope, QuantityExpr, StaticCondition,
     StaticDefinition,
 };
-use engine::types::statics::StaticMode;
+use engine::types::statics::{CombatAloneAction, CombatAloneRequirement, StaticMode};
 use engine::types::Phase;
 
 use crate::convert::keyword::try_convert as keyword_try_convert;
@@ -293,20 +293,30 @@ pub fn convert_permanent_rule(
         P::CantAttack => StaticMode::CantAttack,
         P::CantBlock => StaticMode::CantBlock,
         P::CantCrew => StaticMode::CantCrew,
-        P::CantAttackAlone => StaticMode::CantAttackAlone,
-        P::CantBlockAlone => StaticMode::CantBlockAlone,
+        // CR 506.5 + CR 508.1c + CR 509.1b: parameterized "alone" combat restriction.
+        P::CantAttackAlone => StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        P::CantBlockAlone => StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        P::CanOnlyAttackAlone => StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        },
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
         P::MustBeBlocked => StaticMode::MustBeBlocked,
         P::CanBlockOnly(filter) if is_creature_with_flying_filter(filter) => {
-            StaticMode::BlockRestriction
+            StaticMode::BlockRestriction {
+                filter: engine::types::statics::block_only_creatures_with_flying_filter(),
+            }
         }
-        P::CanBlockOnly(filter) => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "StaticMode::BlockRestriction",
-                needed_variant: format!("parameterized block-only filter: {filter:?}"),
-            });
-        }
+        P::CanBlockOnly(filter) => StaticMode::BlockRestriction {
+            filter: filter::convert(filter)?,
+        },
         P::CantAttackIfDefendingPlayer(condition) => {
             return Ok(StaticDefinition::new(StaticMode::CantAttack)
                 .affected(affected)
@@ -1009,7 +1019,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(converted.mode, StaticMode::BlockRestriction);
+        assert!(matches!(
+            converted.mode,
+            StaticMode::BlockRestriction { .. }
+        ));
         assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
     }
 

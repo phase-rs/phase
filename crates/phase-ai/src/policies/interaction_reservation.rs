@@ -14,6 +14,7 @@ use super::strategy_helpers::{
     battlefield_pressure_delta, best_proactive_cast_score, is_own_main_phase,
 };
 use crate::deck_profile::DeckArchetype;
+use engine::types::game_state::CastPaymentMode;
 
 pub struct InteractionReservationPolicy;
 
@@ -52,6 +53,8 @@ impl InteractionReservationPolicy {
                     object_id: object.id,
                     card_id: object.card_id,
                     targets: Vec::new(),
+
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 ctx.ai_player,
             ) {

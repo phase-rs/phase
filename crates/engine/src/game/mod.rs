@@ -24,6 +24,7 @@ pub mod commander;
 pub mod companion;
 pub(crate) mod conditions;
 pub mod cost_payability;
+pub(crate) mod costs;
 pub mod coverage;
 pub mod dash;
 #[cfg(test)]
@@ -67,6 +68,12 @@ pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
+pub mod meld;
+// Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
+// so `meld.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "meld_tests.rs"]
+mod meld_tests;
 pub mod merge;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
@@ -77,7 +84,14 @@ pub mod morph;
 pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
+pub mod perf_counters;
 pub mod phasing;
+pub mod planechase;
+// Tests for `planechase` live in a sibling file (declared here, not in
+// `planechase.rs`, so `planechase.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "planechase_tests.rs"]
+mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
 pub mod printed_cards;
@@ -108,6 +122,7 @@ pub mod triggers;
 pub mod turn_control;
 pub mod turns;
 pub mod visibility;
+pub mod zone_pipeline;
 pub mod zones;
 
 #[cfg(test)]
@@ -134,8 +149,7 @@ pub use engine::{
 pub use engine_debug::route_debug_create_to_battlefield;
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
-pub use layers::evaluate_layers;
-pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
+pub use mana_payment::{can_pay, pay_from_pool, produce_mana, PaymentError};
 pub use printed_cards::rehydrate_game_from_card_db;
 pub use public_state::finalize_public_state;
 pub use triggers::process_triggers;

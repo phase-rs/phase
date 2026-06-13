@@ -333,10 +333,26 @@ function CardPreviewInner({
   }
 
   const style: React.CSSProperties = position
-    ? {
-        left: Math.min(position.x + 16, window.innerWidth - 488),
-        top: Math.min(position.y - 200, window.innerHeight - 736),
-      }
+    ? (() => {
+        const estimatedWidth = Math.min(previewWidth, viewportWidth - margin * 2);
+        const estimatedHeight = Math.min(previewHeight, viewportHeight - margin * 2);
+        const unclampedLeft =
+          position.x > viewportWidth / 2
+            ? position.x - previewWidth - gap
+            : position.x + gap;
+        const unclampedTop = altHeld ? margin : position.y - estimatedHeight / 2;
+
+        return {
+          left: Math.min(
+            Math.max(margin, unclampedLeft),
+            Math.max(margin, viewportWidth - estimatedWidth - margin),
+          ),
+          top: Math.min(
+            Math.max(margin, unclampedTop),
+            Math.max(margin, viewportHeight - estimatedHeight - margin),
+          ),
+        };
+      })()
     : defaultDesktopStyle;
 
   return (
@@ -401,6 +417,9 @@ function MobilePreviewOverlay({
   const { src, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
+    isToken: obj?.display_source === "Token",
+    tokenFilters: obj?.display_source === "Token" ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: obj?.display_source === "Token" ? obj.token_image_ref : undefined,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     sourcePrinting,

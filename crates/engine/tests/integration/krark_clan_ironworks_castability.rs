@@ -26,7 +26,7 @@ use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr,
-    TargetFilter, TypeFilter, TypedFilter,
+    SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -70,10 +70,10 @@ fn add_kci(state: &mut GameState, player: PlayerId) -> ObjectId {
                 target: None,
             },
         )
-        .cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-            count: 1,
-        }),
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            1,
+        ))),
     );
     id
 }
@@ -145,7 +145,7 @@ fn priority_main_phase(state: &mut GameState, player: PlayerId) {
 // path) because the simulation oracle runs an Auto-mode cast, which correctly
 // fails when only manual mana payment can cover the cost. The frontend
 // surfaces the spell via `spell_costs` (built from `display_spell_cost`) and
-// dispatches `CastSpellWithPaymentMode { Manual }` — the cast is castable;
+// dispatches `CastSpell { Manual }` — the cast is castable;
 // the engine then enters `ManaPayment` and the player activates KCI manually.
 #[test]
 fn castability_gate_exposes_spell_when_kci_can_feasibly_pay_cost() {
@@ -247,7 +247,7 @@ fn castability_gate_rejects_spell_when_capacity_below_cost() {
 // (d) End-to-end Manual-payment regression. Tests the FULL action chain the
 //     castability gate unblocks:
 //
-//       CastSpellWithPaymentMode { Manual }
+//       CastSpell { Manual }
 //         -> ManaPayment
 //         -> ActivateAbility { KCI }
 //         -> SacrificeForManaAbility
@@ -285,14 +285,14 @@ fn manual_payment_flow_resolves_kci_sacrifice_to_pay_spell_cost() {
     // for the caster to activate mana abilities (CR 601.2g).
     apply_as_current(
         &mut state,
-        GameAction::CastSpellWithPaymentMode {
+        GameAction::CastSpell {
             object_id: wellspring,
             card_id: wellspring_card_id,
             targets: vec![],
             payment_mode: CastPaymentMode::Manual,
         },
     )
-    .expect("CastSpellWithPaymentMode { Manual } must succeed when KCI can feasibly pay {2}");
+    .expect("CastSpell { Manual } must succeed when KCI can feasibly pay {2}");
 
     match &state.waiting_for {
         WaitingFor::ManaPayment { player, .. } => assert_eq!(*player, P0),

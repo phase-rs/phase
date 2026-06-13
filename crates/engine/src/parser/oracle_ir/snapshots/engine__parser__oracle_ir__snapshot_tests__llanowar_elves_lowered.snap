@@ -22,11 +22,11 @@ expression: "&lowered"
       "duration": null,
       "description": "{T}: Add {G}.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
-      "forward_result": false
+      "forward_result": false,
+      "is_mana_ability": true
     }
   ],
   "triggers": [],

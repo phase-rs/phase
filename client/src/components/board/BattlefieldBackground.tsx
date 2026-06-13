@@ -66,7 +66,22 @@ export function BattlefieldBackground() {
 
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
+
+  // resolveBackground locks the chosen image in lockedRef for the "random" and
+  // "auto-wubrg" modes (once chosen, it sticks for the session). The lock is
+  // reset by remount: GamePage keys this component on `${boardBackground}-${playerId}`,
+  // so switching mode or seat unmounts and remounts it with a fresh null lockedRef.
+  // That keeps render pure (no prev-value ref tracking / ref mutation during
+  // render) while preserving the same reset semantics under StrictMode.
+
   const deckColor = useMemo(() => {
+    // The dominant-color scan walks the full library + hand + battlefield, and
+    // its result is consumed ONLY by the "auto-wubrg" background — and only
+    // until resolveBackground locks in a color-matched image on first detection
+    // (lockedRef). For every other background mode, and on every action after
+    // the lock, the result is discarded. Without this guard the scan re-ran on
+    // every gameState change (mana tap, phase tick, priority pass) for nothing.
+    if (boardBackground !== "auto-wubrg" || lockedRef.current) return null;
     if (!gameState) return null;
     const player = gameState.players[playerId];
     if (!player) return null;
@@ -77,7 +92,7 @@ export function BattlefieldBackground() {
       gameState.objects,
       playerId,
     );
-  }, [gameState, playerId]);
+  }, [gameState, playerId, boardBackground]);
 
   const bg = resolveBackground(boardBackground, customBackgroundUrl, deckColor, lockedRef);
 

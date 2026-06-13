@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, PtValue, ResolvedAbility,
     TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -25,8 +25,8 @@ pub fn resolve(
             keywords,
             ..
         } => (
-            *power,
-            *toughness,
+            power.clone(),
+            toughness.clone(),
             types.as_slice(),
             remove_types.as_slice(),
             keywords.as_slice(),
@@ -42,11 +42,25 @@ pub fn resolve(
     let mut modifications = Vec::new();
 
     // CR 613.4 / Layer 7b: Set base P/T (overrides printed values).
-    if let Some(p) = power {
-        modifications.push(ContinuousModification::SetPower { value: p });
+    // PtValue::Fixed(n) emits a static SetPower; PtValue::Quantity(q) emits
+    // SetPowerDynamic so the layer system re-evaluates q each tick (CR 613.1).
+    match power {
+        Some(PtValue::Fixed(n)) => {
+            modifications.push(ContinuousModification::SetPower { value: n })
+        }
+        Some(PtValue::Quantity(q)) => {
+            modifications.push(ContinuousModification::SetPowerDynamic { value: q })
+        }
+        Some(PtValue::Variable(_)) | None => {}
     }
-    if let Some(t) = toughness {
-        modifications.push(ContinuousModification::SetToughness { value: t });
+    match toughness {
+        Some(PtValue::Fixed(n)) => {
+            modifications.push(ContinuousModification::SetToughness { value: n })
+        }
+        Some(PtValue::Quantity(q)) => {
+            modifications.push(ContinuousModification::SetToughnessDynamic { value: q })
+        }
+        Some(PtValue::Variable(_)) | None => {}
     }
 
     // CR 613.1d / Layer 4: Add types and subtypes.
@@ -122,6 +136,7 @@ fn resolve_animate_targets(ability: &ResolvedAbility) -> Vec<crate::types::ident
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -139,8 +154,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Animate {
-                power: Some(7),
-                toughness: Some(7),
+                power: Some(PtValue::Fixed(7)),
+                toughness: Some(PtValue::Fixed(7)),
                 types: vec!["Creature".to_string(), "Beast".to_string()],
                 remove_types: vec![],
                 keywords: vec![],
@@ -189,8 +204,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Animate {
-                power: Some(3),
-                toughness: Some(3),
+                power: Some(PtValue::Fixed(3)),
+                toughness: Some(PtValue::Fixed(3)),
                 types: vec!["Creature".to_string()],
                 remove_types: vec![],
                 keywords: vec![],
@@ -223,8 +238,8 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Animate {
-                power: Some(5),
-                toughness: Some(5),
+                power: Some(PtValue::Fixed(5)),
+                toughness: Some(PtValue::Fixed(5)),
                 types: vec!["Creature".to_string()],
                 remove_types: vec![],
                 keywords: vec![],
@@ -242,6 +257,61 @@ mod tests {
         assert_eq!(
             state.transient_continuous_effects[0].duration,
             Duration::UntilHostLeavesPlay
+        );
+    }
+
+    /// CR 613.4 + CR 613.1: PtValue::Quantity routes to SetPowerDynamic /
+    /// SetToughnessDynamic so the layer system re-evaluates the quantity each
+    /// tick (e.g. "becomes an X/X creature" where X = CostXPaid).
+    #[test]
+    fn animate_dynamic_pt_emits_set_power_dynamic() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+
+        let cost_x = QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(PtValue::Quantity(cost_x.clone())),
+                toughness: Some(PtValue::Quantity(cost_x.clone())),
+                types: vec!["Creature".to_string()],
+                remove_types: vec![],
+                keywords: vec![],
+                target: TargetFilter::None,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let tce = &state.transient_continuous_effects[0];
+        assert!(
+            tce.modifications
+                .contains(&ContinuousModification::SetPowerDynamic {
+                    value: cost_x.clone()
+                }),
+            "must emit SetPowerDynamic(CostXPaid)"
+        );
+        assert!(
+            tce.modifications
+                .contains(&ContinuousModification::SetToughnessDynamic { value: cost_x }),
+            "must emit SetToughnessDynamic(CostXPaid)"
+        );
+        assert!(
+            !tce.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { .. })),
+            "must not emit static SetPower when PtValue::Quantity"
         );
     }
 }

@@ -36,9 +36,9 @@ impl MulliganPolicy for AristocratsKeepablesMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        _plan: &PlanSnapshot, // input-unused: aristocrats opener scoring is card-composition only
+        _turn_order: TurnOrder, // input-unused: aristocrats opener scoring is card-composition only
+        _mulligans_taken: u8, // input-unused: aristocrats opener scoring is card-composition only
     ) -> MulliganScore {
         let commitment = features.aristocrats.commitment;
         if commitment <= COMMITMENT_THRESHOLD {
@@ -131,7 +131,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr,
-        TargetFilter, TypedFilter,
+        SacrificeCost, TargetFilter, TypedFilter,
     };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::GameState;
@@ -174,10 +174,10 @@ mod tests {
                 damage_source: None,
             },
         );
-        ability.cost = Some(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            count: 1,
-        });
+        ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            1,
+        )));
         ability
     }
 

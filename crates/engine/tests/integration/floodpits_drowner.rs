@@ -12,8 +12,8 @@
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ControllerRef, Effect, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter,
+    ControllerRef, Effect, EffectScope, FilterProp, QuantityExpr, ResolvedAbility, TapStateChange,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -62,10 +62,12 @@ fn etb_tap_and_stun_counter() {
     );
 
     let mut primary = ResolvedAbility::new(
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
         vec![TargetRef::Object(target_id)],
         source_id,
@@ -265,8 +267,10 @@ fn parser_produces_compound_tap_stun() {
 
     // Primary effect should be Tap with opponent creature target
     match &effect {
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::Typed(tf),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         } => {
             assert!(tf.type_filters.contains(&TypeFilter::Creature));
             assert_eq!(tf.controller, Some(ControllerRef::Opponent));

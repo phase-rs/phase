@@ -6,9 +6,10 @@
 # Existing non-combinator code in the parser is frozen in amber — this check
 # only flags *newly added* offending lines in the diff.
 #
-# Four forbidden pattern families:
+# Six forbidden pattern families:
 #   (A) String-method dispatch: .strip_prefix / .contains("...") / .split_once
-#       / .find("...") / etc. Use nom combinators (tag, alt, take_until) instead.
+#       / .find("...") / .rfind("...") / .split("...") / .splitn / etc.
+#       Use nom combinators (tag, alt, take_until) instead.
 #   (B) Match-arm dispatch on string literals: `match expr { "foo" => ..., }`.
 #       Discriminant is parser text; arms are literals. Use alt((tag(...))).
 #   (C) Chained `if let Ok((rest, _)) = tag("…")(input)` blocks (≥2 in one
@@ -18,6 +19,14 @@
 #       [creature ]types"). Factor each varying axis into its own alt()/opt()
 #       inside a sequence; see PATTERNS.md section 8b. Multi-line structural
 #       check delegated to scripts/lib/detect-cross-product-alts.py.
+#   (E) Verbatim-sentence equality: `lower == "twenty-five plus chars..."`.
+#       Matching a whole Oracle sentence handles exactly one card — decompose
+#       into typed building blocks (grammar prefix/suffix combinators).
+#   (F) Hand-constructed `Effect::Unimplemented { .. }` literals. The single
+#       authority is `Effect::unimplemented(name, fragment)` — it documents
+#       the name-is-a-category-key contract the coverage report depends on.
+#       Match-arm destructuring (`Effect::Unimplemented { name, .. } =>`) is
+#       not flagged.
 #
 # Exempt: lines (or the line immediately above) with
 #     // allow-noncombinator: <reason>
@@ -48,12 +57,13 @@ if [ -n "${GIT_INDEX_FILE:-}" ] || [ "$BASE" = "$(git rev-parse HEAD 2>/dev/null
 fi
 
 # (A) String-method dispatch. The "..." suffix on `.contains` / `.starts_with`
-# / `.ends_with` / `.find` / `.trim_*_matches` matches only string-literal
-# arguments — `.contains(&item)` (Vec/slice op) and `.trim_end_matches('.')`
-# (char arg, structural cleanup) are legitimate. strip_prefix / strip_suffix /
-# split_once / rsplit_once almost always operate on string literals; flag
-# unconditionally.
-FORBIDDEN_METHODS='\.strip_prefix\(|\.strip_suffix\(|\.split_once\(|\.rsplit_once\(|\.contains\("|\.starts_with\("|\.ends_with\("|\.find\("|\.trim_end_matches\("|\.trim_start_matches\("'
+# / `.ends_with` / `.find` / `.rfind` / `.split` / `.trim_*_matches` matches
+# only string-literal arguments — `.contains(&item)` (Vec/slice op),
+# `.trim_end_matches('.')` (char arg, structural cleanup), and the documented
+# `.find(' ')` word-boundary-scan idiom are legitimate. strip_prefix /
+# strip_suffix / split_once / rsplit_once / splitn almost always operate on
+# string literals; flag unconditionally.
+FORBIDDEN_METHODS='\.strip_prefix\(|\.strip_suffix\(|\.split_once\(|\.rsplit_once\(|\.splitn\(|\.contains\("|\.starts_with\("|\.ends_with\("|\.find\("|\.rfind\("|\.split\("|\.trim_end_matches\("|\.trim_start_matches\("'
 
 # (B) Match-arm string-literal pattern. Lines that look like `"literal" => ...`
 # at the start of an indented block. In Rust, string-literal patterns are
@@ -68,11 +78,25 @@ FORBIDDEN_MATCH_ARM='^\+[[:space:]]*"[^"]+"[[:space:]]*=>'
 # — should collapse into `alt((tag(...), tag(...)))`. Counted per file.
 IFLET_TAG_PATTERN='^\+[[:space:]]*if[[:space:]]+let[[:space:]]+Ok.*=[[:space:]]*tag(_no_case)?(::<[^>]*>)?\("[^"]+"\)'
 
+# (E) Verbatim-sentence equality. `expr == "long literal"` (or reversed) with a
+# 25+-char literal is a whole-Oracle-sentence match — the single most
+# prohibited pattern. Short literals (`== "x"` for a counter symbol, type word)
+# are legitimate leaf comparisons and stay unflagged.
+FORBIDDEN_VERBATIM_EQ='(==|!=)[[:space:]]*"[^"]{25,}"|"[^"]{25,}"[[:space:]]*(==|!=)'
+
+# (F) Hand-constructed Unimplemented literal. Construction is either a
+# single-line `Effect::Unimplemented { name: ...` (colon after `name`) or a
+# multi-line opener ending in `{`. Destructuring patterns (`{ name, .. } =>`,
+# `{ .. }`) match neither alternative.
+FORBIDDEN_UNIMPL_LITERAL='Effect::Unimplemented[[:space:]]*\{[[:space:]]*$|Effect::Unimplemented[[:space:]]*\{[[:space:]]*name:'
+
 FAIL=0
 report_methods=""
 report_match_arm=""
 report_iflet_tag=""
 report_crossprod=""
+report_verbatim_eq=""
+report_unimpl=""
 
 # Filter a per-file candidate list against the allow-noncombinator escape
 # hatch. Reads candidate lines (each prefixed by '+') on stdin, prints the
@@ -161,6 +185,32 @@ while IFS= read -r file; do
         FAIL=1
     fi
 
+    # (E) Verbatim-sentence equality comparisons.
+    verbatim_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_VERBATIM_EQ" || true)
+    verbatim_clean=$(filter_allow_noncombinator "$file" "$verbatim_hits")
+    if [ -n "$verbatim_clean" ]; then
+        report_verbatim_eq="${report_verbatim_eq}
+  ${file}:"
+        while IFS= read -r line; do
+            report_verbatim_eq="${report_verbatim_eq}
+    ${line}"
+        done <<< "$verbatim_clean"
+        FAIL=1
+    fi
+
+    # (F) Hand-constructed Effect::Unimplemented literals.
+    unimpl_hits=$(echo "$diff_added" | grep -Ev 'allow-noncombinator' | grep -E "$FORBIDDEN_UNIMPL_LITERAL" || true)
+    unimpl_clean=$(filter_allow_noncombinator "$file" "$unimpl_hits")
+    if [ -n "$unimpl_clean" ]; then
+        report_unimpl="${report_unimpl}
+  ${file}:"
+        while IFS= read -r line; do
+            report_unimpl="${report_unimpl}
+    ${line}"
+        done <<< "$unimpl_clean"
+        FAIL=1
+    fi
+
     # (D) Un-factored cross-product alt. Multi-line structural check: feed the
     # unified=0 diff for this file to the Python detector, which maps added
     # lines onto post-image `alt` blocks and flags those with >=4 tag arms
@@ -194,8 +244,9 @@ EOF
     .strip_prefix / .trim_start_matches  -> Pattern 1 (optional fixed prefix)
     .strip_suffix / .trim_end_matches    -> Pattern 2 or 3 (suffix / trailing)
     .contains / .starts_with / .ends_with -> Pattern 7 (integrate into parse)
-    .split_once / .rsplit_once           -> Pattern 6 (delimiter split)
-    .find("...")                         -> Pattern 5 (word-boundary scan)
+    .split_once / .rsplit_once / .splitn -> Pattern 6 (delimiter split)
+    .split("...")                        -> Pattern 6 (delimiter split)
+    .find("...") / .rfind("...")         -> Pattern 5 (word-boundary scan)
 
 Forbidden in added lines (diff vs ${BASE}):
 ${report_methods}
@@ -231,6 +282,38 @@ A single if-let-tag for an optional prefix is fine.
 
 Forbidden in added files (diff vs ${BASE}):
 ${report_iflet_tag}
+
+EOF
+    fi
+
+    if [ -n "$report_verbatim_eq" ]; then
+        cat >&2 <<EOF
+(E) Verbatim-sentence equality — the single most prohibited pattern:
+    lower == "whole oracle sentence here"   ->  decompose into typed building
+                                                blocks: grammar prefix/suffix
+                                                combinators + typed enum variants
+A whole-sentence match handles exactly one card. Identify the grammatical
+structure and parse each axis with combinators so the pattern covers every
+card in the class.
+
+Forbidden in added lines (diff vs ${BASE}):
+${report_verbatim_eq}
+
+EOF
+    fi
+
+    if [ -n "$report_unimpl" ]; then
+        cat >&2 <<EOF
+(F) Hand-constructed Effect::Unimplemented literal — use the constructor:
+    Effect::Unimplemented {                ->  Effect::unimplemented(
+        name: "...".into(),                        "pattern_class_key",
+        description: Some(text.into()),            unparsed_fragment,
+    }                                          )
+The \`name\` must be a stable snake_case pattern-class key (the coverage
+report groups parse gaps by it) — never the raw Oracle text fragment.
+
+Forbidden in added lines (diff vs ${BASE}):
+${report_unimpl}
 
 EOF
     fi

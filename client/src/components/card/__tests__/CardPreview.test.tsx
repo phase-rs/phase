@@ -2,17 +2,18 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
+import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { CardPreview } from "../CardPreview.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
-  useCardImage: () => ({
+  useCardImage: vi.fn(() => ({
     src: "card.png",
     isLoading: false,
     isRotated: false,
     isFlip: false,
-  }),
+  })),
 }));
 
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
@@ -86,11 +87,25 @@ function gameStateWithObject(object: GameObject): GameState {
 
 afterEach(() => {
   cleanup();
+  vi.clearAllMocks();
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
+  Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
   useGameStore.setState({ gameState: null, spellCosts: {} });
   useUiStore.setState({ inspectedObjectId: null, altHeld: false });
 });
 
 describe("CardPreview chosen attributes", () => {
+  it("clamps an explicit preview position into the viewport", () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
+    const { container } = render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
+
+    const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+    expect(preview).not.toBeNull();
+    expect(preview?.style.left).toBe("40px");
+    expect(preview?.style.top).toBe("16px");
+    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
   it("shows a persisted chosen card name for a battlefield permanent", () => {
     const object = battlefieldObject({
       chosen_attributes: [{ type: "CardName", value: "Lightning Bolt" }],
@@ -118,5 +133,38 @@ describe("CardPreview chosen attributes", () => {
     expect(screen.getByText("Ward {2}")).toHaveAttribute("aria-describedby");
     expect(screen.getByText(/creatures with flying or reach/)).toBeInTheDocument();
     expect(screen.getByText(/ward cost/)).toBeInTheDocument();
+  });
+
+  it("passes token lookup metadata to the mobile preview image hook", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 500 });
+    const object = battlefieldObject({
+      display_source: "Token",
+      name: "Elf Warrior",
+      power: 2,
+      toughness: 2,
+      color: ["Green"],
+      card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Elf", "Warrior"] },
+      token_image_ref: {
+        scryfall_id: "token-printing-id",
+        scryfall_oracle_id: "token-oracle-id",
+        face_name: "Elf Warrior",
+        preset_id: "elf-warrior-token",
+      },
+    });
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+    useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
+
+    render(<CardPreview cardName="Elf Warrior" />);
+
+    expect(useCardImage).toHaveBeenCalledWith("Elf Warrior", expect.objectContaining({
+      isToken: true,
+      tokenFilters: expect.objectContaining({
+        colors: ["Green"],
+        power: 2,
+        subtypes: ["Elf", "Warrior"],
+        toughness: 2,
+      }),
+      tokenImageRef: object.token_image_ref,
+    }));
   });
 });

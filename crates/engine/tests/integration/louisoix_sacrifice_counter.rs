@@ -78,9 +78,13 @@ fn louisoix_sacrifice_parses_disjunctive_counter_target() {
 
     // Ability leg — any activated/triggered ability on the stack.
     assert!(
-        filters
-            .iter()
-            .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        )),
         "missing the activated/triggered ability disjunct: {target:?}"
     );
 

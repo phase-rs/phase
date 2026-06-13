@@ -57,6 +57,7 @@ export function useResumables(): Resumables {
   const [pod, setPod] = useState<ActiveDraftPodMeta | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     setQuickDraft(loadActiveQuickDraft());
     setPod(loadActiveDraftPod());
 
@@ -65,17 +66,21 @@ export function useResumables(): Resumables {
 
     // Validate the saved match against the session/state that actually backs it,
     // clearing the pointer when the backing data is gone so we never offer a
-    // resume that would fail.
+    // resume that would fail. The session/state lookups are async, so guard their
+    // setState against a mid-flight unmount (the cancelled pattern the other
+    // async hooks already use).
     if (saved.mode === "online") {
       if (loadWsSession() !== null) setMatch(saved);
       else clearActiveGame();
     } else if (saved.mode === "p2p-join" && saved.p2pRoomCode) {
       loadP2PSession(`phase-${saved.p2pRoomCode}`).then((session) => {
+        if (cancelled) return;
         if (session) setMatch(saved);
         else clearActiveGame();
       });
     } else {
       loadGame(saved.id).then((state) => {
+        if (cancelled) return;
         if (state) {
           setMatch(saved);
           // CR 800.4: eliminated players are out — only live seats count as
@@ -93,6 +98,10 @@ export function useResumables(): Resumables {
         }
       });
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const resumeMatch = () => {

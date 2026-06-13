@@ -1,8 +1,13 @@
 //! Suite runner — executes every registered `MatchupSpec` and emits a
 //! structured JSON report.
+//!
+//! Deterministic-core results are a pure function of `(binary, spec, seed)`.
+//! Wall-clock fields are retained in `SuiteReport` for operator visibility but
+//! are excluded from [`SuiteReport::deterministic_core`].
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +17,8 @@ use engine::game::deck_loading::{
 };
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -33,6 +40,13 @@ pub enum SuiteStatus {
     Open,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GameResult {
+    pub seed: u64,
+    pub winner: Option<u8>,
+    pub turns: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchupResult {
     pub matchup_id: String,
@@ -43,6 +57,7 @@ pub struct MatchupResult {
     pub p0_wins: usize,
     pub p1_wins: usize,
     pub draws: usize,
+    pub games: Vec<GameResult>,
     pub total_turns: u64,
     pub total_duration_ms: u128,
     pub avg_turns: f64,
@@ -59,11 +74,75 @@ pub struct MatchupResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuiteReport {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_data_hash: Option<String>,
     pub unix_timestamp_secs: i64,
     pub difficulty: String,
     pub games_per_matchup: usize,
     pub base_seed: u64,
     pub results: Vec<MatchupResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeterministicMatchupResult {
+    pub matchup_id: String,
+    pub exercises: Vec<FeatureKind>,
+    pub p0_label: String,
+    pub p1_label: String,
+    pub expected: Expected,
+    pub p0_wins: usize,
+    pub p1_wins: usize,
+    pub draws: usize,
+    pub games: Vec<GameResult>,
+    pub total_turns: u64,
+    pub avg_turns: f64,
+    pub status: SuiteStatus,
+    pub fail_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeterministicSuiteReport {
+    pub schema_version: u32,
+    pub git_sha: Option<String>,
+    pub card_data_hash: Option<String>,
+    pub difficulty: String,
+    pub games_per_matchup: usize,
+    pub base_seed: u64,
+    pub results: Vec<DeterministicMatchupResult>,
+}
+
+impl SuiteReport {
+    pub fn deterministic_core(&self) -> DeterministicSuiteReport {
+        DeterministicSuiteReport {
+            schema_version: self.schema_version,
+            git_sha: self.git_sha.clone(),
+            card_data_hash: self.card_data_hash.clone(),
+            difficulty: self.difficulty.clone(),
+            games_per_matchup: self.games_per_matchup,
+            base_seed: self.base_seed,
+            results: self
+                .results
+                .iter()
+                .map(|result| DeterministicMatchupResult {
+                    matchup_id: result.matchup_id.clone(),
+                    exercises: result.exercises.clone(),
+                    p0_label: result.p0_label.clone(),
+                    p1_label: result.p1_label.clone(),
+                    expected: result.expected,
+                    p0_wins: result.p0_wins,
+                    p1_wins: result.p1_wins,
+                    draws: result.draws,
+                    games: result.games.clone(),
+                    total_turns: result.total_turns,
+                    avg_turns: result.avg_turns,
+                    status: result.status,
+                    fail_reason: result.fail_reason.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Controls decision-trace attribution capture during a suite run. When set
@@ -85,6 +164,8 @@ pub struct SuiteOptions {
     pub output_path: PathBuf,
     pub filter: Option<String>,
     pub attribution: AttributionMode,
+    pub git_sha: Option<String>,
+    pub card_data_hash: Option<String>,
 }
 
 impl SuiteOptions {
@@ -96,6 +177,8 @@ impl SuiteOptions {
             output_path: PathBuf::from("target/duel-suite-results.json"),
             filter: None,
             attribution: AttributionMode::Disabled,
+            git_sha: None,
+            card_data_hash: None,
         }
     }
 }
@@ -172,7 +255,9 @@ fn finalize_report(
     results: Vec<MatchupResult>,
 ) -> Result<SuiteReport, std::io::Error> {
     let report = SuiteReport {
-        schema_version: 1,
+        schema_version: 2,
+        git_sha: options.git_sha.clone(),
+        card_data_hash: options.card_data_hash.clone(),
         unix_timestamp_secs: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -203,15 +288,29 @@ fn run_single_matchup(
     let mut p0_wins = 0usize;
     let mut p1_wins = 0usize;
     let mut draws = 0usize;
+    let mut games = Vec::with_capacity(options.games_per_matchup);
     let mut total_turns: u64 = 0;
     let mut total_duration_ms: u128 = 0;
 
     for game_idx in 0..options.games_per_matchup {
         let seed = matchup_seed.wrapping_add(game_idx as u64);
         let start = Instant::now();
-        let (winner, turns) = run_game(&payload, seed, options.difficulty);
+        let (winner, turns) = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_game(&payload, seed, options.difficulty)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("       seed {seed} aborted: AI panic during suite game");
+                (None, 0)
+            }
+        };
         total_duration_ms += start.elapsed().as_millis();
         total_turns += turns as u64;
+        games.push(GameResult {
+            seed,
+            winner: winner.map(|p| p.0),
+            turns,
+        });
         match winner {
             Some(PlayerId(0)) => p0_wins += 1,
             Some(_) => p1_wins += 1,
@@ -233,6 +332,7 @@ fn run_single_matchup(
         p0_wins,
         p1_wins,
         draws,
+        games,
         total_turns,
         total_duration_ms,
         avg_turns,
@@ -274,6 +374,7 @@ fn failed_result(spec: &MatchupSpec, reason: &str) -> MatchupResult {
         p0_wins: 0,
         p1_wins: 0,
         draws: 0,
+        games: Vec::new(),
         total_turns: 0,
         total_duration_ms: 0,
         avg_turns: 0.0,
@@ -291,14 +392,15 @@ fn classify(expected: &Expected, p0_wins: usize, total: usize) -> (SuiteStatus, 
     let p0_rate = p0_wins as f32 / total as f32;
     match expected {
         Expected::Open => (SuiteStatus::Open, None),
-        Expected::Mirror { tolerance } => {
-            if (p0_rate - 0.5).abs() <= *tolerance {
+        Expected::Mirror { .. } => {
+            let (low, high) = wilson_interval(p0_wins, total);
+            if low <= 0.5 && 0.5 <= high {
                 (SuiteStatus::Pass, None)
             } else {
                 (
                     SuiteStatus::Fail,
                     Some(format!(
-                        "mirror imbalance: p0={p0_rate:.2}, tolerance=±{tolerance}"
+                        "mirror imbalance: p0={p0_rate:.2}, Wilson 95% CI [{low:.2}, {high:.2}] excludes 0.50"
                     )),
                 )
             }
@@ -322,21 +424,48 @@ fn classify(expected: &Expected, p0_wins: usize, total: usize) -> (SuiteStatus, 
     }
 }
 
+fn wilson_interval(successes: usize, total: usize) -> (f32, f32) {
+    if total == 0 {
+        return (0.0, 1.0);
+    }
+
+    let n = total as f32;
+    let p = successes as f32 / n;
+    let z = 1.959_964_f32;
+    let z2 = z * z;
+    let denominator = 1.0 + z2 / n;
+    let center = p + z2 / (2.0 * n);
+    let margin = z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt();
+
+    (
+        (center - margin) / denominator,
+        (center + margin) / denominator,
+    )
+}
+
 fn run_game(payload: &DeckPayload, seed: u64, difficulty: AiDifficulty) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
     load_deck_into_state(&mut state, payload);
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
-    let config = create_config_for_players(difficulty, Platform::Native, 2);
+    let config = create_config_for_players(difficulty, Platform::Native, 2).into_measurement(seed);
     let ai_configs: HashMap<PlayerId, AiConfig> =
         [(PlayerId(0), config.clone()), (PlayerId(1), config)]
             .into_iter()
             .collect();
 
     let mut total_actions: usize = 0;
+    let mut ai_rng = StdRng::seed_from_u64(seed);
+    let ai_session = crate::session::AiSession::arc_from_game(&state);
     loop {
-        let results = run_ai_actions(&mut state, &ai_players, &ai_configs);
+        let results = run_ai_actions(
+            &mut state,
+            &ai_players,
+            &ai_configs,
+            &mut ai_rng,
+            &ai_session,
+        );
         if results.is_empty() {
             break;
         }
@@ -458,4 +587,68 @@ pub fn resolve_matchup(
         spec.p0_label.to_string(),
         spec.p1_label.to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::duel_suite::{Expected, FeatureKind};
+
+    fn report_with_timing(timestamp: i64, duration_ms: u128) -> SuiteReport {
+        SuiteReport {
+            schema_version: 2,
+            git_sha: None,
+            card_data_hash: None,
+            unix_timestamp_secs: timestamp,
+            difficulty: "Medium".to_string(),
+            games_per_matchup: 1,
+            base_seed: 99,
+            results: vec![MatchupResult {
+                matchup_id: "red-mirror".to_string(),
+                exercises: vec![FeatureKind::AggroPressure],
+                p0_label: "Red Aggro".to_string(),
+                p1_label: "Red Aggro".to_string(),
+                expected: Expected::Mirror { tolerance: 0.15 },
+                p0_wins: 1,
+                p1_wins: 0,
+                draws: 0,
+                games: vec![GameResult {
+                    seed: 99,
+                    winner: Some(0),
+                    turns: 7,
+                }],
+                total_turns: 7,
+                total_duration_ms: duration_ms,
+                avg_turns: 7.0,
+                avg_duration_ms: duration_ms as f64,
+                status: SuiteStatus::Pass,
+                fail_reason: None,
+                attribution: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn deterministic_core_excludes_wall_clock_fields() {
+        let first = report_with_timing(1, 100);
+        let second = report_with_timing(2, 200);
+
+        assert_eq!(first.deterministic_core(), second.deterministic_core());
+    }
+
+    #[test]
+    fn mirror_classification_uses_wilson_interval() {
+        let (status, reason) = classify(&Expected::Mirror { tolerance: 0.15 }, 8, 10);
+
+        assert_eq!(status, SuiteStatus::Pass);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn mirror_classification_fails_when_wilson_excludes_half() {
+        let (status, reason) = classify(&Expected::Mirror { tolerance: 0.15 }, 90, 100);
+
+        assert_eq!(status, SuiteStatus::Fail);
+        assert!(reason.unwrap().contains("Wilson 95% CI"));
+    }
 }

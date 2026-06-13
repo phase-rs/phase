@@ -1,13 +1,18 @@
+use std::collections::HashSet;
+
 use crate::game::combat::has_summoning_sickness;
 use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
+use crate::game::functioning_abilities::game_active_statics;
 use crate::game::mana_abilities;
 use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::ability::StaticCondition;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
-use crate::types::statics::StaticMode;
+use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
+use crate::types::statics::{ProhibitionScope, StaticMode};
 use crate::types::zones::Zone;
 
 /// Compute display-only derived fields (CR 302.6 summoning sickness, CR 700.5 devotion).
@@ -71,6 +76,7 @@ pub fn derive_display_state(state: &mut GameState) {
     // token never triggers this auto-tap sweep over every land.
     if dirty.mana_display_dirty || dirty.all_objects_dirty {
         let battlefield_ids: Vec<_> = state.battlefield.iter().copied().collect();
+        crate::game::perf_counters::record_mana_display_sweep(battlefield_ids.len());
         let mana_availability: Vec<(crate::types::identifiers::ObjectId, Option<usize>, _)> =
             battlefield_ids
                 .into_iter()
@@ -244,6 +250,101 @@ pub fn derive_display_state(state: &mut GameState) {
         "has_pending_cast is true but no PendingCast is reachable — drift in {:?}",
         std::mem::discriminant(&state.waiting_for)
     );
+
+    // CR 400.2: Continuous "play with the top card of your library revealed"
+    // statics (Future Sight, Magus of the Future) must keep the library top in
+    // `revealed_cards` across action boundaries — `apply_action` clears
+    // momentary reveals at the start of each action, so re-sync here on every
+    // derive pass before the state is exported to clients.
+    sync_continuous_library_top_reveals(state);
+    sync_continuous_hand_reveals(state);
+}
+
+/// CR 400.2: Repopulate `revealed_cards` for every active `RevealTopOfLibrary`
+/// static after action-boundary clears.
+fn sync_continuous_library_top_reveals(state: &mut GameState) {
+    let mut reveal_all_players = false;
+    let mut reveal_controllers = HashSet::<PlayerId>::new();
+
+    for (source, def) in game_active_statics(state) {
+        let StaticMode::RevealTopOfLibrary { all_players } = def.mode else {
+            continue;
+        };
+        if all_players {
+            reveal_all_players = true;
+        } else {
+            reveal_controllers.insert(source.controller);
+        }
+    }
+
+    if !reveal_all_players && reveal_controllers.is_empty() {
+        return;
+    }
+
+    let tops: Vec<ObjectId> = if reveal_all_players {
+        state
+            .players
+            .iter()
+            .filter_map(|player| player.library.front().copied())
+            .collect()
+    } else {
+        reveal_controllers
+            .into_iter()
+            .filter_map(|controller| {
+                state
+                    .players
+                    .iter()
+                    .find(|player| player.id == controller)
+                    .and_then(|player| player.library.front().copied())
+            })
+            .collect()
+    };
+
+    for top in tops {
+        state.revealed_cards.insert(top);
+    }
+}
+
+/// CR 400.2 + CR 701.20a: Continuous "play with [a] hand revealed" statics
+/// keep affected players' hands public after action-boundary reveal clears.
+fn sync_continuous_hand_reveals(state: &mut GameState) {
+    let mut reveal_all_players = false;
+    let mut reveal_controllers = HashSet::<PlayerId>::new();
+    let mut reveal_opponents_of = HashSet::<PlayerId>::new();
+
+    for (source, def) in game_active_statics(state) {
+        let StaticMode::RevealHand { who } = &def.mode else {
+            continue;
+        };
+        match who {
+            ProhibitionScope::AllPlayers => reveal_all_players = true,
+            ProhibitionScope::Controller => {
+                reveal_controllers.insert(source.controller);
+            }
+            ProhibitionScope::Opponents => {
+                reveal_opponents_of.insert(source.controller);
+            }
+            ProhibitionScope::EnchantedCreatureController => {}
+        }
+    }
+
+    if !reveal_all_players && reveal_controllers.is_empty() && reveal_opponents_of.is_empty() {
+        return;
+    }
+
+    let hand_cards = state
+        .players
+        .iter()
+        .filter(|player| {
+            reveal_all_players
+                || reveal_controllers.contains(&player.id)
+                || reveal_opponents_of
+                    .iter()
+                    .any(|controller| player.id != *controller)
+        })
+        .flat_map(|player| player.hand.iter().copied());
+
+    state.revealed_cards.extend(hand_cards);
 }
 
 /// Commander damage received by `victim`, grouped by the commander's
@@ -288,8 +389,10 @@ pub fn commander_damage_received(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::StaticDefinition;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+    use crate::types::statics::ProhibitionScope;
     use crate::types::zones::Zone;
 
     #[test]
@@ -360,6 +463,90 @@ mod tests {
         // Should have set the flag (false for a card with no mechanics)
         let obj = &state.objects[&id];
         assert!(obj.unimplemented_mechanics.is_empty());
+    }
+
+    #[test]
+    fn derive_reveals_opponents_hands_for_static_reveal_hand() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Telepathy".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            }));
+        let controller_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Card".to_string(),
+            Zone::Hand,
+        );
+        let opponent_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Hand,
+        );
+
+        derive_display_state(&mut state);
+
+        assert!(
+            !state.revealed_cards.contains(&controller_card),
+            "Telepathy-style static must not reveal its controller's hand"
+        );
+        assert!(
+            state.revealed_cards.contains(&opponent_card),
+            "Telepathy-style static must reveal opponents' hands"
+        );
+    }
+
+    #[test]
+    fn derive_reveals_all_hands_for_static_reveal_hand() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revelation".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::RevealHand {
+                who: ProhibitionScope::AllPlayers,
+            }));
+        let controller_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Card".to_string(),
+            Zone::Hand,
+        );
+        let opponent_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Hand,
+        );
+
+        derive_display_state(&mut state);
+
+        assert!(state.revealed_cards.contains(&controller_card));
+        assert!(state.revealed_cards.contains(&opponent_card));
     }
 
     #[test]

@@ -113,6 +113,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         scoped_player: None,
         target_chooser: None,
         source_id: source,
+        source_incarnation: None,
         targets: vec![],
         kind: AbilityKind::Activated,
         sub_ability: None,
@@ -145,6 +146,8 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         chosen_players: Vec::new(),
         repeat_until: None,
         sub_link: SubAbilityLink::ContinuationStep,
+        modal: None,
+        mode_abilities: vec![],
     }
 }
 

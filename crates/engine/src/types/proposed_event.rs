@@ -325,6 +325,11 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
+        /// CR 614.1a + CR 701.9a: `true` when the discard is caused by resolving
+        /// a spell or ability effect; `false` for cost payment or turn-based
+        /// actions (cleanup hand-size discard).
+        #[serde(default)]
+        caused_by_effect: bool,
         applied: HashSet<ReplacementId>,
     },
     Tap {
@@ -786,6 +791,7 @@ mod tests {
                 player_id: PlayerId(0),
                 object_id: ObjectId(2),
                 source_id: None,
+                caused_by_effect: false,
                 applied: HashSet::new(),
             },
             ProposedEvent::Tap {

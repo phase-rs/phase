@@ -237,15 +237,12 @@ fn abundance_decline_falls_through_to_normal_draw() {
             runner.state().waiting_for
         );
     };
-    let decline_idx = candidate_descriptions
-        .iter()
-        .position(|d| d.contains("Decline"))
-        .unwrap_or_else(|| {
-            panic!(
-                "Decline option must be offered for Abundance's optional \
-                 replacement; got candidates={candidate_descriptions:?}"
-            )
-        });
+    assert_eq!(
+        candidate_descriptions,
+        vec!["Accept".to_string(), "Decline".to_string()],
+        "Abundance optional replacement must surface exactly Accept/Decline"
+    );
+    let decline_idx = 1;
     runner
         .act(GameAction::ChooseReplacement { index: decline_idx })
         .expect("decline Abundance's optional replacement");
@@ -271,5 +268,53 @@ fn abundance_decline_falls_through_to_normal_draw() {
         library_after_names,
         library_before_names[1..].to_vec(),
         "decline must NOT shuffle the library — the rest of the deck stays in original order"
+    );
+}
+
+/// CR 614.1a: Abundance replaces only its controller's draws. When the active
+/// player is an opponent, that opponent's draw must not surface Abundance's
+/// optional replacement prompt.
+#[test]
+fn abundance_does_not_replace_opponent_draw_during_opponents_turn() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Abundance", Zone::Battlefield, db);
+    for name in ["Grizzly Bears", "Forest", "Plains"] {
+        scenario.add_real_card(P1, name, Zone::Library, db);
+    }
+    for _ in 0..5 {
+        scenario.add_real_card(P0, "Plains", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    runner.state_mut().debug_mode = true;
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+
+    let hand_before = runner.state().players[1].hand.len();
+    runner
+        .act(GameAction::Debug(DebugAction::DrawCards {
+            player_id: P1,
+            count: 1,
+        }))
+        .expect("debug draw for opponent must succeed");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "P0's Abundance must not replace P1's draw during P1's turn; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        hand_card_names(runner.state(), P1).len(),
+        hand_before + 1,
+        "opponent draw must proceed normally without Abundance replacement"
     );
 }

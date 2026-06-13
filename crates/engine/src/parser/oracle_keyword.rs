@@ -15,12 +15,12 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, FilterProp, QuantityExpr,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
+    QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost,
-    Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
+    EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -669,6 +669,36 @@ fn parse_evoke_cost(cost_text: &str) -> Option<crate::types::keywords::EvokeCost
     }
 }
 
+/// CR 702.103a + CR 118.9: Parse a bestow cost following the em-dash separator.
+/// Classic Theros bestow ("Bestow {3}{G}{G}") is a pure mana cost delivered via
+/// MTGJSON's keywords array (the `FromStr` path). The em-dash form carries a
+/// compound cost — "Bestow—{R}, Collect evidence 6." on Detective's Phoenix —
+/// where the mana sub-cost is paid normally and the residual non-mana sub-cost
+/// (Collect evidence) is paid via `pay_additional_cost`. Mirrors
+/// `parse_flashback_cost` / `parse_evoke_cost`: delegates to `parse_oracle_cost`
+/// so comma-separated parts compose into `AbilityCost::Composite`, and wraps the
+/// result in `BestowCost::Mana` when it's a pure mana cost or `BestowCost::NonMana`
+/// otherwise (the runtime split via `split_bestow_cost_components` extracts the
+/// mana sub-cost from a Composite for normal payment).
+fn parse_bestow_cost(cost_text: &str) -> Option<crate::types::keywords::BestowCost> {
+    use crate::types::keywords::BestowCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(BestowCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(BestowCost::NonMana(other)),
+    }
+}
+
 /// CR 702.30a: Parse an echo cost following the em-dash separator
 /// (e.g., "echo—discard a card" on Rakdos Headliner / Deepcavern Imp).
 /// Mirrors `parse_evoke_cost`: delegates to `parse_oracle_cost` so
@@ -710,6 +740,48 @@ fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
         AbilityCost::Mana { cost: mana_cost } => Some(CyclingCost::Mana(mana_cost)),
         AbilityCost::Unimplemented { .. } => None,
         other => Some(CyclingCost::NonMana(other)),
+    }
+}
+
+/// CR 702.128a + CR 602.1a: Parse an Embalm em-dash cost ("embalm—{2}{W}{W},
+/// discard a card" → `EmbalmCost::NonMana(Composite[..])`). Mirrors
+/// `parse_cycling_cost`: reminder-strip, delegate to `parse_oracle_cost`, wrap a
+/// single `Mana` cost in `Mana`, anything composite/non-mana in `NonMana`, and
+/// reject `Unimplemented`.
+fn parse_embalm_cost(cost_text: &str) -> Option<EmbalmCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    match super::oracle_cost::parse_oracle_cost(clean) {
+        AbilityCost::Mana { cost: mana_cost } => Some(EmbalmCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EmbalmCost::NonMana(other)),
+    }
+}
+
+/// CR 702.129a + CR 602.1a: Parse an Eternalize em-dash cost
+/// ("eternalize—{3}{U}{U}, discard a card" → `EternalizeCost::NonMana(..)`,
+/// Champion of Wits family). Mirrors `parse_embalm_cost`/`parse_cycling_cost`.
+fn parse_eternalize_cost(cost_text: &str) -> Option<EternalizeCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    match super::oracle_cost::parse_oracle_cost(clean) {
+        AbilityCost::Mana { cost: mana_cost } => Some(EternalizeCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EternalizeCost::NonMana(other)),
     }
 }
 
@@ -1110,6 +1182,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.103a + CR 118.9: Bestow with em-dash cost — covers compound costs
+    // such as Detective's Phoenix "Bestow—{R}, Collect evidence 6." Pure-mana
+    // bestow ("Bestow {3}{G}{G}") arrives via MTGJSON's keywords array (FromStr
+    // path). `parse_bestow_cost` delegates to `parse_oracle_cost`, which composes
+    // comma-separated parts into `AbilityCost::Composite` so the runtime split
+    // (`split_bestow_cost_components` in casting.rs) can route the mana sub-cost
+    // through the mana-payment flow and the residual (Collect evidence) through
+    // `pay_additional_cost`.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("bestow\u{2014}").parse(text) {
+        if let Some(bestow_cost) = parse_bestow_cost(rest) {
+            return Some(Keyword::Bestow(bestow_cost));
+        }
+    }
+
     // CR 702.27a: Buyback with em-dash cost — non-mana costs like
     // "buyback—sacrifice a land" (Constant Mists). Pure-mana buyback
     // ("Buyback {3}") is handled by the direct `FromStr` path above.
@@ -1138,6 +1224,27 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
         if let Some(echo_cost) = parse_echo_cost(rest) {
             return Some(Keyword::Echo(echo_cost));
+        }
+    }
+
+    // CR 702.128a + CR 602.1a: Embalm with em-dash cost — composite mana +
+    // non-mana ("embalm—{2}{W}{W}, discard a card"). Pure-mana embalm
+    // ("Embalm {3}{W}") arrives via MTGJSON's keywords array (FromStr path).
+    // `parse_embalm_cost` delegates to `parse_oracle_cost` so comma-separated
+    // parts compose into `AbilityCost::Composite`; synthesis then appends the
+    // mandatory self-exile sub-cost.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("embalm\u{2014}").parse(text) {
+        if let Some(embalm_cost) = parse_embalm_cost(rest) {
+            return Some(Keyword::Embalm(embalm_cost));
+        }
+    }
+
+    // CR 702.129a + CR 602.1a: Eternalize with em-dash cost — composite mana +
+    // non-mana ("eternalize—{3}{U}{U}, discard a card", Champion of Wits family).
+    // Pure-mana eternalize arrives via the FromStr path above.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("eternalize\u{2014}").parse(text) {
+        if let Some(eternalize_cost) = parse_eternalize_cost(rest) {
+            return Some(Keyword::Eternalize(eternalize_cost));
         }
     }
 
@@ -1273,6 +1380,30 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.160a + CR 718.3b: Prototype {cost} — {P}/{T}. The Oracle line carries
+    // the secondary (prototype) power/toughness that the bare MTGJSON keyword lacks;
+    // the generic name/param split below would drop the "— P/T" segment. CR 718.3b:
+    // the prototyped spell/permanent uses ONLY this alternative P/T — never the
+    // top-level (full-cast) P/T — so it must come from this Oracle segment.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("prototype ").parse(text) {
+        if let Ok((_, (cost_str, pt_str))) =
+            split_once_on(rest, "\u{2014}").or_else(|_| split_once_on(rest, "--"))
+        {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str.trim());
+            if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
+                if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
+                    if let Ok((_, toughness)) = nom_primitives::parse_number.parse(tough_str) {
+                        return Some(Keyword::Prototype {
+                            cost,
+                            power: Some(power as i32),
+                            toughness: Some(toughness as i32),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N cards
     // of your library and cast any with the same name without paying their mana cost.
     // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels;
@@ -1329,7 +1460,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
     match cost {
         AbilityCost::EffectCost { effect } => match *effect {
-            Effect::Tap { target } => AbilityCost::TapCreatures {
+            // CR 701.26a: a single-target tap effect-cost becomes a typed
+            // tap-creatures cost. Untap / mass scopes keep the effect-cost form.
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => AbilityCost::TapCreatures {
                 count: 1,
                 filter: target,
             },
@@ -1586,12 +1723,19 @@ fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
             QuantityExpr::Fixed { value } => format!("Pay {value} life"),
             other => format!("Pay {other:?} life"),
         },
-        AbilityCost::Sacrifice { target, count } => {
-            let subject = format_sacrifice_subject(target);
-            if *count == 1 {
-                format!("Sacrifice a {subject}")
-            } else {
-                format!("Sacrifice {count} {subject}s")
+        AbilityCost::Sacrifice(cost) => {
+            let subject = format_sacrifice_subject(&cost.target);
+            match &cost.requirement {
+                SacrificeRequirement::Count { count } => {
+                    if *count == 1 {
+                        format!("Sacrifice a {subject}")
+                    } else {
+                        format!("Sacrifice {count} {subject}s")
+                    }
+                }
+                SacrificeRequirement::Aggregate { value, .. } => {
+                    format!("Sacrifice {subject} with total power {value} or greater")
+                }
             }
         }
         AbilityCost::OneOf { costs } => costs
@@ -1834,7 +1978,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::AbilityCost;
+    use crate::types::ability::{AbilityCost, SacrificeCost};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -2745,6 +2889,7 @@ mod tests {
                         zone,
                         card_types,
                         scope,
+                        filter: None,
                     },
             }) => {
                 assert_eq!(*zone, ZoneRef::Graveyard);
@@ -3065,6 +3210,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_prototype_keyword_line_extracts_pt() {
+        use crate::types::mana::ManaCost;
+
+        // CR 702.160a + CR 718.3b: "Prototype {cost} — {P}/{T}" carries the
+        // alternative power/toughness. The prototype P/T (2/1) must come from the
+        // Oracle "— P/T" segment, NOT the card's top-level P/T (Arcane Proxy: 4/3).
+        let kw = parse_keyword_from_oracle("prototype {1}{u}{u} \u{2014} 2/1").unwrap();
+        match kw {
+            Keyword::Prototype {
+                cost,
+                power,
+                toughness,
+            } => {
+                assert_eq!(power, Some(2));
+                assert_eq!(toughness, Some(1));
+                assert!(
+                    matches!(cost, ManaCost::Cost { generic: 1, ref shards } if shards.len() == 2),
+                    "expected {{1}}{{U}}{{U}}, got {cost:?}"
+                );
+            }
+            other => panic!("Expected Prototype with P/T, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_prototype_keyword_line_without_pt_falls_through() {
+        // Graceful degradation: a cost-only "prototype {2}" line (no "— P/T")
+        // must NOT panic — it falls through to the cost-only keyword path.
+        let kw = parse_keyword_from_oracle("prototype {2}");
+        if let Some(Keyword::Prototype {
+            power, toughness, ..
+        }) = kw
+        {
+            assert_eq!(power, None);
+            assert_eq!(toughness, None);
+        }
+    }
+
+    #[test]
     fn parse_partner_variant_oracle_text() {
         use crate::types::keywords::PartnerType;
 
@@ -3207,6 +3391,61 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 }
             }
         );
+    }
+
+    /// CR 702.129a + CR 602.1a: Champion of Wits family —
+    /// "eternalize—{3}{U}{U}, discard a card" must parse to
+    /// `Eternalize(EternalizeCost::NonMana(Composite[Mana{3UU}, Discard]))`,
+    /// i.e. the discard suffix is NOT dropped.
+    #[test]
+    fn parse_keyword_from_oracle_eternalize_em_dash_discard() {
+        use crate::types::mana::ManaCostShard;
+
+        let kw = parse_keyword_from_oracle("eternalize\u{2014}{3}{u}{u}, discard a card").unwrap();
+        let Keyword::Eternalize(EternalizeCost::NonMana(AbilityCost::Composite { costs })) = kw
+        else {
+            panic!("expected Eternalize NonMana(Composite), got {kw:?}");
+        };
+        assert_eq!(
+            costs.len(),
+            2,
+            "mana + discard, no exile-self yet (synthesis)"
+        );
+        let AbilityCost::Mana { cost: mana } = &costs[0] else {
+            panic!("expected Mana sub-cost, got {:?}", costs[0]);
+        };
+        assert_eq!(
+            mana,
+            &ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            }
+        );
+        assert!(
+            matches!(&costs[1], AbilityCost::Discard { .. }),
+            "discard suffix must survive, got {:?}",
+            costs[1]
+        );
+    }
+
+    /// CR 702.128a: Embalm em-dash composite cost parses the discard suffix.
+    #[test]
+    fn parse_keyword_from_oracle_embalm_em_dash_discard() {
+        let kw = parse_keyword_from_oracle("embalm\u{2014}{2}{w}{w}, discard a card").unwrap();
+        let Keyword::Embalm(EmbalmCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected Embalm NonMana(Composite), got {kw:?}");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
+        assert!(matches!(&costs[1], AbilityCost::Discard { .. }));
+    }
+
+    /// Regression: pure-mana embalm/eternalize still dispatch through the direct
+    /// `FromStr` path to the `Mana` variant (backward compat at the keyword level).
+    #[test]
+    fn parse_keyword_from_oracle_eternalize_mana_backward_compat() {
+        let kw = parse_keyword_from_oracle("eternalize {3}{b}{b}").unwrap();
+        assert!(matches!(kw, Keyword::Eternalize(EternalizeCost::Mana(_))));
     }
 
     /// CR 702.34a regression: Battle Screech's tap-creatures flashback shape
@@ -3459,10 +3698,10 @@ mod tests {
         // CR 702.24a: Sacrifice cumulative upkeep renders the subject from
         // the typed filter ("Sacrifice a land" for Polar Kraken).
         use crate::types::ability::{TypeFilter, TypedFilter};
-        let kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
-            count: 1,
-        });
+        let kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            1,
+        )));
         let s = keyword_display_name(&kw);
         // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
         assert!(s.contains("cumulative upkeep"), "{s}");

@@ -51,11 +51,16 @@ export function flashInGameRolls(events: GameEvent[]): void {
   // All dice in the batch group into one overlay (e.g. a Krark's Thumb double);
   // a co-occurring coin queues behind them and plays after (the overlay FIFO
   // serializes both rather than dropping either).
-  if (dice.length > 0) {
+  // CR 901.9d / CR 706.7: the symbolic planar die emits DieRolled with a null
+  // result (no numeric face to animate); drop those before building the overlay.
+  const numericDice = dice.filter(
+    (e): e is DieRolledEvent & { data: { result: number } } => e.data.result !== null,
+  );
+  if (numericDice.length > 0) {
     flash({
       kind: "die",
-      sides: dice[0].data.sides,
-      rolls: dice.map((e) => ({ playerId: e.data.player_id, value: e.data.result })),
+      sides: numericDice[0].data.sides,
+      rolls: numericDice.map((e) => ({ playerId: e.data.player_id, value: e.data.result })),
       context: "ability",
     });
   }

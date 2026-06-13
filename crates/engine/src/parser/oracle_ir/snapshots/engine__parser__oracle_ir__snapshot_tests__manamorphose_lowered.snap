@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 675
 expression: "&lowered"
 ---
 {
@@ -42,7 +41,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -52,11 +50,11 @@ expression: "&lowered"
       "duration": null,
       "description": "Add two mana in any combination of colors.\nDraw a card.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,
-      "forward_result": false
+      "forward_result": false,
+      "is_mana_ability": true
     }
   ],
   "triggers": [],

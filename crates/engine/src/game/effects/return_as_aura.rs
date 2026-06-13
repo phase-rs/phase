@@ -113,6 +113,22 @@ pub fn resolve(
         .collect();
 
     if candidates.is_empty() {
+        // CR 614.12 + CR 113.10 + CR 303.4g: The returned host becomes an Aura
+        // and loses its other abilities (including its own dies trigger) before
+        // the no-target graveyard move. Without stripping first, the subsequent
+        // LTB event re-queues the same self-return trigger forever (issue #1332).
+        install_aura_continuous_effect(state, ability, returned_id, &enchant_filter, grants);
+        crate::game::layers::evaluate_layers(state);
+        // CR 614.12 + CR 303.4g: Ensure the imminent Battlefield → Graveyard
+        // snapshot omits stripped triggers. `evaluate_layers` applies
+        // `RemoveAllAbilities` to the live list, but the zone-change record
+        // clones `trigger_definitions.iter_all()` at move time — an explicit
+        // clear guarantees LTB look-back (issue #1332) cannot re-queue the
+        // self-return trigger from a stale live list.
+        if let Some(obj) = state.objects.get_mut(&returned_id) {
+            obj.trigger_definitions.clear();
+        }
+
         // CR 303.4g + CR 614.6 + CR 616.1: No legal object to enchant → owner's
         // graveyard. Route the Battlefield → Graveyard move through the
         // replacement pipeline so leaves-the-battlefield replacements
@@ -204,6 +220,37 @@ pub fn resolve(
 /// Duration is hard-coded to `Duration::UntilHostLeavesPlay` per CR 611.2a +
 /// CR 400.7: a new object on re-entry is not the same object, so the prior
 /// continuous effect implicitly ends.
+fn install_aura_continuous_effect(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    returned_id: ObjectId,
+    enchant_filter: &TargetFilter,
+    grants: Vec<ContinuousModification>,
+) {
+    let mut modifications: Vec<ContinuousModification> = Vec::with_capacity(grants.len() + 4);
+    modifications.push(ContinuousModification::SetCardTypes {
+        core_types: vec![CoreType::Enchantment],
+    });
+    modifications.push(ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    });
+    modifications.push(ContinuousModification::AddSubtype {
+        subtype: "Aura".to_string(),
+    });
+    modifications.push(ContinuousModification::AddKeyword {
+        keyword: Keyword::Enchant(enchant_filter.clone()),
+    });
+    modifications.extend(grants);
+    state.add_transient_continuous_effect(
+        ability.source_id,
+        ability.controller,
+        Duration::UntilHostLeavesPlay,
+        TargetFilter::SpecificObject { id: returned_id },
+        modifications,
+        None,
+    );
+}
+
 pub(crate) fn finalize_attach(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -217,44 +264,7 @@ pub(crate) fn finalize_attach(
         return Err(EffectError::ObjectNotFound(returned_id));
     }
 
-    let mut modifications: Vec<ContinuousModification> = Vec::with_capacity(grants.len() + 4);
-    // CR 205.1a + CR 613.1d (Layer 4): replace card types with Enchantment.
-    modifications.push(ContinuousModification::SetCardTypes {
-        core_types: vec![CoreType::Enchantment],
-    });
-    // CR 613.1d (Layer 4): drop the old creature subtypes (Bronzehide is no
-    // longer a Cat, Old-Growth Troll is no longer a Troll, etc.).
-    modifications.push(ContinuousModification::RemoveAllSubtypes {
-        set: SubtypeSet::Creature,
-    });
-    // CR 205.1a + CR 613.1d (Layer 4): add the Aura subtype.
-    modifications.push(ContinuousModification::AddSubtype {
-        subtype: "Aura".to_string(),
-    });
-    // CR 702.5a + CR 613.1f (Layer 6): enchant filter as a keyword so the
-    // attach-time legality logic in `attach::attach_to` sees a real Aura.
-    modifications.push(ContinuousModification::AddKeyword {
-        keyword: Keyword::Enchant(enchant_filter.clone()),
-    });
-    // CR 113.10 + CR 613.1f + CR 613.8 (Layer 6): granted abilities. When
-    // `grants[0]` is `RemoveAllAbilities` (Bronzehide / Harold paths), the
-    // layer-system dependency rule (CR 613.8a: "applying the other would
-    // change the existence of the first effect") orders the removal before
-    // the `Grant*` siblings so the printed face's abilities are stripped
-    // first and the granted abilities survive.
-    modifications.extend(grants);
-
-    // CR 611.2a + CR 400.7: An Aura's continuous self-modification is anchored
-    // to the host object. On the host leaving play, the new object is not the
-    // same object — the effect implicitly ends.
-    state.add_transient_continuous_effect(
-        ability.source_id,
-        ability.controller,
-        Duration::UntilHostLeavesPlay,
-        TargetFilter::SpecificObject { id: returned_id },
-        modifications,
-        None,
-    );
+    install_aura_continuous_effect(state, ability, returned_id, enchant_filter, grants);
 
     // CR 701.3 + CR 303.4: attach the Aura to the chosen permanent. This is
     // a silent no-op if the target carries `CantBeEnchanted` / `CantBeAttached`
@@ -450,6 +460,56 @@ mod tests {
         // No transient continuous effect should be installed yet — that happens
         // after the player picks.
         assert!(state.transient_continuous_effects.is_empty());
+    }
+
+    #[test]
+    fn no_legal_target_strips_live_trigger_without_mutating_baseline() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, QuantityExpr, TriggerDefinition,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(7);
+        let host = setup_return(&mut state, PlayerId(0), "Cat");
+        let mut dies_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        dies_trigger.origin = Some(Zone::Battlefield);
+        dies_trigger.destination = Some(Zone::Graveyard);
+        dies_trigger.valid_card = Some(TargetFilter::SelfRef);
+        dies_trigger.trigger_zones = vec![Zone::Graveyard];
+        dies_trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(dies_trigger.clone());
+            obj.trigger_definitions.push(dies_trigger);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ReturnAsAura {
+                enchant_filter: creature_filter(),
+                grants: vec![ContinuousModification::RemoveAllAbilities],
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.objects[&host].zone, Zone::Graveyard);
+        assert!(!state.objects[&host].base_trigger_definitions.is_empty());
+        let GameEvent::ZoneChanged { record, .. } = events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == host))
+            .expect("return-as-aura no-target path should emit a ZoneChanged event")
+        else {
+            panic!("expected ZoneChanged event");
+        };
+        assert!(record.trigger_definitions.is_empty());
     }
 
     #[test]

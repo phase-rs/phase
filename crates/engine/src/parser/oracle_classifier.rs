@@ -232,6 +232,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // to StaticMode::AttachmentRestriction instead of an effect.
     "can be attached only to",
     "can't attack",
+    // CR 506.5 + CR 508.1c: Master of Cruelties — "~ can only attack alone"
+    // must route to the static parser (CombatAlone MustBeSole), not the effect
+    // pipeline where it previously lowered to Unimplemented.
+    "can only attack alone",
     "can't block",
     "can't be countered",
     "can't be copied",
@@ -246,6 +250,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "no maximum hand size",
     "may choose not to untap",
     "play with the top card",
+    // CR 400.2 + CR 701.20a: Telepathy/Revelation class. Keep this narrower
+    // than generic hand-reveal effects ("reveal a card from your hand") by
+    // matching the continuous "hand(s) revealed" wording.
+    "hands revealed",
+    "hand revealed",
     "cost {",
     "costs {",
     "cost less",
@@ -601,6 +610,11 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
+    if scan_contains(lower, "an effect causes you to discard a card")
+        && scan_contains(lower, "instead of into your graveyard")
+    {
+        return true;
+    }
     false
 }
 
@@ -705,7 +719,32 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::nom_primitives::strip_double_quoted_spans;
     use super::*;
+
+    #[test]
+    fn masked_white_suns_twilight_is_not_static() {
+        // The only static-shaped marker ("can't block") lives INSIDE the token's
+        // quoted ability text; masking it must yield a non-static spell line.
+        let line = "you gain x life. create x 1/1 colorless phyrexian mite artifact \
+            creature tokens with toxic 1 and \"this token can't block.\" if x is 5 or more, \
+            destroy all other creatures.";
+        assert!(!is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    #[test]
+    fn masked_brood_birthing_stays_static() {
+        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
+        // so masking the quoted span must NOT flip the line off static.
+        let line = "they have \"sacrifice this token: add {c}.\"";
+        assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    #[test]
+    fn unquoted_cant_block_static_unchanged() {
+        // No quotes → fast path → classification unchanged.
+        assert!(is_static_pattern("creatures you control can't block"));
+    }
 
     #[test]
     fn classifies_enters_with_counter_trigger() {

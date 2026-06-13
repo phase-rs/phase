@@ -532,23 +532,22 @@ export function GameSetupPage() {
         </div>
       </MenuShell>
 
-      {formatPickerOpen && (
-        <ModalPanelShell
-          eyebrow={t("gameSetup.eyebrow")}
-          title={t("gameSetup.formatPicker.title")}
-          subtitle={t("gameSetup.formatPicker.subtitle")}
-          onClose={() => setFormatPickerOpen(false)}
-          maxWidthClassName="max-w-3xl"
-          bodyClassName="overflow-y-auto px-2 py-4 lg:px-6 lg:py-6"
-        >
-          <FormatPicker
-            onFormatSelect={(format) => {
-              applyFormat(format);
-              setFormatPickerOpen(false);
-            }}
-          />
-        </ModalPanelShell>
-      )}
+      <ModalPanelShell
+        open={formatPickerOpen}
+        eyebrow={t("gameSetup.eyebrow")}
+        title={t("gameSetup.formatPicker.title")}
+        subtitle={t("gameSetup.formatPicker.subtitle")}
+        onClose={() => setFormatPickerOpen(false)}
+        maxWidthClassName="max-w-3xl"
+        bodyClassName="overflow-y-auto px-4 py-4 lg:px-6 lg:py-6"
+      >
+        <FormatPicker
+          onFormatSelect={(format) => {
+            applyFormat(format);
+            setFormatPickerOpen(false);
+          }}
+        />
+      </ModalPanelShell>
     </div>
   );
 }

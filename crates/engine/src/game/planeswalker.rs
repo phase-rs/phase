@@ -13,7 +13,7 @@ use super::casting::emit_targeting_events;
 use super::engine::EngineError;
 use super::stack;
 
-use crate::types::ability::{AbilityCost, ResolvedAbility};
+use crate::types::ability::ResolvedAbility;
 
 /// CR 306.5d + CR 606.3: Loyalty abilities may only be activated once per turn.
 /// CR 606.1: Loyalty abilities are activated abilities with a loyalty symbol in their cost.
@@ -29,7 +29,10 @@ pub fn can_activate_loyalty(
         .iter()
         .enumerate()
         .any(|(ability_index, ability)| {
-            matches!(ability.cost, Some(AbilityCost::Loyalty { .. }))
+            ability
+                .cost
+                .as_ref()
+                .is_some_and(crate::types::ability::is_loyalty_ability_cost)
                 && can_activate_loyalty_ability(state, planeswalker_id, player, ability_index)
         })
 }
@@ -80,7 +83,11 @@ pub fn can_activate_loyalty_ability(
     let Some(ability) = obj.abilities.get(ability_index) else {
         return false;
     };
-    if !matches!(ability.cost, Some(AbilityCost::Loyalty { .. })) {
+    if !ability
+        .cost
+        .as_ref()
+        .is_some_and(crate::types::ability::is_loyalty_ability_cost)
+    {
         return false;
     }
 
@@ -318,10 +325,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, QuantityExpr,
-        TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CounterCostSelection,
+        Effect, EffectScope, QuantityExpr, QuantityRef, TapStateChange, TargetFilter, TypedFilter,
+        REMOVE_COUNTER_COST_X,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
     use crate::types::phase::Phase;
@@ -350,6 +359,17 @@ mod tests {
             .activation_restrictions
             .push(ActivationRestriction::OnlyOnceEachTurn);
         ability
+    }
+
+    fn make_minus_x_loyalty_ability(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+            .cost(AbilityCost::RemoveCounter {
+                count: REMOVE_COUNTER_COST_X,
+                counter_type: CounterMatch::OfType(CounterType::Loyalty),
+                target: None,
+                selection: CounterCostSelection::SingleObject,
+            })
+            .sorcery_speed()
     }
 
     fn create_planeswalker(
@@ -427,6 +447,148 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(state.objects[&pw].loyalty, Some(2)); // 5 - 3
+    }
+
+    /// CR 606.5 + CR 107.3: a `[−X]` loyalty ability (modeled as removing X
+    /// loyalty counters) activates through the generic activated-ability path,
+    /// which announces X capped at current loyalty, removes the chosen X loyalty,
+    /// records the CR 606.3 once-per-turn activation, and binds the chosen X into
+    /// the effect. Uses a non-targeted "gain X life" body so no target-selection
+    /// round-trip is needed; the X-damage cards (Chandra Nalaar, Jeska, …) share
+    /// this exact cost + X-binding path. Issues #653 / #1069 / #2851.
+    #[test]
+    fn minus_x_loyalty_removes_chosen_x_and_binds_x_into_effect() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::GameAction;
+
+        let mut state = setup();
+
+        // "[−X]: You gain X life." — the loyalty-X cost is a chosen-X removal of
+        // loyalty counters (exactly what the parser builds for `[−X]:` lines).
+        let ability = make_minus_x_loyalty_ability(Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            },
+            player: TargetFilter::Controller,
+        });
+
+        let pw = create_planeswalker(&mut state, PlayerId(0), "Variable Walker", 6, vec![ability]);
+        let life_before = state.players[0].life;
+
+        // Activating must prompt for X, capped at the current loyalty (6).
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: pw,
+                ability_index: 0,
+            },
+        )
+        .expect("activation must be accepted");
+        match &state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => {
+                assert_eq!(*max, 6, "X must be capped at current loyalty (6)")
+            }
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        // Choosing X = 4 pays the cost: remove 4 loyalty counters, keeping
+        // `loyalty` and the counter map in sync (CR 306.5b), and records the
+        // CR 606.3 once-per-turn loyalty activation.
+        apply_as_current(&mut state, GameAction::ChooseX { value: 4 })
+            .expect("choosing X=4 must be accepted");
+        assert_eq!(
+            state.objects[&pw].loyalty,
+            Some(2),
+            "loyalty must drop by the chosen X (6 - 4)"
+        );
+        assert_eq!(
+            state.objects[&pw]
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "loyalty counter map must stay in sync with the loyalty field"
+        );
+        assert!(
+            state.objects[&pw].loyalty_activations_this_turn > 0,
+            "CR 606.3: the loyalty activation must be recorded (once-per-turn gate)"
+        );
+
+        // Resolving binds the chosen X into the effect: gain X (= 4) life.
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert_eq!(
+            state.players[0].life,
+            life_before + 4,
+            "the effect must gain the chosen X (4) life"
+        );
+    }
+
+    /// CR 606.3: The generic `GameAction::ActivateAbility` path must enforce
+    /// the same once-per-turn loyalty gate before a `[−X]` cost can prompt for X.
+    #[test]
+    fn minus_x_loyalty_direct_activation_rejected_after_other_loyalty_ability() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::GameAction;
+
+        let mut state = setup();
+        let plus_one = make_loyalty_ability(
+            1,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let minus_x = make_minus_x_loyalty_ability(Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            },
+            player: TargetFilter::Controller,
+        });
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Variable Walker",
+            4,
+            vec![plus_one, minus_x],
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: pw,
+                ability_index: 0,
+            },
+        )
+        .expect("first loyalty activation must be accepted");
+        state.stack.clear();
+        let loyalty_after_first_activation = state.objects[&pw].loyalty;
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: pw,
+                ability_index: 1,
+            },
+        );
+
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "second same-turn loyalty activation must be rejected, got {result:?}"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "the rejected `[−X]` activation must not prompt for X"
+        );
+        assert_eq!(
+            state.objects[&pw].loyalty, loyalty_after_first_activation,
+            "the rejected `[−X]` activation must not remove loyalty counters"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "the rejected `[−X]` activation must not put an ability on the stack"
+        );
     }
 
     #[test]
@@ -641,8 +803,10 @@ mod tests {
             4,
             vec![make_loyalty_ability(
                 -2,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             )],
         );

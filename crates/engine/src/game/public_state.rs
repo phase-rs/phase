@@ -186,6 +186,12 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::Foretold { object_id, .. } => {
                 mark_public_state_object_dirty(state, *object_id);
             }
+            GameEvent::CreatureEnlisted {
+                attacker, tapped, ..
+            } => {
+                mark_public_state_object_dirty(state, *attacker);
+                mark_public_state_object_dirty(state, *tapped);
+            }
             GameEvent::ManaAdded { player_id, .. }
             | GameEvent::ManaPoolEmptied { player_id, .. }
             | GameEvent::ManaRecolored { player_id, .. } => {
@@ -216,6 +222,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::CounterAdded { object_id, .. }
             | GameEvent::ObjectIntensified { object_id, .. }
             | GameEvent::CounterRemoved { object_id, .. }
+            | GameEvent::ControllerChanged { object_id, .. }
             | GameEvent::Evolved { object_id } => {
                 // +1/+1 counters set `layers_dirty` (counters.rs) → Gate 1 caught
                 // them; this arm fires only for counters that did not touch
@@ -366,6 +373,11 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::RoomDoorUnlocked { .. }
             | GameEvent::BecomesPlotted { .. }
             | GameEvent::DungeonCompleted { .. }
+            // Planechase events: the planar deck / controller are authoritative
+            // state serialized directly; they carry no per-object display delta.
+            | GameEvent::Planeswalked { .. }
+            | GameEvent::ChaosEnsued { .. }
+            | GameEvent::PlanarDieRolled { .. }
             | GameEvent::Firebend { .. }
             | GameEvent::Airbend { .. }
             | GameEvent::Earthbend { .. }

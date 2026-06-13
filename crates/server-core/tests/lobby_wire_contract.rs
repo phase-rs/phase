@@ -152,6 +152,9 @@ fn server_hello_mode_byte_identical() {
         build_commit: "abc".into(),
         protocol_version: 7,
         mode: sc::ServerMode::LobbyOnly,
+        // None + skip_serializing_if keeps the wire identical to the lobby
+        // broker's ServerHello, which has no public_url field.
+        public_url: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),

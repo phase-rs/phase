@@ -64,8 +64,23 @@ impl GameScenarioDbExt for GameScenario {
 
         // Move from Library to the requested zone
         remove_from_zone(&mut self.state, id, Zone::Library, player);
-        add_to_zone(&mut self.state, id, zone, player);
-        self.state.objects.get_mut(&id).unwrap().zone = zone;
+        if zone == Zone::Battlefield {
+            let mut events = Vec::new();
+            let req = crate::game::zone_pipeline::ZoneMoveRequest::effect(id, zone, id);
+            match crate::game::zone_pipeline::move_object(&mut self.state, req, &mut events) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    panic!(
+                        "add_real_card battlefield entry for '{}' paused on an as-enters choice",
+                        name
+                    );
+                }
+            }
+        } else {
+            add_to_zone(&mut self.state, id, zone, player);
+            self.state.objects.get_mut(&id).unwrap().zone = zone;
+        }
 
         // Creatures entering the battlefield are not summoning-sick by default
         if zone == Zone::Battlefield {
@@ -74,6 +89,11 @@ impl GameScenarioDbExt for GameScenario {
             obj.entered_battlefield_turn = Some(entered_turn);
             // Pre-existing permanent — see `scenario::add_creature`.
             obj.summoning_sick = false;
+
+            // CR 603.6a: `add_real_card` uses `create_object_from_card_face` +
+            // `add_to_zone`, bypassing `move_to_zone` ETB registration. Re-index
+            // once the printed face (including cumulative upkeep) is applied.
+            crate::game::trigger_index::reindex_object_triggers(&mut self.state, id);
         }
 
         id

@@ -6,6 +6,7 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useSetList, type SetMeta } from "../../hooks/useSetList";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { scryfallLegalityKey } from "../../services/scryfall";
+import { SelectField } from "../ui/SelectField";
 
 // Supported handlers are now derived from the coverage export, not a hardcoded list.
 // See `extractHandlerUsage` below — a handler is listed iff the parser produces it
@@ -93,6 +94,78 @@ interface SetCoverageSummary {
 }
 
 const MAX_VISIBLE_CARDS = 200;
+
+// The coverage export is a single large JSON. Every dashboard view needs the
+// same parsed document, so fetch + parse it once at module scope and share the
+// promise — switching tabs (or remounting a view) reuses the cached result
+// instead of re-fetching and re-parsing megabytes each time.
+let coveragePromise: Promise<CoverageSummary> | null = null;
+// Resolved document, kept once the fetch succeeds so a later view mount (tab
+// switch) can initialize synchronously and skip the loading flash.
+let cachedCoverage: CoverageSummary | null = null;
+
+function loadCoverageData(): Promise<CoverageSummary> {
+  if (!coveragePromise) {
+    coveragePromise = fetch(__COVERAGE_DATA_URL__)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<CoverageSummary>;
+      })
+      .then((data: CoverageSummary) => {
+        cachedCoverage = data;
+        return data;
+      })
+      .catch((e) => {
+        // Don't cache failures: clear the shared slot so the next view mount
+        // (e.g. a tab switch) re-fetches, preserving the per-view retry the old
+        // per-component fetch had. Only successful results stay cached.
+        coveragePromise = null;
+        throw e;
+      });
+  }
+  return coveragePromise;
+}
+
+interface CoverageDataState {
+  coverage: CoverageSummary | null;
+  loading: boolean;
+  error: string | null;
+}
+
+/** Shared loader for the coverage export, consumed by all dashboard views. */
+function useCoverageData(): CoverageDataState {
+  // Initialize from the module cache when the doc is already loaded, so
+  // switching dashboard tabs (which remounts the view) renders data immediately
+  // rather than flashing a spinner before the cached promise re-resolves.
+  const [state, setState] = useState<CoverageDataState>(() =>
+    cachedCoverage
+      ? { coverage: cachedCoverage, loading: false, error: null }
+      : { coverage: null, loading: true, error: null },
+  );
+
+  useEffect(() => {
+    if (cachedCoverage) return; // synchronous init already supplied the data
+    let cancelled = false;
+    loadCoverageData()
+      .then((data) => {
+        if (!cancelled) setState({ coverage: data, loading: false, error: null });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setState({
+            coverage: null,
+            loading: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return state;
+}
 
 type MainView = "card-coverage" | "by-set" | "gap-analysis" | "supported-handlers";
 type HandlerTab = "effects" | "triggers" | "keywords" | "statics" | "replacements";
@@ -188,9 +261,7 @@ export function CardCoverageDashboard() {
 
 function CardCoverageView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { coverage, loading, error } = useCoverageData();
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -198,17 +269,6 @@ function CardCoverageView() {
   const [focusIndex, setFocusIndex] = useState(-1);
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
 
   const hasActiveFilter = search.length >= 2 || statusFilter !== "all";
 
@@ -351,7 +411,8 @@ function CardCoverageView() {
                 onChange={(e) => { setSearch(e.target.value); setFocusIndex(-1); }}
                 className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
               />
-              <select
+              <SelectField
+                chevronSize="sm"
                 value={statusFilter}
                 onChange={(e) => { setStatusFilter(e.target.value as StatusFilter); setFocusIndex(-1); }}
                 className="rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
@@ -359,18 +420,20 @@ function CardCoverageView() {
                 <option value="all">{t("coverage.filterAll")}</option>
                 <option value="supported">{t("coverage.filterSupported")}</option>
                 <option value="unsupported">{t("coverage.filterUnsupported")}</option>
-              </select>
+              </SelectField>
             </div>
             <div className="flex gap-2">
-              <select
+              <SelectField
+                wrapperClassName="min-w-0 flex-1"
+                chevronSize="sm"
                 value={sortMode}
                 onChange={(e) => setSortMode(e.target.value as SortMode)}
-                className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
+                className="w-full rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
               >
                 <option value="name">{t("coverage.sortAz")}</option>
                 <option value="gaps-desc">{t("coverage.sortMostGaps")}</option>
                 <option value="gaps-asc">{t("coverage.sortFewestGaps")}</option>
-              </select>
+              </SelectField>
             </div>
           </div>
 
@@ -550,21 +613,9 @@ function buildSetRows(coverage: CoverageSummary): SetCoverage[] {
 
 function BySetView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { coverage, loading } = useCoverageData();
   const [expandedSet, setExpandedSet] = useState<string | null>(null);
   const [selectedGapCard, setSelectedGapCard] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch(() => setCoverage(null))
-      .finally(() => setLoading(false));
-  }, []);
 
   const setList = useSetList();
   const sets = useMemo(() => {
@@ -768,21 +819,9 @@ function SetRow({
 
 function GapAnalysisView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { coverage, loading } = useCoverageData();
   const [expandedGap, setExpandedGap] = useState<string | null>(null);
   const [formatFilter, setFormatFilter] = useState<FormatFilter>("all");
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch(() => setCoverage(null))
-      .finally(() => setLoading(false));
-  }, []);
 
   if (loading) {
     return (
@@ -816,7 +855,8 @@ function GapAnalysisView() {
       {/* Format filter bar */}
       <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3 sm:px-6">
         <span className="text-xs text-slate-500">{t("coverage.filterByFormat")}</span>
-        <select
+        <SelectField
+          chevronSize="sm"
           value={formatFilter}
           onChange={(e) => setFormatFilter(e.target.value as FormatFilter)}
           className="rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
@@ -824,7 +864,7 @@ function GapAnalysisView() {
           {filterOptions.map(({ key, label }) => (
             <option key={key} value={key}>{label}</option>
           ))}
-        </select>
+        </SelectField>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
@@ -1693,21 +1733,9 @@ function extractHandlerUsage(
 
 function SupportedHandlersView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { coverage, loading } = useCoverageData();
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState<HandlerTab>("effects");
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch(() => setCoverage(null))
-      .finally(() => setLoading(false));
-  }, []);
 
   const usage = useMemo(
     () => (coverage ? extractHandlerUsage(coverage.cards) : null),

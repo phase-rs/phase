@@ -18,7 +18,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{Effect, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -75,6 +75,8 @@ fn cascade_trigger_resolves_through_pipeline_and_exiles_hit() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
 

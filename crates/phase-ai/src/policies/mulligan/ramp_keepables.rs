@@ -36,9 +36,9 @@ impl MulliganPolicy for RampKeepablesMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        _plan: &PlanSnapshot, // input-unused: ramp opener scoring is card-composition only
+        _turn_order: TurnOrder, // input-unused: ramp opener scoring is card-composition only
+        _mulligans_taken: u8, // input-unused: ramp opener scoring is card-composition only
     ) -> MulliganScore {
         let commitment = features.mana_ramp.commitment;
         if commitment <= COMMITMENT_THRESHOLD {

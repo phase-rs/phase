@@ -17,7 +17,6 @@ expression: "&ir"
         "duration": null,
         "description": "Flying",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -51,11 +50,11 @@ expression: "&ir"
         "duration": null,
         "description": "{T}: Add one mana of any color.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
-        "forward_result": false
+        "forward_result": false,
+        "is_mana_ability": true
       }
     }
   ],

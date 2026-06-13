@@ -24,11 +24,13 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, CopyRetargetPermission, Effect,
-    FilterProp, ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
+    CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
+    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
-use crate::types::keywords::{ActivationCadence, Keyword};
+use crate::types::game_state::RetargetScope;
+use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -458,6 +460,13 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             ..
         }
+        // CR 115.7d: "you may choose new targets for [spell/ability]" lowers to
+        // `ChangeTargets { scope: All }` with the full surface form preserved
+        // (not `def.optional`). The player may leave targets unchanged.
+        | Effect::ChangeTargets {
+            scope: RetargetScope::All,
+            ..
+        }
         // CR 701.20a + CR 608.2c: RevealUntil with kept_optional_to encodes
         // "you may put that card onto the battlefield" — the kept-card
         // destination choice IS the "may" decision (mirrors RevealFromHand
@@ -503,6 +512,30 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
         }
+        // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
+        // "you may choose new targets for the copy" on the win branch (Krark)
+        // lives in `win_effect`, not at `def.optional`.
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
         _ => false,
     }
 }
@@ -1005,6 +1038,10 @@ fn static_has_target_gated_cost_modification(def: &StaticDefinition) -> bool {
             spell_filter: Some(filter),
             ..
         } => target_filter_has_targets_property(filter),
+        StaticMode::ImposeAdditionalCost {
+            spell_filter: Some(filter),
+            ..
+        } => target_filter_has_targets_property(filter),
         _ => false,
     }
 }
@@ -1183,17 +1220,21 @@ fn any_ability_has_constraint(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
-    !def.activation_restrictions.is_empty() || def.sorcery_speed
+    // CR 602.5d: sorcery-speed timing is now represented as
+    // `ActivationRestriction::AsSorcery` in `activation_restrictions`, so the
+    // non-empty check below already covers it.
+    !def.activation_restrictions.is_empty()
 }
 
 // CR 702.122 + CR 602.5b: Crew with a once-per-turn activation limit.
 fn keyword_has_activation_limit(keyword: &Keyword) -> bool {
     matches!(
         keyword,
-        Keyword::Crew {
-            once_per_turn: ActivationCadence::OncePerTurn,
-            ..
-        }
+        Keyword::Crew { once_per_turn, .. }
+            if matches!(
+                once_per_turn.as_deref(),
+                Some(ActivationRestriction::OnlyOnceEachTurn)
+            )
     )
 }
 
@@ -1668,6 +1709,102 @@ fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
     .any(|marker| cleaned.contains(marker))
 }
 
+/// CR 702.170c + CR 608.2c: "[you may] exile a card. If you do, it becomes
+/// plotted." The "if you do" gate is the optional-exile linkage — structurally
+/// represented by the `GrantCastingPermission { CastingPermission::Plotted }`
+/// chained off the (optional) exile, which only takes effect when the exile
+/// happened. It is not an uncaptured game-state condition (the coverage-side
+/// `line_has_condition_text` likewise excludes "if you do" wholesale).
+fn def_tree_has_plotted_grant(def: &AbilityDefinition) -> bool {
+    if let Effect::GrantCastingPermission {
+        permission: crate::types::ability::CastingPermission::Plotted { .. },
+        ..
+    } = &*def.effect
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_plotted_grant(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_plotted_grant(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_plotted_grant)
+}
+
+fn any_ability_has_plotted_grant(parsed: &ParsedAbilities) -> bool {
+    parsed.abilities.iter().any(def_tree_has_plotted_grant)
+        || parsed
+            .triggers
+            .iter()
+            .any(|t| t.execute.as_deref().is_some_and(def_tree_has_plotted_grant))
+}
+
+fn plotted_grant_linkage_is_only_if_marker(stripped: &str) -> bool {
+    let has_plot_link = stripped.contains("if you do, it becomes plotted"); // allow-noncombinator: swallow detector marker scan on classified text
+    if !has_plot_link {
+        return false;
+    }
+    let without_plot_link = stripped.replace("if you do, it becomes plotted", "");
+    let has_if_marker = without_plot_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_plot_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_plot_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
+fn def_tree_has_dig(def: &AbilityDefinition) -> bool {
+    if matches!(&*def.effect, Effect::Dig { .. }) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_dig(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_dig(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_dig)
+}
+
+/// CR 608.2c + CR 701.20: "you may look at the top N cards ... If you do,
+/// reveal/put ... from among them ..." (Fertile Thicket, Munda, Planar Atlas).
+/// The optional "look" lowers to an optional `Dig`; the dependent "reveal ...
+/// from among them" is a continuation that patches that same `Dig`. The
+/// "if you do" is not an independent game-state condition — per CR 608.2c
+/// (read the whole text and apply the rules of English) it links the dependent
+/// reveal to the optional look having happened, and the optional `Dig` (the
+/// player may decline the look, and then nothing in the chain resolves) IS that
+/// gate. So when the parse contains a `Dig` inside an optional ability/trigger,
+/// the "if you do" marker is represented, not swallowed.
+fn any_optional_ability_has_dig(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(|def| def_tree_has_optional(def) && def_tree_has_dig(def))
+        || parsed.triggers.iter().any(|t| {
+            trigger_tree_has_optional(t) && t.execute.as_deref().is_some_and(def_tree_has_dig)
+        })
+}
+
+fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !stripped.contains("if you do") {
+        return false;
+    }
+    let without_link = stripped.replace("if you do", "");
+    let has_if_marker = without_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -1728,6 +1865,21 @@ fn detect_condition_if(
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
+    // the "if you do" is the optional-exile linkage, represented by the
+    // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
+    if any_ability_has_plotted_grant(parsed) && plotted_grant_linkage_is_only_if_marker(&stripped) {
+        return;
+    }
+    // CR 608.2c + CR 701.20: "you may look at the top N cards ... If you do,
+    // reveal ... from among them ..." (Fertile Thicket, Munda Ambush Leader,
+    // Planar Atlas). The optional look lowers to an optional `Dig` and the
+    // dependent "reveal ... from among them" is a continuation patching that
+    // same `Dig`; the "if you do" linkage IS represented by the optional `Dig`
+    // (declining the look stops the whole chain), not swallowed.
+    if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
+        return;
+    }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
     // independent condition; prevention replacements encode it by storing the
     // follow-up in `execute`, which the replacement pipeline only fires from
@@ -1969,11 +2121,54 @@ fn detect_condition_as_long_as(
     if any_static_has_per_object_as_long_as_gate(parsed) {
         return;
     }
+    if any_static_has_attached_subject_qualifier_grant(parsed) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Condition_AsLongAs".into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
+}
+
+/// CR 611.3a + CR 613: an inverted attached-subject grant
+/// ("As long as enchanted/equipped creature is `<characteristic>`, it gets …")
+/// represents its "as long as" qualifier by folding the characteristic into the
+/// grant's `affected` attached-subject filter (e.g. `creature + EnchantedBy +
+/// HasColor{White}`), not as a separate `condition`. The qualifier IS
+/// represented — the static only applies while the host matches the folded
+/// characteristic — so the clause is not swallowed.
+///
+/// This is precise: when the qualifier is unparseable the inverted grant falls
+/// back to `affected: SelfRef` (not an attached-subject filter), so this
+/// exemption never masks a genuinely-dropped qualifier.
+fn any_static_has_attached_subject_qualifier_grant(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|static_def| {
+        static_def.description.as_ref().is_some_and(|description| {
+            let lower = description.to_ascii_lowercase(); // allow-noncombinator: swallow detector marker scan on parsed static description
+            lower.contains("as long as enchanted ") || lower.contains("as long as equipped ")
+        }) && static_def
+            .affected
+            .as_ref()
+            .is_some_and(target_filter_is_attached_subject)
+    })
+}
+
+fn target_filter_is_attached_subject(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::EnchantedBy
+                    | crate::types::ability::FilterProp::EquippedBy
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_attached_subject)
+        }
+        TargetFilter::Not { filter } => target_filter_is_attached_subject(filter),
+        _ => false,
+    }
 }
 
 fn any_static_has_per_object_as_long_as_gate(parsed: &ParsedAbilities) -> bool {
@@ -2193,6 +2388,7 @@ fn detect_duration_this_turn(
         // IS the "this turn" scope; `LandsPlayedThisTurn` in the AST means the clause
         // was captured by the intervening-if condition parser, not swallowed.
         "LandsPlayedThisTurn",
+        "DamageDealtThisTurn",
         "AttackedThisTurn",
         "CounterAddedThisTurn",
         "NthSpellThisTurn",
@@ -2570,6 +2766,33 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn condition_as_long_as_accepts_inverted_attached_subject_color_grant() {
+        // CR 611.3a + CR 613: Shield of the Oversoul folds "is white/green" into
+        // the grant's `affected` attached-subject filter, so the "as long as"
+        // qualifier is represented (not swallowed) despite `condition: None`.
+        let parsed = parse_named(
+            "Enchant creature\n\
+             As long as enchanted creature is white, it gets +1/+1 and has flying.\n\
+             As long as enchanted creature is green, it gets +1/+1 and has indestructible.",
+            "Shield of the Oversoul",
+            &["Enchantment", "Aura"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
+    }
+
+    #[test]
+    fn condition_as_long_as_accepts_inverted_equipped_subject_grant() {
+        let parsed = parse_named(
+            "Equip {2}\nAs long as equipped creature is red, it gets +1/+1 and has haste.",
+            "Test Equipment",
+            &["Artifact", "Equipment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
     }
 
     #[test]
@@ -3284,6 +3507,91 @@ mod tests {
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
     }
 
+    /// CR 702.170c + CR 608.2c: "You may exile a card … If you do, it becomes
+    /// plotted." — the "if you do" gate is the optional-exile linkage,
+    /// represented by the chained `GrantCastingPermission { Plotted }`, so the
+    /// `Condition_If` detector must not flag Make Your Own Luck / Kellan Joins Up.
+    #[test]
+    fn condition_if_accepts_if_you_do_becomes_plotted() {
+        let myol = parse_named(
+            "Look at the top three cards of your library. You may exile a nonland card from \
+             among them. If you do, it becomes plotted. Put the rest into your hand.",
+            "Make Your Own Luck",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&myol, "Condition_If"));
+
+        let kellan = parse_named(
+            "When this creature enters, you may exile a nonland card with mana value 3 or less \
+             from your hand. If you do, it becomes plotted.",
+            "Kellan Joins Up",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&kellan, "Condition_If"));
+    }
+
+    /// CR 608.2c: Keep the plotted-grant exemption scoped to the actual
+    /// linkage phrase; a separate conditional marker on the same card must
+    /// still run through the detector.
+    #[test]
+    fn plotted_grant_linkage_exemption_is_text_scoped() {
+        assert!(super::plotted_grant_linkage_is_only_if_marker(
+            "you may exile a card. if you do, it becomes plotted."
+        ));
+        assert!(!super::plotted_grant_linkage_is_only_if_marker(
+            "you may exile a card. if you do, it becomes plotted. if another condition is true, draw a card."
+        ));
+    }
+
+    /// CR 608.2c + CR 701.20: "you may look at the top N cards ... If you do,
+    /// reveal ... from among them ..." — the optional look lowers to an optional
+    /// `Dig` and the dependent reveal patches it, so the "if you do" linkage is
+    /// represented (not a swallowed condition). Fertile Thicket, Munda, and
+    /// Planar Atlas are the motivating cards (#2349).
+    #[test]
+    fn condition_if_accepts_you_may_look_if_you_do_reveal_from_among() {
+        let fertile = parse_named(
+            "When this land enters, you may look at the top five cards of your library. \
+             If you do, reveal up to one basic land card from among them, then put that \
+             card on top of your library and the rest on the bottom in any order.",
+            "Fertile Thicket",
+            &["Land"],
+        );
+        assert!(!has_swallowed_detector(&fertile, "Condition_If"));
+
+        let munda = parse_named(
+            "Whenever this creature or another Ally you control enters, you may look at \
+             the top four cards of your library. If you do, reveal any number of Ally \
+             cards from among them, then put those cards on top of your library in any \
+             order and the rest on the bottom in any order.",
+            "Munda, Ambush Leader",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&munda, "Condition_If"));
+
+        let atlas = parse_named(
+            "When this artifact enters, you may look at the top four cards of your \
+             library. If you do, reveal up to one land card from among them, then put \
+             that card on top of your library and the rest on the bottom in a random order.",
+            "Planar Atlas",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&atlas, "Condition_If"));
+    }
+
+    /// CR 608.2c: the optional-look "if you do" exemption is scoped to the
+    /// linkage phrase; a separate game-state conditional on the same card must
+    /// still reach the detector.
+    #[test]
+    fn dig_if_you_do_exemption_is_text_scoped() {
+        assert!(super::dig_if_you_do_is_only_if_marker(
+            "you may look at the top five cards. if you do, reveal a land card from among them."
+        ));
+        assert!(!super::dig_if_you_do_is_only_if_marker(
+            "you may look at the top five cards. if you do, reveal a land. if you control a forest, draw a card."
+        ));
+    }
+
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is
     /// represented as `CopySpell { retarget: MayChooseNewTargets }`, so no
     /// `Optional_YouMay` swallowed-clause warning is emitted.
@@ -3313,6 +3621,55 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn alt_cost_cast_permissions_do_not_swallow_pay_life_riders() {
+        for (oracle, name, types) in [
+            (
+                "Flying\n\
+                 Lifelink\n\
+                 You may play lands and cast spells from among cards in your graveyard you've \
+                 surveilled this turn. If you cast a spell this way, you pay life equal to its \
+                 mana value rather than paying its mana cost.",
+                "Eye of Duskmantle",
+                &["Creature"][..],
+            ),
+            (
+                "Menace\n\
+                 Whenever The Infamous Cruelclaw deals combat damage to a player, exile cards \
+                 from the top of your library until you exile a nonland card. You may cast that \
+                 card by discarding a card rather than paying its mana cost.",
+                "The Infamous Cruelclaw",
+                &["Creature"][..],
+            ),
+            (
+                "Devoid\n\
+                 Menace\n\
+                 Whenever this creature deals combat damage to a player, that player exiles cards \
+                 from the top of their library until they exile a nonland card. You may cast that \
+                 card by paying life equal to the spell's mana value rather than paying its mana cost.",
+                "Bismuth Mindrender",
+                &["Creature"][..],
+            ),
+            (
+                "Casualty 2\n\
+                 Each opponent exiles the top card of their library. You may cast spells from among \
+                 those cards this turn. If you cast a spell this way, pay life equal to that spell's \
+                 mana value rather than pay its mana cost.",
+                "Xander's Pact",
+                &["Sorcery"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                parsed.parse_warnings.iter().all(|warning| {
+                    !matches!(warning, OracleDiagnostic::SwallowedClause { .. })
+                }),
+                "{name} must not gain coverage via a swallowed clause: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     /// Issue #2233: Condition_Unless — representative cards from the drilldown.
@@ -3348,6 +3705,50 @@ mod tests {
         }
     }
 
+    /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
+    /// to `ChangeTargets { scope: All }` with the full `you may choose new
+    /// targets` surface preserved — not `def.optional`.
+    #[test]
+    fn optional_you_may_accepts_change_targets_retarget_spells() {
+        for (oracle, name, types) in [
+            (
+                "The next time a spell or ability an opponent controls targets you \
+                 this turn, change the target to another spell or ability. \
+                 Overload {2}{U}{U} (You may cast this spell for its overload cost. \
+                 If you do, change its target.)\n\
+                 You may choose new targets for target spell or ability.",
+                "Deflecting Swat",
+                &["Instant"][..],
+            ),
+            (
+                "You may choose new targets for target spell.",
+                "Redirect",
+                &["Instant"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} should not swallow retarget optional"
+            );
+        }
+    }
+
+    /// CR 707.10c + CR 115.7d: Increasing Vengeance — copy with optional
+    /// retarget for copies (absorbed onto CopySpell when adjacent).
+    #[test]
+    fn optional_you_may_accepts_increasing_vengeance_copy_retarget() {
+        let parsed = parse_named(
+            "Copy target instant or sorcery spell you control. If this spell was cast from a \
+             graveyard, copy that spell twice instead. You may choose new targets for the copies.\n\
+             Flashback {3}{R}{R}",
+            "Increasing Vengeance",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
     /// CR 707.10c: Thousand-Year Storm exercises the triggered-ability context
     /// — the plural "for the copies" clause is absorbed onto the trigger's
     /// inner CopySpell.
@@ -3359,6 +3760,38 @@ mod tests {
              You may choose new targets for the copies.",
             "Thousand-Year Storm",
             &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
+    /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
+    /// into `FlipCoin.win_effect`.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
+        let parsed = parse_named(
+            "Whenever you cast an instant or sorcery spell, flip a coin. \
+             If you lose the flip, return that spell to its owner's hand. \
+             If you win the flip, copy that spell, and you may choose new targets for the copy.",
+            "Krark, the Thumbless",
+            &["Legendary", "Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 603.2b + CR 611.2 + CR 609.4b: Xanathar's upkeep trigger bundles
+    /// look/play/spend-as-any-color permissions inside the execute tree.
+    #[test]
+    fn optional_you_may_accepts_xanathar_upkeep_permissions() {
+        let parsed = parse_named(
+            "At the beginning of your upkeep, choose target opponent. Until end of turn, \
+             that player can't cast spells, you may look at the top card of their library \
+             any time, you may play the top card of their library, and you may spend mana \
+             as though it were mana of any color to cast spells this way.",
+            "Xanathar, Guild Kingpin",
+            &["Legendary", "Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));

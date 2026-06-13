@@ -4,9 +4,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastTimingPermission, CastVariantPaid,
-    CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
+    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
+    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
+    ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -74,6 +76,17 @@ pub struct BestowFormState;
 /// permanent — the merge identity lives in `GameObject::merged_components`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
+
+/// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
+/// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
+/// `merged_components.len()` alone cannot, since a two-creature mutate also
+/// has `len() == 2`. The transform guard (CR 712.4c) keys on
+/// `Some(MergeKind::Meld)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeKind {
+    Mutate,
+    Meld,
+}
 
 /// CR 702.160a: Prototype form marker — `Some(_)` means this object was cast
 /// prototyped and should use the secondary power, toughness, and mana cost
@@ -323,6 +336,13 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
+    /// (set via ChooseModalFace back_face=true). Reverted to front face on any
+    /// zone exit that is not to the battlefield (CR 712.8a: front face only in
+    /// zones other than battlefield/stack), unlike transform DFCs which use the
+    /// `transformed` flag.
+    #[serde(default)]
+    pub modal_back_face: bool,
 
     // Combat
     pub damage_marked: u32,
@@ -476,6 +496,16 @@ pub struct GameObject {
     // Timestamp for layer ordering
     pub timestamp: u64,
 
+    /// CR 400.7: Monotonic per-object incarnation, bumped on every battlefield
+    /// entry (`reset_for_battlefield_entry`). A permanent that leaves and
+    /// re-enters the battlefield becomes a new object even though the engine
+    /// reuses its `ObjectId` as storage identity. Pairing the id with this
+    /// counter distinguishes the new object from the old one at the same id, so
+    /// a pending ability that captured the previous incarnation no longer
+    /// resolves its self-reference against the re-entered permanent (blink/flicker).
+    #[serde(default)]
+    pub incarnation: u64,
+
     // CR 603.6a: Turn on which this object entered the battlefield (global turn
     // counter). Used for "entered this turn" triggers and `EnteredThisTurn`
     // filters — NOT for summoning-sickness (see `summoning_sick`).
@@ -554,6 +584,12 @@ pub struct GameObject {
     /// Kicker semantics.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub additional_cost_payment_count: u32,
+    /// CR 607.2g + CR 702.157b/702.175b: Per-instance non-kicker
+    /// additional-cost payments that produced this permanent, copied from
+    /// `SpellContext.additional_cost_payments` at cast resolution for linked
+    /// ETB triggers such as Squad and Offspring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
     /// produced this object. Stored as object ids so future convoke-reference
     /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
@@ -591,11 +627,39 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_components: Vec<ObjectId>,
 
+    /// CR 712.4c / CR 730.2: Which merge keyword produced this merged permanent
+    /// (`Mutate` vs `Meld`), or `None` for a non-merged object. The transform
+    /// guard (CR 712.4c) keys on `Some(MergeKind::Meld)` to forbid transforming a
+    /// melded permanent WITHOUT also blocking a two-creature mutate pile (which
+    /// also has `merged_components.len() == 2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_kind: Option<MergeKind>,
+
     /// CR 730.2a + CR 702.140e: Stable id of the layer-1 copy effect that
     /// represents this merged permanent's topmost copiable values plus component
     /// ability union. `None` for non-merged objects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_layer_effect_id: Option<u64>,
+
+    /// CR 730.2d: A merged permanent is a token only if its TOPMOST component is a
+    /// token. The survivor keeps its own `ObjectId` (CR 730.2c) but adopts the
+    /// topmost component's token-ness while merged; this captures the survivor's
+    /// intrinsic `is_token` (once, on the first merge that overrides it) so
+    /// `merge::split_merged_permanent_on_leave` can restore it when the pile
+    /// leaves the battlefield. `None` when no override is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge_is_token: Option<bool>,
+
+    /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
+    /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
+    /// the surviving object's id here, so that an effect which finds the object
+    /// the merged permanent became — a flicker/blink referencing "it" — returns
+    /// ALL of the components, not just the survivor (see
+    /// `merge::expand_returned_merge_components`). Set when the component is split
+    /// out on battlefield exit; cleared on any battlefield (re-)entry. `None` for
+    /// objects that were never split out of a merged permanent this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_from_merge_survivor: Option<ObjectId>,
 
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
@@ -773,6 +837,12 @@ pub struct GameObject {
     #[serde(default)]
     pub is_saddled: bool,
 
+    /// CR 702.171c: The creatures that saddled this permanent (tapped to pay the
+    /// saddle cost). Cleared in lockstep with `is_saddled` at end of turn or when
+    /// the permanent leaves the battlefield.
+    #[serde(default)]
+    pub saddled_by: Vec<ObjectId>,
+
     /// CR 613.11 + CR 510.1a: This creature assigns combat damage equal to its
     /// toughness rather than its power. Set after object-characteristic layers.
     #[serde(default)]
@@ -808,16 +878,20 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
-    /// CR 614.1a + CR 608.2n: When true, this spell is exiled instead of being
-    /// put into its owner's graveyard any time it would leave the stack
-    /// ("if those spells would be put into your graveyard, exile them instead").
-    /// Set on a spell cast via `Effect::FreeCastFromZones` with the exile rider
-    /// (Invoke Calamity); read by the stack-resolution router. Unlike the
-    /// keyword-driven `CastingVariant` exile riders, this is a per-object marker
-    /// so it survives the during-resolution cast finalize regardless of the
-    /// spell's origin zone or casting variant.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub exile_from_stack_instead_of_graveyard: bool,
+    /// CR 601.2a + CR 603.4: Transient field tracking the player who cast the
+    /// spell that became this permanent. Paired with `cast_from_zone` for
+    /// intervening-if clauses such as "if you cast it from your graveyard".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
+
+    /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
+    /// is exiled instead of being put into its owner's graveyard as it resolves,
+    /// and the resulting exile is recorded as "exiled with" the stored source.
+    /// Set by `Effect::ExileResolvingSpellInsteadOfGraveyard` (Rod of
+    /// Absorption's "exile it instead of putting it into a graveyard as it
+    /// resolves" rider); consumed by the stack-resolution router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_from_stack_linked_source: Option<ObjectId>,
 
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
@@ -877,7 +951,37 @@ pub struct GameObject {
     pub phase_status: PhaseStatus,
 }
 
+/// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
+/// slice. The generic "choose a card type" persists as a `CardType` attribute; a
+/// restricted card-type choice ("Choose creature or land", Winding Way) parses as
+/// a `Labeled` modal option list and persists as a capitalized `Label`, which is
+/// parsed back to its `CoreType`. Shared by `GameObject::chosen_card_type` and
+/// the `FilterProp::IsChosenCardType` matcher so both forms bind uniformly.
+pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType> {
+    attrs.iter().find_map(|a| match a {
+        ChosenAttribute::CardType(t) => Some(*t),
+        ChosenAttribute::Label(label) => label.parse::<CoreType>().ok(),
+        _ => None,
+    })
+}
+
 impl GameObject {
+    pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
+        additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
+    }
+
+    pub fn instance_payment_count_for_ordinal(
+        &self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+    ) -> u32 {
+        additional_cost_instance_payment_count_for_ordinal(
+            &self.additional_cost_payments,
+            origin,
+            origin_ordinal,
+        )
+    }
+
     /// Oathbreaker RC: true for the command-zone signature spell role.
     pub fn is_signature_spell(&self) -> bool {
         self.signature_spell.is_some()
@@ -911,6 +1015,7 @@ impl GameObject {
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
+            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
@@ -1005,6 +1110,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
             attached_to: None,
@@ -1052,6 +1158,7 @@ impl GameObject {
             base_color: Vec::new(),
             base_characteristics_initialized: false,
             timestamp: 0,
+            incarnation: 0,
             entered_battlefield_turn: None,
             discarded_turn: None,
             summoning_sick: false,
@@ -1062,12 +1169,16 @@ impl GameObject {
             cost_x_paid: None,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
+            additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
             bestow_form: None,
             prototype_form: None,
             mutate_form: None,
             merged_components: Vec::new(),
+            merge_kind: None,
+            pre_merge_is_token: None,
             merge_layer_effect_id: None,
+            split_from_merge_survivor: None,
             cleave_form: None,
             cleave_variant: None,
             unimplemented_mechanics: Vec::new(),
@@ -1100,6 +1211,7 @@ impl GameObject {
             monstrous: false,
             prepared: None,
             is_saddled: false,
+            saddled_by: Vec::new(),
             assigns_damage_from_toughness: false,
             assigns_damage_as_though_unblocked: false,
             assigns_no_combat_damage: false,
@@ -1107,7 +1219,8 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
-            exile_from_stack_instead_of_graveyard: false,
+            cast_controller: None,
+            exile_from_stack_linked_source: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
@@ -1163,9 +1276,17 @@ impl GameObject {
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
     pub fn reset_for_battlefield_entry(&mut self, turn_number: u32) {
+        // CR 400.7: This (re-)entry creates a new object at the same storage id.
+        // Bump the incarnation so self-references captured by abilities created
+        // for the previous incarnation no longer match this permanent.
+        self.incarnation += 1;
         self.base_controller = Some(self.owner);
         self.controller = self.owner;
         self.entered_battlefield_turn = Some(turn_number);
+        // CR 730.3c + CR 400.7: a split-out merge component that (re-)enters the
+        // battlefield is a fresh permanent — drop the survivor back-link so it is
+        // not re-collected by a later continuity-reference return.
+        self.split_from_merge_survivor = None;
         // CR 302.6: A permanent that enters the battlefield has not been
         // continuously under its controller's control since that player's
         // most recent turn began. Cleared at controller's next turn start
@@ -1190,6 +1311,7 @@ impl GameObject {
         // state. Assign when WotC publishes SOS CR update.
         self.prepared = None;
         self.is_saddled = false;
+        self.saddled_by.clear();
         self.paired_with = None;
         self.pair_controller = None;
         self.chosen_attributes.clear();
@@ -1199,12 +1321,15 @@ impl GameObject {
         // it only for ability-effect-driven entries (Kodama anti-recursion guard).
         self.entered_via_ability_source = None;
         self.cast_timing_permission = None;
-        // CR 400.7 + CR 702.33d: kicker payments are bound to the casting
-        // event that produced this object. A re-entering permanent has no
-        // memory of prior kicker payments — clear before the cast resolution
-        // path repopulates from the resolving spell's `SpellContext`.
+        // CR 400.7d + CR 702.33d: cast provenance and kicker payments are
+        // bound to the casting event that produced this object. A re-entering
+        // permanent has no memory of prior cast links — clear before the cast
+        // resolution path repopulates from the resolving spell's context.
+        self.cast_from_zone = None;
+        self.cast_controller = None;
         self.kickers_paid.clear();
         self.additional_cost_payment_count = 0;
+        self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
         // spell-resolution event that created this object. A re-entering
         // permanent has no memory of a prior convoke payment.
@@ -1272,6 +1397,7 @@ impl GameObject {
         self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
+        self.saddled_by.clear();
         // CR 702.xxx: Prepared (Strixhaven) is a battlefield-only designation —
         // clears on BF exit, paralleling monstrous/suspected. CR 400.7: a
         // re-entering permanent is a new object with no memory of its previous
@@ -1286,6 +1412,7 @@ impl GameObject {
         // re-checks resolve correctly. A permanent that leaves the battlefield
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
+        self.cast_controller = None;
         // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
         // scoped — a permanent that leaves the battlefield is a new object on any
         // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.
@@ -1309,6 +1436,15 @@ impl GameObject {
         // re-entering object is not stuck carrying stale component ids. `mutate_form`
         // (stack-only, paralleling `bestow_form`) is intentionally NOT cleared here.
         self.merged_components.clear();
+        // CR 712.4c / CR 730.2 + CR 400.7: the merge-kind discriminator is
+        // battlefield-scoped like the rest of the merge identity; clear it so a
+        // re-entering object is not stuck as a phantom Meld/Mutate survivor.
+        self.merge_kind = None;
+        // CR 730.2d + CR 400.7: the topmost-derived token-ness override is
+        // battlefield-scoped. `split_merged_permanent_on_leave` restores it before
+        // this reset runs; clear it defensively so a re-entering object never
+        // carries a stale override value.
+        self.pre_merge_is_token = None;
         // CR 730.3 + CR 400.7: merge copy effects are battlefield-scoped and are
         // pruned at the battlefield-exit seam before this reset. Clear the stored
         // id so a re-entering object cannot point at a stale transient effect.
@@ -1357,11 +1493,16 @@ impl GameObject {
 
     /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
+    ///
+    /// CR 205.2a: A *restricted* card-type choice ("Choose creature or land",
+    /// Winding Way) parses as a `Labeled` modal option list rather than the
+    /// generic "choose a card type", so it persists as a capitalized `Label`
+    /// rather than a `CardType`. The label still names a card type, so fall back
+    /// to parsing it (e.g. "Creature" → `CoreType::Creature`) — this lets every
+    /// "of the chosen type" reader (cost reduction, protection, the reveal-and-
+    /// partition move) bind a restricted card-type choice uniformly.
     pub fn chosen_card_type(&self) -> Option<CoreType> {
-        self.chosen_attributes.iter().find_map(|a| match a {
-            ChosenAttribute::CardType(t) => Some(*t),
-            _ => None,
-        })
+        chosen_card_type_of(&self.chosen_attributes)
     }
 
     /// Look up a stored basic land type choice.

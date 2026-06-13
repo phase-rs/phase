@@ -7,6 +7,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
+import { BattlefieldZoneOverflow } from "./BattlefieldZoneOverflow.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommandDock } from "../zone/CommandDock.tsx";
 
@@ -136,9 +137,10 @@ export function PlayerArea({
         style={landStyle}
         data-debug-label="Lands"
       >
-        <BattlefieldRow
+        <BattlefieldZoneOverflow
           groups={partitioned?.lands ?? []}
-          rowType="lands"
+          zone="lands"
+          side="left"
           className="justify-start px-0"
         />
         {landColumnExtra}
@@ -152,9 +154,10 @@ export function PlayerArea({
         style={supportStyle}
         data-debug-label="Support"
       >
-        <BattlefieldRow
+        <BattlefieldZoneOverflow
           groups={supportGroups}
-          rowType="support"
+          zone="support"
+          side="right"
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
         />
@@ -179,13 +182,15 @@ export function PlayerArea({
   // than wedged into its own column or lane. As a content-width absolute overlay
   // it consumes zero vertical space, so the flex-1 creature row keeps its full
   // height, and the box hugs the HUD instead of spanning the row. Centered
-  // horizontally (`left-1/2 -translate-x-1/2`) and dropped below the land row
-  // (`top-[200%]`), mirrored upward for the focused opponent. z-20 keeps it
+  // horizontally (`left-1/2 -translate-x-1/2`) and dropped just below the middle
+  // row for the player (`top-[130%] -translate-y-full`); the focused opponent
+  // uses the vertical mirror (`bottom-[130%] translate-y-full`) so the HUD sits
+  // just above its middle row. z-20 keeps it
   // above resting cards (lands/support are z-10) but below a hovered card
   // (PermanentCard lifts to z-60), so a card slides over the HUD on hover.
   const hudBand = hud ? (
     <div
-      className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[320%]" : "top-[130%] -translate-y-full"}`}
+      className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[130%] translate-y-full" : "top-[130%] -translate-y-full"}`}
       data-debug-label="HUD"
     >
       {hud}

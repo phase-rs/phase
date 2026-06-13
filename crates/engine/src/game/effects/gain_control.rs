@@ -22,24 +22,96 @@ pub fn resolve(
     // CR 613.1b: Layer 2 — control-changing effects are applied.
     let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
 
-    for target in &ability.targets {
-        if let TargetRef::Object(obj_id) = target {
-            // Verify target exists
-            if !state.objects.contains_key(obj_id) {
-                return Err(EffectError::ObjectNotFound(*obj_id));
-            }
+    let Effect::GainControl { target } = &ability.effect else {
+        return Err(EffectError::InvalidParam(
+            "expected GainControl effect".to_string(),
+        ));
+    };
 
-            // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
-            // The affected filter targets this specific object by ID.
-            state.add_transient_continuous_effect(
-                ability.source_id,
-                ability.controller,
-                duration.clone(),
-                TargetFilter::SpecificObject { id: *obj_id },
-                vec![ContinuousModification::ChangeController],
-                None,
-            );
-            mark_echo_due_for_new_controller(state, *obj_id);
+    let new_controller = gain_control_controller(ability, target);
+    let object_ids = gain_control_object_targets(state, ability, target);
+
+    for obj_id in object_ids {
+        if !state.objects.contains_key(&obj_id) {
+            return Err(EffectError::ObjectNotFound(obj_id));
+        }
+
+        // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            new_controller,
+            duration.clone(),
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_echo_due_for_new_controller(state, obj_id);
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 613.1b: Mass control-change (Layer 2 — control-changing effects) — gain
+/// control of EVERY battlefield permanent matching the effect's `target` filter
+/// (the untargeted "all" counterpart of [`resolve`], mirroring
+/// `destroy::resolve_all`). Hellkite Tyrant's "gain control of all artifacts
+/// that player controls": the filter is enumerated against the battlefield with
+/// an ability-bound [`FilterContext`], so a `controller: TargetPlayer` clause
+/// resolves to the effect's player target (e.g. the player dealt combat damage),
+/// and one Layer-2 control TCE is registered per match.
+pub fn resolve_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
+
+    let Effect::GainControlAll { target } = &ability.effect else {
+        return Err(EffectError::InvalidParam(
+            "expected GainControlAll effect".to_string(),
+        ));
+    };
+
+    // "you gain control" — the ability's controller takes control.
+    let new_controller = ability.controller;
+
+    // Ability-context filter evaluation, identical to `destroy::resolve_all`:
+    // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
+    // TargetPlayer`) from the ability before matching.
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let matching: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching {
+        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+        // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            new_controller,
+            duration.clone(),
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_echo_due_for_new_controller(state, obj_id);
+        if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller,
+                new_controller,
+            });
         }
     }
 
@@ -49,6 +121,45 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 613.3: The player who gains control. Normally the ability controller;
+/// after a resolution-scoped `Choose(Opponent)` whose dependent effect is
+/// `GainControl { SelfRef }`, the chosen opponent is the recipient
+/// (Wishclaw Talisman — "an opponent gains control of ~").
+fn gain_control_controller(ability: &ResolvedAbility, target: &TargetFilter) -> PlayerId {
+    if matches!(target, TargetFilter::SelfRef) {
+        if let Some(&recipient) = ability.chosen_players.last() {
+            return recipient;
+        }
+    }
+    ability.controller
+}
+
+fn gain_control_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    // CR 608.2c: `SelfRef` binds to the ability source even when target
+    // propagation has populated `ability.targets`.
+    if matches!(filter, TargetFilter::SelfRef) {
+        return vec![ability.source_id];
+    }
+
+    let chosen_objects = super::effect_object_targets(filter, &ability.targets);
+
+    if !chosen_objects.is_empty() {
+        return chosen_objects;
+    }
+
+    crate::game::targeting::resolved_targets(ability, filter, state)
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .collect()
 }
 
 /// CR 110.2: Give control of target permanent to a specified recipient player.
@@ -81,7 +192,7 @@ pub fn resolve_give(
     }) {
         pid
     } else {
-        unique_recipient_from_filter(state, recipient, ability.controller)?
+        unique_recipient_from_filter(state, recipient, ability)?
     };
 
     let object_ids = give_control_object_targets(state, ability, target);
@@ -141,8 +252,16 @@ fn give_control_object_targets(
 fn unique_recipient_from_filter(
     state: &GameState,
     filter: &TargetFilter,
-    source_controller: PlayerId,
+    ability: &ResolvedAbility,
 ) -> Result<PlayerId, EffectError> {
+    if let TargetFilter::ScopedPlayer = filter {
+        return ability
+            .scoped_player
+            .ok_or_else(|| EffectError::MissingParam("GiveControl scoped recipient".to_string()));
+    }
+
+    let source_controller = ability.controller;
+
     if let TargetFilter::SpecificPlayer { id } = filter {
         return state
             .players
@@ -162,6 +281,23 @@ fn unique_recipient_from_filter(
             source_controller,
             *direction,
         ));
+    }
+
+    // CR 603.7c + CR 608.2c: "that player" on triggered abilities lowers to
+    // `TargetFilter::TriggeringPlayer`. The stateless player matcher cannot
+    // resolve event-context refs, so bind the recipient from the active trigger
+    // event (Coveted Jewel: the attacking opponent).
+    if matches!(filter, TargetFilter::TriggeringPlayer) {
+        return crate::game::targeting::resolve_event_context_target(
+            state,
+            filter,
+            ability.source_id,
+        )
+        .and_then(|target| match target {
+            TargetRef::Player(player_id) => Some(player_id),
+            _ => None,
+        })
+        .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
     }
 
     let mut matching = state
@@ -218,6 +354,192 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 611.2b + CR 122.1c: Shield Broker — "put a shield counter on target
+    /// noncommander creature you don't control. You gain control of that
+    /// creature for as long as it has a shield counter on it." The control TCE's
+    /// `ForAsLongAs { RecipientHasCounters(shield) }` duration must be evaluated
+    /// against the CONTROLLED creature (the recipient), not the source (Shield
+    /// Broker has no shield counter). Issue #2855: pre-fix the source-scoped
+    /// `HasCounters` check failed immediately, so control never transferred.
+    #[test]
+    fn shield_broker_etb_places_counter_and_transfers_control() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let broker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shield Broker".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&target).unwrap();
+            o.card_types.core_types = vec![CoreType::Creature];
+            o.base_card_types = o.card_types.clone();
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.base_power = Some(2);
+            o.base_toughness = Some(2);
+        }
+
+        let def = parse_trigger_line(
+            "When this creature enters, put a shield counter on target noncommander creature you don't control. You gain control of that creature for as long as it has a shield counter on it.",
+            "Shield Broker",
+        );
+        let ability = def.execute.as_ref().expect("execute ability");
+        let resolved = build_resolved_from_def_with_targets(
+            ability,
+            broker,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).expect("ETB resolves");
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = &state.objects[&target];
+        assert_eq!(
+            obj.counters.get(&CounterType::Shield).copied().unwrap_or(0),
+            1,
+            "a shield counter must be placed on the target"
+        );
+        assert_eq!(
+            obj.controller,
+            PlayerId(0),
+            "control of the target must transfer to Shield Broker's controller while it has a shield counter"
+        );
+
+        state
+            .objects
+            .get_mut(&target)
+            .expect("target remains on battlefield")
+            .counters
+            .remove(&CounterType::Shield);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&target].controller,
+            PlayerId(1),
+            "control must revert when the recipient no longer has a shield counter"
+        );
+    }
+
+    /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
+    /// controls". The mass `GainControlAll` enumerates the battlefield, binds
+    /// `controller: TargetPlayer` to the effect's player target (the player
+    /// dealt combat damage), takes control of EVERY matching artifact, and
+    /// leaves non-artifacts (and the controller's own artifacts) untouched.
+    #[test]
+    fn gain_control_all_takes_every_matching_artifact_of_target_player() {
+        use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Hellkite Tyrant (the source), controlled by P0.
+        let hellkite = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hellkite Tyrant".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Two artifacts controlled by the target player P1.
+        let make_artifact = |state: &mut GameState, cid: u32, name: &str| {
+            let id = create_object(
+                state,
+                CardId(cid.into()),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+            id
+        };
+        let boots = make_artifact(&mut state, 2, "Swiftfoot Boots");
+        let banana = make_artifact(&mut state, 3, "Banana");
+
+        // A non-artifact creature P1 controls — must NOT be taken.
+        let bear = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        // An artifact P0 already controls — already theirs; control is unchanged.
+        let own_artifact = make_artifact(&mut state, 5, "Sol Ring");
+        state.objects.get_mut(&own_artifact).unwrap().controller = PlayerId(0);
+        state
+            .objects
+            .get_mut(&own_artifact)
+            .unwrap()
+            .base_controller = Some(PlayerId(0));
+
+        // "all artifacts that player controls", with the damaged player (P1) as
+        // the effect's player target — exactly what the parsed Hellkite trigger
+        // resolves to.
+        let ability = ResolvedAbility::new(
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            hellkite,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&boots).unwrap().controller,
+            PlayerId(0),
+            "P1's artifact (Boots) must transfer to Hellkite's controller",
+        );
+        assert_eq!(
+            state.objects.get(&banana).unwrap().controller,
+            PlayerId(0),
+            "P1's artifact (Banana) must transfer too — ALL artifacts, not one",
+        );
+        assert_eq!(
+            state.objects.get(&bear).unwrap().controller,
+            PlayerId(1),
+            "P1's non-artifact creature must NOT be taken",
+        );
+        assert_eq!(
+            state.objects.get(&own_artifact).unwrap().controller,
+            PlayerId(0),
+            "P0's own artifact stays with P0 (the filter is the target player's)",
+        );
     }
 
     #[test]
@@ -340,6 +662,54 @@ mod tests {
             state.objects.get(&target_id).unwrap().controller,
             recipient,
             "target should now be controlled by the recipient, not the caster or source.controller"
+        );
+    }
+
+    /// CR 603.7c + CR 608.2c: `GiveControl` with `recipient: TriggeringPlayer`
+    /// must resolve from the active trigger event, not the stateless player
+    /// matcher (Coveted Jewel — "that player gains control of this artifact").
+    #[test]
+    fn give_control_triggering_player_recipient_resolves_from_event() {
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let jewel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coveted Jewel".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Raider".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            jewel,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&jewel).unwrap().controller,
+            PlayerId(1),
+            "TriggeringPlayer recipient must be the attacking opponent"
         );
     }
 
@@ -537,6 +907,40 @@ mod tests {
         );
     }
 
+    /// Issue #2915: upkeep "that player gains control" binds `ScopedPlayer` to the
+    /// active player; `GiveControl` must read `ability.scoped_player`.
+    #[test]
+    fn give_control_scoped_player_uses_active_player_binding() {
+        let mut state = GameState::new_two_player(42);
+        let alexios = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Alexios, Deimos of Kosmos".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::ScopedPlayer,
+            },
+            vec![TargetRef::Object(alexios)],
+            alexios,
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&alexios).unwrap().controller,
+            PlayerId(1),
+            "ScopedPlayer recipient must resolve to the bound active player"
+        );
+    }
+
     /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of
     /// Bucknard's Everfull Purse's activated ability
     /// (`{1}, {T}: Roll a d4 and create a number of Treasure tokens equal to
@@ -642,7 +1046,7 @@ mod tests {
         let roll = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result as usize),
+                GameEvent::DieRolled { result, .. } => result.map(usize::from),
                 _ => None,
             })
             .expect("RollDie must emit a DieRolled event");
@@ -818,6 +1222,40 @@ mod tests {
             state.objects.get(&target_id).unwrap().controller,
             PlayerId(1),
             "control must revert to the owner once the tapped source leaves the battlefield",
+        );
+    }
+
+    /// Issue #564: Wishclaw Talisman encodes "an opponent gains control of ~"
+    /// as `Choose(Opponent)` → `GainControl { SelfRef }`. The chosen opponent
+    /// must receive control, not the activator.
+    #[test]
+    fn issue_564_gain_control_self_ref_uses_chosen_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let talisman = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wishclaw Talisman".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::GainControl {
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            talisman,
+            PlayerId(0),
+        );
+        ability.chosen_players = vec![PlayerId(1)];
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&talisman).unwrap().controller,
+            PlayerId(1),
+            "SelfRef GainControl after Choose(Opponent) must transfer to the chosen opponent"
         );
     }
 

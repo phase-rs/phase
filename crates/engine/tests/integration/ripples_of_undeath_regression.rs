@@ -17,7 +17,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -195,6 +195,8 @@ fn ripples_of_undeath_triggers_after_being_cast_and_next_turn() {
             object_id: ripples_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ripples cast should be accepted");
 

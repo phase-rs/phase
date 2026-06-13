@@ -23,7 +23,7 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
 /// "for each Aura you controlled that was attached to it" (Hateful Eidolon)
 /// can resolve their quantity after SBA has already unattached the Auras.
-fn capture_attachment_snapshot(
+pub(crate) fn capture_attachment_snapshot(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<crate::types::game_state::AttachmentSnapshot> {
@@ -57,7 +57,12 @@ fn capture_attachment_snapshot(
 /// revert (CR 712.14), exile permission clearing (CR 113.6e), monstrous reset
 /// (CR 701.37b), counter clearing (CR 122.2), layer pruning, and mana-tap
 /// cleanup.
-fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone, to: Zone) {
+pub(crate) fn apply_zone_exit_cleanup(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. Both the short-lived `revealed_cards`
     // (cleared at action boundaries) and the persistent `public_revealed_cards`
@@ -116,13 +121,41 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
-        // CR 712.14 + CR 400.7: Transformed permanents revert to front face on zone change.
+        // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
+        // transient marker on the spell object. The stack resolver snapshots it
+        // before moving the spell, so all zone exits can clear the field here.
+        obj_mut.exile_from_stack_linked_source = None;
+
+        // CR 400.7 + CR 730.3c: a component split out of a merged permanent is a
+        // new object on every zone change, so its survivor back-link is
+        // meaningful only while it stays in the zone it split into. Clear it on
+        // ANY exit (it is re-set by `merge::split_merged_permanent_on_leave` if it
+        // re-leaves a merged permanent) so it cannot wrongly re-collect on a later
+        // continuity return after moving between non-battlefield zones (e.g.
+        // exile → graveyard). The split sets the link AFTER this cleanup runs, so
+        // this never clobbers the initial set.
+        obj_mut.split_from_merge_survivor = None;
+
+        // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
+        // zone exit (transform DFCs are only valid in transformed state on the battlefield).
         if obj_mut.transformed {
             if let Some(back_face) = obj_mut.back_face.clone() {
                 let current_back = snapshot_object_face(obj_mut);
                 apply_back_face_to_object(obj_mut, back_face);
                 obj_mut.back_face = Some(current_back);
                 obj_mut.transformed = false;
+            }
+        }
+
+        // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
+        // front face in any zone other than the stack or battlefield (back face is
+        // valid on the stack while the spell is being cast, and on the battlefield).
+        if obj_mut.modal_back_face && to != Zone::Stack && to != Zone::Battlefield {
+            if let Some(back_face) = obj_mut.back_face.clone() {
+                let current_back = snapshot_object_face(obj_mut);
+                apply_back_face_to_object(obj_mut, back_face);
+                obj_mut.back_face = Some(current_back);
+                obj_mut.modal_back_face = false;
             }
         }
 
@@ -329,6 +362,31 @@ pub fn create_object(
     id
 }
 
+/// CR 700.11: A player has "descended this turn" when a permanent card has
+/// been put into their graveyard from anywhere this turn. Single authority for
+/// the descend bookkeeping, shared by `move_to_zone` and the merge-split
+/// component delivery (`merge::put_component_into_zone`). Tokens are not cards
+/// and do not count.
+pub(crate) fn record_descend_on_graveyard_arrival(
+    state: &mut GameState,
+    object_id: ObjectId,
+    owner: PlayerId,
+) {
+    let is_permanent_card = state.objects.get(&object_id).is_some_and(|obj| {
+        !obj.is_token
+            && obj
+                .card_types
+                .core_types
+                .iter()
+                .any(|ct| ct.is_permanent_type())
+    });
+    if is_permanent_card {
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+            player.descended_this_turn = true;
+        }
+    }
+}
+
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 pub fn move_to_zone(
     state: &mut GameState,
@@ -424,12 +482,10 @@ pub fn move_to_zone(
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
     }
-    let unattached_from = if from == Zone::Battlefield {
+    let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
-    } else {
-        None
-    };
+    });
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
@@ -438,7 +494,25 @@ pub fn move_to_zone(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    // CR 607.2b + CR 603.10e: Persist the linked-exile snapshot as last-known
+    // information so a self-sacrifice ability that refers to "cards exiled with
+    // this permanent" (Rod of Absorption) still resolves correctly after its own
+    // source is gone and the live `TrackedBySource` links have been pruned.
+    if !zone_change_record.linked_exile_snapshot.is_empty() {
+        state
+            .linked_exile_lki
+            .insert(object_id, zone_change_record.linked_exile_snapshot.clone());
+    }
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+
+    sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
+
+    // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
+    // temporarily changed the survivor's token-ness, the ZoneChanged record above
+    // must retain the merged permanent's event-time token-ness. Restore the
+    // survivor only after that snapshot so the moved token component can cease to
+    // exist without corrupting leave-trigger filters.
+    super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
 
     apply_zone_exit_cleanup(state, object_id, from, to);
 
@@ -471,24 +545,9 @@ pub fn move_to_zone(
         obj_mut.reset_for_battlefield_entry(state.turn_number);
     }
 
-    // Track descended: a permanent card was put into its owner's graveyard.
+    // CR 700.11: a permanent card was put into its owner's graveyard.
     if to == Zone::Graveyard {
-        let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
-            matches!(
-                ct,
-                CoreType::Creature
-                    | CoreType::Artifact
-                    | CoreType::Enchantment
-                    | CoreType::Planeswalker
-                    | CoreType::Land
-                    | CoreType::Battle
-            )
-        });
-        if is_permanent_card && !obj_mut.is_token {
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
-                player.descended_this_turn = true;
-            }
-        }
+        record_descend_on_graveyard_arrival(state, object_id, owner);
     }
 
     // Mark layers dirty when objects enter the battlefield, or the hand (so
@@ -535,15 +594,7 @@ pub fn move_to_zone(
     // above, guaranteeing a post-layer rebuild on the next
     // `collect_pending_triggers` consult.
     if to == Zone::Battlefield {
-        let registration = state.objects.get(&object_id).map(|obj| {
-            let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
-                obj.trigger_definitions.as_slice().iter().cloned().collect();
-            let synthetic = super::trigger_index::has_synthetic_keyword_trigger_for(obj);
-            (defs, synthetic)
-        });
-        if let Some((defs, synthetic)) = registration {
-            state.trigger_index.add(object_id, &defs, synthetic);
-        }
+        super::trigger_index::reindex_object_triggers(state, object_id);
     }
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());
@@ -674,6 +725,43 @@ fn capture_linked_exile_snapshot(
         .collect()
 }
 
+/// After leave-time snapshots are captured on the zone-change record, sever
+/// live attachment graph edges for a permanent departing the battlefield.
+///
+/// Attached Auras/Equipment that remain on the battlefield are cleaned up by
+/// SBAs (CR 704.5m/704.5n). Hosts must not carry a stale `attachments` list
+/// into other zones (commander zone return, blink, etc.), and attachments that
+/// leave the battlefield must not keep a dangling `attached_to` pointer.
+fn sever_battlefield_attachment_graph_on_exit(
+    state: &mut GameState,
+    object_id: ObjectId,
+    unattached_from: &Option<crate::types::ability::TargetRef>,
+) {
+    if unattached_from.is_some() {
+        if let Some(old_target_id) = state
+            .objects
+            .get(&object_id)
+            .and_then(|o| o.attached_to)
+            .and_then(|t| t.as_object())
+        {
+            if let Some(host) = state.objects.get_mut(&old_target_id) {
+                host.attachments.retain(|&id| id != object_id);
+            }
+        }
+        if let Some(attacher) = state.objects.get_mut(&object_id) {
+            attacher.attached_to = None;
+        }
+        crate::game::layers::mark_layers_full(state);
+    }
+
+    if let Some(host) = state.objects.get_mut(&object_id) {
+        if !host.attachments.is_empty() {
+            host.attachments.clear();
+            crate::game::layers::mark_layers_full(state);
+        }
+    }
+}
+
 fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCombatStatus {
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
@@ -728,16 +816,16 @@ pub fn move_to_library_at_index(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
-    let unattached_from = if from == Zone::Battlefield {
+    let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
-    } else {
-        None
-    };
+    });
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+
+    sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
     apply_zone_exit_cleanup(state, object_id, from, Zone::Library);
 
@@ -1781,6 +1869,306 @@ mod tests {
                 .iter()
                 .all(|link| link.source_id != source),
             "TrackedBySource links should still be pruned immediately after LTB"
+        );
+    }
+
+    /// CR 712.8a + CR 400.7: An MDFC permanent that entered the battlefield as
+    /// its back face (modal_back_face = true) must revert to its front face when
+    /// it leaves the battlefield (battlefield is the only non-stack zone where
+    /// back face is permitted).
+    #[test]
+    fn mdfc_back_face_reverts_to_front_face_on_leaving_battlefield() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::printed_cards::apply_back_face_to_object;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        // Create an MDFC in command zone, showing its front face (Valki-like).
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["God".to_string()],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            // Store back face data (original MDFC back face).
+            obj.back_face = Some(BackFaceData {
+                name: "Back Face".to_string(),
+                power: Some(6),
+                toughness: Some(6),
+                loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec!["Devil".to_string()],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![Keyword::Trample],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+            });
+        }
+
+        // Simulate ChooseModalFace { back_face: true }: apply back face and set flag.
+        let front_snapshot =
+            crate::game::printed_cards::snapshot_object_face(state.objects.get(&id).unwrap());
+        let back_data = state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .back_face
+            .take()
+            .unwrap();
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_back_face_to_object(obj, back_data);
+            obj.back_face = Some(front_snapshot);
+            obj.modal_back_face = true;
+        }
+
+        // Move to battlefield.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        {
+            let obj = &state.objects[&id];
+            assert!(obj.modal_back_face, "flag must still be set on battlefield");
+            assert_eq!(obj.name, "Back Face");
+        }
+
+        // Leave the battlefield (dies / commander SBA).
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        let obj = &state.objects[&id];
+        // CR 712.8a: must revert to front face.
+        assert!(
+            !obj.modal_back_face,
+            "modal_back_face must be cleared after leaving battlefield"
+        );
+        assert_eq!(obj.name, "Front Face", "must show front face in graveyard");
+        assert_eq!(obj.power, Some(1), "power must revert to front face");
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// CR 712.8a: A countered MDFC spell (stack → graveyard) must also revert to
+    /// front face — the graveyard is "a zone other than the battlefield or stack."
+    #[test]
+    fn mdfc_back_face_reverts_on_countered_spell_to_graveyard() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::printed_cards::apply_back_face_to_object;
+        use crate::types::card_type::{CardType, CoreType};
+
+        let mut state = setup();
+
+        let id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.back_face = Some(BackFaceData {
+                name: "Back Face".to_string(),
+                power: Some(6),
+                toughness: Some(6),
+                loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+            });
+        }
+        // Apply back face (simulating ChooseModalFace on stack).
+        let front_snapshot =
+            crate::game::printed_cards::snapshot_object_face(state.objects.get(&id).unwrap());
+        let back_data = state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .back_face
+            .take()
+            .unwrap();
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_back_face_to_object(obj, back_data);
+            obj.back_face = Some(front_snapshot);
+            obj.modal_back_face = true;
+        }
+
+        // Spell is countered: stack → graveyard.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        // CR 712.8a: graveyard is not battlefield/stack — must show front face.
+        let obj = &state.objects[&id];
+        assert!(
+            !obj.modal_back_face,
+            "flag must be cleared when spell goes to graveyard"
+        );
+        assert_eq!(
+            obj.name, "Front Face",
+            "must revert to front face in graveyard"
+        );
+    }
+
+    #[test]
+    fn aura_leaving_battlefield_clears_attached_to() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, aura, Zone::Graveyard, &mut events);
+
+        assert_eq!(state.objects[&aura].zone, Zone::Graveyard);
+        assert!(
+            state.objects[&aura].attached_to.is_none(),
+            "attached_to must be cleared when the aura leaves the battlefield"
+        );
+        assert!(
+            !state.objects[&host].attachments.contains(&aura),
+            "host must not retain a stale attachments entry"
+        );
+    }
+
+    #[test]
+    fn sba_pipeline_graveyard_clears_attached_to() {
+        use crate::game::effects::attach::attach_to;
+        use crate::game::zone_pipeline::{ZoneChangeCause, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        let result = crate::game::zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest {
+                object_id: aura,
+                to: Zone::Graveyard,
+                cause: ZoneChangeCause::StateBasedAction,
+                mods: crate::game::zone_pipeline::EntryMods::default(),
+                placement: None,
+                exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+            },
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&aura].zone, Zone::Graveyard);
+        assert!(state.objects[&aura].attached_to.is_none());
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::Unattached {
+                        attachment_id,
+                        old_target
+                    } if *attachment_id == aura
+                        && *old_target == crate::types::ability::TargetRef::Object(host)
+                )
+            }),
+            "SBA zone movement must still publish the unattach event for triggers"
         );
     }
 }

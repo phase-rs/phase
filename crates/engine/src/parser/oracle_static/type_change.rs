@@ -922,70 +922,124 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
     modifications
 }
 
-/// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <types> with power and toughness
-/// each equal to its mana value [as long as <condition>]" — a self-referential
-/// conditional animation static. Covers Animate Artifact and the class of
-/// dynamic-P/T-by-mana-value "it's a/an X creature" become-creature statics.
+/// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <descriptor> [as long as <condition>]"
+/// — self-referential conditional animation static. Covers:
+///   - Dynamic-P/T-by-mana-value: "it's an artifact creature with power and
+///     toughness each equal to its mana value" (Animate Artifact)
+///   - Fixed P/T + types + keywords: "he's a 7/7 Dragon God creature with flying
+///     and indestructible" (Grand Master of Flowers — CR 613.4b fixed P/T,
+///     CR 613.1d type grant, CR 613.1g keyword grant)
 ///
-/// Scoped to the dynamic-P/T-by-MV case only. Fixed-literal P/T (`it's a 3/4
-/// …`) and keyword tails (`with flying`) are deliberately deferred to a
-/// FOLLOWUP — this function does NOT reuse `parse_animation_modifications`
-/// (which rejects `it's an` and drops the P/T clause).
+/// Accepts gender-neutral and gendered pronouns ("it's", "~'s", "they're",
+/// "he's", "she's"). Delegates body parsing to
+/// `parse_animation_spec` + `animation_modifications` (which handles fixed P/T,
+/// dynamic P/T-by-MV, types, subtypes, and keyword tails in one pass), falling
+/// back to the prior type-only + MV-dynamic-P/T path if the spec parser returns
+/// None.
 pub(crate) fn parse_pronoun_becomes_type_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
+    // STEP A.0 — peel an optional leading "during your turn, " timing clause.
+    // Mirror of `parse_compound_turn_counter_animation` (anthem.rs): the
+    // alternate printing convention writes the turn restriction as a leading
+    // timing prefix ("During your turn, ~ is a 4/4 ...") rather than a trailing
+    // "as long as it's your turn" clause. The peel is Option-returning, so when
+    // absent it falls through to `*tp` unchanged and no condition is attached.
+    let (tp, turn_condition) = match nom_tag_tp(tp, "during your turn, ") {
+        Some(rest) => (rest, Some(StaticCondition::DuringYourTurn)),
+        None => (*tp, None),
+    };
+
     // STEP A — peel a trailing " as long as <condition>" FIRST. The canonical
     // inverted-form rewrite produces "<effect> as long as <condition>"; the
     // condition must come off before the effect is parsed, or it leaks into
     // the " with " tail and never becomes a StaticCondition.
     let (effect_tp, condition_tp) = match tp.split_around(" as long as ") {
         Some((before, after)) => (before, Some(after)),
-        None => (*tp, None),
+        None => (tp, None),
     };
 
-    // STEP B — pronoun + article prefix. `it's an` must be accepted alongside
-    // `it's a`; the existing `parse_animation_modifications` rejects `it's an`.
+    // STEP B — pronoun + article prefix. Accept gender-neutral ("it's", "~'s",
+    // "they're") and gendered ("he's", "she's") pronouns; planeswalker
+    // animation statics use gendered pronouns (Grand Master of Flowers, Kaito,
+    // Gideon classes). Also accept the bare "is"-copula form ("~ is a/an ...")
+    // produced when an inverted "As long as it's your turn, ~ is a ..." line
+    // (Gideon Blackblade, #1155) is split by `parse_conditional_static` and the
+    // pronoun-less effect clause "~ is a 4/4 ..." re-enters this parser.
     let body = nom_tag_tp(&effect_tp, "it's a ")
         .or_else(|| nom_tag_tp(&effect_tp, "it's an "))
         .or_else(|| nom_tag_tp(&effect_tp, "~'s a "))
-        .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))?;
-    let mut modifications = Vec::new();
+        .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "~ is a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "~ is an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "they're a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "they're an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "he's a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "he's an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "she's a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "she's an "))?;
 
-    // STEP C — split the type expression from the " with <P/T clause>" tail.
-    let (type_part, with_tail) = match body.split_around(" with ") {
-        Some((before, after)) => (before, Some(after)),
-        None => (body, None),
+    // STEP C — delegate body parsing to parse_animation_spec which handles
+    // fixed P/T (CR 613.4b), dynamic P/T-by-mana-value, types (CR 613.1d),
+    // subtypes (CR 205.3), and keyword tails (CR 613.1g) in one composable pass.
+    let body_text = body.original.trim().trim_end_matches('.');
+    let modifications = if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        body_text,
+        &mut ParseContext::default(),
+    ) {
+        super::oracle_effect::animation::animation_modifications(&spec)
+    } else {
+        // Fallback: type-token parse + mana-value dynamic P/T. Handles edge
+        // cases where parse_animation_spec returns None (e.g., unusual clause
+        // ordering not yet covered by the animation spec parser).
+        let mut mods = Vec::new();
+        let (type_part, with_tail) = match body.split_around(" with ") {
+            Some((before, after)) => (before, Some(after)),
+            None => (body, None),
+        };
+        mods.extend(
+            super::oracle_effect::animation::parse_becomes_type_modifications(type_part.original),
+        );
+        if let Some(tail) = &with_tail {
+            push_base_pt_mana_value_dynamic_modifications(&mut mods, tail.lower);
+        }
+        mods
     };
-
-    // STEP D — types: delegate to the existing animation type-token parser.
-    modifications.extend(
-        super::oracle_effect::animation::parse_becomes_type_modifications(type_part.original),
-    );
-
-    // STEP E — P/T-by-mana-value clause only (fixed/keyword tails deferred).
-    // If a " with " tail is present but is not the P/T-by-MV clause, the
-    // helper pushes nothing and the static still carries its type
-    // modifications — acceptable for this unit's class.
-    if let Some(tail) = &with_tail {
-        push_base_pt_mana_value_dynamic_modifications(&mut modifications, tail.lower);
-    }
 
     if modifications.is_empty() {
         return None;
     }
 
-    // STEP F — attach the condition peeled in STEP A.
+    // STEP D — attach the condition(s). The leading "during your turn, " timing
+    // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are
+    // independent; either, both, or neither may be present.
+    // CR 205.1b + CR 613.7: "~ is a [P/T] [types] creature ... that's still a
+    // planeswalker" — additive type-change (AddType is non-replacing, so the
+    // permanent retains its Planeswalker type while it is also a creature).
+    let trailing_condition = condition_tp.map(|cond_tp| {
+        let cond_text = cond_tp.original.trim().trim_end_matches('.');
+        parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+            text: cond_text.to_string(),
+        })
+    });
+    let condition = match (turn_condition, trailing_condition) {
+        // CR 611.3a: when both a leading turn restriction and a trailing
+        // "as long as" condition are present, compose via `And` rather than
+        // dropping one (mirrors `parse_conditional_static` in anthem.rs).
+        (Some(turn), Some(inner)) => Some(StaticCondition::And {
+            conditions: vec![turn, inner],
+        }),
+        (Some(turn), None) => Some(turn),
+        (None, Some(inner)) => Some(inner),
+        (None, None) => None,
+    };
+
     let mut def = StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(modifications)
         .description(text.to_string());
-    if let Some(cond_tp) = condition_tp {
-        let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+    if let Some(condition) = condition {
         def = def.condition(condition);
     }
     Some(def)

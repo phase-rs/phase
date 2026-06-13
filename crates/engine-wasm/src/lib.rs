@@ -1605,8 +1605,7 @@ mod tests {
                     "sub_ability": null,
                     "duration": null,
                     "description": null,
-                    "target_prompt": null,
-                    "sorcery_speed": false
+                    "target_prompt": null
                 }],
                 "triggers": [],
                 "static_abilities": [],

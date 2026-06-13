@@ -1,13 +1,14 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{CostResume, GameState, PayCostKind, PendingCast, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain,
     auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
-    build_target_slots_labelled, flatten_targets_in_chain, random_select_targets_for_ability,
-    record_modal_mode_choices, target_constraints_from_modal, validate_modal_indices,
+    build_target_slots_labelled, cap_distribution_target_slots, flatten_targets_in_chain,
+    random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
+    validate_modal_indices,
 };
 use super::engine::EngineError;
 use super::engine_stack;
@@ -110,14 +111,19 @@ fn handle_activated_mode_choice(
     // announcement steps. If an activated modal ability's target legality depends
     // on an {X} activation cost, choose X after modes and before targets, then
     // resume through the same deferred target-selection path modal spells use so
-    // per-mode labels and X-dependent legality stay in sync.
-    if ability_target_legality_needs_chosen_x(&resolved) {
+    // per-mode labels and X-dependent legality stay in sync. CR 601.2d: a chosen
+    // mode that divides an X-dependent pool is likewise X-bounded (issue #2856).
+    let mode_distribute = indices
+        .iter()
+        .find_map(|&i| mode_abilities.get(i).and_then(|m| m.distribute.clone()));
+    if ability_target_legality_needs_chosen_x(&resolved, mode_distribute.as_ref()) {
         if let Some(cost) = ability_cost.as_ref() {
             if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
                 let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
                 pending_x.activation_cost = remaining;
                 pending_x.activation_ability_index = ability_index;
                 pending_x.target_constraints = target_constraints;
+                pending_x.distribute = mode_distribute.clone();
                 pending_x.deferred_target_selection = true;
                 let mut chosen_modes = indices.clone();
                 chosen_modes.sort_unstable();
@@ -144,12 +150,48 @@ fn handle_activated_mode_choice(
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = ability_index;
             pending_x.target_constraints = target_constraints;
+            pending_x.distribute = mode_distribute.clone();
             pending_x.deferred_target_selection = true;
             let mut chosen_modes = indices.clone();
             chosen_modes.sort_unstable();
             pending_x.chosen_modes = chosen_modes;
             state.pending_cast = Some(Box::new(pending_x));
             return casting_costs::enter_payment_step(state, player, None, events);
+        }
+
+        // CR 118.3 + CR 602.2b: Modal activated abilities detour to the
+        // interactive sacrifice prompt before targets or direct cost payment.
+        // Non-modal activations take this path in `handle_activate_ability`;
+        // without it, `pay_ability_cost` no-ops non-self `Sacrifice` sub-costs.
+        if let Some((count, sac_filter)) = casting::find_non_self_sacrifice_cost(cost) {
+            let eligible =
+                casting::find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
+            let (min_count, max_count) = casting::sacrifice_cost_bounds(count, eligible.len());
+            if eligible.len() < min_count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to sacrifice".into(),
+                ));
+            }
+            let mut pending_sac =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_sac.activation_cost = Some(cost.clone());
+            pending_sac.activation_ability_index = ability_index;
+            pending_sac.target_constraints = target_constraints_from_modal(&modal);
+            pending_sac.distribute = mode_distribute.clone();
+            pending_sac.deferred_target_selection = true;
+            let mut chosen_modes = indices.clone();
+            chosen_modes.sort_unstable();
+            pending_sac.chosen_modes = chosen_modes;
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Sacrifice,
+                choices: eligible,
+                count: max_count,
+                min_count,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_sac),
+                },
+            });
         }
     }
 
@@ -159,7 +201,7 @@ fn handle_activated_mode_choice(
     // SAME post-flush state (Finding 4 — never let the two vectors diverge in
     // length). `resolved.context` is the chained ability's context, reapplied
     // per-mode by the labelled builder.
-    let (target_slots, mode_labels) = build_target_slots_labelled(
+    let (mut target_slots, mode_labels) = build_target_slots_labelled(
         state,
         &mode_abilities,
         &indices,
@@ -169,6 +211,12 @@ fn handle_activated_mode_choice(
         &resolved.context,
         resolved.chosen_x,
     )?;
+    cap_distribution_target_slots(
+        state,
+        &resolved,
+        mode_distribute.as_ref(),
+        &mut target_slots,
+    );
 
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target modal activated abilities — the
@@ -432,7 +480,9 @@ fn handle_triggered_mode_choice(
             !triggers::is_pending_trigger_construction_active(state),
             "deferred-trigger drain entered with construction still active",
         );
-        if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
+        if let Some(waiting_for) =
+            triggers::drain_deferred_triggers_after_trigger_construction(state, events)
+        {
             return Ok(waiting_for);
         }
     }

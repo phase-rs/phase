@@ -3,6 +3,7 @@ use super::*;
 use std::sync::Arc;
 
 use engine::types::ability::{Effect, TargetFilter, TargetRef, TypedFilter};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
 
@@ -32,6 +33,8 @@ fn spell_fizzles_when_target_removed() {
             object_id: bolt1_id,
             card_id: bolt1_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast bolt 1 should succeed");
 
@@ -51,6 +54,8 @@ fn spell_fizzles_when_target_removed() {
             object_id: bolt2_id,
             card_id: bolt2_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast bolt 2 should succeed");
 
@@ -145,6 +150,8 @@ fn no_legal_targets_prevents_casting() {
             object_id: obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         },
     );
 
@@ -182,6 +189,8 @@ fn hexproof_prevents_opponent_targeting() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed (there are still legal targets: players)");
 
@@ -237,6 +246,8 @@ fn shroud_prevents_all_targeting() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed (players are still valid targets)");
 

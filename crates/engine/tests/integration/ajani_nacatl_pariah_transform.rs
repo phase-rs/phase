@@ -35,6 +35,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 /// Drive the full pipeline: a Cat dies → Ajani's trigger fires → the player
 /// accepts the optional "you may" → Ajani returns to the battlefield
@@ -92,6 +93,8 @@ fn ajani_nacatl_pariah_returns_transformed_when_another_cat_dies() {
             object_id: bolt,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Lightning Bolt");
     if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {

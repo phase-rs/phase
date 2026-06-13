@@ -12,6 +12,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 #[test]
 fn issue_1985_peter_parker_commander_offers_modal_face_choice_from_command_zone() {
@@ -59,6 +60,8 @@ fn issue_1985_peter_parker_commander_offers_modal_face_choice_from_command_zone(
             object_id: card,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell on commander from command zone accepted");
     assert!(

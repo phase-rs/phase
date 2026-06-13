@@ -136,6 +136,7 @@ mod tests {
             scoped_player: None,
             target_chooser: None,
             source_id: ObjectId(1),
+            source_incarnation: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -168,6 +169,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         }
     }
 

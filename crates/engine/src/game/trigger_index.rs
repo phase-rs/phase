@@ -124,6 +124,16 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
                     push(TriggerEventKey::LeaveBattlefield(narrow));
                 }
                 (Some(Zone::Battlefield), _) => push(TriggerEventKey::LeaveBattlefield(narrow)),
+                // CR 603.6c: destination=Graveyard with unrestricted origin
+                // ("from anywhere") must match both battlefield→graveyard and
+                // non-battlefield→graveyard events. Add the battlefield fast-path
+                // keys, but keep unclassified routing for library/hand/stack
+                // origins because there is no generic "to graveyard" event key.
+                (None, Some(Zone::Graveyard)) => {
+                    push(TriggerEventKey::Dies(narrow));
+                    push(TriggerEventKey::LeaveBattlefield(narrow));
+                    return (keys, true);
+                }
                 _ => {
                     // Non-battlefield zone change (e.g. cast-from-graveyard
                     // observers). Route to unclassified — these are rare and
@@ -187,6 +197,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::AttackerBlockedByCreature
         | TriggerMode::AttackerUnblocked
         | TriggerMode::AttackerUnblockedOnce
+        | TriggerMode::YouAttackUnblocked
         | TriggerMode::Blocks
         | TriggerMode::BlockersDeclared
         | TriggerMode::BecomesBlocked => {
@@ -381,14 +392,14 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::SaddlesOrCrews
         | TriggerMode::Cycled
         | TriggerMode::CycledOrDiscarded
-        | TriggerMode::Exploited
-        | TriggerMode::Enlisted => return (keys, true),
+        | TriggerMode::Exploited => return (keys, true),
 
         // --- Triggered mechanics with dedicated event keys ---
         TriggerMode::Explored => push(TriggerEventKey::Explored),
         TriggerMode::Discover => push(TriggerEventKey::DiscoverResolved),
         TriggerMode::Adapt => push(TriggerEventKey::AdaptResolved),
         TriggerMode::Exerted => push(TriggerEventKey::Exerted),
+        TriggerMode::Enlisted => push(TriggerEventKey::Enlisted),
         TriggerMode::Foretell => push(TriggerEventKey::Foretold),
         TriggerMode::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
 
@@ -443,10 +454,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
-        // CR 701.43d: `TriggerMode::Exerted` is in the unclassified
-        // always-checked bucket (see `keys_from_trigger_def`), so no dedicated
-        // event key is needed — `match_exerted` filters by source.
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
+        GameEvent::CreatureEnlisted { .. } => push(TriggerEventKey::Enlisted),
         GameEvent::Foretold { .. } => push(TriggerEventKey::Foretold),
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
@@ -514,6 +523,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             }
         }
         GameEvent::LifeChanged { .. } => push(TriggerEventKey::LifeChanged),
+        GameEvent::ControllerChanged { .. } => push(TriggerEventKey::ChangesController),
         GameEvent::ManaAdded { .. } => push(TriggerEventKey::ManaProduced),
         GameEvent::TappedForMana { .. } => {
             push(TriggerEventKey::ManaProduced);
@@ -591,6 +601,12 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
+        // Planechase trigger modes (PlaneswalkedFrom/To, ChaosEnsues) route to the
+        // always-checked unclassified bucket in `keys_from_trigger_def`, so these
+        // events need no dedicated index key — their matchers are always consulted.
+        GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. } => {}
         GameEvent::RoomDoorUnlocked { .. } | GameEvent::BecomesPlotted { .. } => {}
         GameEvent::InitiativeTaken { .. } => push(TriggerEventKey::MonarchOrInitiative),
         GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
@@ -642,7 +658,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
             push(TriggerEventKey::AttachmentChanged);
         }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
-        EffectKind::GainControl => push(TriggerEventKey::ChangesController),
+        EffectKind::GainControl | EffectKind::GainControlAll => {
+            push(TriggerEventKey::ChangesController)
+        }
         EffectKind::Fight => push(TriggerEventKey::Fight),
         EffectKind::Explore => push(TriggerEventKey::Explored),
         EffectKind::Discover => push(TriggerEventKey::DiscoverResolved),
@@ -670,7 +688,6 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::LoseLife
         | EffectKind::Tap
         | EffectKind::Untap
-        | EffectKind::AddCounter
         | EffectKind::RemoveCounter
         | EffectKind::Sacrifice
         | EffectKind::DiscardCard
@@ -709,6 +726,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
         | EffectKind::Encore
+        | EffectKind::Meld
         | EffectKind::ExileHaunting
         | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy
@@ -753,6 +771,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PayCost
         | EffectKind::CastFromZone
         | EffectKind::FreeCastFromZones
+        | EffectKind::ExileResolvingSpellInsteadOfGraveyard
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
         | EffectKind::Regenerate
@@ -766,6 +785,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
+        | EffectKind::Planeswalk
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters
@@ -796,6 +816,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Amass
         | EffectKind::Bolster
         | EffectKind::Manifest
+        | EffectKind::Cloak
         | EffectKind::ExtraTurn
         | EffectKind::GrantExtraLoyaltyActivations
         | EffectKind::SkipNextTurn
@@ -857,6 +878,24 @@ pub fn has_synthetic_keyword_trigger_for(obj: &GameObject) -> bool {
                 | Keyword::Firebending(_)
         )
     })
+}
+
+/// CR 603.6a: Re-register one permanent's trigger definitions in the derived
+/// index after they are applied outside the ETB pipeline (scenario seeding,
+/// card-db rehydration, Oracle-text overlays, etc.).
+pub fn reindex_object_triggers(state: &mut GameState, object_id: ObjectId) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    if obj.zone != Zone::Battlefield || obj.is_phased_out() {
+        state.trigger_index.remove(object_id);
+        return;
+    }
+    let defs: SmallVec<[TriggerDefinition; 4]> =
+        obj.trigger_definitions.as_slice().iter().cloned().collect();
+    let synthetic = has_synthetic_keyword_trigger_for(obj);
+    state.trigger_index.remove(object_id);
+    state.trigger_index.add(object_id, &defs, synthetic);
 }
 
 impl TriggerIndex {
@@ -971,6 +1010,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 mod tests {
     use super::*;
     use crate::types::ability::{TargetFilter, TypedFilter};
+    use crate::types::game_state::ZoneChangeRecord;
     use crate::types::triggers::TriggerEventKey;
 
     fn etb_creature_def() -> TriggerDefinition {
@@ -1058,5 +1098,47 @@ mod tests {
             &state,
         );
         assert!(event_keys.contains(&TriggerEventKey::PhaseOut));
+    }
+
+    #[test]
+    fn from_anywhere_to_graveyard_emits_battlefield_keys_and_stays_unclassified() {
+        // CR 603.6c: A trigger with destination=Graveyard and unrestricted origin
+        // ("from anywhere") should emit Dies and LeaveBattlefield keys for
+        // battlefield-origin events, but must still route through unclassified
+        // for non-battlefield origins such as library→graveyard or hand→graveyard.
+        let def = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(TypedFilter::card()));
+        let (keys, route) = keys_from_trigger_def(&def);
+        assert!(keys.contains(&TriggerEventKey::Dies(None)));
+        assert!(keys.contains(&TriggerEventKey::LeaveBattlefield(None)));
+        assert!(route);
+    }
+
+    #[test]
+    fn from_anywhere_to_graveyard_candidate_survives_library_origin_event() {
+        // CR 603.6c: "from anywhere" includes library→graveyard moves. The
+        // event side emits only Milled for this shape, so this class must stay
+        // in the unclassified safety bucket until a generic graveyard key exists.
+        let mut state = GameState::new_two_player(42);
+        let watcher = ObjectId(99);
+        let def = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(TypedFilter::card()));
+        state.trigger_index.add(watcher, &[def], false);
+
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(7),
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        };
+
+        let candidates = candidates_for_event(&state, &event);
+        assert!(candidates.contains(&watcher));
     }
 }

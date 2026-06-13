@@ -26,7 +26,6 @@ expression: "&ir"
         "duration": null,
         "description": "{3}: Return ~ to its owner's hand.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -59,7 +58,6 @@ expression: "&ir"
         "duration": null,
         "description": "Equip {5}",
         "target_prompt": null,
-        "sorcery_speed": true,
         "activation_restrictions": [
           {
             "type": "AsSorcery"

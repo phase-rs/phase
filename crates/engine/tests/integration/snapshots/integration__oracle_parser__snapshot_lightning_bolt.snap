@@ -21,7 +21,6 @@ expression: result
       "duration": null,
       "description": "~ deals 3 damage to any target.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,

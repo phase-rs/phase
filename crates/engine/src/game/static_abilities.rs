@@ -10,7 +10,8 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    CostPaymentProhibition, CrewAction, CrewContributionKind, ProhibitionScope, StaticMode,
+    CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
+    CrewContributionKind, ProhibitionScope, StaticMode,
 };
 
 /// Handler function type for static ability modes.
@@ -166,8 +167,29 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
-    registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
-    registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
+    // CR 506.5 + CR 508.1c + CR 509.1b: CombatAlone — parameterized "alone"
+    // restriction. Runtime enforcement lives in combat.rs.
+    registry.insert(
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        handle_rule_mod,
+    );
+    registry.insert(
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        handle_rule_mod,
+    );
+    registry.insert(
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        },
+        handle_rule_mod,
+    );
     // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
     registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
@@ -253,8 +275,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // casting.rs::is_blocked_by_per_turn_cast_limit(). Coverage support is via is_data_carrying_static().
 
     // Promoted Tier 3 statics -- parser-produced, rule-modification handlers
-    // CR 509.1b: BlockRestriction — restricts what a creature can block.
-    registry.insert(StaticMode::BlockRestriction, handle_rule_mod);
+    // Note: BlockRestriction is data-carrying — runtime enforcement is in
+    // combat.rs::can_block_pair via blocker-side static scan. Coverage support
+    // is via is_data_carrying_static().
     // CR 402.2: NoMaximumHandSize — player has no maximum hand size.
     registry.insert(StaticMode::NoMaximumHandSize, handle_rule_mod);
     // CR 305.2: MayPlayAdditionalLand — player may play additional lands.
@@ -650,6 +673,7 @@ pub fn check_static_ability(
                     context.attack_target.as_ref(),
                     defended,
                     obj.controller,
+                    obj.owner,
                 ) {
                     continue;
                 }
@@ -1568,7 +1592,6 @@ mod tests {
             StaticMode::Lifelink,
             StaticMode::Shroud,
             // Tier 3 promoted statics
-            StaticMode::BlockRestriction,
             StaticMode::NoMaximumHandSize,
             StaticMode::MayPlayAdditionalLand,
             StaticMode::MayChooseNotToUntap,

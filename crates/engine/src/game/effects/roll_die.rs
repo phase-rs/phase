@@ -20,7 +20,7 @@ pub(crate) fn roll_die(
     events.push(GameEvent::DieRolled {
         player_id,
         sides,
-        result,
+        result: Some(result),
     });
     state.die_result_this_resolution = Some(i32::from(result));
     result
@@ -85,7 +85,7 @@ pub fn resolve(
 
         if actual != natural {
             if let Some(GameEvent::DieRolled { result, .. }) = events.last_mut() {
-                *result = actual;
+                *result = Some(actual);
             }
         }
 
@@ -297,7 +297,7 @@ mod tests {
         let result = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result),
+                GameEvent::DieRolled { result, .. } => *result,
                 _ => None,
             })
             .expect("DieRolled event should be present");
@@ -343,7 +343,7 @@ mod tests {
         let result = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result),
+                GameEvent::DieRolled { result, .. } => *result,
                 _ => None,
             })
             .expect("DieRolled event should be present");
@@ -377,14 +377,14 @@ mod tests {
         let r_a = ev_a
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result),
+                GameEvent::DieRolled { result, .. } => *result,
                 _ => None,
             })
             .unwrap();
         let r_b = ev_b
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result),
+                GameEvent::DieRolled { result, .. } => *result,
                 _ => None,
             })
             .unwrap();
@@ -417,7 +417,7 @@ mod tests {
                 let r = events
                     .iter()
                     .find_map(|e| match e {
-                        GameEvent::DieRolled { result, .. } => Some(*result),
+                        GameEvent::DieRolled { result, .. } => *result,
                         _ => None,
                     })
                     .unwrap();
@@ -452,7 +452,7 @@ mod tests {
         let result = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                GameEvent::DieRolled { result, .. } => result.map(i32::from),
                 _ => None,
             })
             .expect("DieRolled event must be present");
@@ -650,7 +650,7 @@ mod tests {
         let result = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result),
+                GameEvent::DieRolled { result, .. } => *result,
                 _ => None,
             })
             .expect("DieRolled event must be present");
@@ -718,7 +718,7 @@ mod tests {
         let rolled = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result as usize),
+                GameEvent::DieRolled { result, .. } => result.map(usize::from),
                 _ => None,
             })
             .expect("DieRolled event must be present");
@@ -785,7 +785,9 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 GameEvent::DieRolled {
-                    result, sides: 6, ..
+                    result: Some(result),
+                    sides: 6,
+                    ..
                 } => Some(usize::from(*result)),
                 _ => None,
             })
@@ -928,7 +930,9 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 GameEvent::DieRolled {
-                    result, sides: 6, ..
+                    result: Some(result),
+                    sides: 6,
+                    ..
                 } => Some(*result),
                 _ => None,
             })

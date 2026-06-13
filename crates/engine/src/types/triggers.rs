@@ -160,6 +160,8 @@ pub enum TriggerEventKey {
     AdaptResolved,
     /// CR 701.43d: A creature was exerted.
     Exerted,
+    /// CR 702.154c: A creature enlisted another creature.
+    Enlisted,
     /// CR 702.143a: A card was foretold.
     Foretold,
     /// CR 701.14: A fight resolution (separate from generic deals-damage
@@ -178,6 +180,9 @@ pub enum AttackTargetFilter {
     Planeswalker,
     PlayerOrPlaneswalker,
     Battle,
+    /// CR 506.2 + CR 508.1a: "can't attack its owner" — the permanent may not
+    /// declare an attack against the player who owns it (distinct from controller).
+    Owner,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).
@@ -233,6 +238,10 @@ pub enum TriggerMode {
     AttackersDeclared,
     /// CR 508.3d: "Whenever you attack" — triggers for the attacking player.
     YouAttack,
+    /// CR 508.3d + CR 509.1h: "Whenever one or more [creatures] attack [you] and
+    /// aren't blocked" — fires after blockers are declared when at least one
+    /// matching attacker was not assigned blockers.
+    YouAttackUnblocked,
     AttackersDeclaredOneTarget,
     /// CR 509.1h: Triggers when an attacking creature becomes blocked.
     AttackerBlocked,
@@ -335,7 +344,7 @@ pub enum TriggerMode {
     // Monarch / initiative
     /// CR 725: Triggers when a player becomes the monarch.
     BecomeMonarch,
-    /// CR 725: Triggers when a player takes the initiative.
+    /// CR 726.2: Triggers when a player takes the initiative.
     TakesInitiative,
 
     // Game state
@@ -706,6 +715,7 @@ impl FromStr for TriggerMode {
             "VisitAttraction" => TriggerMode::VisitAttraction,
             "Vote" => TriggerMode::Vote,
             "YouAttack" => TriggerMode::YouAttack,
+            "YouAttackUnblocked" => TriggerMode::YouAttackUnblocked,
             "Waterbend" => TriggerMode::Waterbend,
             _ => TriggerMode::Unknown(s.to_string()),
         };
@@ -971,6 +981,7 @@ mod tests {
             "Vote",
             "Waterbend",
             "YouAttack",
+            "YouAttackUnblocked",
         ];
 
         let mut known_count = 0;

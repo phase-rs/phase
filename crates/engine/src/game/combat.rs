@@ -13,7 +13,9 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::statics::{BlockExceptionKind, StaticMode};
+use crate::types::statics::{
+    BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
+};
 use crate::types::zones::Zone;
 
 /// CR 702.19: Which trample variant applies to combat damage assignment.
@@ -195,7 +197,7 @@ pub fn enter_attacking(
         ));
         // CR 508.4 + CR 506.4 + CR 613.1f: a permanent put onto the battlefield
         // attacking is an attacking creature; re-evaluate Layer 6
-        // FilterProp::Attacking grants immediately.
+        // FilterProp::Attacking { defender: None } grants immediately.
         state.layers_dirty.mark_full();
     }
 }
@@ -306,7 +308,7 @@ pub fn place_attacking_alongside(
             defending_player,
         ));
         // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
-        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking
+        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking { defender: None }
         // grants.
         state.layers_dirty.mark_full();
     }
@@ -467,16 +469,41 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         }
     }
 
-    // CR 506.5 + CR 508.1a: A creature with "can't attack alone" may be declared
-    // as an attacker only if it isn't the sole attacker. Two such creatures may
-    // attack together (CR 506.5 Example), so this only triggers at exactly one.
+    // CR 506.5 + CR 508.1c: CombatAlone(Attack, NeedsCompanion) — creature must
+    // NOT be the sole attacker ("can't attack alone"). Two such creatures may
+    // attack together (CR 506.5 Example), so only reject when exactly one attacker.
     if attacker_ids.len() == 1 {
         let id = attacker_ids[0];
         if let Some(obj) = state.objects.get(&id) {
-            if super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantAttackAlone)
-            {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                sd.mode
+                    == (StaticMode::CombatAlone {
+                        action: CombatAloneAction::Attack,
+                        requirement: CombatAloneRequirement::NeedsCompanion,
+                    })
+            }) {
                 return Err(format!("{id:?} can't attack alone (CR 506.5)"));
+            }
+        }
+    }
+
+    // CR 506.5 + CR 508.1c: CombatAlone(Attack, MustBeSole) — creature must BE
+    // the sole attacker ("can only attack alone"). Reject any multi-attacker
+    // declaration that includes such a creature.
+    if attacker_ids.len() > 1 {
+        for &id in attacker_ids {
+            if let Some(obj) = state.objects.get(&id) {
+                if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                    sd.mode
+                        == (StaticMode::CombatAlone {
+                            action: CombatAloneAction::Attack,
+                            requirement: CombatAloneRequirement::MustBeSole,
+                        })
+                }) {
+                    return Err(format!(
+                        "{id:?} can only attack alone — may not attack alongside other creatures (CR 506.5 + CR 508.1c)"
+                    ));
+                }
             }
         }
     }
@@ -590,6 +617,37 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
     blocker_restriction_statics_for(state, blocker_id)
         .next()
         .is_some()
+}
+
+/// CR 509.1b: Static abilities on the blocker (or on another source whose
+/// `affected` filter matches the blocker) that restrict which attackers it
+/// may block — e.g. "This creature can block only creatures with flying."
+fn blocker_block_allowed_statics_for<'a>(
+    state: &'a GameState,
+    blocker_id: ObjectId,
+) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
+    super::functioning_abilities::game_functioning_statics(state)
+        .filter(|(_, def)| matches!(def.mode, StaticMode::BlockRestriction { .. }))
+        .filter(move |(src, def)| match def.affected.as_ref() {
+            None => src.id == blocker_id,
+            Some(filter) => matches_target_filter(
+                state,
+                blocker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ),
+        })
+        .filter(move |(src, def)| {
+            def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    blocker_id,
+                )
+            })
+        })
 }
 
 /// CR 509.1c: Static abilities that force blockers onto `attacker_id` — e.g.
@@ -917,6 +975,23 @@ pub fn validate_blockers_for_player(
             ));
         }
 
+        // CR 509.1b: blocker-side "can block only <filter>" restrictions.
+        for (src, sd) in blocker_block_allowed_statics_for(state, blocker_id) {
+            let StaticMode::BlockRestriction { filter } = &sd.mode else {
+                continue;
+            };
+            if !matches_target_filter(
+                state,
+                attacker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ) {
+                return Err(format!(
+                    "{blocker_id:?} can block only creatures matching the block restriction"
+                ));
+            }
+        }
+
         blockers_per_attacker
             .entry(attacker_id)
             .or_default()
@@ -924,15 +999,18 @@ pub fn validate_blockers_for_player(
         *attackers_per_blocker.entry(blocker_id).or_default() += 1;
     }
 
-    // CR 506.5 + CR 509.1b: A creature with "can't block alone" may be declared
-    // as a blocker only if it isn't the sole creature this player declares as a
-    // blocker this step. Two such creatures may block together.
+    // CR 506.5 + CR 509.1b: CombatAlone(Block, NeedsCompanion) — creature must
+    // NOT be the sole blocker ("can't block alone"). Two such creatures may block together.
     if attackers_per_blocker.len() == 1 {
         let (&blocker_id, _) = attackers_per_blocker.iter().next().expect("len checked");
         if let Some(obj) = state.objects.get(&blocker_id) {
-            if super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantBlockAlone)
-            {
+            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+                sd.mode
+                    == (StaticMode::CombatAlone {
+                        action: CombatAloneAction::Block,
+                        requirement: CombatAloneRequirement::NeedsCompanion,
+                    })
+            }) {
                 return Err(format!("{blocker_id:?} can't block alone (CR 506.5)"));
             }
         }
@@ -1319,6 +1397,7 @@ pub fn compute_combat_tax(
                         attack_target.as_ref(),
                         filter,
                         source_obj.controller,
+                        source_obj.owner,
                     ) {
                         continue;
                     }
@@ -2133,7 +2212,7 @@ pub fn declare_attackers_with_bands(
     // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
     // stays attacking until removed from combat or the combat phase ends. Marking
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
-    // FilterProp::Attacking (e.g. Crossway Troublemakers) to re-evaluate now, so
+    // FilterProp::Attacking { defender: None } (e.g. Crossway Troublemakers) to re-evaluate now, so
     // the grant is live for the whole combat, not just after damage.
     state.layers_dirty.mark_full();
     let attacker_count = combat.attackers.len();
@@ -2657,6 +2736,20 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     if is_landwalk_unblockable(state, attacker, blocker.controller) {
         return false;
     }
+    // CR 509.1b: blocker-side "can block only <filter>" restrictions.
+    for (src, sd) in blocker_block_allowed_statics_for(state, blocker_id) {
+        let StaticMode::BlockRestriction { filter } = &sd.mode else {
+            continue;
+        };
+        if !matches_target_filter(
+            state,
+            attacker_id,
+            filter,
+            &FilterContext::from_source(state, src.id),
+        ) {
+            return false;
+        }
+    }
     true
 }
 
@@ -3116,8 +3209,8 @@ mod tests {
 
     #[test]
     fn cant_attack_alone_rejects_sole_attacker() {
-        // CR 506.5 + CR 508.1a: a "can't attack alone" creature is illegal as the
-        // only attacker, but legal alongside another attacker.
+        // CR 506.5 + CR 508.1c: a CombatAlone(Attack, NeedsCompanion) creature is
+        // illegal as the only attacker, but legal alongside another attacker.
         let mut state = setup();
         let a = create_creature(&mut state, PlayerId(0), "Bonded Construct", 2, 2);
         state
@@ -3125,7 +3218,10 @@ mod tests {
             .get_mut(&a)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::CantAttackAlone));
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }));
         let b = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
 
         assert!(validate_attackers(&state, &[a]).is_err());
@@ -3133,9 +3229,37 @@ mod tests {
     }
 
     #[test]
+    fn can_only_attack_alone_rejects_multi_attacker() {
+        // CR 506.5 + CR 508.1c: CombatAlone(Attack, MustBeSole) — the flagged
+        // creature can attack alone but is rejected when declared alongside another.
+        let mut state = setup();
+        let master = create_creature(&mut state, PlayerId(0), "Master of Cruelties", 1, 4);
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            }));
+        let companion = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let unflagged = create_creature(&mut state, PlayerId(0), "Elk", 2, 2);
+
+        // Sole attacker: legal.
+        assert!(validate_attackers(&state, &[master]).is_ok());
+        // With a companion: illegal.
+        assert!(validate_attackers(&state, &[master, companion]).is_err());
+        // Unflagged creature attacking alone: legal (restriction is not on it).
+        assert!(validate_attackers(&state, &[unflagged]).is_ok());
+        // Two unflagged creatures: legal.
+        assert!(validate_attackers(&state, &[unflagged, companion]).is_ok());
+    }
+
+    #[test]
     fn cant_block_alone_rejects_sole_blocker() {
-        // CR 506.5 + CR 509.1b: a "can't block alone" creature is illegal as the
-        // only blocker, but legal alongside another blocker.
+        // CR 506.5 + CR 509.1b: a CombatAlone(Block, NeedsCompanion) creature is
+        // illegal as the only blocker, but legal alongside another blocker.
         let mut state = setup();
         let atk1 = create_creature(&mut state, PlayerId(0), "Atk1", 2, 2);
         let atk2 = create_creature(&mut state, PlayerId(0), "Atk2", 2, 2);
@@ -3145,7 +3269,10 @@ mod tests {
             .get_mut(&lone)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::CantBlockAlone));
+            .push(StaticDefinition::new(StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }));
         let other = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
         state.combat = Some(CombatState {
@@ -6038,6 +6165,39 @@ mod tests {
     }
 
     #[test]
+    fn cant_attack_owner_blocks_only_owner_attack_target() {
+        let mut state = setup_multiplayer_combat(3);
+        let attacker = create_creature(&mut state, PlayerId(1), "Owner-Restricted Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.controller = PlayerId(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(crate::types::triggers::AttackTargetFilter::Owner)),
+            );
+        }
+
+        let mut owner_attack_state = state.clone();
+        let attacks_owner = declare_attackers(
+            &mut owner_attack_state,
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(attacks_owner.is_err());
+        assert!(attacks_owner
+            .unwrap_err()
+            .contains("can't attack Player(PlayerId(1))"));
+
+        let attacks_non_owner = declare_attackers(
+            &mut state,
+            &[(attacker, AttackTarget::Player(PlayerId(2)))],
+            &mut vec![],
+        );
+        assert!(attacks_non_owner.is_ok());
+    }
+
+    #[test]
     fn must_attack_player_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let attacker = create_creature(&mut state, PlayerId(0), "Lured Bear", 2, 2);
@@ -6219,6 +6379,54 @@ mod tests {
         assert!(validate_blockers(&state, &[(ground_blocker, attacker)]).is_err());
         // Flying creature can block (matches the exception filter)
         assert!(validate_blockers(&state, &[(flying_blocker, attacker)]).is_ok());
+    }
+
+    /// Issue #2364: Pinnacle Emissary Drone tokens carry "can block only
+    /// creatures with flying" — a blocker-side BlockRestriction, distinct
+    /// from attacker-side CantBeBlockedExceptBy.
+    #[test]
+    fn issue_2364_block_restriction_limits_blocker_to_flying_attackers() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{block_only_creatures_with_flying_filter, StaticMode};
+
+        let mut state = setup();
+        let ground_attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let flying_attacker = create_creature(&mut state, PlayerId(0), "Bird", 2, 2);
+        state
+            .objects
+            .get_mut(&flying_attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        let drone = create_creature(&mut state, PlayerId(1), "Drone", 1, 1);
+        {
+            let drone_obj = state.objects.get_mut(&drone).unwrap();
+            drone_obj.keywords.push(Keyword::Flying);
+            drone_obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::BlockRestriction {
+                    filter: block_only_creatures_with_flying_filter(),
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        assert!(
+            validate_blockers(&state, &[(drone, ground_attacker)]).is_err(),
+            "Drone must not block non-flying attackers"
+        );
+        assert!(
+            !can_block_pair(&state, drone, ground_attacker),
+            "can_block_pair must reject non-flying attacker"
+        );
+        assert!(
+            validate_blockers(&state, &[(drone, flying_attacker)]).is_ok(),
+            "Drone may block flying attackers"
+        );
+        assert!(
+            can_block_pair(&state, drone, flying_attacker),
+            "can_block_pair must accept flying attacker"
+        );
     }
 
     /// Issue #496: "can't be blocked except by three or more creatures" must
@@ -6837,7 +7045,7 @@ mod tests {
     }
 
     /// CR 508.4 + CR 613.1f: a creature put onto the battlefield attacking must
-    /// dirty layers so Layer 6 FilterProp::Attacking grants re-evaluate. Fails on
+    /// dirty layers so Layer 6 FilterProp::Attacking { defender: None } grants re-evaluate. Fails on
     /// revert of the `enter_attacking` mark.
     #[test]
     fn enter_attacking_marks_layers_dirty() {
@@ -6877,7 +7085,7 @@ mod tests {
     }
 
     /// CR 702.49c + CR 702.190b + CR 613.1f: Ninjutsu/Sneak place a creature
-    /// already attacking; the layers must re-evaluate Layer 6 FilterProp::Attacking
+    /// already attacking; the layers must re-evaluate Layer 6 FilterProp::Attacking { defender: None }
     /// grants. Fails on revert of the `place_attacking_alongside` mark.
     #[test]
     fn place_attacking_alongside_marks_layers_dirty() {

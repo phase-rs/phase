@@ -169,9 +169,12 @@ pub(super) fn parse_search_library_details(
     // CR 701.23a + CR 608.2c: Detect cultivate-class split destinations ("put
     // one onto the battlefield tapped and the other into your hand"). Only the
     // single-filter case carries a split; multi-filter chains handle their own
-    // destinations via the interleaved-ChangeZone lowering.
+    // destinations via the interleaved-ChangeZone lowering. Scan the full effect
+    // chain when available so Final Parting's destination clause in a sibling
+    // chunk still populates `split` on the search effect.
+    let split_scan = ctx.effect_chain_full_lower.as_deref().unwrap_or(lower);
     let split = if extra_filters.is_empty() {
-        detect_search_split_destination(lower)
+        detect_search_split_destination(split_scan)
     } else {
         None
     };
@@ -2587,12 +2590,38 @@ fn parse_search_split_destination(input: &str) -> OracleResult<'_, SearchDestina
     ))
 }
 
+fn parse_zone_pair_search_split(input: &str) -> OracleResult<'_, SearchDestinationSplit> {
+    let (input, primary_count) = nom_primitives::parse_number(input)?;
+    let (input, primary_destination) = parse_choice_partition_destination(input)?;
+    let (input, _) = tag(" and ").parse(input)?;
+    let (input, _) = opt(tag("put ")).parse(input)?;
+    let (input, _) = parse_rest_cards_reference(input)?;
+    let (input, rest_destination) = parse_choice_partition_destination(input)?;
+    Ok((
+        input,
+        SearchDestinationSplit {
+            primary_destination,
+            primary_count,
+            primary_enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(false),
+            rest_destination,
+        },
+    ))
+}
+
 /// Detector: scan `lower` at word boundaries for the "put N onto the battlefield
 /// ... and the rest/other into <zone>" split clause. Returns the parsed split
 /// when the cultivate-class grammar matches, else `None` so the caller falls
 /// back to single-zone destination handling.
 fn detect_search_split_destination(lower: &str) -> Option<SearchDestinationSplit> {
-    scan_preceded(lower, "put ", parse_search_split_destination).map(|(split, _)| split)
+    scan_preceded(lower, "put ", parse_search_split_destination)
+        .or_else(|| scan_preceded(lower, "put ", parse_zone_pair_search_split))
+        .map(|(split, _)| split)
+}
+
+/// Whether `lower` is a standalone put-destination clause already handled by a
+/// preceding `SearchLibrary { split: Some(_) }` effect (Final Parting class).
+pub(super) fn is_zone_pair_search_split_clause(lower: &str) -> bool {
+    scan_preceded(lower, "put ", parse_zone_pair_search_split).is_some()
 }
 
 pub(super) fn parse_search_destination(lower: &str) -> Zone {
@@ -2773,6 +2802,38 @@ mod tests {
         assert_eq!(split.primary_count, 2);
         assert_eq!(split.primary_destination, Zone::Battlefield);
         assert_eq!(split.rest_destination, Zone::Hand);
+    }
+
+    #[test]
+    fn final_parting_lowers_to_hand_graveyard_split() {
+        let details = parse_search_library_details(
+            "search your library for two cards. put one into your hand and the other into your graveyard. then shuffle",
+            &mut ParseContext::default(),
+        );
+        let split = details
+            .split
+            .expect("Final Parting must populate a SearchDestinationSplit");
+        assert_eq!(split.primary_destination, Zone::Hand);
+        assert_eq!(split.primary_count, 1);
+        assert!(!split.primary_enter_tapped.is_tapped());
+        assert_eq!(split.rest_destination, Zone::Graveyard);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
+    fn zone_pair_split_lowers_to_exile_and_library_bottom() {
+        let details = parse_search_library_details(
+            "search your library for two cards. put one into exile and the other on the bottom of your library. then shuffle",
+            &mut ParseContext::default(),
+        );
+        let split = details
+            .split
+            .expect("zone-pair split must populate a SearchDestinationSplit");
+        assert_eq!(split.primary_destination, Zone::Exile);
+        assert_eq!(split.primary_count, 1);
+        assert!(!split.primary_enter_tapped.is_tapped());
+        assert_eq!(split.rest_destination, Zone::Library);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
     }
 
     #[test]

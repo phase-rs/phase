@@ -37,7 +37,7 @@ pub(super) fn exile_nonresolving_stack_objects(
                 source_id,
                 None,
                 false,
-                false,
+                crate::types::zones::EtbTapState::Unspecified,
                 None,
                 &[],
                 None,

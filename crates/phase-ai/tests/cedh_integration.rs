@@ -266,9 +266,9 @@ fn score_candidates_boosts_heliod_combo_activation_for_cedh_ai() {
         "legal_actions must offer PassPriority as the baseline"
     );
 
-    // Run the real planner entry point. `into_deterministic` disables the
+    // Run the real planner entry point. `into_measurement` disables the
     // wall-clock budget so the test is reproducible.
-    let config = create_config(AiDifficulty::CEDH, Platform::Native).into_deterministic();
+    let config = create_config(AiDifficulty::CEDH, Platform::Native).into_measurement(42);
     let scored = score_candidates(&state, PlayerId(0), &config);
     assert!(
         !scored.is_empty(),
@@ -383,7 +383,7 @@ fn choose_action_picks_combo_activation_for_cedh_ai() {
 
     let (state, heliod_id, ballista_id) =
         cedh_combo_state_with_synthetic_abilities(CommanderBracketTier::Cedh);
-    let config = create_config(AiDifficulty::CEDH, Platform::Native).into_deterministic();
+    let config = create_config(AiDifficulty::CEDH, Platform::Native).into_measurement(42);
 
     let mut combo_count = 0u32;
     for seed in 0..50u64 {
@@ -426,7 +426,7 @@ fn choose_action_does_not_boost_combo_without_is_cedh() {
     let (state, heliod_id, ballista_id) =
         cedh_combo_state_with_synthetic_abilities(CommanderBracketTier::Core);
     // Difficulty stays CEDH so the only variable is the deck tier / is_cedh flag.
-    let config = create_config(AiDifficulty::CEDH, Platform::Native).into_deterministic();
+    let config = create_config(AiDifficulty::CEDH, Platform::Native).into_measurement(42);
 
     let mut combo_count = 0u32;
     for seed in 0..50u64 {

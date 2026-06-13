@@ -24,7 +24,6 @@ expression: result
       "duration": null,
       "description": "{1}{R}: Level 2",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -84,7 +83,6 @@ expression: result
         "duration": "UntilEndOfTurn",
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

@@ -16,6 +16,10 @@ permissions:
 jobs:
   cut-nightly-release:
     name: Cut Nightly Release
+    # Forks inherit this workflow's schedule but not upstream secrets
+    # (RELEASE_BOT_TOKEN), so a scheduled run in a fork can only fail noisily.
+    # Restrict the whole release graph to the canonical repository.
+    if: github.repository == 'phase-rs/phase'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -234,6 +238,13 @@ jobs:
 
           cargo release "$VERSION" --workspace --execute --no-confirm --no-publish --no-push --allow-branch main
 
+          cargo update --manifest-path client/src-tauri/Cargo.toml --package phase-tauri
+          if ! git diff --quiet -- client/src-tauri/Cargo.lock; then
+            git add client/src-tauri/Cargo.lock
+            git commit --amend --no-edit
+            git tag -f -a "$TAG" -m "$TAG"
+          fi
+
       - name: Verify release commit and tag
         if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
         env:
@@ -290,6 +301,7 @@ jobs:
               Cargo.lock \
               Cargo.toml \
               client/package.json \
+              client/src-tauri/Cargo.lock \
               client/src-tauri/Cargo.toml \
               client/src-tauri/tauri.conf.json \
               | sort)

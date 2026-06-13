@@ -55,7 +55,7 @@
         "execute": {
           "kind": "Spell",
           "effect": {
-            "type": "Tap",
+            "type": "SetTapState",
             "target": {
               "type": "Typed",
               "type_filters": [
@@ -63,6 +63,12 @@
               ],
               "controller": "Opponent",
               "properties": []
+            },
+            "scope": {
+              "type": "Single"
+            },
+            "state": {
+              "type": "Tap"
             }
           },
           "cost": null,

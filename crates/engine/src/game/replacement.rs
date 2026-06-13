@@ -3,9 +3,10 @@ use std::collections::HashMap;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope, PostReplacementContinuation,
     PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, ShieldKind, TapStateChange,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -320,13 +321,20 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                             // indication; a decline-less Optional (Unleash) keeps a
                             // plain "Decline".
                             ReplacementMode::Optional { decline } => {
-                                let accept = repl
-                                    .description
-                                    .clone()
-                                    .or_else(|| {
-                                        repl.execute.as_ref().and_then(|e| e.description.clone())
-                                    })
-                                    .unwrap_or_else(|| "Accept".to_string());
+                                let accept = if repl.event
+                                    == crate::types::replacements::ReplacementEvent::Draw
+                                {
+                                    "Accept".to_string()
+                                } else {
+                                    repl.description
+                                        .clone()
+                                        .or_else(|| {
+                                            repl.execute
+                                                .as_ref()
+                                                .and_then(|e| e.description.clone())
+                                        })
+                                        .unwrap_or_else(|| "Accept".to_string())
+                                };
                                 let decline_label = decline
                                     .as_ref()
                                     .and_then(|d| d.description.clone())
@@ -385,13 +393,22 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         AbilityCost::Mana { cost } => format!("Pay {cost:?}"),
         AbilityCost::PayLife { amount } => format!("Pay {amount:?} life"),
         // CR 614.12a: Karoo self-ETB cost lands.
-        AbilityCost::Sacrifice { count, .. } => {
-            if *count == 1 {
-                "Sacrifice a permanent".to_string()
-            } else {
-                format!("Sacrifice {count} permanents")
+        AbilityCost::Sacrifice(cost) => match &cost.requirement {
+            crate::types::ability::SacrificeRequirement::Count { count } => {
+                if *count == 1 {
+                    "Sacrifice a permanent".to_string()
+                } else {
+                    format!("Sacrifice {count} permanents")
+                }
             }
-        }
+            crate::types::ability::SacrificeRequirement::Aggregate {
+                stat: crate::types::ability::SacrificeAggregateStat::TotalPower,
+                comparator,
+                value,
+            } => {
+                format!("Sacrifice creatures with total power {value} ({comparator:?} constraint)")
+            }
+        },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
         // CR 702.24a: Delegate the label to the base cost so a "for each
         // counter" wrapper inherits its base's prompt phrasing (e.g.,
@@ -453,11 +470,17 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
             // enters-tapped modifier class. The `target: TargetFilter::SelfRef`
             // constraint is load-bearing — a non-SelfRef tap is not an
             // enters-tapped modifier and must fall through to raw text.
-            Effect::Tap {
+            // CR 701.26a: SelfRef single tap → enters tapped.
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             } => "Enters tapped".to_string(),
-            Effect::Untap {
+            // CR 701.26b: SelfRef single untap → enters untapped.
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             } => "Enters untapped".to_string(),
             _ => fallback(),
         },
@@ -515,17 +538,51 @@ fn replacement_mode_decline_cloned(mode: &ReplacementMode) -> Option<Box<Ability
     }
 }
 
+/// CR 614.12a: outcome of attempting to pay an optional `MayCost` replacement's
+/// accept-cost. The accept path applies the replacement only on [`Paid`]; on
+/// [`Unpaid`] it falls through to the decline branch (CR 614.12); on
+/// [`PausedForChoice`] the payment has set an interactive `WaitingFor` (e.g. a
+/// `DiscardChoice`) and the replacement must re-park itself so the post-choice
+/// resume can finish any remaining cost before entering the permanent — never
+/// let it enter early.
+///
+/// [`Paid`]: MayCostOutcome::Paid
+/// [`Unpaid`]: MayCostOutcome::Unpaid
+/// [`PausedForChoice`]: MayCostOutcome::PausedForChoice
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MayCostOutcome {
+    Paid,
+    Unpaid,
+    PausedForChoice { remaining_cost: Option<AbilityCost> },
+}
+
+fn combine_paused_may_cost(
+    paused_remaining: Option<AbilityCost>,
+    following_costs: &[AbilityCost],
+) -> Option<AbilityCost> {
+    let mut costs = Vec::new();
+    if let Some(cost) = paused_remaining {
+        costs.push(cost);
+    }
+    costs.extend(following_costs.iter().cloned());
+    match costs.len() {
+        0 => None,
+        1 => costs.into_iter().next(),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
 fn pay_replacement_may_cost(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
-) -> bool {
+) -> MayCostOutcome {
     if !cost.is_payable(state, player, source_id) {
-        return false;
+        return MayCostOutcome::Unpaid;
     }
-    match cost {
+    let paid = match cost {
         AbilityCost::Mana { cost } => {
             crate::game::casting::pay_unless_cost(state, player, cost, events).is_ok()
         }
@@ -538,10 +595,92 @@ fn pay_replacement_may_cost(
                 crate::game::life_costs::PayLifeCostResult::Paid { .. }
             )
         }
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|cost| pay_replacement_may_cost(state, player, source_id, cost, events)),
+        AbilityCost::Composite { costs } => {
+            // CR 614.12a: a composite accept-cost pays each sub-cost in order; a
+            // mid-composite pause carries the unpaid suffix so the resume
+            // completes the rest before the replacement applies.
+            for (index, sub_cost) in costs.iter().enumerate() {
+                match pay_replacement_may_cost(state, player, source_id, sub_cost, events) {
+                    MayCostOutcome::Paid => {}
+                    MayCostOutcome::PausedForChoice { remaining_cost } => {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: combine_paused_may_cost(
+                                remaining_cost,
+                                &costs[index + 1..],
+                            ),
+                        };
+                    }
+                    MayCostOutcome::Unpaid => return MayCostOutcome::Unpaid,
+                }
+            }
+            true
+        }
+        // CR 614.12a + CR 118.12 + CR 701.9a: a "discard a [type] card" cost
+        // paid as the replacement is applied (Mox Diamond, Chrome Mox-style
+        // as-enters discards). This is the chosen-from-hand discard shape, which
+        // only has a real payment arm in *resolution* scope — the activation-
+        // scope `pay_ability_cost` no-ops it (it expects the interactive
+        // `WaitingFor::PayCost`/`DiscardChoice` detour to have run first, which
+        // never happens on the replacement accept path). Routing through the
+        // resolution authority discards the card(s) for real: when the eligible
+        // set exactly fills the requirement the discard auto-pays synchronously
+        // (`PaymentOutcome::Paid`); otherwise the authority sets
+        // `WaitingFor::DiscardChoice` and returns `Paused`, which surfaces as
+        // `PausedForChoice` so the accept path re-parks the replacement and the
+        // permanent enters only after the card actually leaves the hand.
+        AbilityCost::Discard {
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            ..
+        } => {
+            // The synthesized ability is the payment context for the resolution
+            // authority: `pay_ability_cost_for_resolution` reads only its
+            // `source_id` and resolves the (here fixed) discard `count` against
+            // it. Modeling it as `Effect::PayCost { cost }` keeps the context
+            // self-describing without inventing a fake target chain.
+            let ability = ResolvedAbility::new(
+                crate::types::ability::Effect::PayCost {
+                    cost: cost.clone(),
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                player,
+            );
+            // CR 118.12 + CR 701.9b: when the eligible set exceeds the requirement
+            // the resolution authority sets `WaitingFor::DiscardChoice` for the
+            // player to pick *which* card(s) to discard. The non-composite discard
+            // arm reports `Paid` in that case (the pending choice IS the payment),
+            // so the set `waiting_for` — not just the `PaymentOutcome` — signals
+            // the interactive pause. Snapshot it to distinguish a synchronous
+            // forced/auto discard (`Paid`, no choice) from a paused one.
+            let prior_waiting_for = state.waiting_for.clone();
+            match crate::game::costs::pay_ability_cost_for_resolution(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => {
+                    if state.waiting_for != prior_waiting_for
+                        && matches!(state.waiting_for, WaitingFor::DiscardChoice { .. })
+                    {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: None,
+                        };
+                    }
+                    true
+                }
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
+            }
+        }
         _ => crate::game::casting::pay_ability_cost(state, player, source_id, cost, events).is_ok(),
+    };
+    if paid {
+        MayCostOutcome::Paid
+    } else {
+        MayCostOutcome::Unpaid
     }
 }
 
@@ -3121,6 +3260,13 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TriggeringPlayer => false,
             }
         }
+        ReplacementCondition::EffectCausedDiscard => matches!(
+            event,
+            ProposedEvent::Discard {
+                caused_by_effect: true,
+                ..
+            }
+        ),
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
         // Checks the event's `is_extra_turn` flag directly; returns `false` for
         // any non-`BeginTurn` event so a misattached `OnlyExtraTurn` doesn't
@@ -3290,6 +3436,27 @@ pub fn find_applicable_replacements(
         ProposedEvent::Discard { object_id, .. } => Some(*object_id),
         _ => None,
     };
+    // CR 608.2n + CR 614.1a + CR 614.12: A spell on the stack can carry its own
+    // self-scoped `Moved` replacement that fires as it leaves the stack ("If
+    // this spell would be put into your graveyard, exile it instead" — the
+    // Invoke Calamity free-cast rider). The default `[Battlefield, Command]`
+    // scan misses a stack-resident object, and the `is_entering` exception is
+    // gated on `to: Battlefield`, so a stack→graveyard self-move would not
+    // discover the object's own replacement. Mirror the entering-object
+    // exception's shape: include the MOVING object as a candidate source when
+    // its own move originates on the stack. This is a per-event check on the one
+    // moving object (no extra zone sweep) — the loop below still iterates the
+    // same `active_replacements` set; this only lets that one object pass the
+    // zone gate, and the `is_stack_self_move && !in_scanned_zone` SelfRef guard
+    // keeps it scoped to that object's own definitions.
+    let stack_self_moving_object_id = match event {
+        ProposedEvent::ZoneChange {
+            object_id,
+            from: Zone::Stack,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    };
 
     let zones_to_scan = [Zone::Battlefield, Zone::Command];
     // CR 702.26b + CR 114.4: `active_replacements` owns the phased-out /
@@ -3301,6 +3468,9 @@ pub fn find_applicable_replacements(
         let in_scanned_zone = zones_to_scan.contains(&obj.zone);
         let is_entering = entering_object_id == Some(obj.id);
         let is_being_discarded = discarding_object_id == Some(obj.id);
+        // CR 608.2n + CR 614.1a: the stack-resident object whose own move this
+        // event represents (see `stack_self_moving_object_id` above).
+        let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
 
         // CR 702.52a: Dredge functions only while the card is in a player's
         // graveyard. The default Battlefield/Command scan misses it, so include a
@@ -3321,7 +3491,12 @@ pub fn find_applicable_replacements(
                         .is_some_and(|p| p.library.len() as u32 >= *n))
             });
 
-        if !in_scanned_zone && !is_entering && !is_being_discarded && !is_applicable_dredge {
+        if !in_scanned_zone
+            && !is_entering
+            && !is_being_discarded
+            && !is_applicable_dredge
+            && !is_stack_self_move
+        {
             continue;
         }
 
@@ -3339,6 +3514,16 @@ pub fn find_applicable_replacements(
                 continue;
             }
             if is_being_discarded
+                && !in_scanned_zone
+                && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+            {
+                continue;
+            }
+            // CR 614.12 + CR 608.2n: a stack-resident object reached only via the
+            // stack-self-move exception can apply only its own self-replacement
+            // effects. Explicit `SelfRef` is the canonical marker (Invoke
+            // Calamity rider, Nexus of Fate).
+            if is_stack_self_move
                 && !in_scanned_zone
                 && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
             {
@@ -3796,11 +3981,6 @@ fn extract_etb_counters_from_effect(
             counter_type,
             count,
             ..
-        }
-        | Effect::AddCounter {
-            counter_type,
-            count,
-            ..
         } => {
             // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
             // object for ETB replacements. `CostXPaid` reads the spell's paid X
@@ -3872,6 +4052,11 @@ pub(super) struct EventModifiers {
     etb_tap_state: EtbTapState,
     etb_counters: Vec<(CounterType, u32)>,
     redirect_zone: Option<Zone>,
+    /// CR 110.2a: Controller override for a self-ETB replacement
+    /// (`ReplacementDefinition::enters_under`). Carried as an unresolved
+    /// `ControllerRef`; resolved to a concrete `PlayerId` and written onto the
+    /// `ZoneChange`'s `controller_override` when the replacement is applied.
+    controller_override: Option<ControllerRef>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3886,14 +4071,13 @@ impl EventModifiers {
     fn is_event_modifier_effect(effect: &Effect) -> bool {
         matches!(
             effect,
-            Effect::Tap {
+            // CR 701.26a/b: a SelfRef single tap/untap is purely an enters-tapped
+            // event modifier (either polarity).
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
-            } | Effect::Untap {
-                target: TargetFilter::SelfRef,
-            } | Effect::PutCounter {
-                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
                 ..
-            } | Effect::AddCounter {
+            } | Effect::PutCounter {
                 target: TargetFilter::SelfRef,
                 ..
             } | Effect::ChangeZone { .. }
@@ -3952,11 +4136,17 @@ fn event_modifiers_for_ability(
     while let Some(def) = current {
         if etb_tap_state == EtbTapState::Unspecified {
             etb_tap_state = match &*def.effect {
-                Effect::Tap {
+                // CR 701.26a: SelfRef single tap → enters tapped.
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 } => EtbTapState::Tapped,
-                Effect::Untap {
+                // CR 701.26b: SelfRef single untap → enters untapped.
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 } => EtbTapState::Untapped,
                 _ => EtbTapState::Unspecified,
             };
@@ -3976,6 +4166,38 @@ fn event_modifiers_for_ability(
         etb_tap_state,
         etb_counters: counters,
         redirect_zone: redirect,
+        controller_override: None,
+    }
+}
+
+/// CR 110.2a: Resolve the controller for a self-ETB controller-override
+/// replacement (`ReplacementDefinition::enters_under`). The reference is resolved
+/// relative to the entering object's *own* controller.
+///
+/// `ControllerRef::Opponent` ("enters under the control of an opponent of your
+/// choice") is resolved here rather than via the canonical `controller_ref_player`,
+/// which returns `None` for `Opponent` (ambiguous when more than one opponent
+/// exists). In a two-player game this is the sole opponent — fully correct. In
+/// multiplayer it picks the first opponent in seat order; a full controller choice
+/// is a follow-up. Either way the permanent enters under an opponent's control
+/// rather than its owner's, satisfying CR 110.2a.
+fn resolve_self_enters_under_controller(
+    state: &GameState,
+    object_id: ObjectId,
+    cref: &ControllerRef,
+) -> Option<PlayerId> {
+    let entering_controller = state.objects.get(&object_id)?.controller;
+    match cref {
+        ControllerRef::Opponent => crate::game::players::opponents(state, entering_controller)
+            .into_iter()
+            .next(),
+        other => crate::game::filter::controller_ref_player(
+            state,
+            object_id,
+            Some(entering_controller),
+            None,
+            other,
+        ),
     }
 }
 
@@ -4261,11 +4483,13 @@ fn apply_single_replacement(
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
                 )
             });
-            (
-                repl_def.event.clone(),
-                event_modifiers_for_ability(ability, state, rid.source, &proposed),
-                post_effect,
-            )
+            let mut modifiers = event_modifiers_for_ability(ability, state, rid.source, &proposed);
+            // CR 110.2a: A self-ETB controller override is carried directly on the
+            // replacement definition (not derived from `execute`), parallel to the
+            // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
+            // event modifier so it is written onto the `ZoneChange` below.
+            modifiers.controller_override = repl_def.enters_under.clone();
+            (repl_def.event.clone(), modifiers, post_effect)
         }
         None => return Ok(proposed),
     };
@@ -4290,6 +4514,25 @@ fn apply_single_replacement(
                 if modifiers.etb_tap_state != EtbTapState::Unspecified {
                     if let Some(enter_tapped) = new_event.battlefield_entry_tap_state_mut() {
                         *enter_tapped = modifiers.etb_tap_state;
+                    }
+                }
+                // CR 110.2a: Apply a self-ETB controller override onto the entering
+                // ZoneChange (set before ETB triggers fire — the permanent never
+                // enters under its owner's control first). Resolve the carried
+                // `ControllerRef` against the entering object's own controller.
+                if let Some(cref) = modifiers.controller_override.as_ref() {
+                    if let ProposedEvent::ZoneChange {
+                        object_id,
+                        to: Zone::Battlefield,
+                        controller_override,
+                        ..
+                    } = &mut new_event
+                    {
+                        if let Some(pid) =
+                            resolve_self_enters_under_controller(state, *object_id, cref)
+                        {
+                            *controller_override = Some(pid);
+                        }
                     }
                 }
                 // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
@@ -4622,10 +4865,14 @@ fn candidate_materiality(
             }
             // CR 616.1c: copy-as-it-enters strips another replacement's source.
             Effect::BecomeCopy { .. } => return CandidateMateriality::Unconditional,
-            // CR 614.1c: `Tap`/`Untap` both overwrite the `enter_tapped` field —
-            // two such candidates conflict (tapland + Spelunking / Archelos),
-            // last-applied wins.
-            Effect::Tap { .. } | Effect::Untap { .. } => {
+            // CR 614.1c: single-target `Tap`/`Untap` (legacy `Tap`/`Untap`) both
+            // overwrite the `enter_tapped` field — two such candidates conflict
+            // (tapland + Spelunking / Archelos), last-applied wins. The mass
+            // scope is not an ETB modifier and is not matched here.
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                ..
+            } => {
                 field = Some(EventField::EnterTapped);
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
@@ -4735,6 +4982,13 @@ fn pipeline_loop(
                     candidates,
                     depth,
                     is_optional: true,
+                    // CR 701.24a: set by the W3 library-placement arm after parking
+                    // (the pipeline doesn't know the caller's placement here).
+                    library_placement: None,
+                    // CR 614.12a: first park of this choice — no MayCost has been
+                    // paid yet. Set only when re-parking after a paused accept.
+                    may_cost_paid: false,
+                    may_cost_remaining: None,
                 });
                 return ReplacementResult::NeedsChoice(affected);
             }
@@ -4762,6 +5016,11 @@ fn pipeline_loop(
                 candidates,
                 depth,
                 is_optional: false,
+                // CR 701.24a: set by the W3 library-placement arm after parking.
+                library_placement: None,
+                // CR 614.12a: distinct-replacement choices carry no MayCost.
+                may_cost_paid: false,
+                may_cost_remaining: None,
             });
             return ReplacementResult::NeedsChoice(affected);
         } else {
@@ -4896,6 +5155,15 @@ pub fn continue_replacement(
     if pending.is_optional {
         let rid = pending.candidates[0];
         let payer = pending.proposed.affected_player(state);
+        // CR 614.12a: a `true` flag means this is the post-choice resume of an
+        // accept whose `MayCost` payment paused for an interactive sub-choice
+        // (e.g. a `DiscardChoice`). Re-park fields are captured up front so a
+        // fresh pause can re-stash the same record.
+        let resuming_after_paid_cost = pending.may_cost_paid;
+        let remaining_may_cost = pending.may_cost_remaining.clone();
+        let reparked_candidates = pending.candidates.clone();
+        let reparked_depth = pending.depth;
+        let reparked_library_placement = pending.library_placement.clone();
         let mut proposed = pending.proposed;
         proposed.mark_applied(rid);
 
@@ -4915,12 +5183,51 @@ pub fn continue_replacement(
             })
             .unwrap_or((None, None, None));
 
-        let paid_may_cost = if chosen_index == 0 {
-            may_cost
-                .as_ref()
-                .is_none_or(|cost| pay_replacement_may_cost(state, payer, rid.source, cost, events))
+        // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
+        // `PausedForChoice` outcome means the payment surfaced an interactive
+        // sub-choice (`WaitingFor` already set) — re-park the SAME pending record
+        // with `may_cost_paid: true` plus any unpaid suffix so the post-choice
+        // resume re-enters here, continues payment, and finishes entering the
+        // permanent. The permanent must NOT enter until the card actually leaves
+        // the hand.
+        let pay_outcome = if chosen_index != 0 {
+            MayCostOutcome::Unpaid
+        } else if resuming_after_paid_cost {
+            match &remaining_may_cost {
+                None => MayCostOutcome::Paid,
+                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+            }
         } else {
-            false
+            match &may_cost {
+                None => MayCostOutcome::Paid,
+                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+            }
+        };
+
+        let paid_may_cost = match pay_outcome {
+            MayCostOutcome::Paid => true,
+            MayCostOutcome::Unpaid => false,
+            MayCostOutcome::PausedForChoice { remaining_cost } => {
+                // CR 614.12a: the payment surfaced an interactive sub-choice (e.g. a
+                // `DiscardChoice`); `state.waiting_for` is already set to it. Re-park
+                // the SAME pending record with `may_cost_paid: true` and flag the
+                // pause so `handle_replacement_choice` surfaces the live sub-choice
+                // (not a fresh ReplacementChoice). The permanent enters only when
+                // the resume finishes any `may_cost_remaining`. The carried
+                // `Execute` payload is inert — the flag short-circuits the caller
+                // before it is read.
+                state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+                    proposed: proposed.clone(),
+                    candidates: reparked_candidates,
+                    depth: reparked_depth,
+                    is_optional: true,
+                    library_placement: reparked_library_placement,
+                    may_cost_paid: true,
+                    may_cost_remaining: remaining_cost,
+                });
+                state.replacement_may_cost_paused = true;
+                return ReplacementResult::Execute(proposed);
+            }
         };
 
         let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
@@ -5124,8 +5431,10 @@ mod tests {
     fn chained_etb_modifiers_do_not_stash_post_replacement_continuation() {
         let mut enter_tapped = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         );
         enter_tapped.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -5196,8 +5505,10 @@ mod tests {
                 },
                 decline: Some(Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))),
             })
@@ -5517,8 +5828,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -5526,8 +5839,10 @@ mod tests {
         let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -5923,8 +6238,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -5969,8 +6286,10 @@ mod tests {
         let tap =
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ));
         assert_eq!(replacement_choice_label(&tap), "Enters tapped");
@@ -5978,8 +6297,10 @@ mod tests {
         let untap =
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ));
         assert_eq!(replacement_choice_label(&untap), "Enters untapped");
@@ -5989,8 +6310,10 @@ mod tests {
         let non_self_tap = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::Any,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .description("X".to_string());
@@ -6025,8 +6348,10 @@ mod tests {
         let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -6035,8 +6360,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -6100,8 +6427,10 @@ mod tests {
         .description("This permanent enters with an additional +1/+1 counter on it".to_string());
         let haste_branch = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .description("It gains haste".to_string());
@@ -6131,6 +6460,9 @@ mod tests {
             }],
             depth: 0,
             is_optional: true,
+            library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -7005,8 +7337,10 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::Typed(
@@ -7020,8 +7354,10 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ))
             .valid_card(TargetFilter::Typed(
@@ -10349,8 +10685,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ),
         );
@@ -10358,8 +10696,10 @@ mod tests {
         let untap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ),
         );

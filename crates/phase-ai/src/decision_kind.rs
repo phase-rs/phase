@@ -11,6 +11,8 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 
 use crate::policies::registry::DecisionKind;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 /// Classify a decision into the bucket the policy registry uses for routing.
 pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
@@ -34,7 +36,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
         // CR 508.1g: exert-as-attack is part of the attack declaration; route it
         // to the attack policy population.
-        WaitingFor::ExertChoice { .. } => DecisionKind::DeclareAttackers,
+        WaitingFor::ExertChoice { .. } | WaitingFor::EnlistChoice { .. } => {
+            DecisionKind::DeclareAttackers
+        }
         // CR 508.1d + CR 509.1c: Combat tax — route by context so the attack-tax
         // policy sees `DeclareAttackers` candidates and the block-tax policy sees
         // `DeclareBlockers` candidates.
@@ -184,6 +188,8 @@ mod tests {
             object_id: ObjectId(0),
             card_id: CardId(0),
             targets: Vec::new(),
+
+            payment_mode: CastPaymentMode::Auto,
         };
 
         // Mulligan routing.

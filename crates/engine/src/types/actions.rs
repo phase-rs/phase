@@ -117,11 +117,7 @@ pub enum GameAction {
         object_id: ObjectId,
         card_id: CardId,
         targets: Vec<ObjectId>,
-    },
-    CastSpellWithPaymentMode {
-        object_id: ObjectId,
-        card_id: CardId,
-        targets: Vec<ObjectId>,
+        #[serde(default)]
         payment_mode: CastPaymentMode,
     },
     /// CR 702.143a-b: Foretell special action — during your turn while you
@@ -159,6 +155,12 @@ pub enum GameAction {
     /// in the pending `WaitingFor::ExertChoice`. `exert: false` declines.
     ChooseExert {
         exert: bool,
+    },
+    /// CR 508.1g + CR 702.154a: The active player's decision whether to pay
+    /// the pending Enlist optional attack cost by tapping one eligible
+    /// creature. `None` declines because Enlist allows tapping "up to one."
+    ChooseEnlist {
+        target: Option<ObjectId>,
     },
     /// CR 701.30b: The clashing player's choice of which opponent to clash with,
     /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
@@ -378,11 +380,7 @@ pub enum GameAction {
         hand_object: ObjectId,
         card_id: CardId,
         creature_to_return: ObjectId,
-    },
-    CastSpellAsSneakWithPaymentMode {
-        hand_object: ObjectId,
-        card_id: CardId,
-        creature_to_return: ObjectId,
+        #[serde(default)]
         payment_mode: CastPaymentMode,
     },
     /// CR 702.188a: Cast a spell from HAND via the Web-slinging alternative cost.
@@ -391,11 +389,7 @@ pub enum GameAction {
         hand_object: ObjectId,
         card_id: CardId,
         creature_to_return: ObjectId,
-    },
-    CastSpellAsWebSlingingWithPaymentMode {
-        hand_object: ObjectId,
-        card_id: CardId,
-        creature_to_return: ObjectId,
+        #[serde(default)]
         payment_mode: CastPaymentMode,
     },
     /// CR 601.2b + CR 118.9a: Cast a spell from hand for free via a
@@ -412,11 +406,7 @@ pub enum GameAction {
         object_id: ObjectId,
         card_id: CardId,
         source_id: ObjectId,
-    },
-    CastSpellForFreeWithPaymentMode {
-        object_id: ObjectId,
-        card_id: CardId,
-        source_id: ObjectId,
+        #[serde(default)]
         payment_mode: CastPaymentMode,
     },
     /// CR 702.94a + CR 603.11: Accept a pending `WaitingFor::MiracleReveal`
@@ -427,10 +417,7 @@ pub enum GameAction {
     CastSpellAsMiracle {
         object_id: ObjectId,
         card_id: CardId,
-    },
-    CastSpellAsMiracleWithPaymentMode {
-        object_id: ObjectId,
-        card_id: CardId,
+        #[serde(default)]
         payment_mode: CastPaymentMode,
     },
     /// CR 702.35a: Accept a pending `WaitingFor::CastOffer` (Madness) and cast
@@ -439,10 +426,7 @@ pub enum GameAction {
     CastSpellAsMadness {
         object_id: ObjectId,
         card_id: CardId,
-    },
-    CastSpellAsMadnessWithPaymentMode {
-        object_id: ObjectId,
-        card_id: CardId,
+        #[serde(default)]
         payment_mode: CastPaymentMode,
     },
     /// CR 609.3: Accept or decline an optional effect ("You may X").
@@ -1233,24 +1217,16 @@ impl GameAction {
     pub fn source_object(&self) -> Option<ObjectId> {
         match self {
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
-            GameAction::CastSpell { object_id, .. }
-            | GameAction::CastSpellWithPaymentMode { object_id, .. } => Some(*object_id),
+            GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),
-            GameAction::CastSpellAsSneak { hand_object, .. }
-            | GameAction::CastSpellAsSneakWithPaymentMode { hand_object, .. } => Some(*hand_object),
-            GameAction::CastSpellAsWebSlinging { hand_object, .. }
-            | GameAction::CastSpellAsWebSlingingWithPaymentMode { hand_object, .. } => {
-                Some(*hand_object)
-            }
+            GameAction::CastSpellAsSneak { hand_object, .. } => Some(*hand_object),
+            GameAction::CastSpellAsWebSlinging { hand_object, .. } => Some(*hand_object),
             GameAction::ActivateNinjutsu {
                 ninjutsu_object_id, ..
             } => Some(*ninjutsu_object_id),
             GameAction::CastSpellForFree { object_id, .. }
-            | GameAction::CastSpellForFreeWithPaymentMode { object_id, .. }
             | GameAction::CastSpellAsMiracle { object_id, .. }
-            | GameAction::CastSpellAsMiracleWithPaymentMode { object_id, .. }
-            | GameAction::CastSpellAsMadness { object_id, .. }
-            | GameAction::CastSpellAsMadnessWithPaymentMode { object_id, .. } => Some(*object_id),
+            | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
@@ -1266,6 +1242,7 @@ impl GameAction {
             GameAction::ChoosePair { partner } => *partner,
             GameAction::ChooseDamageSource { source } => Some(*source),
             GameAction::ChooseUntap { object_id, .. } => Some(*object_id),
+            GameAction::ChooseEnlist { target } => *target,
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),
             GameAction::ChooseLegend { keep } => Some(*keep),
             GameAction::CastPreparedCopy { source } => Some(*source),
@@ -1378,6 +1355,8 @@ mod tests {
             object_id: ObjectId(5),
             card_id: CardId(1),
             targets: vec![ObjectId(10), ObjectId(20)],
+
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
         let json = serde_json::to_value(&action).unwrap();
         assert_eq!(json["type"], "CastSpell");
@@ -1463,6 +1442,8 @@ mod tests {
                     object_id: oid,
                     card_id: cid,
                     targets: vec![],
+
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 },
                 Some(oid),
             ),
@@ -1492,6 +1473,8 @@ mod tests {
                     hand_object: oid,
                     card_id: cid,
                     creature_to_return: ObjectId(99),
+
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 },
                 Some(oid),
             ),

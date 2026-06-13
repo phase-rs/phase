@@ -92,7 +92,7 @@ fn drive_to_reflexive_selection() -> (GameRunner, usize, Vec<(ObjectId, u32)>) {
         .find_map(|e| match e {
             GameEvent::DieRolled {
                 result, sides: 20, ..
-            } => Some(*result as usize),
+            } => result.map(usize::from),
             _ => None,
         })
         .expect("Ancient Brass Dragon should roll a d20 on combat damage");

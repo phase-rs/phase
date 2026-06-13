@@ -714,3 +714,106 @@ fn inverted_as_long_as_flash_grant_attaches_condition() {
         static_def.condition
     );
 }
+
+/// CR 111.3 + CR 111.4: a created token's quoted inline ability text is the
+/// token's own "text", not a static clause of the host spell. Before the fix,
+/// the Priority-7 static gate matched a static-shaped marker (e.g. "can't
+/// block", "can't be blocked") INSIDE the quoted token ability and routed the
+/// whole spell to the static parser, producing `abilities: []` and a bogus
+/// static. Masking double-quoted spans for spell-line static classification
+/// restores the spell's own effect chain (>=1 ability, no bogus static).
+#[test]
+fn token_grant_spells_no_longer_misroute_to_static() {
+    // (oracle, name, types, subtypes)
+    let cases: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact creature \
+             tokens with toxic 1 and \"This token can't block.\" If X is 5 or more, \
+             destroy all other creatures.",
+            "White Sun's Twilight",
+            &["Sorcery"],
+            &[],
+        ),
+        (
+            "Create two 1/1 black Rat creature tokens with \"This token can't block.\"",
+            "Pest Problem",
+            &["Instant"],
+            &["Adventure"],
+        ),
+        (
+            "Create two 1/1 blue Fish creature tokens with \"This token can't be \
+             blocked.\" Then for each kind of counter among creatures you control, \
+             put a counter of that kind on either of those tokens.",
+            "Exotic Pets",
+            &["Instant"],
+            &[],
+        ),
+        (
+            "Return up to one target creature to its owner's hand. Create a 1/1 \
+             colorless Spirit creature token with \"This token can't block or be \
+             blocked by non-Spirit creatures.\"",
+            "Lost in the Spirit World",
+            &["Sorcery"],
+            &[],
+        ),
+    ];
+
+    for (oracle, name, types, subtypes) in cases {
+        let result = parse(oracle, name, &[], types, subtypes);
+        assert!(
+            !result.abilities.is_empty(),
+            "{name}: expected >=1 spell ability after masking the quoted token text, \
+             got abilities={:#?}",
+            result.abilities
+        );
+        // The bogus host-line static (a CantBlock the gate manufactured from the
+        // token's quoted text) must be gone. The token's own can't-block lives
+        // on the created token inside the Effect::Token, not in `statics`.
+        assert!(
+            !result
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::CantBlock)),
+            "{name}: a bogus host-line CantBlock static must not be produced, \
+             got statics={:#?}",
+            result.statics
+        );
+    }
+}
+
+/// Negative control: Brood Birthing's "have \"…\"" grant marker is OUTSIDE the
+/// quoted span, so masking must NOT change its parse — it still lowers to its
+/// functional `GrantAbility` static (the sacrifice-for-mana grant). This is the
+/// invariant the masking fix must preserve.
+#[test]
+fn brood_birthing_grant_static_unchanged_by_masking() {
+    use engine::types::ability::ContinuousModification;
+
+    let result = parse(
+        "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn \
+         creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, \
+         create one of those tokens.",
+        "Brood Birthing",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    assert_eq!(
+        result.statics.len(),
+        1,
+        "Brood Birthing keeps exactly one static (the GrantAbility grant): {:#?}",
+        result.statics
+    );
+    let grants_ability = matches!(result.statics[0].mode, StaticMode::Continuous)
+        && result.statics[0]
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }));
+    assert!(
+        grants_ability,
+        "Brood Birthing's static must remain the functional GrantAbility grant, \
+         got: {:#?}",
+        result.statics[0]
+    );
+}
