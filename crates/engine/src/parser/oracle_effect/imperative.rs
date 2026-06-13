@@ -11,7 +11,7 @@ use super::counter::{
     try_parse_double_effect, try_parse_move_counters_from, try_parse_put_counter,
     try_parse_remove_counter,
 };
-use super::lower::strip_for_each_multiplier_suffix;
+use super::lower::parse_for_each_multiplier_prefix;
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
 use super::{
@@ -462,16 +462,16 @@ pub(super) fn parse_numeric_imperative_ast(
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
         // dynamic-quantity gaps from the coverage report.
-        let mut count = parse_count_expr(rest).map(|(q, _)| q)?;
+        let (mut count, remainder) = parse_count_expr(rest)?;
         // CR 121.1 + CR 107.1: a trailing "for each <countable>" multiplier scales
         // the draw count ("draw a card for each spell you've cast this turn …") by
         // an integer per-each quantity — count templating, not the CR 609.3 "do as
-        // much as possible" rule. `parse_count_expr` discards its remainder, so the
-        // multiplier lives in the original `rest`; attach it via the shared
-        // for-each authority, rebinding the base Fixed count to factor × <for-each>.
+        // much as possible" rule. Attach it from the count parser's exact
+        // remainder via the shared anchored for-each authority, rebinding the
+        // base Fixed count to factor × <for-each>.
         // Only upgrades a successfully parsed Fixed count — preserves Fixed(1) when
         // no/unparsed `for each` tail, and keeps a dynamic base unchanged.
-        if let Some((for_each_expr, _head)) = strip_for_each_multiplier_suffix(rest) {
+        if let Some(for_each_expr) = parse_for_each_multiplier_prefix(remainder) {
             count = replace_fixed_quantity(count, for_each_expr);
         }
         return Some(NumericImperativeAst::Draw { count, up_to });

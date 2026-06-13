@@ -45,6 +45,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -768,7 +769,7 @@ pub(crate) fn parse_cda_quantity_with_context(
     // "the number of noncreature spells they've cast this turn"
     // "the number of spells they've cast this turn"
     // "the number of spells you've cast this turn from anywhere other than your hand"
-    // CR 117.1 + CR 400.1 + CR 601.2a: the shared helper locates the verb phrase
+    // CR 400.1 + CR 601.2a: the shared helper locates the verb phrase
     // mid-clause (via take_until) so a trailing cast-origin qualifier survives;
     // "this turn" may already be stripped by strip_trailing_duration, so the bare
     // " they've cast" / " that player has cast" forms are also recognized.
@@ -2034,13 +2035,11 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
 /// Parse the clause after "for each" into a QuantityRef.
 /// CR 702.62b: A suspended card is a card in the exile zone with the suspend
 /// keyword and a time counter on it. Counting clauses (`for each suspended card
-/// you own`) can only observe exile membership + time counter from the count
-/// context, so this primitive composes those two observable axes with the
-/// ownership qualifier; the suspend-keyword conjunct is implied by the card
-/// being a suspended exile card and is not separately filterable here.
+/// you own`) compose those observable axes with the ownership qualifier.
 ///
-/// Composes existing `FilterProp`s (`InZone`/`Owned`/`Counters`) into a typed
-/// card filter — never a one-off `Suspended` tag or a verbatim string match.
+/// Composes existing `FilterProp`s (`InZone`/`HasKeywordKind`/`Owned`/`Counters`)
+/// into a typed card filter — never a one-off `Suspended` tag or a verbatim
+/// string match.
 fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("suspended ")
         .parse(clause)
@@ -2065,6 +2064,10 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
         filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
             // CR 400.1: in the exile zone.
             FilterProp::InZone { zone: Zone::Exile },
+            // CR 702.62b: has suspend.
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            },
             // CR 108.3: owned by the ability's controller.
             FilterProp::Owned {
                 controller: ControllerRef::You,
@@ -2079,7 +2082,7 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
     })
 }
 
-/// CR 117.1 + CR 400.1 + CR 601.2a: Parse a spell-history count clause into its
+/// CR 400.1 + CR 601.2a: Parse a spell-history count clause into its
 /// controller scope and an optional characteristic/cast-origin filter.
 ///
 /// Single authority shared by both the `for each <spell> you've cast this turn …`
@@ -2491,7 +2494,7 @@ fn parse_for_each_clause_with_they_controller(
     // "spell you've cast this turn from anywhere other than your hand".
     // Direct dispatch before type-phrase fallback to handle spell-casting quantity
     // patterns; the shared helper locates the verb phrase mid-clause so a trailing
-    // cast-origin qualifier survives. CR 117.1 + CR 400.1 + CR 601.2a.
+    // cast-origin qualifier survives. CR 400.1 + CR 601.2a.
     if let Some((scope, filter)) = parse_spell_history_clause(clause, CountScope::Controller) {
         return Some(QuantityRef::SpellsCastThisTurn { scope, filter });
     }
@@ -5801,7 +5804,7 @@ mod tests {
 
     // ===================================================================
     // Cluster-01: trailing "for each …" multiplier + spell-history cast-origin
-    // + suspended-card primitive. CR 117.1 / CR 400.1 / CR 601.2a / CR 702.62b.
+    // + suspended-card primitive. CR 400.1 / CR 601.2a / CR 702.62b.
     // ===================================================================
 
     use crate::parser::oracle_target::cast_capable_zones_except;
@@ -5922,7 +5925,7 @@ mod tests {
         );
     }
 
-    // Suspended-card primitive (CR 702.62b): exile + owned{you} + time counter.
+    // Suspended-card primitive (CR 702.62b): exile + suspend + owned{you} + time counter.
     #[test]
     fn for_each_suspended_card_you_own() {
         let qty = parse_for_each_clause("suspended card you own")
@@ -5938,6 +5941,12 @@ mod tests {
                 .properties
                 .contains(&FilterProp::InZone { zone: Zone::Exile }),
             "must require exile zone (CR 702.62b)"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            }),
+            "must require suspend keyword (CR 702.62b)"
         );
         assert!(
             typed.properties.contains(&FilterProp::Owned {

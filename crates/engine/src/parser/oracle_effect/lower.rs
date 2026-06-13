@@ -1649,31 +1649,35 @@ pub(super) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
     (None, text.to_string())
 }
 
-/// CR 107.1: Attach a trailing `for each <clause>` multiplier to an effect's
+/// CR 107.1: Parse an anchored `for each <clause>` multiplier for an effect's
 /// count. The multiplier scales the base count by an integer per-each quantity
 /// (the game uses only integers), so this is plain count templating, not the
-/// CR 609.3 "do as much as possible" rule. Locates the first `for each `
-/// boundary anywhere in `text` (not just at the start) via `split_once_on_lower`,
-/// then delegates the `<clause>` to the shared `parse_for_each_clause_expr`
-/// quantity grammar.
+/// CR 609.3 "do as much as possible" rule.
 ///
 /// Single authority for "attach trailing for-each multiplier", shared across
-/// every quantity-taking verb (PutCounter via `parse_counter_for_each_suffix`,
-/// Draw via the imperative dispatch). On success returns the parsed
-/// `QuantityExpr` and the text *before* `for each` so callers can keep their
-/// pre-multiplier remainder. Returns `None` (preserving the caller's current
-/// behavior) when no `for each` boundary exists or the clause does not parse —
-/// never silently substitutes `Fixed(1)`.
-pub(super) fn strip_for_each_multiplier_suffix(text: &str) -> Option<(QuantityExpr, &str)> {
+/// quantity-taking verbs whose own quantity parser has already returned the
+/// exact remainder where the multiplier is allowed. The count parser leaves
+/// quantity nouns such as `card`/`cards` in the remainder, so this accepts that
+/// draw-count noun axis before the marker. Returns `None` when the remainder
+/// does not begin with an allowed multiplier shape or the clause does not parse
+/// — never silently substitutes `Fixed(1)`.
+pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
-    // `split_once_on_lower` locates the first case-insensitive `for each `
-    // boundary (the noun phrase before the multiplier may be arbitrary) and
-    // returns both sides in original case — the same tested building block used
-    // elsewhere, replacing hand-rolled `text.len() - …` offset math.
-    let (head, for_each_clause) = split_once_on_lower(text, &lower, "for each ")?;
+    let ((), for_each_clause) = nom_on_lower(text, &lower, |input| {
+        let (rest, _) = multispace0.parse(input)?;
+        let (rest, _) = opt(terminated(
+            alt((
+                tag::<_, _, OracleError<'_>>("cards"),
+                tag::<_, _, OracleError<'_>>("card"),
+            )),
+            multispace1,
+        ))
+        .parse(rest)?;
+        let (rest, _) = tag("for each ").parse(rest)?;
+        Ok((rest, ()))
+    })?;
     let clause_lower = for_each_clause.to_lowercase();
-    let count = parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())?;
-    Some((count, head))
+    parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())
 }
 
 pub(super) fn parse_for_each_opponent_target_fanout_clause(

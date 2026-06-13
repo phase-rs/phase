@@ -18,7 +18,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
-use super::lower::strip_for_each_multiplier_suffix;
+use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
 use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
@@ -460,19 +460,11 @@ pub(super) fn try_parse_put_counter<'a>(
 }
 
 fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)> {
-    // Delegate to the shared "attach trailing for-each multiplier" authority
-    // (CR 107.1 integer count templating) in oracle_effect::lower. The counter
-    // remainder must *begin* with the `for each ` marker (any leading noun was
-    // already consumed upstream): require the pre-`for each` head to be
-    // whitespace-only so this stays anchored like the original
-    // `multispace0 + tag("for each ")` form and does not treat a trailing
-    // unrelated clause that merely *contains* "for each" as a multiplier. The
-    // multiplier consumes the entire tail; preserve the original contract of
-    // returning an empty post-suffix remainder.
-    let (count, head) = strip_for_each_multiplier_suffix(remainder)?;
-    if !head.trim().is_empty() {
-        return None;
-    }
+    // Delegate to the shared anchored "attach trailing for-each multiplier"
+    // authority (CR 107.1 integer count templating) in oracle_effect::lower.
+    // The multiplier consumes the entire tail; preserve the original contract
+    // of returning an empty post-suffix remainder.
+    let count = parse_for_each_multiplier_prefix(remainder)?;
     Some((count, ""))
 }
 
