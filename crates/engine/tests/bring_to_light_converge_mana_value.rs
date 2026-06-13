@@ -37,11 +37,6 @@ const BRING_TO_LIGHT: &str = "Converge — Search your library for a creature, i
 card with mana value less than or equal to the number of colors of mana spent to cast this spell, \
 exile that card, then shuffle. You may cast that card without paying its mana cost.";
 
-/// The fixed `ObjectId` `build_resolved_from_def` uses as the resolving spell's
-/// source; the converge metric (`ManaSpentToCast { scope: SelfObject }`)
-/// resolves against this object's `colors_spent_to_cast`.
-const SPELL_ID: ObjectId = ObjectId(100);
-
 fn add_library_creature(
     state: &mut GameState,
     card_id: u64,
@@ -85,9 +80,10 @@ fn bring_to_light_converge_five_excludes_mana_value_six_creature() {
     let mut state = GameState::new_two_player(42);
 
     // The resolving Bring to Light spell object. Converge = 5 distinct colors of
-    // mana spent (the physical maximum). `build_resolved_from_def` anchors the
-    // ability on SPELL_ID, and `ManaSpentToCast { scope: SelfObject }` reads this
-    // object's `colors_spent_to_cast`.
+    // mana spent (the physical maximum). The ability is anchored on this object's
+    // own id (below), and `ManaSpentToCast { scope: SelfObject }` reads its
+    // `colors_spent_to_cast`. `create_object` assigns ids sequentially, so the
+    // spell's concrete id must be threaded through — not assumed.
     let spell = create_object(
         &mut state,
         CardId(100),
@@ -95,7 +91,6 @@ fn bring_to_light_converge_five_excludes_mana_value_six_creature() {
         "Bring to Light".to_string(),
         Zone::Stack,
     );
-    assert_eq!(spell, SPELL_ID, "source-id assumption for converge scope");
     let mut converge = ColoredManaCount::default();
     for color in ManaColor::ALL {
         converge.add(color, 1);
@@ -128,7 +123,7 @@ fn bring_to_light_converge_five_excludes_mana_value_six_creature() {
         },
     );
 
-    let ability = build_resolved_from_def(definition, SPELL_ID, PlayerId(0));
+    let ability = build_resolved_from_def(definition, spell, PlayerId(0));
     let mut events = Vec::new();
     resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
