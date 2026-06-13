@@ -15,7 +15,7 @@ function groupKey(obj: GameObject): string {
   // two identical permanents always land in the same group regardless of the
   // order their counters were applied (the old stringify could split them by
   // insertion order; this matches the sorted keyword key above).
-  const counters = Object.entries(obj.counters)
+  const counters = Object.entries(obj.counters ?? {})
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .map(([type, n]) => `${type}:${n}`)
     .join(",");

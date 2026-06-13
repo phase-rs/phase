@@ -66,6 +66,20 @@ export function BattlefieldBackground() {
 
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
+
+  // resolveBackground locks the chosen image in lockedRef for the "random" and
+  // "auto-wubrg" modes (once chosen, it sticks). Clear that lock when the mode
+  // or the viewed player changes, so switching backgrounds mid-session (or
+  // switching seats) doesn't keep showing a stale locked image from the prior
+  // mode/player. Comparing prior values during render is the idiomatic reset.
+  const lastModeRef = useRef(boardBackground);
+  const lastPlayerRef = useRef(playerId);
+  if (lastModeRef.current !== boardBackground || lastPlayerRef.current !== playerId) {
+    lastModeRef.current = boardBackground;
+    lastPlayerRef.current = playerId;
+    lockedRef.current = null;
+  }
+
   const deckColor = useMemo(() => {
     // The dominant-color scan walks the full library + hand + battlefield, and
     // its result is consumed ONLY by the "auto-wubrg" background — and only
