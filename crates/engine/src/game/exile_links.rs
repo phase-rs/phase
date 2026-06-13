@@ -9,6 +9,7 @@ const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "CardsExiledBySource",
     "OwnersOfCardsExiledBySource",
     "ChoiceAmongExiledColors",
+    "TargetSharesNameWithOtherExiledThisWay",
     // CR 601.2a + CR 113.6b: A source carrying `StaticMode::ExileCastPermission`
     // (Maralen, Fae Ascendant) consumes its own linked-exile pool to grant
     // casting permission. Detection by externally-tagged serde key ensures the
@@ -102,6 +103,43 @@ pub(crate) fn push_exiled_with_source_this_turn(
 
 pub(crate) fn ability_contains_linked_exile_consumer(ability: &ResolvedAbility) -> bool {
     contains_linked_exile_consumer(ability)
+}
+
+/// CR 607.2a: True when at least two distinct cards exiled with `source_id`
+/// share a name (case-insensitive).
+pub(crate) fn duplicate_name_among_exiled_by_source(
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    let mut names: Vec<&str> = state
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == source_id)
+        .filter_map(|link| state.objects.get(&link.exiled_id))
+        .map(|obj| obj.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+        .windows(2)
+        .any(|pair| pair[0].eq_ignore_ascii_case(pair[1]))
+}
+
+/// CR 607.2a: True when `card_id` shares a name with another card linked to
+/// `source_id` via `exile_links`.
+pub(crate) fn shares_name_with_other_exiled_by_source(
+    state: &GameState,
+    source_id: ObjectId,
+    card_id: ObjectId,
+) -> bool {
+    let Some(card) = state.objects.get(&card_id) else {
+        return false;
+    };
+    state
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == source_id && link.exiled_id != card_id)
+        .filter_map(|link| state.objects.get(&link.exiled_id))
+        .any(|other| other.name.eq_ignore_ascii_case(&card.name))
 }
 
 fn source_contains_linked_exile_consumer(obj: &crate::game::GameObject) -> bool {

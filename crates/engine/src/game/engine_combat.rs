@@ -1,4 +1,5 @@
 use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget, TrampleKind};
+use crate::types::ability::{CostPaidObjectSnapshot, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatDamageAssignmentMode, CombatTaxContext, CombatTaxPending, DamageSlot, GameState,
@@ -71,6 +72,15 @@ pub(super) fn handle_declare_attackers(
         });
     }
 
+    if let Some(waiting_for) = next_enlist_choice(state, player, enlist_candidates(state, attacks))
+    {
+        // CR 508.2: defer declaration triggers until after Enlist optional
+        // attack costs, so attack and linked "when you do" triggers are placed
+        // on the stack before priority.
+        state.pending_attack_trigger_events = events[declaration_start..].to_vec();
+        return Ok(waiting_for);
+    }
+
     finish_declare_attackers(state, events, attacks.is_empty())
 }
 
@@ -90,6 +100,82 @@ fn exert_candidates(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> 
                 })
         })
         .collect()
+}
+
+/// CR 702.154b + CR 702.154d: each Enlist instance represents an independent
+/// optional attack cost linked to its own "when you do" trigger. Return one
+/// queue entry per active `TriggerMode::Enlisted` definition, preserving attack
+/// declaration order and per-instance multiplicity.
+fn enlist_candidates(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> Vec<ObjectId> {
+    attacks
+        .iter()
+        .flat_map(|(attacker_id, _)| {
+            let count = state.objects.get(attacker_id).map_or(0, |obj| {
+                super::functioning_abilities::active_trigger_definitions(state, obj)
+                    .filter(|(_, def)| def.mode == crate::types::triggers::TriggerMode::Enlisted)
+                    .count()
+            });
+            (0..count).map(|_| *attacker_id)
+        })
+        .collect()
+}
+
+fn current_enlist_candidates(state: &GameState) -> Vec<ObjectId> {
+    let Some(combat) = state.combat.as_ref() else {
+        return Vec::new();
+    };
+    let attacks: Vec<_> = combat
+        .attackers
+        .iter()
+        .map(|attacker| (attacker.object_id, attacker.attack_target))
+        .collect();
+    enlist_candidates(state, &attacks)
+}
+
+pub(super) fn next_enlist_choice(
+    state: &GameState,
+    player: PlayerId,
+    candidates: Vec<ObjectId>,
+) -> Option<WaitingFor> {
+    let mut remaining = candidates;
+    while !remaining.is_empty() {
+        let attacker = remaining.remove(0);
+        let eligible = enlist_eligible_targets(state, attacker);
+        if !eligible.is_empty() {
+            return Some(WaitingFor::EnlistChoice {
+                player,
+                attacker,
+                eligible,
+                remaining,
+            });
+        }
+    }
+    None
+}
+
+pub(super) fn next_current_enlist_choice(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<WaitingFor> {
+    next_enlist_choice(state, player, current_enlist_candidates(state))
+}
+
+fn enlist_eligible_targets(state: &GameState, attacker: ObjectId) -> Vec<ObjectId> {
+    let Some(attacker_obj) = state.objects.get(&attacker) else {
+        return Vec::new();
+    };
+    super::targeting::find_legal_targets(
+        state,
+        &crate::database::synthesis::enlist_tap_target_filter(),
+        attacker_obj.controller,
+        attacker,
+    )
+    .into_iter()
+    .filter_map(|target| match target {
+        TargetRef::Object(id) => Some(id),
+        TargetRef::Player(_) => None,
+    })
+    .collect()
 }
 
 /// CR 701.43a + CR 701.43c: Pay the optional exert cost for an attacking
@@ -133,6 +219,49 @@ pub(super) fn apply_attack_exert(
     // per-action event stream for the frontend.
     state.pending_attack_trigger_events.push(exerted.clone());
     events.push(exerted);
+}
+
+/// CR 702.154a-c: Pay one Enlist optional attack cost by tapping an eligible
+/// creature. The normal tap event and the linked Enlist event are both buffered
+/// for CR 508.2 trigger processing after all attack costs are chosen.
+pub(super) fn apply_attack_enlist(
+    state: &mut GameState,
+    attacker: ObjectId,
+    tapped: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !enlist_eligible_targets(state, attacker).contains(&tapped) {
+        return Err(EngineError::InvalidAction(format!(
+            "{tapped:?} is not eligible to be enlisted"
+        )));
+    }
+
+    let Some(obj) = state.objects.get(&tapped) else {
+        return Ok(());
+    };
+    let snapshot = CostPaidObjectSnapshot {
+        object_id: tapped,
+        lki: obj.snapshot_public_characteristics(),
+    };
+    let Some(obj) = state.objects.get_mut(&tapped) else {
+        return Ok(());
+    };
+    obj.tapped = true;
+
+    let tap_event = GameEvent::PermanentTapped {
+        object_id: tapped,
+        caused_by: None,
+    };
+    let enlisted = GameEvent::CreatureEnlisted {
+        attacker,
+        tapped,
+        tapped_snapshot: Box::new(snapshot),
+    };
+    state.pending_attack_trigger_events.push(tap_event.clone());
+    state.pending_attack_trigger_events.push(enlisted.clone());
+    events.push(tap_event);
+    events.push(enlisted);
+    Ok(())
 }
 
 /// Post-declaration tail of `handle_declare_attackers`, shared with the exert
@@ -803,6 +932,164 @@ mod tests {
         obj.counters
             .insert(crate::types::counter::CounterType::Loyalty, loyalty);
         id
+    }
+
+    fn add_enlist_trigger(state: &mut GameState, attacker: ObjectId) {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+            TargetFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let pump = AbilityDefinition::new(
+            AbilityKind::Spell,
+            crate::types::ability::Effect::Pump {
+                power: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                }),
+                toughness: PtValue::Fixed(0),
+                target: TargetFilter::SelfRef,
+            },
+        );
+        let trigger = crate::types::ability::TriggerDefinition::new(TriggerMode::Enlisted)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(pump);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+    }
+
+    fn declare_single_enlist_attacker(state: &mut GameState, attacker: ObjectId) -> WaitingFor {
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        let mut events = Vec::new();
+        handle_declare_attackers(state, PlayerId(0), &attacks, &[], &mut events)
+            .expect("declare attackers")
+    }
+
+    #[test]
+    fn enlist_prompts_before_priority_and_stack() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enlister", 2, 2);
+        let helper = create_creature(&mut state, PlayerId(0), "Helper", 3, 3);
+        add_enlist_trigger(&mut state, attacker);
+
+        let waiting = declare_single_enlist_attacker(&mut state, attacker);
+
+        assert!(
+            matches!(
+                waiting,
+                WaitingFor::EnlistChoice {
+                    attacker: id,
+                    ref eligible,
+                    ..
+                } if id == attacker && eligible.contains(&helper)
+            ),
+            "declare attackers must pause for Enlist before priority, got {waiting:?}"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "no Enlist trigger is stacked before the cost choice"
+        );
+        assert!(
+            !state.objects[&helper].tapped,
+            "the enlisted creature is not tapped until the Enlist choice is paid"
+        );
+    }
+
+    #[test]
+    fn decline_enlist_taps_nothing_and_stacks_no_linked_trigger() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enlister", 2, 2);
+        let helper = create_creature(&mut state, PlayerId(0), "Helper", 3, 3);
+        add_enlist_trigger(&mut state, attacker);
+        state.waiting_for = declare_single_enlist_attacker(&mut state, attacker);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::ChooseEnlist { target: None },
+        )
+        .expect("decline enlist");
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.objects[&helper].tapped);
+        assert!(state.stack.is_empty());
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CreatureEnlisted { .. })),
+            "declining Enlist must not fire the linked trigger"
+        );
+    }
+
+    #[test]
+    fn paid_enlist_seeds_tapped_creature_lki_on_linked_trigger() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enlister", 2, 2);
+        let helper = create_creature(&mut state, PlayerId(0), "Helper", 3, 3);
+        add_enlist_trigger(&mut state, attacker);
+        state.waiting_for = declare_single_enlist_attacker(&mut state, attacker);
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::ChooseEnlist {
+                target: Some(helper),
+            },
+        )
+        .expect("pay enlist");
+
+        let ability = match &state.stack.back().expect("Enlist trigger on stack").kind {
+            crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => ability,
+            other => panic!("expected triggered ability, got {other:?}"),
+        };
+        let snapshot = ability
+            .effect_context_object
+            .as_ref()
+            .expect("Enlist trigger must carry tapped creature LKI");
+        assert_eq!(snapshot.object_id, helper);
+        assert_eq!(snapshot.lki.power, Some(3));
+    }
+
+    #[test]
+    fn multiple_enlist_instances_offer_independent_choices() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enlister", 2, 2);
+        let first = create_creature(&mut state, PlayerId(0), "First Helper", 3, 3);
+        let second = create_creature(&mut state, PlayerId(0), "Second Helper", 4, 4);
+        add_enlist_trigger(&mut state, attacker);
+        add_enlist_trigger(&mut state, attacker);
+        state.waiting_for = declare_single_enlist_attacker(&mut state, attacker);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::ChooseEnlist {
+                target: Some(first),
+            },
+        )
+        .expect("pay first enlist");
+
+        assert!(state.objects[&first].tapped);
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::EnlistChoice {
+                    attacker: id,
+                    ref eligible,
+                    ..
+                } if id == attacker && eligible.contains(&second) && !eligible.contains(&first)
+            ),
+            "second Enlist instance must offer a fresh eligible set, got {:?}",
+            result.waiting_for
+        );
     }
 
     #[test]

@@ -348,26 +348,36 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::GainLife).description(text.to_string());
+        // CR 119.10 + CR 614.6: "If [a player] would gain life, [that player]
+        // gains no life instead." — the lifegain-negation replacement. The
+        // body lowers to a bare "gain no life" which `parse_effect_chain` would
+        // turn into an `Unimplemented` no-op effect (a silent runtime
+        // passthrough). Instead, emit the structured `Prevent` quantity
+        // modification, which `gain_life_applier` Branch 1 reads to fully
+        // suppress the gain (CR 614.6: a replaced event never happens). Mirrors
+        // `parse_global_player_counter_prohibition`: a `Prevent` replacement
+        // carries no `execute` effect, so no stray `Unimplemented` pollutes the
+        // AST. Scoped to the un-durationed form — the "...would gain life THIS
+        // TURN..." durational replacement (Flames of the Blood Hand, CR 611.2a:
+        // a resolving spell's continuous effect lasts only as long as stated) is
+        // deferred, since a flat `Prevent` would wrongly become permanent.
+        let body_negates_lifegain = effect_text
+            .as_deref()
+            .is_some_and(|e| body_is_lifegain_negation(&e.to_lowercase()));
+        if body_negates_lifegain
+            && !nom_primitives::scan_contains(&lower, "would gain life this turn")
+        {
+            def = def.quantity_modification(QuantityModification::Prevent);
+            // Apply player scope before short-circuiting (shared with the
+            // execute path below): "a player" / opponent / controller scoping.
+            apply_gain_life_player_scope(&lower, &mut def);
+            return Some(def);
+        }
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
         // CR 614.1a: Parse the subject to determine player scope.
-        if nom_primitives::scan_contains(&lower, "an opponent would gain life")
-            || nom_primitives::scan_contains(&lower, "opponent would gain life")
-        {
-            def.valid_player = Some(ReplacementPlayerScope::Opponent);
-        } else if nom_primitives::scan_contains(&lower, "would cause its controller to gain life")
-            || nom_primitives::scan_contains(&lower, "a player would gain life")
-        {
-            // CR 614.1a: "a spell or ability would cause its controller to gain
-            // life" (Rain of Gore) and "a player would gain life" are global —
-            // the replacement watches every player's life gain, not just the
-            // source controller's. Step 4 note: the "caused by a spell or
-            // ability" qualifier is effectively universal (even combat lifelink
-            // is ability-sourced), so no `ReplacementCondition` is needed.
-            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
-        }
-        // else: "you would gain life" → valid_player stays None (controller-only).
+        apply_gain_life_player_scope(&lower, &mut def);
         // CR 614.1a: A "while [condition]" gate in the antecedent suppresses the
         // replacement when the condition is false. Phial of Galadriel ("If you
         // would gain life while you have 5 or less life, you gain twice that
@@ -3271,6 +3281,17 @@ fn self_die_exile_anaphor_execute(
 /// chain and run via the mandatory post-replacement-effect hook after the
 /// redirected ZoneChange physically resolves. Owner-routing (CR 400.3) is
 /// enforced at the zone layer, which reads `obj.owner` when writing to a library.
+///
+/// CR 614.1a + CR 608.2n: Self-referential subjects (`~`, "this spell", …) must
+/// carry `valid_card: SelfRef` so `find_applicable_replacements` discovers the
+/// def while the spell is still on the stack (Nexus of Fate / Progenitus class).
+fn graveyard_replacement_subject_is_self_referential(subject: &str) -> bool {
+    let subject = subject.trim();
+    subject == "~"
+        || matches!(subject, "this spell" | "this card")
+        || crate::parser::oracle_util::SELF_REF_TYPE_PHRASES.contains(&subject)
+}
+
 fn parse_graveyard_exile_replacement(
     norm_lower: &str,
     original_text: &str,
@@ -3306,74 +3327,78 @@ fn parse_graveyard_exile_replacement(
         NonToken,
     }
 
-    let ((scope, token_scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
-        // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
-        let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
-        // Subject: accept any phrase up to " would be put into " — covers
-        // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
-        // — and classify its token axis (CR 730.3e) from the captured slice.
-        let (i, subject) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
-        // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
-        // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
-        // phrasing ("a card or token") names tokens explicitly and stays
-        // unscoped. The token-rider check wins over the bare-card check, so
-        // "a card or token" is never misread as token-excluding.
-        //
-        // The token axis is a terminal-noun classification of the noun phrase
-        // `take_until` already tokenized off. "Ends with <noun>" is expressed as
-        // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
-        // classification stays combinator-pure (no raw tail string-ops) and is
-        // correct for arbitrarily long subjects ("a nontoken creature card",
-        // "a creature an opponent controls") where a first-word split would not
-        // be.
-        fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
-            terminated(
-                (take_until(noun), tag(noun)),
-                eof::<&'a str, OracleError<'a>>,
-            )
-            .parse(subject)
-            .is_ok()
-        }
-        let names_token =
-            subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
-        let names_card =
-            subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
-        let token_scope = if names_card && !names_token {
-            TokenScope::NonToken
-        } else {
-            TokenScope::Unscoped
-        };
-        let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
-        let (i, scope) = alt((
-            value(Scope::Opponent, tag("an opponent's graveyard")),
-            value(Scope::Opponent, tag("an opponents graveyard")),
-            value(Scope::Opponent, tag("opponent's graveyard")),
-            value(
-                Scope::Any,
-                preceded(take_until(" graveyard"), tag(" graveyard")),
-            ),
-        ))
-        .parse(i)?;
-        let (i, _) = opt(tag(" from anywhere")).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
+    let ((scope, token_scope, outcome, subject), _rest) =
+        nom_on_lower(original_text, norm_lower, |i| {
+            // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
+            let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
+            // Subject: accept any phrase up to " would be put into " — covers
+            // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
+            // — and classify its token axis (CR 730.3e) from the captured slice.
+            let (i, subject) =
+                take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+            // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
+            // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
+            // phrasing ("a card or token") names tokens explicitly and stays
+            // unscoped. The token-rider check wins over the bare-card check, so
+            // "a card or token" is never misread as token-excluding.
+            //
+            // The token axis is a terminal-noun classification of the noun phrase
+            // `take_until` already tokenized off. "Ends with <noun>" is expressed as
+            // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
+            // classification stays combinator-pure (no raw tail string-ops) and is
+            // correct for arbitrarily long subjects ("a nontoken creature card",
+            // "a creature an opponent controls") where a first-word split would not
+            // be.
+            fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
+                terminated(
+                    (take_until(noun), tag(noun)),
+                    eof::<&'a str, OracleError<'a>>,
+                )
+                .parse(subject)
+                .is_ok()
+            }
+            let names_token =
+                subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
+            let names_card =
+                subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
+            let token_scope = if names_card && !names_token {
+                TokenScope::NonToken
+            } else {
+                TokenScope::Unscoped
+            };
+            let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+            let (i, scope) = alt((
+                value(Scope::Opponent, tag("an opponent's graveyard")),
+                value(Scope::Opponent, tag("an opponents graveyard")),
+                value(Scope::Opponent, tag("opponent's graveyard")),
+                value(
+                    Scope::Any,
+                    preceded(take_until(" graveyard"), tag(" graveyard")),
+                ),
+            ))
+            .parse(i)?;
+            let (i, _) = opt(tag(" from anywhere")).parse(i)?;
+            let (i, _) = tag(", ").parse(i)?;
 
-        // Outcome dispatch. The shuffle-back variant optionally prefixes
-        // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
-        let (i, outcome) = alt((
-            value(Outcome::Exile, tag("exile it instead")),
-            value(
-                Outcome::ShuffleBack { reveal: true },
-                tag("reveal ~ and shuffle it into its owner's library instead"),
-            ),
-            value(
-                Outcome::ShuffleBack { reveal: false },
-                tag("shuffle it into its owner's library instead"),
-            ),
-        ))
-        .parse(i)?;
+            // Outcome dispatch. The shuffle-back variant optionally prefixes
+            // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
+            let (i, outcome) = alt((
+                value(Outcome::Exile, tag("exile it instead")),
+                value(
+                    Outcome::ShuffleBack { reveal: true },
+                    tag("reveal ~ and shuffle it into its owner's library instead"),
+                ),
+                value(
+                    Outcome::ShuffleBack { reveal: false },
+                    tag("shuffle it into its owner's library instead"),
+                ),
+            ))
+            .parse(i)?;
 
-        Ok((i, (scope, token_scope, outcome)))
-    })?;
+            Ok((i, (scope, token_scope, outcome, subject.to_string())))
+        })?;
+
+    let subject = subject.trim();
 
     // Destination routing is determined by the outcome branch.
     let destination = match &outcome {
@@ -3396,8 +3421,15 @@ fn parse_graveyard_exile_replacement(
     if let TokenScope::NonToken = token_scope {
         props.push(FilterProp::NonToken);
     }
-    let valid_card =
-        (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
+    let valid_card = if graveyard_replacement_subject_is_self_referential(subject) {
+        Some(TargetFilter::SelfRef)
+    } else if !props.is_empty() {
+        Some(TargetFilter::Typed(
+            TypedFilter::default().properties(props),
+        ))
+    } else {
+        None
+    };
 
     // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
     // the `destination` field from this top-level ChangeZone — other fields here
@@ -3614,6 +3646,7 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
                 .map(|_| crate::types::ability::PreventionScope::CombatDamage)
                 .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
             damage_source_filter: source_filter,
+            prevention_duration: None,
         });
     }
 
@@ -4078,6 +4111,50 @@ fn scan_combat_scope(text: &str) -> Option<CombatDamageScope> {
         ))
         .parse(input)
     })
+}
+
+/// CR 119.10 + CR 614.6: True iff the replacement body negates the life gain
+/// ("[that player] gains no life" / "[you] gain no life"). The optional
+/// player-subject anaphor (`that player` / `the player` / `you` / `they`) is
+/// consumed by a nom `alt` before the negation `tag`, so the negation phrase is
+/// matched structurally rather than by verbatim full-sentence comparison. This
+/// covers the "gains no life instead" *replacement* class (Sulfuric Vortex);
+/// the separate `StaticAbilityMode::CantGainLife` hate-permanent class
+/// (Erebos, Leyline of Punishment, …) uses no replacement framing and is
+/// matched elsewhere.
+fn body_is_lifegain_negation(lower_body: &str) -> bool {
+    let subject = opt(alt((
+        tag::<_, _, OracleError<'_>>("that player "),
+        tag("the player "),
+        tag("you "),
+        tag("they "),
+    )));
+    let mut combinator = preceded(
+        subject,
+        value((), alt((tag("gains no life"), tag("gain no life")))),
+    );
+    combinator.parse(lower_body.trim()).is_ok()
+}
+
+/// CR 614.1a: Assign the replacement's player scope from the antecedent subject
+/// ("an opponent" → Opponent, "a player" / "its controller" → AnyPlayer,
+/// "you" → controller-only/None). Shared by the `Prevent` short-circuit and the
+/// generic execute path so both surfaces compute scope identically.
+fn apply_gain_life_player_scope(lower: &str, def: &mut ReplacementDefinition) {
+    if nom_primitives::scan_contains(lower, "an opponent would gain life")
+        || nom_primitives::scan_contains(lower, "opponent would gain life")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    } else if nom_primitives::scan_contains(lower, "would cause its controller to gain life")
+        || nom_primitives::scan_contains(lower, "a player would gain life")
+    {
+        // CR 614.1a: "a spell or ability would cause its controller to gain
+        // life" (Rain of Gore) and "a player would gain life" are global — the
+        // replacement watches every player's life gain, not just the source
+        // controller's.
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    }
+    // else: "you would gain life" → valid_player stays None (controller-only).
 }
 
 fn parse_color_word(word: &str) -> Option<ManaColor> {
@@ -6366,6 +6443,88 @@ mod tests {
     }
 
     #[test]
+    fn gains_no_life_instead_lowers_to_prevent_not_unimplemented() {
+        // CR 119.10 + CR 614.6 + issue #743: "If a player would gain life, that
+        // player gains no life instead." must emit a structured `Prevent`
+        // quantity modification (which `gain_life_applier` Branch 1 reads to
+        // fully suppress the gain), NOT an `Unimplemented` no-op effect
+        // (which the runtime silently passes through, letting the gain proceed).
+        let def = parse_replacement_line(
+            "If a player would gain life, that player gains no life instead.",
+            "Sulfuric Vortex",
+        )
+        .expect("Sulfuric Vortex lifegain-negation replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::GainLife);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent),
+            "lifegain-negation must carry Prevent, got {:?}",
+            def.quantity_modification
+        );
+        // No execute effect: a Prevent replacement carries no `Unimplemented`
+        // (or any) effect, mirroring the counter-prohibition precedent.
+        assert!(
+            def.execute.is_none(),
+            "Prevent replacement must not carry an execute effect, got {:?}",
+            def.execute
+        );
+        // "a player would gain life" → global scope (CR 614.1a).
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+
+        // Class coverage: the "you gain no life" sibling phrasing lowers the
+        // same way (controller-only scope).
+        let you_def = parse_replacement_line(
+            "If you would gain life, you gain no life instead.",
+            "Test Card",
+        )
+        .expect("'you gain no life' sibling should parse");
+        assert_eq!(
+            you_def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(you_def.valid_player, None);
+    }
+
+    #[test]
+    fn lifegain_doubler_still_doubles_not_prevented() {
+        // Negative guard: "gain twice that much life" must NOT collapse into
+        // Prevent — the negation detector only fires on "no life".
+        let def = parse_replacement_line(
+            "If you would gain life, you gain twice that much life instead.",
+            "Boon Reflection",
+        )
+        .expect("doubler should parse");
+        assert_eq!(def.event, ReplacementEvent::GainLife);
+        assert_ne!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent),
+            "doubler must not be turned into a Prevent"
+        );
+    }
+
+    #[test]
+    fn flames_durational_lifegain_negation_is_not_permanent_prevent() {
+        // CR 611.2a + issue #743 scoping: Flames of the Blood Hand's clause is a
+        // duration-scoped ("this turn") replacement created by a resolving
+        // spell. It must NOT be lowered to a permanent `Prevent` (which would
+        // suppress the player's lifegain forever). Deferred as a follow-up until
+        // the durational replacement shape is supported.
+        let def = parse_replacement_line(
+            "If that player or that planeswalker's controller would gain life this turn, that player gains no life instead.",
+            "Flames of the Blood Hand",
+        );
+        // Whether it parses to some other shape or None, it must never carry a
+        // permanent Prevent.
+        if let Some(def) = def {
+            assert_ne!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent),
+                "durational 'this turn' negation must not become a permanent Prevent"
+            );
+        }
+    }
+
+    #[test]
     fn library_of_leng_discard_to_library_top_replacement() {
         let def = parse_replacement_line(
             "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
@@ -6997,7 +7156,7 @@ mod tests {
                 TypedFilter::new(TypeFilter::Artifact)
                     .with_type(TypeFilter::Creature)
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking])
+                    .properties(vec![FilterProp::Attacking { defender: None }])
             ))
         );
         assert!(def.damage_target_filter.is_none());
@@ -7133,6 +7292,11 @@ mod tests {
             assert_eq!(def.event, ReplacementEvent::Moved);
             assert_eq!(def.destination_zone, Some(Zone::Graveyard));
             assert!(matches!(def.mode, ReplacementMode::Mandatory));
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "{card}: shuffle-back graveyard replacement must be self-scoped for stack resolution"
+            );
 
             // Execute: ChangeZone { destination: Library, target: SelfRef }
             let execute = def.execute.as_ref().unwrap();
@@ -7194,6 +7358,42 @@ mod tests {
         assert!(
             shuffle.sub_ability.is_none(),
             "no-reveal branch must not stash a trailing sub_ability"
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "tilde subject must be self-scoped for stack resolution"
+        );
+    }
+
+    /// CR 608.2n + CR 614.1a (issue #2897): card-name subjects normalize to `~`
+    /// and must carry `valid_card: SelfRef`, not an absent filter that the
+    /// stack-self-move gate would reject.
+    #[test]
+    fn graveyard_shuffle_back_card_name_subject_is_selfref() {
+        let def = parse_replacement_line(
+            "If Nexus of Fate would be put into a graveyard from anywhere, reveal Nexus of Fate \
+             and shuffle it into its owner's library instead.",
+            "Nexus of Fate",
+        )
+        .expect("Nexus of Fate shuffle-back must parse");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Board-wide graveyard replacements keep their external typed filter.
+    #[test]
+    fn graveyard_exile_card_subject_stays_external_nontoken() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+        let def = parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .expect("Leyline-style exile must parse");
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::NonToken])
+            ))
         );
     }
 

@@ -197,6 +197,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::AttackerBlockedByCreature
         | TriggerMode::AttackerUnblocked
         | TriggerMode::AttackerUnblockedOnce
+        | TriggerMode::YouAttackUnblocked
         | TriggerMode::Blocks
         | TriggerMode::BlockersDeclared
         | TriggerMode::BecomesBlocked => {
@@ -391,14 +392,14 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::SaddlesOrCrews
         | TriggerMode::Cycled
         | TriggerMode::CycledOrDiscarded
-        | TriggerMode::Exploited
-        | TriggerMode::Enlisted => return (keys, true),
+        | TriggerMode::Exploited => return (keys, true),
 
         // --- Triggered mechanics with dedicated event keys ---
         TriggerMode::Explored => push(TriggerEventKey::Explored),
         TriggerMode::Discover => push(TriggerEventKey::DiscoverResolved),
         TriggerMode::Adapt => push(TriggerEventKey::AdaptResolved),
         TriggerMode::Exerted => push(TriggerEventKey::Exerted),
+        TriggerMode::Enlisted => push(TriggerEventKey::Enlisted),
         TriggerMode::Foretell => push(TriggerEventKey::Foretold),
         TriggerMode::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
 
@@ -453,10 +454,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
-        // CR 701.43d: `TriggerMode::Exerted` is in the unclassified
-        // always-checked bucket (see `keys_from_trigger_def`), so no dedicated
-        // event key is needed — `match_exerted` filters by source.
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
+        GameEvent::CreatureEnlisted { .. } => push(TriggerEventKey::Enlisted),
         GameEvent::Foretold { .. } => push(TriggerEventKey::Foretold),
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
@@ -602,6 +601,12 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
+        // Planechase trigger modes (PlaneswalkedFrom/To, ChaosEnsues) route to the
+        // always-checked unclassified bucket in `keys_from_trigger_def`, so these
+        // events need no dedicated index key — their matchers are always consulted.
+        GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. } => {}
         GameEvent::RoomDoorUnlocked { .. } | GameEvent::BecomesPlotted { .. } => {}
         GameEvent::InitiativeTaken { .. } => push(TriggerEventKey::MonarchOrInitiative),
         GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
@@ -780,6 +785,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
+        | EffectKind::Planeswalk
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters

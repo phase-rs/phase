@@ -84,7 +84,14 @@ pub mod morph;
 pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
+pub mod perf_counters;
 pub mod phasing;
+pub mod planechase;
+// Tests for `planechase` live in a sibling file (declared here, not in
+// `planechase.rs`, so `planechase.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "planechase_tests.rs"]
+mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
 pub mod printed_cards;

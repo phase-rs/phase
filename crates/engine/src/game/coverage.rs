@@ -5,6 +5,7 @@ use crate::game::static_abilities::{build_static_registry, static_registry, Stat
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::{
     is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
+    is_draft_matters_sentence,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
@@ -30,8 +31,10 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
+use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::{all_consuming, value};
+use nom::character::complete::space1;
+use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -45,6 +48,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::CantBeCast { .. }
@@ -128,6 +132,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 400.2 + CR 701.20a: RevealHand carries the affected player
+            // scope (`opponents`, `all_players`, or `controller`). Runtime
+            // visibility sync is in derived.rs::sync_continuous_hand_reveals().
+            | StaticMode::RevealHand { .. }
             // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
             // CounterType + fixed count. Runtime enforcement is in the
             // battlefield-entry counter hook in effects/change_zone.rs, which
@@ -416,7 +424,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             SeatDirection::Right => "player to your right".into(),
         },
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
-        TargetFilter::TrackedSetFiltered { id, filter } => {
+        TargetFilter::TrackedSetFiltered { id, filter, .. } => {
             format!("tracked set #{} matching {}", id.0, fmt_target(filter))
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
@@ -445,8 +453,12 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
-            FilterProp::Attacking => parts.push("attacking".into()),
-            FilterProp::AttackingController => parts.push("attacking you".into()),
+            FilterProp::Attacking { defender } => match defender {
+                None => parts.push("attacking".into()),
+                Some(ControllerRef::You) => parts.push("attacking you".into()),
+                Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
+                Some(_) => parts.push("attacking scoped player".into()),
+            },
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
@@ -1141,7 +1153,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
-        QuantityRef::FilteredTrackedSetSize { filter } => {
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
@@ -1254,6 +1266,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
         QuantityRef::AdditionalCostPaymentCount => "additional cost payments for this spell".into(),
+        QuantityRef::AdditionalCostPaymentCountFor {
+            origin,
+            origin_ordinal,
+        } => {
+            if let Some(ordinal) = origin_ordinal {
+                format!("{origin:?} additional cost payments for instance {ordinal}")
+            } else {
+                format!("{origin:?} additional cost payments for this spell")
+            }
+        }
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
         QuantityRef::ManaSpentToCast { scope, metric } => {
             format!("mana spent to cast ({scope:?}, {metric:?})")
@@ -1333,6 +1355,9 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
+            "opponents of the attacking player who aren't being attacked"
+        }
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
@@ -1562,14 +1587,61 @@ fn skip_step_phrase(step: Phase) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CoverageAllPlayerStepSkipSubject {
+    Players,
+    EachPlayer,
+}
+
+fn coverage_all_player_step_skip_subject(
+    input: &str,
+) -> nom::IResult<&str, CoverageAllPlayerStepSkipSubject> {
+    alt((
+        value(CoverageAllPlayerStepSkipSubject::Players, tag("players")),
+        value(
+            CoverageAllPlayerStepSkipSubject::EachPlayer,
+            tag("each player"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn coverage_all_player_step_skip_verb(
+    subject: CoverageAllPlayerStepSkipSubject,
+    input: &str,
+) -> nom::IResult<&str, ()> {
+    match subject {
+        CoverageAllPlayerStepSkipSubject::Players => value((), tag("skip")).parse(input),
+        CoverageAllPlayerStepSkipSubject::EachPlayer => value((), tag("skips")).parse(input),
+    }
+}
+
+fn coverage_all_player_skip_step_line<'a>(
+    input: &'a str,
+    step_phrase: &str,
+) -> nom::IResult<&'a str, ()> {
+    let (input, subject) = coverage_all_player_step_skip_subject(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = coverage_all_player_step_skip_verb(subject, input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag("their").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag(step_phrase).parse(input)?;
+    let (input, _) = opt(tag("s")).parse(input)?;
+    let (input, _) = tag(".").parse(input)?;
+    Ok((input, ()))
+}
+
 fn oracle_line_matches_skip_step(effective_lower: &str, step: Phase) -> bool {
     let Some(step_phrase) = skip_step_phrase(step) else {
         return false;
     };
 
-    let result: nom::IResult<&str, ()> =
-        all_consuming(value((), (tag("skip your "), tag(step_phrase), tag("."))))
-            .parse(effective_lower);
+    let result: nom::IResult<&str, ()> = all_consuming(alt((
+        value((), (tag("skip your "), tag(step_phrase), tag("."))),
+        |input| coverage_all_player_skip_step_line(input, step_phrase),
+    )))
+    .parse(effective_lower);
     result.is_ok()
 }
 
@@ -1604,6 +1676,8 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Battle => "battle",
         CoreType::Kindred => "kindred",
         CoreType::Dungeon => "dungeon",
+        CoreType::Plane => "plane",
+        CoreType::Phenomenon => "phenomenon",
     }
 }
 
@@ -2581,6 +2655,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
@@ -2702,6 +2777,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("remove {}", keyword_label(keyword))
         }
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
+            "grant all activated abilities of".into()
+        }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
         ContinuousModification::AddType { core_type } => {
@@ -4536,6 +4614,13 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
         if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
+        // Draft-time "draft matters" lines (CR 905) are consumed as no-ops by
+        // the parser, so they produce no parse item — don't count them as
+        // effective Oracle lines either, or the silent-drop guard would flag
+        // these cards as unsupported.
+        if is_draft_matters_sentence(stripped) {
+            continue;
+        }
 
         // Check if this line contains a modal header ("choose one —", "choose two.", etc.)
         // Handles standalone headers, triggered modals ("when enters, choose one —"),
@@ -5334,6 +5419,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. } => {
+            ("TargetSharesNameWithOtherExiledThisWay", Handled)
+        }
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
@@ -5344,6 +5432,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
@@ -5540,6 +5629,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
         QuantityRef::AdditionalCostPaymentCount => ("AdditionalCostPaymentCount", Handled),
+        QuantityRef::AdditionalCostPaymentCountFor { .. } => {
+            ("AdditionalCostPaymentCountFor", Handled)
+        }
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
@@ -5577,6 +5669,11 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        // CR 506.2 + CR 508.6: count-only filter resolved by `resolve_player_count`
+        // (Suppressor Skyguard's intervening-if). Handled like the other count filters.
+        PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
+            ("OpponentOfTriggeringPlayerNotAttacked", Handled)
+        }
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
@@ -5628,6 +5725,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Unhandled),
         StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Unhandled),
         StaticCondition::IsMonarch => ("IsMonarch", Handled),
+        StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
@@ -6802,6 +6900,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("play with the top card")
                     || effective_lower.contains("play with the top")
             }
+            StaticMode::RevealHand { .. } => {
+                effective_lower.contains("play with")
+                    && effective_lower.contains("hand")
+                    && effective_lower.contains("revealed")
+            }
             // CR 601.2f: ReduceCost / RaiseCost / MinimumCost coverage markers,
             // discriminated by the `mode` axis. Trinisphere's "would cost less than"
             // distinguishes Minimum from Reduce ("less to cast") and Raise ("more").
@@ -6815,6 +6918,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 CostModifyMode::Minimum => {
                     effective_lower.contains("would cost less than")
                         && effective_lower.contains("mana to cast")
+                }
+            },
+            StaticMode::ImposeAdditionalCost { action, .. } => match action {
+                crate::types::statics::AdditionalCostTaxAction::Cast => {
+                    effective_lower.contains("cost an additional")
+                        && effective_lower.contains("life to cast")
                 }
             },
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
@@ -7882,8 +7991,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if you control your commander")
             // "if you had no cards in hand" — turn-start state check
             || lower.contains("had no cards in hand")
-            // "if you have the initiative" — special designation check
-            || lower.contains("you have the initiative")
             // "if no permanents left the battlefield" — turn-event check
             || lower.contains("no permanents left")
             // "if [this card is] the only creature card in your graveyard" — zone state check
@@ -9578,6 +9685,7 @@ mod tests {
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,
+                    prevention_duration: None,
                 },
             )
             .duration(Duration::UntilEndOfTurn)
@@ -10502,7 +10610,7 @@ mod tests {
         face.oracle_text = Some(oracle.to_string());
         face.static_abilities.push(StaticDefinition {
             mode: StaticMode::SkipStep { step: Phase::Draw },
-            affected: Some(TargetFilter::SelfRef),
+            affected: Some(TargetFilter::Controller),
             modifications: vec![],
             condition: None,
             per_player_condition: None,
@@ -10517,6 +10625,35 @@ mod tests {
         assert!(
             card_face_gaps(&face).is_empty(),
             "'Skip your draw step.' should be covered by SkipStep(Draw) static"
+        );
+    }
+
+    /// CR 614.1b + CR 614.10: Eon Hub's all-player wording is the same
+    /// step-skip replacement mode with player-wide scope.
+    #[test]
+    fn players_skip_upkeep_steps_static_has_no_coverage_gap() {
+        let mut face = make_face();
+        let oracle = "Players skip their upkeep steps.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::SkipStep {
+                step: Phase::Upkeep,
+            },
+            affected: Some(TargetFilter::Player),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Players skip their upkeep steps.".to_string()),
+            attack_defended: None,
+        });
+
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "'Players skip their upkeep steps.' should be covered by SkipStep(Upkeep) static"
         );
     }
 
@@ -10587,6 +10724,38 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "'You can't draw cards.' should be fully supported by CantDraw(controller), but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 400.2 + CR 701.20a: parameterized `RevealHand` statics must be
+    /// coverage-recognized so Telepathy/Revelation-class cards do not become
+    /// silent drops after parsing.
+    #[test]
+    fn reveal_hand_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "Your opponents play with their hands revealed.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(oracle.to_string()),
+            attack_defended: None,
+        });
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "'Your opponents play with their hands revealed.' should be fully supported by RevealHand(opponents), but got gaps: {:?}",
             gaps
         );
     }

@@ -23,7 +23,7 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
 /// "for each Aura you controlled that was attached to it" (Hateful Eidolon)
 /// can resolve their quantity after SBA has already unattached the Auras.
-fn capture_attachment_snapshot(
+pub(crate) fn capture_attachment_snapshot(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<crate::types::game_state::AttachmentSnapshot> {
@@ -482,12 +482,10 @@ pub fn move_to_zone(
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
     }
-    let unattached_from = if from == Zone::Battlefield {
+    let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
-    } else {
-        None
-    };
+    });
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
@@ -506,6 +504,8 @@ pub fn move_to_zone(
             .insert(object_id, zone_change_record.linked_exile_snapshot.clone());
     }
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+
+    sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
     // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
     // temporarily changed the survivor's token-ness, the ZoneChanged record above
@@ -725,6 +725,43 @@ fn capture_linked_exile_snapshot(
         .collect()
 }
 
+/// After leave-time snapshots are captured on the zone-change record, sever
+/// live attachment graph edges for a permanent departing the battlefield.
+///
+/// Attached Auras/Equipment that remain on the battlefield are cleaned up by
+/// SBAs (CR 704.5m/704.5n). Hosts must not carry a stale `attachments` list
+/// into other zones (commander zone return, blink, etc.), and attachments that
+/// leave the battlefield must not keep a dangling `attached_to` pointer.
+fn sever_battlefield_attachment_graph_on_exit(
+    state: &mut GameState,
+    object_id: ObjectId,
+    unattached_from: &Option<crate::types::ability::TargetRef>,
+) {
+    if unattached_from.is_some() {
+        if let Some(old_target_id) = state
+            .objects
+            .get(&object_id)
+            .and_then(|o| o.attached_to)
+            .and_then(|t| t.as_object())
+        {
+            if let Some(host) = state.objects.get_mut(&old_target_id) {
+                host.attachments.retain(|&id| id != object_id);
+            }
+        }
+        if let Some(attacher) = state.objects.get_mut(&object_id) {
+            attacher.attached_to = None;
+        }
+        crate::game::layers::mark_layers_full(state);
+    }
+
+    if let Some(host) = state.objects.get_mut(&object_id) {
+        if !host.attachments.is_empty() {
+            host.attachments.clear();
+            crate::game::layers::mark_layers_full(state);
+        }
+    }
+}
+
 fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCombatStatus {
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
@@ -779,16 +816,16 @@ pub fn move_to_library_at_index(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
-    let unattached_from = if from == Zone::Battlefield {
+    let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
-    } else {
-        None
-    };
+    });
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+
+    sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
     apply_zone_exit_cleanup(state, object_id, from, Zone::Library);
 
@@ -2014,6 +2051,124 @@ mod tests {
         assert_eq!(
             obj.name, "Front Face",
             "must revert to front face in graveyard"
+        );
+    }
+
+    #[test]
+    fn aura_leaving_battlefield_clears_attached_to() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, aura, Zone::Graveyard, &mut events);
+
+        assert_eq!(state.objects[&aura].zone, Zone::Graveyard);
+        assert!(
+            state.objects[&aura].attached_to.is_none(),
+            "attached_to must be cleared when the aura leaves the battlefield"
+        );
+        assert!(
+            !state.objects[&host].attachments.contains(&aura),
+            "host must not retain a stale attachments entry"
+        );
+    }
+
+    #[test]
+    fn sba_pipeline_graveyard_clears_attached_to() {
+        use crate::game::effects::attach::attach_to;
+        use crate::game::zone_pipeline::{ZoneChangeCause, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        let result = crate::game::zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest {
+                object_id: aura,
+                to: Zone::Graveyard,
+                cause: ZoneChangeCause::StateBasedAction,
+                mods: crate::game::zone_pipeline::EntryMods::default(),
+                placement: None,
+                exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+            },
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&aura].zone, Zone::Graveyard);
+        assert!(state.objects[&aura].attached_to.is_none());
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::Unattached {
+                        attachment_id,
+                        old_target
+                    } if *attachment_id == aura
+                        && *old_target == crate::types::ability::TargetRef::Object(host)
+                )
+            }),
+            "SBA zone movement must still publish the unattach event for triggers"
         );
     }
 }

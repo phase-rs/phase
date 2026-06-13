@@ -563,6 +563,14 @@ pub enum CostModifyMode {
     Minimum,
 }
 
+/// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
+/// Distinct from [`CostModifyMode`], which only adjusts the mana component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdditionalCostTaxAction {
+    /// "... cost an additional N life to cast."
+    Cast,
+}
+
 /// CR 702.122c: How a creature's contributed power is modified when it crews a
 /// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -734,6 +742,16 @@ pub enum StaticMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
+    /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
+    /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
+    /// which adjusts only the mana component. Terror of the Peaks class:
+    /// "Spells your opponents cast that target this creature cost an additional
+    /// 3 life to cast."
+    ImposeAdditionalCost {
+        cost: super::ability::AbilityCost,
+        spell_filter: Option<TargetFilter>,
+        action: AdditionalCostTaxAction,
+    },
     /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
     /// E.g., "Ninjutsu abilities you activate cost {1} less to activate."
     /// `keyword` identifies which ability type is reduced (e.g., "ninjutsu", "equip", "cycling").
@@ -830,6 +848,11 @@ pub enum StaticMode {
     /// Variants: "your library" (controller only) or "their libraries" (all players).
     RevealTopOfLibrary {
         all_players: bool,
+    },
+    /// CR 400.2 + CR 701.20a: Play with hands revealed.
+    /// `who` identifies whose hand is public: controller, opponents, or all players.
+    RevealHand {
+        who: ProhibitionScope,
     },
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
     /// matching cards from owner's graveyard.
@@ -1368,6 +1391,7 @@ impl Hash for StaticMode {
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
+            StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
                 // TargetFilter does not implement Hash; discriminant only.
                 BlockExceptionKind::Quality(_) => {}
@@ -1428,6 +1452,7 @@ impl Hash for StaticMode {
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
@@ -1481,6 +1506,7 @@ impl StaticMode {
             | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::AlternativeKeywordCost { .. }
             | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
@@ -1497,6 +1523,7 @@ impl StaticMode {
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
             | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::RevealHand { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
@@ -1595,6 +1622,9 @@ impl fmt::Display for StaticMode {
                 CostModifyMode::Reduce => write!(f, "ReduceCost"),
                 CostModifyMode::Raise => write!(f, "RaiseCost"),
                 CostModifyMode::Minimum => write!(f, "MinimumCost"),
+            },
+            StaticMode::ImposeAdditionalCost { action, .. } => match action {
+                AdditionalCostTaxAction::Cast => write!(f, "ImposeAdditionalCastCost"),
             },
             StaticMode::ReduceAbilityCost {
                 keyword,
@@ -1716,6 +1746,7 @@ impl fmt::Display for StaticMode {
                     write!(f, "RevealTopOfLibrary(you)")
                 }
             }
+            StaticMode::RevealHand { who } => write!(f, "RevealHand({who})"),
             // Tier 1
             StaticMode::CantBeBlocked => write!(f, "CantBeBlocked"),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
@@ -2314,6 +2345,14 @@ impl FromStr for StaticMode {
                     StaticMode::RevealTopOfLibrary {
                         all_players: rest == "all",
                     }
+                } else if let Some(inner) = other
+                    .strip_prefix("RevealHand(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::RevealHand { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(rest) = other.strip_prefix("AdditionalLandDrop(") {
                     let rest = rest.strip_suffix(')').unwrap_or(rest);
                     StaticMode::AdditionalLandDrop {
@@ -2588,6 +2627,12 @@ mod tests {
             StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::AllPlayers,
+            },
             // Tier 1: keyword/evasion statics
             StaticMode::CantBeBlocked,
             StaticMode::CantBeBlockedExceptBy {

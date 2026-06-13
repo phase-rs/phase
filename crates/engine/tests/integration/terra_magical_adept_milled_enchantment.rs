@@ -70,7 +70,7 @@ fn terra_etb_parses_milled_this_way_as_tracked_set_filtered() {
     let Effect::ChangeZone { target, .. } = &*put.effect else {
         panic!("expected ChangeZone put clause, got {:?}", put.effect);
     };
-    let TargetFilter::TrackedSetFiltered { id, filter } = target else {
+    let TargetFilter::TrackedSetFiltered { id, filter, .. } = target else {
         panic!("put-from-milled must target TrackedSetFiltered, got {target:?}");
     };
     assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");

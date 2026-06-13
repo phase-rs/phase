@@ -16,11 +16,13 @@ use engine::types::ability::{
     AbilityDefinition, CostCategory, Effect, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::card::CardFace;
+use engine::types::card_type::CoreType;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 
 /// CR 603.6a: Per-deck landfall classification.
 ///
@@ -54,10 +56,14 @@ pub fn detect(deck: &[DeckEntry]) -> LandfallFeature {
 
     let mut payoff_count = 0u32;
     let mut enabler_count = 0u32;
+    let mut total_nonland = 0u32;
     let mut payoff_names: Vec<String> = Vec::new();
 
     for entry in deck {
         let face = &entry.card;
+        if !face.card_type.core_types.contains(&CoreType::Land) {
+            total_nonland = total_nonland.saturating_add(entry.count);
+        }
         if is_landfall_payoff(face) {
             payoff_count = payoff_count.saturating_add(entry.count);
             payoff_names.push(face.name.clone());
@@ -67,10 +73,16 @@ pub fn detect(deck: &[DeckEntry]) -> LandfallFeature {
         }
     }
 
-    // Commitment scales roughly with payoff density. Payoffs dominate
-    // because enablers alone (e.g., a fetchland cycle in a non-landfall
-    // deck) don't indicate landfall intent.
-    let commitment = f32::min(1.0, 0.3 * payoff_count as f32 + 0.1 * enabler_count as f32);
+    // Commitment scales with per-60-nonland equivalent density. Payoffs
+    // dominate because enablers alone (e.g., a fetchland cycle in a
+    // non-landfall deck) don't indicate landfall intent.
+    let commitment = commitment::weighted_sum(&[
+        (0.3, commitment::density_per_60(payoff_count, total_nonland)),
+        (
+            0.1,
+            commitment::density_per_60(enabler_count, total_nonland),
+        ),
+    ]);
 
     LandfallFeature {
         payoff_count,

@@ -7281,6 +7281,7 @@ mod tests {
                 target: TargetFilter::Any,
                 scope: Default::default(),
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },

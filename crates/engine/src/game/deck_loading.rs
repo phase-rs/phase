@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -96,16 +96,14 @@ pub struct DeckList {
 /// Resolve a flat name list into DeckEntry entries using the card database.
 /// Groups duplicate names and skips unresolvable names.
 fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
-    let mut counts: HashMap<&str, u32> = HashMap::new();
+    let mut entries: Vec<DeckEntry> = Vec::new();
     for name in names {
-        *counts.entry(name.as_str()).or_insert(0) += 1;
-    }
-    let mut entries = Vec::new();
-    for (name, count) in counts {
-        if let Some(face) = db.get_face_by_name(name) {
+        if let Some(index) = entries.iter().position(|entry| entry.card.name == *name) {
+            entries[index].count += 1;
+        } else if let Some(face) = db.get_face_by_name(name) {
             entries.push(DeckEntry {
                 card: face.clone(),
-                count,
+                count: 1,
             });
         }
     }

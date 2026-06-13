@@ -69,7 +69,7 @@ fn ancient_copper_dragon_creates_treasures_equal_to_d20_result() {
     let rolled = all_events.iter().find_map(|e| match e {
         GameEvent::DieRolled {
             result, sides: 20, ..
-        } => Some(*result as usize),
+        } => result.map(usize::from),
         _ => None,
     });
 

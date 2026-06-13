@@ -283,6 +283,23 @@ fn unique_recipient_from_filter(
         ));
     }
 
+    // CR 603.7c + CR 608.2c: "that player" on triggered abilities lowers to
+    // `TargetFilter::TriggeringPlayer`. The stateless player matcher cannot
+    // resolve event-context refs, so bind the recipient from the active trigger
+    // event (Coveted Jewel: the attacking opponent).
+    if matches!(filter, TargetFilter::TriggeringPlayer) {
+        return crate::game::targeting::resolve_event_context_target(
+            state,
+            filter,
+            ability.source_id,
+        )
+        .and_then(|target| match target {
+            TargetRef::Player(player_id) => Some(player_id),
+            _ => None,
+        })
+        .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
+    }
+
     let mut matching = state
         .players
         .iter()
@@ -337,6 +354,91 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 611.2b + CR 122.1c: Shield Broker — "put a shield counter on target
+    /// noncommander creature you don't control. You gain control of that
+    /// creature for as long as it has a shield counter on it." The control TCE's
+    /// `ForAsLongAs { RecipientHasCounters(shield) }` duration must be evaluated
+    /// against the CONTROLLED creature (the recipient), not the source (Shield
+    /// Broker has no shield counter). Issue #2855: pre-fix the source-scoped
+    /// `HasCounters` check failed immediately, so control never transferred.
+    #[test]
+    fn shield_broker_etb_places_counter_and_transfers_control() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let broker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shield Broker".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&target).unwrap();
+            o.card_types.core_types = vec![CoreType::Creature];
+            o.base_card_types = o.card_types.clone();
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.base_power = Some(2);
+            o.base_toughness = Some(2);
+        }
+
+        let def = parse_trigger_line(
+            "When this creature enters, put a shield counter on target noncommander creature you don't control. You gain control of that creature for as long as it has a shield counter on it.",
+            "Shield Broker",
+        );
+        let ability = def.execute.as_ref().expect("execute ability");
+        let resolved = build_resolved_from_def_with_targets(
+            ability,
+            broker,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).expect("ETB resolves");
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let obj = &state.objects[&target];
+        assert_eq!(
+            obj.counters.get(&CounterType::Shield).copied().unwrap_or(0),
+            1,
+            "a shield counter must be placed on the target"
+        );
+        assert_eq!(
+            obj.controller,
+            PlayerId(0),
+            "control of the target must transfer to Shield Broker's controller while it has a shield counter"
+        );
+
+        state
+            .objects
+            .get_mut(&target)
+            .expect("target remains on battlefield")
+            .counters
+            .remove(&CounterType::Shield);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&target].controller,
+            PlayerId(1),
+            "control must revert when the recipient no longer has a shield counter"
+        );
     }
 
     /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
@@ -560,6 +662,54 @@ mod tests {
             state.objects.get(&target_id).unwrap().controller,
             recipient,
             "target should now be controlled by the recipient, not the caster or source.controller"
+        );
+    }
+
+    /// CR 603.7c + CR 608.2c: `GiveControl` with `recipient: TriggeringPlayer`
+    /// must resolve from the active trigger event, not the stateless player
+    /// matcher (Coveted Jewel — "that player gains control of this artifact").
+    #[test]
+    fn give_control_triggering_player_recipient_resolves_from_event() {
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let jewel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coveted Jewel".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Raider".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            jewel,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&jewel).unwrap().controller,
+            PlayerId(1),
+            "TriggeringPlayer recipient must be the attacking opponent"
         );
     }
 
@@ -896,7 +1046,7 @@ mod tests {
         let roll = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result as usize),
+                GameEvent::DieRolled { result, .. } => result.map(usize::from),
                 _ => None,
             })
             .expect("RollDie must emit a DieRolled event");

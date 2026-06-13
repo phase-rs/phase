@@ -7,6 +7,7 @@ import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -52,6 +53,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const opponentHudDensity = usePreferencesStore((s) => s.opponentHudDensity);
   const setOpponentHudDensity = usePreferencesStore((s) => s.setOpponentHudDensity);
   const gameState = useGameStore((s) => s.gameState);
+  const isMobileViewport = useIsMobile();
+  const isCompactHeight = useIsCompactHeight();
+  const forceCompactHud = isMobileViewport || isCompactHeight;
 
   const teamBased = gameState?.format_config?.team_based ?? false;
 
@@ -248,6 +252,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const matchScore = showMatchScore ? gameState?.match_score ?? null : null;
     const label = opponentName ?? getOpponentDisplayName(opponentId);
     const opponentAvatarUrl = primaryOpponentAvatarUrl;
+    const compact = forceCompactHud;
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
     const opponentSeatColor = getSeatColor(opponentId, gameState?.seat_order);
@@ -259,7 +264,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       <div
         data-player-hud={String(opponentId)}
         data-phased-out={isOpponentPhasedOut ? "true" : undefined}
-        className={`relative flex items-center gap-1.5 py-1 ${
+        className={`relative flex items-center ${compact ? "gap-1 py-0.5" : "gap-1.5 py-1"} ${
           isOpponentPhasedOut ? "opacity-40 grayscale" : ""
         }`}
       >
@@ -271,6 +276,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
           playerId={opponentId}
+          density={compact ? "compact" : "default"}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={
             <>
@@ -300,9 +306,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
             </>
           }
         >
-          <div className="flex min-w-0 items-center gap-2">
-            <LifeTotal playerId={opponentId} size="lg" hideLabel />
-            <ManaPoolSummary playerId={opponentId} />
+          <div className={`flex min-w-0 items-center ${compact ? "gap-1" : "gap-2"}`}>
+            <LifeTotal playerId={opponentId} size={compact ? "sm" : "lg"} hideLabel />
+            <ManaPoolSummary playerId={opponentId} size={compact ? "sm" : "default"} />
           </div>
         </HudPlate>
       </div>
@@ -312,6 +318,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   // Multiplayer: tabbed opponent selector
   const focusedId = focusedOpponent ?? liveOpponents[0];
   const targetLabel = kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
+  const effectiveCompact = forceCompactHud || opponentHudDensity === "compact";
 
   return (
     // Single-row opponent rail. Tabs flex to share the available width — they
@@ -334,6 +341,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           isTargeting={isTargeting}
           legalObjectTargetIds={legalObjectTargetsByController.get(opId) ?? EMPTY_OBJECT_IDS}
           showMana={focusedId === opId}
+          compact={effectiveCompact}
           incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_OBJECT_IDS}
           onSelectFocus={() => handleSelectFocus(opId)}
           onTargetPlayer={() => handlePlayerTarget(opId)}
@@ -344,12 +352,14 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           }
         />
       ))}
-      <DensityToggle
-        compact={opponentHudDensity === "compact"}
-        onToggle={() =>
-          setOpponentHudDensity(opponentHudDensity === "compact" ? "comfortable" : "compact")
-        }
-      />
+      {!forceCompactHud && (
+        <DensityToggle
+          compact={opponentHudDensity === "compact"}
+          onToggle={() =>
+            setOpponentHudDensity(opponentHudDensity === "compact" ? "comfortable" : "compact")
+          }
+        />
+      )}
       <FollowActiveToggle
         enabled={followActiveOpponent}
         onToggle={handleToggleFollowActiveOpponent}
@@ -492,6 +502,7 @@ interface OpponentTabProps {
    *  this opponent's permanents are legal. */
   legalObjectTargetIds: readonly ObjectId[];
   showMana: boolean;
+  compact: boolean;
   /** Attacker object ids this opponent has declared against me / my stuff.
    *  When non-empty, the tab renders a red ⚔×N badge and a hover popover
    *  with mini card images so the defender can assess incoming threats
@@ -506,7 +517,7 @@ interface OpponentTabProps {
   onKick?: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
+function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, compact, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
@@ -518,7 +529,6 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const [hoverPopover, setHoverPopover] = useState<"none" | "incoming" | "peek">("none");
   const hasIncoming = incomingAttackerIds.length > 0;
   const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover);
-  const compact = usePreferencesStore((s) => s.opponentHudDensity) === "compact";
   // Peek opens for any non-focused opponent on hover — a permanent scout
   // affordance — gated by user preference. Incoming-attackers popover
   // takes precedence during combat (when not in a target-selection state)

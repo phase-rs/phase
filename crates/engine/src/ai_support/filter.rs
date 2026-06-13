@@ -105,6 +105,7 @@ impl CandidateFilter for SimulationFilter {
     }
 
     fn accept(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+        crate::game::perf_counters::record_state_clone_for_legality();
         let mut sim = state.clone();
         apply_as_current(&mut sim, candidate.action.clone()).is_ok()
     }

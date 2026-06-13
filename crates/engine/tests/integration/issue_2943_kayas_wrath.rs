@@ -72,7 +72,7 @@ fn kayas_wrath_lowers_to_destroy_all_plus_filtered_tracked_set_gain_life() {
         Effect::GainLife {
             amount:
                 QuantityExpr::Ref {
-                    qty: QuantityRef::FilteredTrackedSetSize { filter },
+                    qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
                 },
             player: TargetFilter::Controller,
         } => match filter.as_ref() {

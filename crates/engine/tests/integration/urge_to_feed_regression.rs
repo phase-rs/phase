@@ -71,7 +71,7 @@ fn urge_to_feed_each_of_those_vampires_is_tracked_set_filtered() {
         } => {
             assert_eq!(*counter_type, CounterType::Plus1Plus1);
             match target {
-                TargetFilter::TrackedSetFiltered { id, filter } => {
+                TargetFilter::TrackedSetFiltered { id, filter, .. } => {
                     assert_eq!(*id, TrackedSetId(0));
                     match filter.as_ref() {
                         TargetFilter::Typed(tf) => {

@@ -38,6 +38,7 @@ use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::commitment;
 
 /// Maximum mana value to qualify as "low curve" — CR 202.3.
 pub const LOW_CURVE_CAP: u32 = 2;
@@ -145,15 +146,31 @@ pub fn detect(deck: &[DeckEntry]) -> AggroPressureFeature {
 
     let nonland_denom = total_nonland.max(1) as f32;
     let low = low_curve_creature_count as f32 / nonland_denom;
-    let hasty = hasty_creature_count as f32 / nonland_denom;
-    let evasion = evasion_creature_count as f32 / nonland_denom;
-    let burn = burn_spell_count as f32 / nonland_denom;
-    let pump = combat_pump_count as f32 / nonland_denom;
 
     // Weighted sum: low-curve density is the primary axis; evasion/hasty add
     // tempo value; burn and pump contribute pressure at lower weights.
-    let raw = 2.0 * low + 1.0 * hasty + 0.8 * evasion + 0.6 * burn + 0.4 * pump;
-    let commitment = raw.clamp(0.0, 1.0);
+    let commitment = commitment::weighted_sum(&[
+        (
+            2.0 / 60.0,
+            commitment::density_per_60(low_curve_creature_count, total_nonland),
+        ),
+        (
+            1.0 / 60.0,
+            commitment::density_per_60(hasty_creature_count, total_nonland),
+        ),
+        (
+            0.8 / 60.0,
+            commitment::density_per_60(evasion_creature_count, total_nonland),
+        ),
+        (
+            0.6 / 60.0,
+            commitment::density_per_60(burn_spell_count, total_nonland),
+        ),
+        (
+            0.4 / 60.0,
+            commitment::density_per_60(combat_pump_count, total_nonland),
+        ),
+    ]);
 
     AggroPressureFeature {
         low_curve_creature_count,
@@ -271,10 +288,10 @@ pub(crate) fn is_combat_pump_parts(
         return true;
     }
     // Shape 2: continuous static that boosts attacking creatures.
-    // `FilterProp::Attacking` restricts the anthem to combatants. CR 613.4c.
+    // `FilterProp::Attacking { .. }` restricts the anthem to combatants. CR 613.4c.
     static_abilities.iter().any(|s| {
         s.mode == StaticMode::Continuous
-            && affected_filter_has_prop(&s.affected, &FilterProp::Attacking)
+            && affected_filter_has_attacking(&s.affected)
             && s.modifications.iter().any(|m| {
                 matches!(
                     m,
@@ -339,18 +356,23 @@ fn can_target_player(target: &TargetFilter) -> bool {
     matches!(target, TargetFilter::Any | TargetFilter::Player)
 }
 
-/// True if the `affected` `TargetFilter` contains `FilterProp::Attacking`
+/// True if the `affected` `TargetFilter` contains any `FilterProp::Attacking`
 /// anywhere in its filter tree. Handles `Typed`, `And`, and `Or` wrappers.
-fn affected_filter_has_prop(affected: &Option<TargetFilter>, prop: &FilterProp) -> bool {
-    let Some(filter) = affected else { return false };
-    filter_has_prop(filter, prop)
+fn affected_filter_has_attacking(affected: &Option<TargetFilter>) -> bool {
+    let Some(filter) = affected else {
+        return false;
+    };
+    filter_has_attacking(filter)
 }
 
-fn filter_has_prop(filter: &TargetFilter, prop: &FilterProp) -> bool {
+fn filter_has_attacking(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.properties.contains(prop),
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Attacking { .. })),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|f| filter_has_prop(f, prop))
+            filters.iter().any(filter_has_attacking)
         }
         _ => false,
     }
@@ -554,7 +576,7 @@ mod tests {
         let attacking_filter = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::Attacking],
+            properties: vec![FilterProp::Attacking { defender: None }],
         });
         let static_anthem = StaticDefinition {
             mode: StaticMode::Continuous,

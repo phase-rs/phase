@@ -114,6 +114,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
         | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
 
         GameEvent::DamageDealt { is_combat, .. } => {
@@ -206,6 +207,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::RoomEntered { .. }
         | GameEvent::RoomDoorUnlocked { .. }
         | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
@@ -329,6 +333,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::CreatureExerted { object_id } => {
             vec![card_seg(state, *object_id), text(" is exerted")]
         }
+
+        GameEvent::CreatureEnlisted {
+            attacker, tapped, ..
+        } => vec![
+            card_seg(state, *attacker),
+            text(" enlists "),
+            card_seg(state, *tapped),
+        ],
 
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]
@@ -841,13 +853,18 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             sides,
             result,
-        } => vec![
-            player_seg(state, *player_id),
-            text(" rolls a d"),
-            num(*sides as i32),
-            text(": "),
-            num(*result as i32),
-        ],
+        } => match result {
+            // CR 706: a numeric die roll renders its face value.
+            Some(r) => vec![
+                player_seg(state, *player_id),
+                text(" rolls a d"),
+                num(*sides as i32),
+                text(": "),
+                num(*r as i32),
+            ],
+            // CR 901.9d / CR 706.7: the symbolic planar die has no numeric face.
+            None => vec![player_seg(state, *player_id), text(" rolls the planar die")],
+        },
 
         GameEvent::CoinFlipped { player_id, won } => vec![
             player_seg(state, *player_id),
@@ -1037,6 +1054,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::RoomEntered { .. } => vec![text("Room entered")],
         GameEvent::RoomDoorUnlocked { .. } => vec![text("Room door unlocked")],
         GameEvent::DungeonCompleted { .. } => vec![text("Dungeon completed")],
+        GameEvent::Planeswalked { .. } => vec![text("Planeswalked")],
+        GameEvent::ChaosEnsued { .. } => vec![text("Chaos ensues")],
+        GameEvent::PlanarDieRolled { face, .. } => {
+            vec![text(&format!("Rolled the planar die: {face:?}"))]
+        }
         GameEvent::InitiativeTaken { .. } => vec![text("Initiative taken")],
         GameEvent::AttractionOpened { object_id, .. } => {
             vec![text("Opened Attraction "), card_seg(state, *object_id)]
@@ -1313,7 +1335,7 @@ mod tests {
             GameEvent::DieRolled {
                 player_id: PlayerId(0),
                 sides: 20,
-                result: 17,
+                result: Some(17),
             },
             GameEvent::StartingPlayerContest {
                 rounds: vec![crate::types::events::ContestRound {

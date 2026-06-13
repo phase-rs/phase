@@ -275,6 +275,21 @@ pub fn resolve(
             return Ok(());
         }
 
+        // CR 400.7: SelfRef resolves to the source only while it is still the
+        // same object (same incarnation). When `resolved_targets` returned empty
+        // because `source_is_current()` was false (the source left and re-entered
+        // the battlefield since the ability was created), the zone-scan fallback
+        // must NOT re-discover the source by raw id equality — that would bypass
+        // the incarnation guard. Short-circuit here so the stale self-reference
+        // does nothing (e.g. a Warp delayed exile after a blink).
+        if matches!(target_filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
         // CR 701.23b + CR 401.2: Interactive library-step fail-to-find guard.
         // The parser emits `origin=Library, target=Any` for the put-step of a
         // chain where an earlier interactive step selects the card from the
@@ -528,6 +543,11 @@ pub fn resolve(
             enters_attacking: effect_enters_attacking,
             owner_library,
             track_exiled_by_source,
+            // CR 708.2a + CR 708.3: carry the face-down profile across the
+            // interactive `EffectZoneChoice` round-trip so a "return it face
+            // down" selection resumes face down (not face up) when the player
+            // resolves the choice.
+            face_down_profile: face_down_profile.clone(),
             count_param: 0,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
@@ -547,6 +567,7 @@ pub fn resolve(
         enter_with_counters: effect_enter_with_counters,
         duration: ability.duration.clone(),
         track_exiled_by_source,
+        face_down_profile: face_down_profile.clone(),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
@@ -598,6 +619,10 @@ pub fn resolve(
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
                         moved_count: None,
+                        // CR 708.2a + CR 708.3: preserve the face-down profile so
+                        // the resumed members of a paused face-down return still
+                        // enter face down.
+                        face_down_profile: ctx.face_down_profile.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -623,6 +648,10 @@ pub fn resolve(
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
                         moved_count: None,
+                        // CR 708.2a + CR 708.3: preserve the face-down profile so
+                        // the resumed members of a paused face-down return still
+                        // enter face down.
+                        face_down_profile: ctx.face_down_profile.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -668,6 +697,10 @@ pub(crate) struct ChangeZoneIterationCtx {
     pub enter_with_counters: Vec<(CounterType, u32)>,
     pub duration: Option<Duration>,
     pub track_exiled_by_source: bool,
+    /// CR 708.2a + CR 708.3: `Some` turns the object face down before it enters
+    /// the battlefield with these characteristics ("return it face down ... It's
+    /// a Forest land" — Yedora). `None` = normal face-up entry.
+    pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
 }
 
 /// Move one object through the full zone-change pipeline used by the
@@ -706,13 +739,11 @@ pub(crate) fn process_one_zone_move(
     // CR 110.2a: `enters_under_player` was pre-resolved at resolver entry;
     // pass it straight to the zone-move pipeline so replacement effects see
     // the correct controller without re-evaluating the `ControllerRef`.
-    // NOTE: `face_down_profile` is not yet threaded through the interactive
-    // single-selection carriers (`ChangeZoneIterationCtx`,
-    // `PendingChangeZoneIteration`, `WaitingFor::EffectZoneChoice`). The only
-    // current face-down-on-entry effect (Cyber-Controller) resolves via the mass
-    // `resolve_all` path, so this multi-target/interactive single path passes
-    // `None`. Latent: threading it here would extend face-down entry to
-    // interactive single-card "put X face down" effects if any are added.
+    // CR 708.2a + CR 708.3: thread the face-down profile through the
+    // multi-target/direct-target loop so a "return it face down" move
+    // (Yedora's dies trigger, target `TriggeringSource`) turns the returned
+    // permanent face down with the effect's characteristics. `None` keeps the
+    // normal face-up entry for every non-face-down move.
     let result = execute_zone_move(
         state,
         obj_id,
@@ -724,7 +755,7 @@ pub(crate) fn process_one_zone_move(
         ctx.enter_tapped,
         ctx.enters_under_player,
         &ctx.enter_with_counters,
-        None,
+        ctx.face_down_profile.as_ref(),
         ctx.track_exiled_by_source,
         events,
     );
@@ -753,13 +784,16 @@ pub fn resolve_all(
     // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
     // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
     // behavior — only the multi-zone shape opts into the union scan.
-    let (origin_zones, dest_zone, target_filter, enter_tapped) = match &ability.effect {
+    let (origin_zones, dest_zone, target_filter, enter_tapped, enter_with_counters) = match &ability
+        .effect
+    {
         Effect::ChangeZoneAll {
             origin,
             destination,
             target,
             enters_under: _,
             enter_tapped,
+            enter_with_counters,
             face_down_profile: _,
         } => {
             let extracted = target.extract_zones();
@@ -772,7 +806,26 @@ pub fn resolve_all(
             } else {
                 vec![Zone::Battlefield]
             };
-            (scan_zones, *destination, target.clone(), *enter_tapped)
+            // CR 122.1 + CR 122.1h: Resolve each `QuantityExpr` counter count
+            // to a concrete u32 once, mirroring the single-object `ChangeZone`
+            // arm. Every entering object receives these counters (e.g. a
+            // finality counter on Shilgengar's mass return).
+            let resolved_counters: Vec<(CounterType, u32)> = enter_with_counters
+                .iter()
+                .map(|(ct, qty)| {
+                    let n =
+                        crate::game::quantity::resolve_quantity_with_targets(state, qty, ability)
+                            .max(0) as u32;
+                    (ct.clone(), n)
+                })
+                .collect();
+            (
+                scan_zones,
+                *destination,
+                target.clone(),
+                *enter_tapped,
+                resolved_counters,
+            )
         }
         _ => return Err(EffectError::MissingParam("ChangeZoneAll".to_string())),
     };
@@ -936,6 +989,8 @@ pub fn resolve_all(
     // Clean up consumed tracked set after scanning.
     if let TargetFilter::TrackedSet { id } = &effective_filter {
         state.tracked_object_sets.remove(id);
+        // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
+        state.tracked_set_member_causes.remove(id);
     }
 
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
@@ -971,6 +1026,8 @@ pub fn resolve_all(
         // Mass zone moves don't use enter_transformed; enter_tapped and
         // controller override are carried for "return ... tapped/under your
         // control" effects.
+        // CR 122.1 + CR 122.1h: each object enters with the resolved counters
+        // (e.g. a finality counter on Shilgengar's mass return).
         match execute_zone_move(
             state,
             obj_id,
@@ -981,7 +1038,7 @@ pub fn resolve_all(
             false,
             enter_tapped,
             enters_under_player,
-            &[],
+            &enter_with_counters,
             face_down_profile.as_ref(),
             track_exiled_by_source,
             events,
@@ -1024,12 +1081,10 @@ pub fn resolve_all(
                 // class). The drain owns the single trailing EffectResolved, so we do
                 // NOT emit it here (mirrors the targeted loop's contract).
                 //
-                // NOTE (pre-existing face_down residual, extended not regressed):
-                // `process_one_zone_move` (the drain's mover) hardcodes
-                // `face_down=None`, while this mass loop passes
-                // `face_down_profile.as_ref()`. Resumed members of a face-down mass
-                // entry (the Cyber-Controller class) therefore lose their face-down
-                // profile. This carrier gap predates this change.
+                // CR 708.2a + CR 708.3: carry the face-down profile through the
+                // resume carrier so resumed members of a face-down mass entry (the
+                // Cyber-Controller class) still enter face down — the drain's mover
+                // (`process_one_zone_move`) now reads it from the ctx.
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         remaining: matching[i + 1..].to_vec(),
@@ -1041,10 +1096,13 @@ pub fn resolve_all(
                         enter_tapped,
                         enters_under_player,
                         enters_attacking: false,
-                        enter_with_counters: vec![],
+                        // CR 122.1h: resumed members of a paused mass return still
+                        // receive their counters (Shilgengar's finality counter).
+                        enter_with_counters: enter_with_counters.clone(),
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
                         moved_count: Some(moved_count),
+                        face_down_profile: face_down_profile.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 crate::game::replacement::park_waiting_for(state, player);
@@ -1075,10 +1133,16 @@ pub fn resolve_all(
                         enter_tapped,
                         enters_under_player,
                         enters_attacking: false,
-                        enter_with_counters: vec![],
+                        // CR 122.1h: resumed members of a paused mass return still
+                        // receive their counters (Shilgengar's finality counter).
+                        enter_with_counters: enter_with_counters.clone(),
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
                         moved_count: Some(moved_count + 1),
+                        // CR 708.2a + CR 708.3: preserve the face-down profile so
+                        // resumed members of a paused face-down mass return enter
+                        // face down.
+                        face_down_profile: face_down_profile.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -1145,12 +1209,17 @@ fn owner_scoped_nonbattlefield_mass_filter(
                 origin_zones,
             )),
         },
-        TargetFilter::TrackedSetFiltered { id, filter } => TargetFilter::TrackedSetFiltered {
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
             id,
             filter: Box::new(owner_scoped_nonbattlefield_mass_filter(
                 *filter,
                 origin_zones,
             )),
+            caused_by,
         },
         other => other,
     }
@@ -1907,6 +1976,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -2660,6 +2730,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -2709,6 +2780,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2797,6 +2869,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -2868,6 +2941,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2930,6 +3004,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3002,6 +3077,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -3033,6 +3109,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3105,6 +3182,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -3207,6 +3285,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -3568,6 +3647,7 @@ mod tests {
                     }),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 vec![],
@@ -4684,6 +4764,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -4758,6 +4839,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -4808,6 +4890,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::Opponent),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -4905,6 +4988,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             // Parent target supplies the "that name" referent.
@@ -5050,6 +5134,7 @@ mod tests {
                     ])),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 vec![TargetRef::Object(seed)],
@@ -5251,6 +5336,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5313,9 +5399,11 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(land_filter),
+                    caused_by: None,
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5392,9 +5480,11 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(land_filter),
+                    caused_by: None,
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5463,12 +5553,15 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(creature_filter),
+                    caused_by: None,
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile {
                     power: Some(2),
                     toughness: Some(2),
+                    body: crate::types::ability::FaceDownBody::Creature,
                     extra_core_types: vec![CoreType::Artifact],
                     subtypes: vec!["Cyberman".to_string()],
                     ward: None,
@@ -5541,9 +5634,11 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+                    caused_by: None,
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Tapped,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5609,9 +5704,11 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+                    caused_by: None,
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5645,9 +5742,11 @@ mod tests {
                         controller: None,
                         properties: vec![],
                     })),
+                    caused_by: None,
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
             },
             vec![],
@@ -5841,6 +5940,141 @@ mod tests {
         );
     }
 
+    /// CR 708.2a + CR 708.3 (issue #2923 review): a face-down `ChangeZone` entry
+    /// that PAUSES on a per-permanent replacement-ordering / as-enters choice must
+    /// resume FACE DOWN with the same profile — not face up. The face-down profile
+    /// must ride the `PendingChangeZoneIteration` resume carrier (mirroring
+    /// `enter_tapped`/`enter_transformed`/`enters_under_player`), so the drain's
+    /// mover (`process_one_zone_move`) applies it on resume.
+    ///
+    /// Discriminator: pre-fix the carrier dropped `face_down_profile`, so the
+    /// resumed object entered face up — exposing its real creature characteristics
+    /// the Yedora-style effect was supposed to hide. Both shock-style targets pause
+    /// (each carries a `Moved` MayCost replacement), so BOTH resume through the
+    /// stash/drain path and BOTH must end up face-down Forest lands.
+    #[test]
+    fn paused_face_down_change_zone_resumes_face_down_with_profile() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{FaceDownBody, FaceDownProfile};
+
+        let mut state = GameState::new_two_player(42);
+        // Two shock-style cards: each forces a per-permanent replacement choice on
+        // ETB, so the targeted loop pauses (stash → drain) for each.
+        let shock_a = add_shock_in_library_for_test(&mut state, 701, PlayerId(0));
+        let shock_b = add_shock_in_library_for_test(&mut state, 702, PlayerId(0));
+        for id in [shock_a, shock_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Yedora's profile: a Forest land — non-creature body, Land core type,
+        // Forest subtype, no power/toughness.
+        let forest_land = FaceDownProfile {
+            power: None,
+            toughness: None,
+            body: FaceDownBody::Noncreature,
+            extra_core_types: vec![CoreType::Land],
+            subtypes: vec!["Forest".to_string()],
+            ward: None,
+        };
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                face_down_profile: Some(forest_land.clone()),
+            },
+            vec![TargetRef::Object(shock_a), TargetRef::Object(shock_b)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // First target pauses on its replacement choice; the stash must carry the
+        // face-down profile.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected first ReplacementChoice, got {:?}",
+            state.waiting_for
+        );
+        let pending = state
+            .pending_change_zone_iteration
+            .as_ref()
+            .expect("a paused targeted ChangeZone must stash the iteration");
+        assert_eq!(
+            pending.face_down_profile.as_ref(),
+            Some(&forest_land),
+            "the paused carrier must preserve the face-down profile (pre-fix: None)"
+        );
+
+        // Decline both replacement choices, driving the loop through the
+        // stash/drain resume path for both targets.
+        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline first replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected a SECOND ReplacementChoice for shock_b, got {:?}",
+            state.waiting_for
+        );
+        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline second replacement");
+
+        // Both objects must have RESUMED face down as Forest lands (pre-fix they
+        // resumed face up with their creature characteristics).
+        for id in [shock_a, shock_b] {
+            let obj = &state.objects[&id];
+            assert_eq!(
+                obj.zone,
+                Zone::Battlefield,
+                "object {id:?} must reach the battlefield"
+            );
+            assert!(
+                obj.face_down,
+                "object {id:?} must RESUME face down (pre-fix: face up)"
+            );
+            assert!(
+                obj.card_types.core_types.contains(&CoreType::Land),
+                "object {id:?} must be a Land, got {:?}",
+                obj.card_types
+            );
+            assert!(
+                !obj.card_types.core_types.contains(&CoreType::Creature),
+                "object {id:?} must NOT be a creature, got {:?}",
+                obj.card_types
+            );
+            assert!(
+                obj.card_types.subtypes.iter().any(|s| s == "Forest"),
+                "object {id:?} must have the Forest subtype, got {:?}",
+                obj.card_types
+            );
+            assert!(
+                obj.power.is_none() && obj.toughness.is_none(),
+                "a face-down Forest land has no power/toughness, got {:?}/{:?}",
+                obj.power,
+                obj.toughness
+            );
+        }
+
+        assert!(
+            state.pending_change_zone_iteration.is_none(),
+            "resume slot must be cleared once the loop completes"
+        );
+    }
+
     /// Issue #567: `ChangeZoneAll::resolve_all` must stash remaining matches on
     /// `NeedsChoice` and resume via `drain_pending_change_zone_iteration` — the
     /// same contract as the targeted `ChangeZone` loop (issue #535).
@@ -5870,6 +6104,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -6181,6 +6416,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 
@@ -6350,6 +6586,7 @@ mod tests {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::new(
                         TypeFilter::Enchantment,
                     ))),
+                    caused_by: None,
                 },
                 owner_library: false,
                 enter_transformed: false,

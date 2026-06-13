@@ -20,6 +20,7 @@ pub mod plan;
 pub mod planner;
 pub mod policies;
 pub mod projection;
+pub mod saved_state;
 pub mod search;
 pub mod session;
 pub mod strategy_profile;

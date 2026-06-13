@@ -230,6 +230,9 @@ pub(crate) enum ContinuationAst {
     CopyMayRetarget,
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
+    /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
+    /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
+    GoadLastCreated { duration: Option<Duration> },
     /// "The flashback cost is equal to its mana cost." after a flashback grant.
     FlashbackCostEqualsManaCost,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
@@ -306,6 +309,12 @@ pub(crate) enum ContinuationAst {
         /// from-among put-step.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 701.20a vs 701.20e: True when the from-among clause's stripped verb
+        /// was "reveal" (a public action) rather than "put"/"choose" (a private
+        /// look). Promotes the patched Dig to `reveal: true` even when the kept
+        /// cards route to a fixed library position (Fertile Thicket).
+        #[serde(default)]
+        reveal_verb: bool,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -362,6 +371,17 @@ pub(crate) enum ContinuationAst {
         count: QuantityExpr,
         face_down: bool,
     },
+    /// CR 702.75a + CR 406.3: "exile one of them face down" after a private
+    /// `Dig` (the "look at the top N cards of <player>'s library" look step) —
+    /// the Gonti, Lord of Luxury class. Unlike `ExileLookedAtCard` (which exiles
+    /// the looked-at card(s) wholesale via `ExileTop`), this is a player choice
+    /// of ONE card from among the N looked at. It patches the preceding `Dig`
+    /// into the Hideaway shape (`keep_count: Some(1)`, `destination: Exile`) so
+    /// the dug card is player-selected and routed to exile by the `DigChoice`
+    /// flow, then chains a `HideawayConceal` sub-ability to turn the chosen card
+    /// face down and link it to the source. Gated on the exile-the-dug-card
+    /// continuation, so genuine pure-peek Digs (Delver of Secrets) are untouched.
+    ExileOneOfThemFaceDown,
     /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
     /// following a choose-and-sacrifice-rest effect, optionally narrowing the
     /// final sacrifice sweep ("all other nonland permanents they control").
@@ -555,18 +575,31 @@ pub(crate) enum NumericImperativeAst {
     },
 }
 
-/// Replace a fixed quantity with a for-each quantity, preserving multipliers.
+/// CR 107.1: Scale a *fixed* base count by a per-each `for_each` quantity.
 /// Fixed(0) is preserved as-is (zero effect regardless of for-each count).
 /// Fixed(1) is replaced directly with the for-each quantity.
 /// Fixed(N>1) wraps in Multiply { factor: N, inner: for_each }.
+///
+/// A non-`Fixed` base (e.g. `EventContextAmount` from "that many", a `Ref`, or
+/// a nested `Multiply` from "twice X") is returned **unchanged**: there is no
+/// `QuantityExpr` variant for the product of two arbitrary dynamic quantities
+/// (`Multiply` takes a constant `factor`, not a second dynamic operand), so the
+/// only rules-safe choice is to keep the parsed base rather than silently
+/// discard it in favor of the bare for-each. Callers must therefore only reach
+/// the for-each-attach path with a `Fixed` base; if a future card pairs a
+/// dynamic base with a for-each multiplier, a general product variant is the
+/// correct extension (gated through `add-engine-variant`).
 pub(crate) fn replace_fixed_quantity(fixed: QuantityExpr, for_each: QuantityExpr) -> QuantityExpr {
     match fixed {
         QuantityExpr::Fixed { value: 0 } => QuantityExpr::Fixed { value: 0 },
+        QuantityExpr::Fixed { value: 1 } => for_each,
         QuantityExpr::Fixed { value } if value > 1 => QuantityExpr::Multiply {
             factor: value,
             inner: Box::new(for_each),
         },
-        _ => for_each,
+        // Non-`Fixed` base (or a negative Fixed, which a draw/counter count never
+        // produces): keep the parsed base rather than dropping it for `for_each`.
+        base => base,
     }
 }
 
@@ -749,6 +782,11 @@ pub(crate) enum TargetedImperativeAst {
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 708.2a + CR 708.3: "face down" — the returned object is turned
+        /// face down before it enters (Yedora's "return it ... face down ... It's
+        /// a Forest land."). Lowered to a default vanilla-2/2 `face_down_profile`,
+        /// refined by a trailing "It's a <type>" `FaceDownProfileSpec`.
+        face_down: bool,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
@@ -767,6 +805,12 @@ pub(crate) enum TargetedImperativeAst {
         /// `None` preserves default controller assignment.
         enters_under: Option<ControllerRef>,
         enter_tapped: bool,
+        /// CR 122.1 + CR 122.1h: Counters placed on each returned object as it
+        /// enters the battlefield (e.g. "return each creature card from your
+        /// graveyard to the battlefield. They enter with a finality counter").
+        /// Threaded onto `Effect::ChangeZoneAll.enter_with_counters`. Empty for
+        /// returns that carry no counters.
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     Fight {
         target: TargetFilter,
@@ -1035,6 +1079,15 @@ pub(crate) enum PutImperativeAst {
         target: TargetFilter,
         enters_under: Option<ControllerRef>,
         enter_tapped: bool,
+        /// CR 608.2c: "and the rest into <zone>" complement for a tracked-set
+        /// partition ("Put all <filter> revealed this way into your hand and
+        /// the rest into your graveyard" — Winding Way). The primary move sends
+        /// the chosen subset to `destination`; the lowering emits a sibling
+        /// `ChangeZoneAll { target: TrackedSet, destination: rest }` so the
+        /// still-tracked cards left in the producer's zone (the rest) move to
+        /// the rest zone. `None` for non-partition forms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_destination: Option<Zone>,
     },
     TopOfLibrary,
     BottomOfLibrary,
@@ -1299,6 +1352,15 @@ pub(crate) enum OracleBlockAst {
         trigger_line: String,
         header: ModalHeaderAst,
         modes: Vec<ModeAst>,
+        /// CR 603.12 + CR 700.2b: When the trigger gates its modal choice behind
+        /// an optional reflexive cost ("Whenever you attack, you may sacrifice
+        /// another creature. When you do, choose ..."), this holds the cost
+        /// effect text (e.g. "Sacrifice another creature"). The lowering builds
+        /// an `Effect::Sacrifice { optional }` whose `WhenYouDo` sub_ability
+        /// carries the modal, so the modes fire only after the cost is paid.
+        /// `None` for a plain triggered modal (Pip-Boy), where the modal attaches
+        /// directly as the trigger's execute.
+        optional_cost: Option<String>,
     },
     /// CR 614.12c + CR 607.2d: "As [this permanent] enters, choose <A> or
     /// <B>. \n • <A> — <linked ability>. \n • <B> — <linked ability>." The

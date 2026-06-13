@@ -3228,6 +3228,8 @@ mod tests {
                 .valid_card(TargetFilter::SelfRef)
                 .condition(TriggerCondition::AdditionalCostPaid {
                     source: AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,

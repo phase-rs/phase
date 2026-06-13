@@ -7,9 +7,9 @@ description: Use when adding a new deck-aware AI feature (`DeckFeatures` axis) a
 
 This is the authoritative checklist for adding a new feature to the three-layer AI architecture (Features → Plan → Policies). Nine features exist as reference: `landfall`, `mana_ramp`, `tribal`, `control`, `aristocrats`, `aggro_pressure`, `tokens_wide`, `plus_one_counters`, `spellslinger_prowess`. Each follows the same pattern; mirror it.
 
-**Before you start:** Read `landfall.rs` (simplest), then `aristocrats.rs` (geometric-mean commitment with identity lookup), then one feature similar in shape to yours. Trace from `features/<name>.rs::detect()` through `session.rs::features_for` through `policies/<name>.rs::verdict` so the data flow is concrete.
+**Before you start:** Read `landfall.rs` (simplest), then `aristocrats.rs` (geometric-mean commitment with identity lookup), then one feature similar in shape to yours. Trace from `features/<name>.rs::detect()` through `DeckFeatures::analyze` and `AiSession::from_game` through `policies/<name>.rs::verdict` so the data flow is concrete.
 
-> **CR Verification Rule.** Every CR number in annotations MUST be verified by greppign `docs/MagicCompRules.txt` BEFORE you write it. Do NOT rely on memory or prior prompts. The 701.x and 702.x sections are arbitrary sequential assignments that hallucinate consistently. Run `grep -n "^701.34" docs/MagicCompRules.txt` for every number. CR 122.1d is Stun (NOT +1/+1 — that's CR 122.1a). CR 701.27 is Transform (NOT Proliferate — that's CR 701.34). Two real catches from the existing batch — you will have similar misses unless you grep.
+> **CR Verification Rule.** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` BEFORE you write it. Do NOT rely on memory or prior prompts. The 701.x and 702.x sections are arbitrary sequential assignments that hallucinate consistently. Run `grep -n "^701.34" docs/MagicCompRules.txt` for every number. CR 122.1d is Stun (NOT +1/+1 — that's CR 122.1a). CR 701.27 is Transform (NOT Proliferate — that's CR 701.34). Two real catches from the existing batch — you will have similar misses unless you grep.
 
 ---
 
@@ -18,7 +18,8 @@ This is the authoritative checklist for adding a new feature to the three-layer 
 ```
 AiSession (per-game cache; built once in AiSession::from_game)
   ├─ features: HashMap<PlayerId, DeckFeatures>    ← Layer 1: structural detection
-  ├─ plan:     HashMap<PlayerId, PlanSnapshot>    ← Layer 2: derived schedule
+  ├─ plan:     HashMap<PlayerId, PlanSnapshot>    ← Layer 2: bottoming + curve schedule
+  ├─ deck_profile / strategy: per-player strategic profiles
   ├─ synergy:  HashMap<PlayerId, SynergyGraph>
   └─ memory:   PolicyMemory
 
@@ -42,7 +43,23 @@ Both run inside their respective registries (`PolicyRegistry::default`,
 `MulliganRegistry::default`). Activation is the single multiplicative knob.
 ```
 
+`AiSession::from_game` analyzes `current_main` plus `current_commander`; commander entries are
+weighted as build-around cards before feature/profile/synergy detection. One-off analysis helpers
+that only receive a deck slice stay pure over that slice.
+
 **Single-knob rule.** A `TacticalPolicy` exposes `activation()` returning `Option<f32>`. The registry multiplies `verdict.delta * activation` exactly once. There is no `archetype_scale`, no `turn_mult`, no second pass. If a policy needs archetype/turn-sensitive weight, it computes it inside `activation()` from the inputs.
+
+**Score contract.** Tactical policy deltas are card-equivalent units: `delta = 1.0` means one card of expected value. Use the band helpers on `PolicyVerdict` so the chosen strength is visible at the call site:
+
+| Band | Helper | Range | Meaning |
+|---|---|---|---|
+| Nudge | `PolicyVerdict::nudge` | `(0.0, 0.3]` | tie-breaker |
+| Preference | `PolicyVerdict::preference` | `(0.3, 1.5]` | half-card to 1.5-card preference |
+| Strong | `PolicyVerdict::strong` | `(1.5, 5.0]` | multi-card swing |
+| Critical | `PolicyVerdict::critical` | `(5.0, 15.0]` | game-deciding |
+| Veto | `PolicyVerdict::reject` | n/a | never take this action |
+
+All scoring scalars come from `AiConfig::policy_penalties` / `PolicyPenalties` with rationale comments. Thresholds that only gate activation stay as `pub const` in the policy/feature module. Never encode vetoes as sentinel scores.
 
 ---
 
@@ -101,7 +118,7 @@ Every feature must produce ALL of these:
 
 1. **AST verification table in module docstring** — one line per axis citing the exact `crates/engine/src/types/...:line` where the type lives + a CR number where applicable. Mirror `landfall.rs:1-12` and `aggro_pressure.rs:1-25`. This is your proof that the AST supports detection without parser changes.
 2. **`<Name>Feature` struct** — counters as `u32`, ratios as `f32`, identity-lookup lists as `Vec<String>`, single `commitment: f32` (0.0..=1.0). NO bool fields. Document each field with a CR if it implements a rule.
-3. **Commitment formula** with calibration anchor in a doc comment. Show the math (e.g., `commitment = clamp01(2.0 * low_density + 1.0 * hasty_density + 0.6 * burn_density)`) AND a real-deck calibration ("Mono-Red Burn: ~16 one-drops + 4 burn → commitment ≈ 0.85"). Anti-calibration ("UW control → commitment ≈ 0.0") is also required. Two formula shapes are established:
+3. **Commitment formula** with calibration anchor in a doc comment. Commitments are density-normalized per 60 nonland cards so 60-card and 99-card decks with the same density score the same. Use only the shared helpers in `features/commitment.rs`: `commitment::density_per_60(count, total_nonland)`, `commitment::weighted_sum(&[(weight, density)])`, and `commitment::geometric_mean(&[pillar_density])`. Show the math AND a real-deck calibration ("Mono-Red Burn: ~16 one-drops + 4 burn → commitment ≈ 0.85"). Anti-calibration ("UW control → commitment ≈ 0.0") is also required. Two formula shapes are established:
    - **Weighted sum, clamped** (when missing pillars are tolerable). Pattern: control, aggro_pressure, spellslinger.
    - **Geometric mean with zero-pillar collapse** (when missing a pillar = not this archetype). Pattern: aristocrats, tokens_wide.
 4. **Parts-based predicate exports** — one `pub(crate) fn is_<X>_parts(<minimal CardFace slices>) -> bool` per axis. Each takes the slice the policy actually has access to on `GameObject` (e.g., `is_burn_spell_parts(core_types: &[CoreType], abilities: &[AbilityDefinition])`). Add a public `is_X(face: &CardFace)` wrapper if useful for tests; remove it if dead per clippy. **The `_parts` predicates are the contract** — they let the policy classify live `GameObject`s without reconstructing a `CardFace`.
@@ -179,7 +196,7 @@ pub trait MulliganPolicy: Send + Sync {
 - Constant `Some(1.0)` requires an `// activation-constant: <reason>` marker (lint at `policies/tests/activation_marker_lint.rs`).
 
 **`verdict()` patterns:**
-- Return `PolicyVerdict::Score { delta: f64, reason: PolicyReason }` (no Reject unless you genuinely want to veto).
+- Return `PolicyVerdict::{nudge,preference,strong,critical}(ctx.config.policy_penalties.<named_field>, reason)` for scores. Return `PolicyVerdict::reject(reason)` only for genuine vetoes.
 - `PolicyReason::new("stable_kind_string").with_fact("metric_name", value as i64)` — kind is `&'static str`, frozen per policy.
 - Mirror `free_outlet_activation.rs:80-94`: re-classify the live ability structurally using parts predicates against `obj.abilities`/`obj.keywords`/etc. — don't trust deck-time classification at decision time.
 
@@ -187,6 +204,7 @@ pub trait MulliganPolicy: Send + Sync {
 - Opt-out below `MULLIGAN_FLOOR` returns `Score { delta: 0.0, reason: <name>_keepables_na }`.
 - Walk `hand` (`Vec<ObjectId>`); look up each via `state.objects.get(&oid)`. Classify by core type, mana value, identity lookup against feature `payoff_names`.
 - Verdict tiers in priority order (first match returns): `_keepable_ideal` (+1.5..2.0), `_workable` (+0.5..1.0), penalty (-1.0..-1.5), default (0.0).
+- `turn_order` and `mulligans_taken` are real inputs. New policies must consume them or carry an `// input-unused: <reason>` marker next to the binding.
 
 ---
 
@@ -198,13 +216,13 @@ For a feature named `<feat>` with `<Feat>Feature` struct and policies `<Feat>Pol
 |---|---|
 | `crates/phase-ai/src/features/mod.rs` | Add `pub mod <feat>;` + `pub use <feat>::<Feat>Feature;` + `pub <feat>: <Feat>Feature` field on `DeckFeatures`. |
 | `crates/phase-ai/src/features/<feat>.rs` | NEW. The feature module + tests. |
-| `crates/phase-ai/src/session.rs` | Import + call `<feat>::detect(deck)` in `features_for()`. |
+| `crates/phase-ai/src/features/mod.rs` | Call `<feat>::detect(deck)` in `DeckFeatures::analyze`. |
 | `crates/phase-ai/src/policies/mod.rs` | Add `pub mod <feat>;` (and any new tactical policy module). |
 | `crates/phase-ai/src/policies/<feat>.rs` | NEW. Tactical policy + tests. |
 | `crates/phase-ai/src/policies/registry.rs` | Add `PolicyId::<Feat>` (and `<Feat>Mulligan`) variants. Import `super::<feat>::<Feat>Policy`. Add `Box::new(<Feat>Policy)` to `PolicyRegistry::default`'s vec. |
 | `crates/phase-ai/src/policies/mulligan/<feat>_keepables.rs` | NEW (if a mulligan policy is in scope). |
 | `crates/phase-ai/src/policies/mulligan/mod.rs` | Add module + `pub use` + `Box::new(<Feat>Mulligan)` to `MulliganRegistry::default`'s vec. |
-| `crates/phase-ai/src/plan/curves.rs` | OPTIONAL: add tempo-class branch in `tempo_class_for` (carefully ordered — see Section 8). Add expected-curve adjustments in `expected_lands_for`/`expected_mana_for`/`expected_threats_for` if archetype shifts the curve. |
+| `crates/phase-ai/src/plan/curves.rs` | OPTIONAL: add tempo-class branch in `tempo_class_for` (carefully ordered — see Section 8). Add expected-curve adjustments in `expected_lands_for`/`expected_mana_for`/`expected_threats_for` if archetype shifts the curve. Plan data is consumed by mulligan bottoming and curve expectations; do not add zombie plan fields. |
 
 The `no_name_matching` lint at `features/tests/no_name_matching.rs` automatically scans both `src/features/` and `src/policies/` — no manual exemption needed unless your file names appear in the lint's allow-list (unlikely).
 
@@ -292,23 +310,29 @@ Every feature MUST have:
 - `opts_out_when_commitment_low`
 - `ideal_hand_<descriptors>` → positive delta with `<feat>_keepable_ideal` reason
 - Each verdict tier (workable, penalty, default)
+- A `turn_order` / `mulligans_taken` test, or an explicit `// input-unused: <reason>` marker in the implementation.
+
+**Measurement evidence:**
+- New-policy PRs attach a `rtk cargo ai-gate` paired-seed report. No flips is acceptable for narrow policies, but the run must exist.
 
 ---
 
 ## 12. Implementation order (each step compiles before the next)
 
 1. Read `landfall.rs` + the most-similar reference feature end to end.
-2. Verify each CR number you'll cite by greppign `docs/MagicCompRules.txt`.
+2. Verify each CR number you'll cite by grepping `docs/MagicCompRules.txt`.
 3. STEP 0 (if needed): refactor an existing predicate from another feature to `pub(crate)` parts shape (e.g., `control::is_card_draw_parts` was promoted for spellslinger). Run the existing tests; behavior must be preserved.
-4. Create `features/<feat>.rs`: struct + thresholds + `detect()` + parts predicates + tests.
-5. Wire `features/mod.rs` and `session.rs`.
-6. Create `policies/<feat>.rs` (tactical) + tests. Add `PolicyId` variant + `Box::new()` registration.
-7. Create `policies/mulligan/<feat>_keepables.rs` + tests. Add `PolicyId` variant + register in `MulliganRegistry::default`.
-8. (Optional) Add `plan/curves.rs` branches with tests.
-9. (Optional) Cross-feature amplification (Section 10).
-10. `cargo fmt && cargo clippy --all-targets -p phase-ai -- -D warnings && cargo test -p phase-ai --lib`. All must be clean.
-11. Commit with explicit `git add path1 path2 ...`. NEVER `git add -A`.
-12. Spawn an opus advisory review (see `git log --grep="address review"` for prior fix-up commit messages as templates). Address MUST FIX in a follow-up commit; CONSIDER items at your discretion.
+4. Optionally start from `scripts/new-ai-policy.sh <feat>`; it writes the three scaffold files and prints the wiring checklist.
+5. Create `features/<feat>.rs`: struct + thresholds + `detect()` + parts predicates + tests.
+6. Wire `features/mod.rs`.
+7. Create `policies/<feat>.rs` (tactical) + tests. Add `PolicyId` variant + `Box::new()` registration.
+8. Create `policies/mulligan/<feat>_keepables.rs` + tests. Add `PolicyId` variant + register in `MulliganRegistry::default`.
+9. (Optional) Add `plan/curves.rs` branches with tests.
+10. (Optional) Cross-feature amplification (Section 10).
+11. Run `cargo fmt --all`, then use Tilt verification: `./scripts/tilt-wait.sh clippy test-ai`. If Tilt is down, fall back to the direct phase-ai clippy/test commands.
+12. Run `rtk cargo ai-gate` for new policy work.
+13. Commit with explicit `git add path1 path2 ...`. NEVER `git add -A`.
+14. Spawn an opus advisory review (see `git log --grep="address review"` for prior fix-up commit messages as templates). Address MUST FIX in a follow-up commit; CONSIDER items at your discretion.
 
 ---
 

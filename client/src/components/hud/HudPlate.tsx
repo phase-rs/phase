@@ -34,6 +34,7 @@ interface HudPlateProps {
    *  by both `PlayerHud` and `OpponentHud`; absence means the plate never
    *  participates in debug highlighting. */
   playerId?: PlayerId;
+  density?: "default" | "compact";
 }
 
 const TONE_CLASSES: Record<HudTone, string> = {
@@ -74,6 +75,7 @@ export function HudPlate({
   underAttack = false,
   avatarUrl,
   playerId,
+  density = "default",
 }: HudPlateProps) {
   const { t } = useTranslation("game");
   const Component = onClick ? "button" : "div";
@@ -83,12 +85,24 @@ export function HudPlate({
   const isDebugHighlighted = useUiStore(
     (s) => playerId != null && s.debugHighlightedPlayerId === playerId,
   );
+  const compact = density === "compact";
+  const plateChrome = compact
+    ? "gap-1 rounded-lg px-1 py-0.5"
+    : "gap-2 rounded-xl px-1.5 py-1 lg:gap-2.5 lg:rounded-[18px] lg:px-2.5 lg:py-1.5";
+  const labelClass = compact
+    ? "truncate text-[8px] font-semibold uppercase tracking-[0.12em]"
+    : "truncate text-[9px] font-semibold uppercase tracking-[0.18em]";
+  const contentGap = compact ? "gap-0.5" : "gap-1";
+  const childGap = compact ? "gap-1" : "gap-2";
+  const trailingClass = compact
+    ? "relative flex max-w-[36vw] shrink items-center gap-0.5 overflow-hidden [&>*]:scale-90 [&>*]:origin-center"
+    : "relative flex shrink-0 items-center gap-1.5";
 
   const plate = (
     <Component
       type={onClick ? "button" : undefined}
       onClick={onClick}
-      className={`group relative inline-flex max-w-full items-center gap-2 rounded-xl border px-1.5 py-1 backdrop-blur-xl transition-all duration-200 lg:gap-2.5 lg:rounded-[18px] lg:px-2.5 lg:py-1.5 ${TONE_CLASSES[tone]}${activeRing} ${
+      className={`group relative inline-flex max-w-full items-center border backdrop-blur-xl transition-all duration-200 ${plateChrome} ${TONE_CLASSES[tone]}${activeRing} ${
         onClick ? "cursor-pointer hover:-translate-y-0.5 hover:border-white/30" : ""
       }`}
     >
@@ -128,30 +142,31 @@ export function HudPlate({
           label={label}
           avatarUrl={avatarUrl}
           seatColor={seatColor}
+          compact={compact}
         />
       ) : null}
-      <div className="relative flex min-w-0 flex-col items-center justify-center gap-1">
-        <div className="flex min-w-0 items-center justify-center gap-1">
+      <div className={`relative flex min-w-0 flex-col items-center justify-center ${contentGap}`}>
+        <div className={`flex min-w-0 items-center justify-center ${contentGap}`}>
           {!avatarUrl && seatColor && (
             <span
               aria-hidden
-              className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]"
+              className={`${compact ? "h-2 w-2" : "h-2.5 w-2.5"} shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]`}
               style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
             />
           )}
           <span
-            className="truncate text-[9px] font-semibold uppercase tracking-[0.18em]"
+            className={labelClass}
             style={seatColor ? { color: seatColor } : { color: "rgba(255,255,255,0.68)" }}
           >
             {label}
           </span>
         </div>
-        <div className="flex min-w-0 items-center justify-center gap-2">
+        <div className={`flex min-w-0 items-center justify-center ${childGap}`}>
           {children}
         </div>
       </div>
       {trailing ? (
-        <div className="relative flex shrink-0 items-center gap-1.5">
+        <div className={trailingClass}>
           {trailing}
         </div>
       ) : null}
@@ -165,17 +180,19 @@ function HudAvatar({
   label,
   avatarUrl,
   seatColor,
+  compact,
 }: {
   label: string;
   avatarUrl: string;
   seatColor?: string;
+  compact: boolean;
 }) {
   return (
     <AvatarHoverPreview
       avatarUrl={avatarUrl}
       label={label}
       seatColor={seatColor}
-      className="relative h-12 w-10 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.35)] lg:h-14 lg:w-12"
+      className={`relative shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.35)] ${compact ? "h-8 w-7" : "h-12 w-10 lg:h-14 lg:w-12"}`}
       style={seatColor ? {
         borderColor: `${seatColor}cc`,
         boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35), 0 0 18px ${seatColor}33`,

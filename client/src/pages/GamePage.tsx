@@ -873,6 +873,9 @@ function GamePageContent({
 
   // Sync card size preference to CSS custom properties
   const cardSize = usePreferencesStore((s) => s.cardSize);
+  // Keys BattlefieldBackground so a mode/seat change remounts it with a fresh
+  // lock (see BattlefieldBackground) instead of resetting refs during render.
+  const boardBackground = usePreferencesStore((s) => s.boardBackground);
   useEffect(() => {
     const root = document.documentElement;
     const scale = cardSize === "small" ? 0.8 : cardSize === "large" ? 1.25 : 1;
@@ -1078,7 +1081,7 @@ function GamePageContent({
       }}
     >
       <SpectatorChrome />
-      <BattlefieldBackground />
+      <BattlefieldBackground key={`${boardBackground}-${playerId}`} />
       <StackDisplay />
 
       {/* Persistent Sandbox banner — visible to all players whenever the
@@ -1507,6 +1510,12 @@ function GamePageContent({
         {waitingFor?.type === "ExertChoice" &&
           canActForWaitingState && (
             <ExertChoiceModal />
+          )}
+
+        {/* CR 702.154a: Optional Enlist tap choice during declare attackers. */}
+        {waitingFor?.type === "EnlistChoice" &&
+          canActForWaitingState && (
+            <EnlistChoiceModal />
           )}
 
         {/* Unless payment choice ("Counter unless you pay {X}") */}
@@ -2735,6 +2744,55 @@ function ExertChoiceModal() {
         dispatch({
           type: "ChooseExert",
           data: { exert: id === "exert" },
+        })
+      }
+    />
+  );
+}
+
+// ── Enlist Choice Modal (CR 702.154a: enlist as it attacks) ─────────────
+
+function EnlistChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "EnlistChoice") return null;
+
+  const attackerId = waitingFor.data.attacker;
+  const attacker = objects?.[attackerId];
+  const attackerName = attacker?.name ?? t("gamePage.enlist.attackerFallback");
+  const creatureFallback = t("gamePage.enlist.creatureFallback");
+  const options = [
+    ...waitingFor.data.eligible.map((id) => {
+      const enlisted = objects?.[id];
+      const name = enlisted?.name ?? creatureFallback;
+      return {
+        id: String(id),
+        label: name,
+        description: t("gamePage.enlist.tapDescription", { name, attacker: attackerName }),
+      };
+    }),
+    {
+      id: "decline",
+      label: t("gamePage.enlist.decline"),
+      description: t("gamePage.enlist.declineDescription", { attacker: attackerName }),
+    },
+  ];
+
+  return (
+    <ChoiceModal
+      title={t("gamePage.enlist.title", { name: attackerName })}
+      subtitle={t("gamePage.enlist.subtitle")}
+      previewCardName={attacker?.name}
+      previewCardTypes={attacker?.card_types}
+      previewObjectId={attackerId}
+      options={options}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseEnlist",
+          data: { target: id === "decline" ? null : Number(id) },
         })
       }
     />

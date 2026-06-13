@@ -478,6 +478,9 @@ pub fn resolve(
     ) {
         if let Some((&id, _)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) {
             state.tracked_object_sets.remove(&id);
+            // CR 608.2c: drop the consumed set's member-cause provenance too so
+            // the side map never outlives its `tracked_object_sets` entry.
+            state.tracked_set_member_causes.remove(&id);
         }
     }
 
@@ -1778,9 +1781,10 @@ fn powerstone_ability() -> AbilityDefinition {
             produced: ManaProduction::Colorless {
                 count: QuantityExpr::Fixed { value: 1 },
             },
-            restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Artifact".to_string(),
-            )],
+            restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            }],
             grants: vec![],
             expiry: None,
             target: None,

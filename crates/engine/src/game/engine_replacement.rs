@@ -82,7 +82,20 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
-    match super::replacement::continue_replacement(state, index, events) {
+    let result = super::replacement::continue_replacement(state, index, events);
+    // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
+    // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
+    // multiple eligible lands) re-parked the pending replacement with
+    // `may_cost_paid: true` plus any `may_cost_remaining`, and left
+    // `waiting_for` on the live sub-choice prompt.
+    // Surface that prompt as-is; the sub-choice's resolution re-enters
+    // `continue_replacement` (resume) to finish entering the permanent once the
+    // cost is paid. The carried `Execute` payload is inert and must not be
+    // delivered here.
+    if std::mem::take(&mut state.replacement_may_cost_paused) {
+        return Ok(state.waiting_for.clone());
+    }
+    match result {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;
             let mut enters_battlefield = false;
@@ -755,6 +768,44 @@ pub(super) fn handle_copy_target_choice(
     // on the battlefield — concede / error / chained-replacement paths can
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
+    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+        return Ok(waiting_for);
+    }
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
+}
+
+/// CR 603.2 + CR 614.12a: Replay the deferred battlefield-entry `ZoneChanged`
+/// event(s) for `source_id` through the trigger pipeline after a mid-entry
+/// player choice (copy target, enters-with-counter branch, or as-enters named
+/// choice) has resolved, then surface any interactive trigger pause that
+/// replay raised. This is the single authority for deferred-entry replay — both
+/// the copy-completion site (`handle_copy_target_choice`) and the as-enters
+/// named-choice resume site (`engine_resolution_choices.rs`) route through it,
+/// so the pause-propagation logic is defined exactly once.
+///
+/// The entry event was captured into `state.deferred_entry_events` by
+/// `capture_deferred_entry_events_if_mid_entry_choice` *before* the choice was
+/// made, so that ETB observers (constellation, Soul Warden) and any granted
+/// ETB triggers (Callidus Assassin) match against the fully realized,
+/// post-choice object — not a half-entered one (CR 614.12a: the choice is made
+/// before the permanent enters). `process_triggers` (CR 603.2 event-based
+/// triggers) + `check_delayed_triggers` (CR 603.7c delayed triggers) collect
+/// against the realized object.
+///
+/// Drained via `std::mem::take` so replay is idempotent — the event is fired
+/// exactly once and can never also reach a later `Priority`-result pipeline
+/// pass. Returns `None` (no pause) when `deferred_entry_events` is empty (the
+/// no-op guard for non-entry persisted choices, e.g. Pithing Needle naming),
+/// or when the entering source has left the battlefield (concede / error /
+/// chained-replacement paths leave a stale event we discard rather than fire
+/// against a phantom object).
+pub(super) fn replay_deferred_entry_events(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
     let deferred = std::mem::take(&mut state.deferred_entry_events);
     let source_still_on_battlefield = state
         .objects
@@ -768,7 +819,7 @@ pub(super) fn handle_copy_target_choice(
     effects::drain_pending_continuation(state, events);
     // CR 113.2c + CR 603.3b + CR 707.10: `process_triggers` above may have
     // paused on an interactive replayed ETB trigger fired by the realized
-    // copy. When it pauses it sets `state.pending_trigger` for the active
+    // entry. When it pauses it sets `state.pending_trigger` for the active
     // instance and stashes any simultaneously-fired siblings into
     // `state.deferred_triggers`. This mirrors the priority-time
     // `process_triggers` call site in `engine_priority`, so the resumption
@@ -789,21 +840,20 @@ pub(super) fn handle_copy_target_choice(
     // `engine_modes::handle_triggered_mode_choice`, or the `DistributeAmong`
     // handler) once the player resolves the active trigger.
     if matches!(state.waiting_for, WaitingFor::DistributeAmong { .. }) {
-        return Ok(state.waiting_for.clone());
+        return Ok(Some(state.waiting_for.clone()));
     }
     // CR 603.3b (#531): propagate OrderTriggers pause from process_triggers
-    // above. Without this, a doubled replayed ETB trigger (e.g., Wedding
-    // Announcement's token + Ocelot Pride's life-gain rider both firing on the
-    // copy entry) would silently fall through to Priority.
+    // above. Without this, multiple simultaneously-fired ETB observers on one
+    // entry (e.g., two constellation triggers, or Wedding Announcement's token
+    // + Ocelot Pride's life-gain rider on a copy entry) would silently fall
+    // through to Priority.
     if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-        return Ok(state.waiting_for.clone());
+        return Ok(Some(state.waiting_for.clone()));
     }
     if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)? {
-        return Ok(waiting_for);
+        return Ok(Some(waiting_for));
     }
-    Ok(WaitingFor::Priority {
-        player: state.active_player,
-    })
+    Ok(None)
 }
 
 fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
@@ -948,7 +998,7 @@ pub(super) fn apply_pending_post_replacement_effect(
     // single producer site so both the stack-resolution path (non-optional
     // copy replacements) and the `handle_replacement_choice` path (optional
     // "you may have this enter as a copy" replacements) defer uniformly.
-    capture_deferred_entry_events_if_copy_target_choice(state, waiting_for.as_ref(), events);
+    capture_deferred_entry_events_if_mid_entry_choice(state, waiting_for.as_ref(), events);
     waiting_for
 }
 
@@ -971,20 +1021,35 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
         })
 }
 
-/// CR 614.12a + CR 707.9: If `waiting_for` is `CopyTargetChoice`, or a
-/// `ChooseOneOfBranch` that `is_enters_counter_choice` (the enters-with-choice-
-/// of-counter shape), clone any battlefield-entry `ZoneChanged` events for the
-/// entering source into `state.deferred_entry_events`. The original `events` vec
-/// is preserved so the frontend animates the entry as soon as the spell
-/// resolves; the deferred copy is replayed through `process_triggers` /
-/// `check_delayed_triggers` once the choice resolves (in
-/// `handle_copy_target_choice` for copies, in the `ChooseBranch` arm of
-/// `engine_resolution_choices.rs` for enters-counter choices).
+/// CR 603.2 + CR 614.12a: When a permanent's battlefield entry pauses on a
+/// mid-entry player choice — `CopyTargetChoice` (enter as a copy), a
+/// `ChooseOneOfBranch` that `is_enters_counter_choice` (enter with your choice
+/// of counter), or a persisted `NamedChoice` whose `source_id` is the entering
+/// permanent (the "As it enters, choose a color/creature type/…" shape, e.g.
+/// Valgavoth's Lair) — clone any battlefield-entry `ZoneChanged` events for the
+/// entering source into `state.deferred_entry_events`. The original `events`
+/// vec is preserved so the frontend animates the entry as soon as the spell /
+/// land-play resolves; the deferred copy is replayed through `process_triggers`
+/// / `check_delayed_triggers` once the choice resolves (in
+/// `handle_copy_target_choice` for copies, in the `ChooseBranch` arm and the
+/// `NamedChoice` + `ChooseOption` arm of `engine_resolution_choices.rs` for the
+/// other two shapes), so every ETB observer (constellation like Doomwake Giant,
+/// Soul Warden, …) sees the entry against the fully realized post-choice object.
+/// Without this, the entry event returns `WaitingFor::NamedChoice` instead of
+/// `Priority`, so the canonical priority-time trigger collection
+/// (`engine_priority::run_post_action_pipeline`) is skipped and every ETB
+/// observer is silently dropped for that entry (issue #830).
+///
+/// The `NamedChoice` arm is keyed on the structural fact that an entry
+/// `ZoneChanged` for the same source is present in `events` (the capture loop
+/// below only pushes matching events). Non-entry persisted `NamedChoice`s —
+/// Pithing Needle naming, a `Choose` resolved off the stack — carry no such
+/// entry event, so nothing is captured and the downstream replay is a no-op.
 ///
 /// Defense in depth: clears any stale events from a prior choice that exited
 /// abnormally (concede mid-choice, eliminate_player, error return before drain)
 /// so the replay never fires triggers against a phantom object.
-fn capture_deferred_entry_events_if_copy_target_choice(
+fn capture_deferred_entry_events_if_mid_entry_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
     events: &[GameEvent],
@@ -999,6 +1064,18 @@ fn capture_deferred_entry_events_if_copy_target_choice(
             branches,
             ..
         }) if is_enters_counter_choice(branches) => *source_id,
+        // CR 603.2 + CR 614.12a: an "As it enters, choose …" replacement
+        // (Valgavoth's Lair, the Thriving lands, Voice of All) pauses the entry
+        // on a persisted `NamedChoice` whose `source_id` is the entering
+        // permanent. Defer the entry event exactly like the copy/counter shapes
+        // so ETB observers fire against the post-choice object once the player
+        // answers. The entry-event filter in the capture loop scopes this to the
+        // entering source — a persisted `NamedChoice` with no matching entry
+        // event in `events` (Pithing Needle naming) captures nothing.
+        Some(WaitingFor::NamedChoice {
+            source_id: Some(source_id),
+            ..
+        }) => *source_id,
         _ => return,
     };
     // CR 614.12b boundary (inherited from the CopyTargetChoice path, NOT expanded
@@ -1048,12 +1125,16 @@ fn apply_pending_spell_resolution(
     // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        obj.cast_controller = ctx.cast_controller;
         if let Some(permission) = ctx.cast_timing_permission {
             obj.cast_timing_permission = Some((permission, state.turn_number));
         }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
         obj.additional_cost_payment_count = ctx.additional_cost_payment_count;
+        obj.additional_cost_payments
+            .clone_from(&ctx.additional_cost_payments);
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
+        crate::database::synthesis::ensure_paid_offspring_etb_copy_triggers(obj);
     }
 
     // CR 303.4f: Aura resolving to battlefield attaches to its target.
@@ -1547,11 +1628,13 @@ mod tests {
             controller: PlayerId(0),
             casting_variant: CastingVariant::Normal,
             cast_from_zone: None,
+            cast_controller: None,
             cast_timing_permission: None,
             spell_targets: vec![],
             actual_mana_spent: 0,
             kickers_paid: vec![],
             additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
             convoked_creatures: vec![],
         });
 
@@ -1580,6 +1663,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            may_cost_paid: false,
+            may_cost_remaining: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
@@ -1662,6 +1747,8 @@ mod tests {
             obj.kickers_paid = vec![KickerVariant::First];
             obj.additional_cost_payment_count = 1;
             obj.convoked_creatures = vec![ObjectId(777)];
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
             obj.cast_timing_permission =
                 Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
         }
@@ -1689,6 +1776,8 @@ mod tests {
         );
         assert_eq!(obj.additional_cost_payment_count, 1);
         assert_eq!(obj.convoked_creatures, vec![ObjectId(777)]);
+        assert_eq!(obj.cast_from_zone, Some(Zone::Graveyard));
+        assert_eq!(obj.cast_controller, Some(PlayerId(0)));
         assert_eq!(
             obj.cast_timing_permission,
             Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
@@ -1724,6 +1813,8 @@ mod tests {
             // effect-driven battlefield entry).
             obj.kickers_paid = vec![KickerVariant::First];
             obj.additional_cost_payment_count = 2;
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_controller = Some(PlayerId(0));
         }
 
         let mut events = Vec::new();
@@ -1743,6 +1834,8 @@ mod tests {
              `from == Stack`)"
         );
         assert_eq!(obj.additional_cost_payment_count, 0);
+        assert_eq!(obj.cast_from_zone, None);
+        assert_eq!(obj.cast_controller, None);
     }
 
     /// CR 615.1: When the player declines (or the replacement pipeline returns

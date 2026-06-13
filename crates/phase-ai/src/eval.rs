@@ -52,7 +52,7 @@ impl EvalWeights {
 }
 
 /// Turn-phase-aware weight sets: early (T1-3), mid (T4-7), late (T8+).
-/// Learned from 12.9M 17Lands game-turn samples split by turn number.
+/// Learned from 90.4M 17Lands game-turn samples split by turn number.
 /// Each phase has different weight profiles reflecting how the importance
 /// of board state features shifts across a game of Magic.
 #[derive(Debug, Clone, Serialize, Deserialize)]

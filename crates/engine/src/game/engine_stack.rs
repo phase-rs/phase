@@ -80,7 +80,9 @@ pub(super) fn finalize_trigger_target_selection(
         !triggers::is_pending_trigger_construction_active(state),
         "deferred-trigger drain entered with construction still active",
     );
-    if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
+    if let Some(waiting_for) =
+        triggers::drain_deferred_triggers_after_trigger_construction(state, events)
+    {
         return waiting_for;
     }
     WaitingFor::Priority { player: controller }

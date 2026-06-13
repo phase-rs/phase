@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
-use crate::types::statics::{CrewAction, CrewContributionKind};
+use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
@@ -2012,6 +2012,47 @@ fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents()
     );
 }
 
+/// CR 601.2f + CR 102.2/102.3: Heliod, the Warped Eclipse. "Spells you cast cost
+/// {1} less to cast for each card your opponents have drawn this turn." must lower
+/// to a `ModifyCost { mode: Reduce, dynamic_count: CardsDrawnThisTurn{Opponent{Sum}} }`.
+/// On the buggy parser the for-each clause fell to `ObjectCount{Typed{[Card]}}`
+/// (every card on the battlefield), over-reducing. This pins the typed
+/// opponents'-draw shape and asserts the dynamic_count is NOT an `ObjectCount`.
+#[test]
+fn heliod_warped_eclipse_cost_reduction_counts_opponents_draws() {
+    let def = parse_static_line(
+        "Spells you cast cost {1} less to cast for each card your opponents have drawn this turn.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(1));
+    assert_eq!(
+        dynamic_count,
+        Some(QuantityRef::CardsDrawnThisTurn {
+            player: PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+        }),
+        "dynamic_count must be opponents' SUM of cards drawn, not an ObjectCount; got {dynamic_count:?}"
+    );
+    // Discriminating against the over-reduction bug: the generic-card-count
+    // misparse would surface as an `ObjectCount` here.
+    assert!(
+        !matches!(dynamic_count, Some(QuantityRef::ObjectCount { .. })),
+        "dynamic_count must NOT be the generic ObjectCount{{Card}} misparse"
+    );
+}
+
 #[test]
 fn ghalta_self_cost_reduction_is_active_from_command_zone() {
     let def = parse_static_line(
@@ -2477,6 +2518,83 @@ fn static_opponent_spells_targeting_commanders_cost_more() {
     assert_eq!(commander_tf.controller, Some(ControllerRef::You));
     assert!(commander_tf.type_filters.contains(&TypeFilter::Permanent));
     assert!(commander_tf.properties.contains(&FilterProp::IsCommander));
+}
+
+#[test]
+fn parse_static_line_imposes_terror_tax() {
+    let def = parse_static_line(
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.",
+    )
+    .expect("parse_static_line should recognize terror tax");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ImposeAdditionalCost {
+            action: AdditionalCostTaxAction::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn try_parse_impose_additional_cost_terror_line() {
+    let text =
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.";
+    let lower = text.to_lowercase();
+    let def = try_parse_impose_additional_cost(text, &lower).expect("should parse terror tax");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ImposeAdditionalCost {
+            action: AdditionalCostTaxAction::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn static_opponent_spells_targeting_self_cost_additional_life_to_cast() {
+    let def = parse_static_line(
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+    let StaticMode::ImposeAdditionalCost {
+        cost: AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+        },
+        spell_filter: Some(TargetFilter::Typed(target_tf)),
+        action: AdditionalCostTaxAction::Cast,
+    } = def.mode
+    else {
+        panic!(
+            "expected ImposeAdditionalCost PayLife(3), got {:?}",
+            def.mode
+        );
+    };
+    let filter = target_tf
+        .properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::Targets { filter } => Some(filter.as_ref()),
+            _ => None,
+        })
+        .expect("expected Targets property on spell filter");
+    assert!(matches!(filter, TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_mana_abilities_cost_additional_life_to_activate_stays_gap() {
+    assert!(
+        parse_static_line("Mana abilities of this land cost an additional 1 life to activate.")
+            .is_none(),
+        "activation taxes need activation-pipeline support before coverage can claim them"
+    );
 }
 
 #[test]
@@ -4565,6 +4683,36 @@ fn parse_continuous_modifications_are_goaded_emits_goaded_static_mode() {
     )));
 }
 
+/// CR 613.1f + CR 113.3: "all activated abilities of all cards exiled with it" /
+/// "the exiled card" → `GrantAllActivatedAbilitiesOf { ExiledBySource }` (Myr
+/// Welder, Territory Forge). Issue #3101.
+#[test]
+fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
+    use crate::types::ability::TargetFilter;
+    for predicate in [
+        "all activated abilities of all cards exiled with it",
+        "all activated abilities of all cards exiled with ~",
+        "all activated abilities of the exiled card",
+    ] {
+        let mods = parse_continuous_modifications(predicate);
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::ExiledBySource
+            }],
+            "predicate: {predicate}"
+        );
+    }
+    // Typed/counter/battlefield forms stay a gap (no modification) for now.
+    assert!(
+        parse_continuous_modifications(
+            "all activated abilities of all creature cards exiled with it"
+        )
+        .is_empty(),
+        "typed 'creature cards exiled with it' must stay a gap (follow-up)"
+    );
+}
+
 #[test]
 fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     let defs = parse_static_line_multi(
@@ -5087,7 +5235,7 @@ fn static_attacking_creatures_you_control_have_double_strike() {
         Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Attacking]),
+                .properties(vec![FilterProp::Attacking { defender: None }]),
         ))
     );
     assert!(def
@@ -5095,6 +5243,85 @@ fn static_attacking_creatures_you_control_have_double_strike() {
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::DoubleStrike,
         }));
+}
+
+#[test]
+fn static_creatures_attacking_your_opponents_have_double_strike() {
+    let def = parse_static_line("Creatures attacking your opponents have double strike.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike,
+        }));
+}
+
+#[test]
+fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
+    let def = parse_static_line(
+        "Creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+}
+
+#[test]
+fn static_creatures_attacking_you_get_pump() {
+    let def = parse_static_line("Creatures attacking you get -1/-0.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::You)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: -1 }));
+}
+
+#[test]
+fn boarded_window_full_text_has_no_swallowed_clause_regression() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    let parsed = parse_oracle_text(
+        "Creatures attacking you get -1/-0.\nAt the beginning of each end step, if you were dealt 4 or more damage this turn, exile this artifact.",
+        "Boarded Window",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let swallowed: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. }))
+        .collect();
+    assert!(
+        swallowed.is_empty(),
+        "Boarded Window must not emit swallowed-clause warnings: {swallowed:?}"
+    );
 }
 
 #[test]
@@ -7239,7 +7466,9 @@ fn static_unblocked_attacking_ninjas_you_control_have_lifelink() {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Unblocked));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
     } else {
         panic!(
             "Expected Typed filter with Ninja subtype, got {:?}",
@@ -7260,7 +7489,9 @@ fn static_attacking_ninjas_you_control_have_deathtouch() {
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
         assert!(!tf.properties.contains(&FilterProp::Unblocked));
     } else {
         panic!(
@@ -10186,6 +10417,7 @@ fn negative_dynamic_power() {
 fn skip_draw_step() {
     let def = parse_static_line("Skip your draw step.").unwrap();
     assert_eq!(def.mode, StaticMode::SkipStep { step: Phase::Draw });
+    assert_eq!(def.affected, Some(TargetFilter::Controller));
 }
 
 #[test]
@@ -10203,6 +10435,31 @@ fn skip_upkeep_step() {
             step: Phase::Upkeep
         }
     );
+    assert_eq!(def.affected, Some(TargetFilter::Controller));
+}
+
+#[test]
+fn players_skip_their_upkeep_steps() {
+    let def = parse_static_line("Players skip their upkeep steps.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::SkipStep {
+            step: Phase::Upkeep
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::Player));
+}
+
+#[test]
+fn each_player_skips_their_upkeep_step() {
+    let def = parse_static_line("Each player skips their upkeep step.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::SkipStep {
+            step: Phase::Upkeep
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::Player));
 }
 
 #[test]
@@ -10659,6 +10916,93 @@ fn cant_draw_opponents() {
 }
 
 #[test]
+fn reveal_hand_opponents() {
+    let def = parse_static_line("Your opponents play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players() {
+    let def = parse_static_line("Players play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players_explicit_subject() {
+    let def = parse_static_line("All players play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_each_player_singular_hand() {
+    let def = parse_static_line("Each player plays with their hand revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players_with_untapped_condition() {
+    let def =
+        parse_static_line("As long as ~ is untapped, all players play with their hands revealed.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::Not { ref condition })
+                if matches!(**condition, StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn reveal_hand_controller_with_optional_you_subject() {
+    let def = parse_static_line("You play with your hand revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::Controller,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let imperative = parse_static_line("Play with your hand revealed.").unwrap();
+    assert_eq!(imperative.mode, def.mode);
+    assert_eq!(imperative.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
 fn spell_cost_reduction_uses_card_types_in_graveyard_quantity() {
     let def = parse_static_line(
         "This spell costs {1} less to cast for each card type among cards in your graveyard.",
@@ -10992,6 +11336,25 @@ fn static_assigns_damage_from_toughness_all_creatures() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::AssignDamageFromToughness));
+}
+
+#[test]
+fn static_assigns_damage_from_toughness_all_creatures_during_your_turn() {
+    // CR 510.1c + CR 611.3a: Baldin's global toughness-damage static is
+    // active only during its controller's turn.
+    let def = parse_static_line(
+        "During your turn, each creature assigns combat damage equal to its toughness rather than its power.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature()))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AssignDamageFromToughness));
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
 }
 
 #[test]
@@ -15645,4 +16008,42 @@ fn static_graveyard_cards_have_retrace_during_your_turn() {
         }
         other => panic!("Expected Some(Typed filter), got {other:?}"),
     }
+}
+
+#[test]
+fn continuous_gets_for_each_counter_on_source_equipment() {
+    // CR 122.1: "Equipped creature gets +1/+1 for each counter on this Equipment."
+    // (Gavel of the Righteous). The "for each counter on this Equipment" quantity
+    // must produce AddDynamicPower/AddDynamicToughness — not a flat AddPower/AddToughness.
+    let def = parse_static_line("Equipped creature gets +1/+1 for each counter on this Equipment.")
+        .expect("should parse Gavel static");
+    let mods = &def.modifications;
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
+                },
+            }
+        )),
+        "expected AddDynamicPower(CountersOn{{Source, None}}), got {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
+                },
+            }
+        )),
+        "expected AddDynamicToughness(CountersOn{{Source, None}}), got {mods:?}"
+    );
 }

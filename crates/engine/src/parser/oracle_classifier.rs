@@ -232,6 +232,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // to StaticMode::AttachmentRestriction instead of an effect.
     "can be attached only to",
     "can't attack",
+    // CR 506.5 + CR 508.1c: Master of Cruelties — "~ can only attack alone"
+    // must route to the static parser (CombatAlone MustBeSole), not the effect
+    // pipeline where it previously lowered to Unimplemented.
+    "can only attack alone",
     "can't block",
     "can't be countered",
     "can't be copied",
@@ -246,6 +250,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "no maximum hand size",
     "may choose not to untap",
     "play with the top card",
+    // CR 400.2 + CR 701.20a: Telepathy/Revelation class. Keep this narrower
+    // than generic hand-reveal effects ("reveal a card from your hand") by
+    // matching the continuous "hand(s) revealed" wording.
+    "hands revealed",
+    "hand revealed",
     "cost {",
     "costs {",
     "cost less",

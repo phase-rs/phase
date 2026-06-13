@@ -163,6 +163,100 @@ fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
     stripped.trim()
 }
 
+/// CR 601.2f + CR 118.8: Parse static-imposed additional non-mana costs such as
+/// Terror of the Peaks ("cost an additional 3 life to cast").
+pub(crate) fn try_parse_impose_additional_cost(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let (_prefix, (life_amount, action), _) = nom_primitives::scan_preceded(lower, |i| {
+        let (i, _) = tag::<_, _, VE>("cost an additional ").parse(i)?;
+        let (i, life_amount) = alt((
+            map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                value: n as i32,
+            }),
+            value(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                tag("x"),
+            ),
+            value(
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                tag("{x}"),
+            ),
+        ))
+        .parse(i)?;
+        let (i, action) = value(AdditionalCostTaxAction::Cast, tag(" life to cast")).parse(i)?;
+        Ok((i, (life_amount, action)))
+    })?;
+
+    let cost = AbilityCost::PayLife {
+        amount: life_amount,
+    };
+
+    let controller = if nom_primitives::scan_contains(lower, "your opponents cast")
+        || nom_primitives::scan_contains(lower, "opponents cast")
+        || nom_primitives::scan_contains(lower, "each opponent casts")
+    {
+        Some(ControllerRef::Opponent)
+    } else if nom_primitives::scan_contains(lower, "you cast")
+        || nom_primitives::scan_contains(lower, " you activate")
+        || nom_primitives::scan_contains(lower, " you may activate")
+    {
+        Some(ControllerRef::You)
+    } else {
+        None
+    };
+
+    let target_cost_filter = parse_cost_modifier_target_filter(lower)?;
+    let spell_filter = Some(target_cost_filter);
+
+    let is_self_scoped = nom_primitives::scan_contains(lower, "of this land")
+        || nom_primitives::scan_contains(lower, "of this creature")
+        || nom_primitives::scan_contains(lower, "of this permanent")
+        || nom_primitives::scan_contains(lower, "of ~");
+
+    let affected = if is_self_scoped {
+        TargetFilter::SelfRef
+    } else {
+        match controller {
+            Some(ControllerRef::You) => {
+                TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You))
+            }
+            Some(ControllerRef::Opponent) => {
+                TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::Opponent))
+            }
+            Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::ChosenPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::TriggeringPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            None => TargetFilter::Typed(TypedFilter::card()),
+        }
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::ImposeAdditionalCost {
+            cost,
+            spell_filter,
+            action,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
 /// Dynamic "for each" counts are extracted when present.
 pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
     let is_raise = nom_primitives::scan_contains(lower, "more to cast")

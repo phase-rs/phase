@@ -2344,7 +2344,7 @@ mod tests {
             GameEvent::DieRolled {
                 player_id: PlayerId(0),
                 sides: 6,
-                result: 4,
+                result: Some(4),
             },
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
@@ -2367,7 +2367,7 @@ mod tests {
         let events = vec![GameEvent::DieRolled {
             player_id: PlayerId(0),
             sides: 6,
-            result: 4,
+            result: Some(4),
         }];
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {
@@ -2455,7 +2455,7 @@ mod tests {
         let roll = events
             .iter()
             .find_map(|e| match e {
-                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                GameEvent::DieRolled { result, .. } => result.map(i32::from),
                 _ => None,
             })
             .expect("RollDie must emit a DieRolled event");

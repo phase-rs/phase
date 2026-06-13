@@ -635,6 +635,11 @@ export interface SerializedAbility {
    *  confirmation modal for a lone card-consuming action — see
    *  requiresConfirmation in viewmodel/cardActionChoice.ts. */
   consumes_source?: boolean;
+  /** Derived by the engine (CR 605.1a, mana_abilities::is_mana_ability): true
+   *  when this is a mana ability. Absent / false otherwise. The UI uses this to
+   *  route mana-tap affordances instead of introspecting the effect AST — see
+   *  isManaObjectAction in viewmodel/cardActionChoice.ts. */
+  is_mana_ability?: boolean;
   [key: string]: unknown;
 }
 
@@ -1135,7 +1140,10 @@ export type WaitingFor =
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Dash" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" } | { type: "Blitz" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
+  // Keep this union exhaustive with the engine enum so the modal's keyword
+  // switch is type-checked against every variant the engine can emit.
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -1202,6 +1210,7 @@ export type WaitingFor =
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
   | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
+  | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   // CR 510.1d + CR 702.22k: a blocking creature blocking a banded attacker —
@@ -1543,6 +1552,7 @@ export type GameAction =
   | { type: "PayCombatTax"; data: { accept: boolean } }
   | { type: "ChooseUntap"; data: { object_id: ObjectId; untap: boolean } }
   | { type: "ChooseExert"; data: { exert: boolean } }
+  | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
@@ -1684,8 +1694,10 @@ export type GameEvent =
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
   // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
-  // the engine's authoritative roll (1..=sides after modifiers).
-  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number } }
+  // the engine's authoritative roll (1..=sides after modifiers). `result` is
+  // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
+  // numeric face value to animate.
+  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number | null } }
   // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
   // preserves the round boundaries (round 1 = every seat; each later round = the
   // previous round's tied-max group that rerolled); `winner` is the engine's

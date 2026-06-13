@@ -4,9 +4,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastTimingPermission, CastVariantPaid,
-    CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
+    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
+    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
+    ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -582,6 +584,12 @@ pub struct GameObject {
     /// Kicker semantics.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub additional_cost_payment_count: u32,
+    /// CR 607.2g + CR 702.157b/702.175b: Per-instance non-kicker
+    /// additional-cost payments that produced this permanent, copied from
+    /// `SpellContext.additional_cost_payments` at cast resolution for linked
+    /// ETB triggers such as Squad and Offspring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
     /// produced this object. Stored as object ids so future convoke-reference
     /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
@@ -870,6 +878,12 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
+    /// CR 601.2a + CR 603.4: Transient field tracking the player who cast the
+    /// spell that became this permanent. Paired with `cast_from_zone` for
+    /// intervening-if clauses such as "if you cast it from your graveyard".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
+
     /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
     /// is exiled instead of being put into its owner's graveyard as it resolves,
     /// and the resulting exile is recorded as "exiled with" the stored source.
@@ -937,7 +951,37 @@ pub struct GameObject {
     pub phase_status: PhaseStatus,
 }
 
+/// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
+/// slice. The generic "choose a card type" persists as a `CardType` attribute; a
+/// restricted card-type choice ("Choose creature or land", Winding Way) parses as
+/// a `Labeled` modal option list and persists as a capitalized `Label`, which is
+/// parsed back to its `CoreType`. Shared by `GameObject::chosen_card_type` and
+/// the `FilterProp::IsChosenCardType` matcher so both forms bind uniformly.
+pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType> {
+    attrs.iter().find_map(|a| match a {
+        ChosenAttribute::CardType(t) => Some(*t),
+        ChosenAttribute::Label(label) => label.parse::<CoreType>().ok(),
+        _ => None,
+    })
+}
+
 impl GameObject {
+    pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
+        additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
+    }
+
+    pub fn instance_payment_count_for_ordinal(
+        &self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+    ) -> u32 {
+        additional_cost_instance_payment_count_for_ordinal(
+            &self.additional_cost_payments,
+            origin,
+            origin_ordinal,
+        )
+    }
+
     /// Oathbreaker RC: true for the command-zone signature spell role.
     pub fn is_signature_spell(&self) -> bool {
         self.signature_spell.is_some()
@@ -1125,6 +1169,7 @@ impl GameObject {
             cost_x_paid: None,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
+            additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
             bestow_form: None,
             prototype_form: None,
@@ -1174,6 +1219,7 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
+            cast_controller: None,
             exile_from_stack_linked_source: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
@@ -1275,12 +1321,15 @@ impl GameObject {
         // it only for ability-effect-driven entries (Kodama anti-recursion guard).
         self.entered_via_ability_source = None;
         self.cast_timing_permission = None;
-        // CR 400.7 + CR 702.33d: kicker payments are bound to the casting
-        // event that produced this object. A re-entering permanent has no
-        // memory of prior kicker payments — clear before the cast resolution
-        // path repopulates from the resolving spell's `SpellContext`.
+        // CR 400.7d + CR 702.33d: cast provenance and kicker payments are
+        // bound to the casting event that produced this object. A re-entering
+        // permanent has no memory of prior cast links — clear before the cast
+        // resolution path repopulates from the resolving spell's context.
+        self.cast_from_zone = None;
+        self.cast_controller = None;
         self.kickers_paid.clear();
         self.additional_cost_payment_count = 0;
+        self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
         // spell-resolution event that created this object. A re-entering
         // permanent has no memory of a prior convoke payment.
@@ -1363,6 +1412,7 @@ impl GameObject {
         // re-checks resolve correctly. A permanent that leaves the battlefield
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
+        self.cast_controller = None;
         // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
         // scoped — a permanent that leaves the battlefield is a new object on any
         // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.
@@ -1443,11 +1493,16 @@ impl GameObject {
 
     /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
+    ///
+    /// CR 205.2a: A *restricted* card-type choice ("Choose creature or land",
+    /// Winding Way) parses as a `Labeled` modal option list rather than the
+    /// generic "choose a card type", so it persists as a capitalized `Label`
+    /// rather than a `CardType`. The label still names a card type, so fall back
+    /// to parsing it (e.g. "Creature" → `CoreType::Creature`) — this lets every
+    /// "of the chosen type" reader (cost reduction, protection, the reveal-and-
+    /// partition move) bind a restricted card-type choice uniformly.
     pub fn chosen_card_type(&self) -> Option<CoreType> {
-        self.chosen_attributes.iter().find_map(|a| match a {
-            ChosenAttribute::CardType(t) => Some(*t),
-            _ => None,
-        })
+        chosen_card_type_of(&self.chosen_attributes)
     }
 
     /// Look up a stored basic land type choice.

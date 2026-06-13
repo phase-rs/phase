@@ -79,6 +79,7 @@ fn build_gatta_prevention_chain(
             target: TargetFilter::ParentTarget,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
+            prevention_duration: None,
         },
         vec![TargetRef::Object(chosen)],
         gatta,

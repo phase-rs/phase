@@ -364,6 +364,29 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         }
     }
 
+    // CR 901.10 / CR 311.5 / CR 312.4: If the planar controller leaves the game,
+    // the next player in turn order that isn't leaving becomes the planar
+    // controller (the active player normally, unless they're the one leaving).
+    // This is NOT a state-based action — it happens immediately on leave.
+    if state.planar_controller == Some(player) {
+        let any_alive = state
+            .players
+            .iter()
+            .any(|p| !p.is_eliminated && p.id != player);
+
+        if !any_alive {
+            state.planar_controller = None;
+        } else {
+            let new_controller =
+                if players::is_alive(state, state.active_player) && state.active_player != player {
+                    state.active_player
+                } else {
+                    players::next_player(state, player)
+                };
+            crate::game::planechase::set_planar_controller(state, new_controller, events);
+        }
+    }
+
     events.push(GameEvent::PlayerEliminated { player_id: player });
 }
 

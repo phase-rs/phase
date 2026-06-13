@@ -1,7 +1,9 @@
 //! Layer 2 — Plan: derived schedule (static prior) + per-decision realization.
 //!
 //! `derive_snapshot` lives in `curves.rs` and consumes a `DeckFeatures` prior
-//! to produce a `PlanSnapshot`. Live realization (`PlanState`) is Phase C+.
+//! to produce a `PlanSnapshot`. The snapshot is consumed by mulligan bottoming
+//! and by feature-aware curve policies; `PlanState` is the cheap live
+//! realization shape for future per-decision consumers.
 
 pub mod curves;
 

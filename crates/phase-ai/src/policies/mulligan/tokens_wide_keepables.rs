@@ -30,9 +30,9 @@ impl MulliganPolicy for TokensWideKeepablesMulligan {
         hand: &[ObjectId],
         state: &GameState,
         features: &DeckFeatures,
-        _plan: &PlanSnapshot,
-        _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        _plan: &PlanSnapshot, // input-unused: tokens opener scoring is card-composition only
+        _turn_order: TurnOrder, // input-unused: tokens opener scoring is card-composition only
+        _mulligans_taken: u8, // input-unused: tokens opener scoring is card-composition only
     ) -> MulliganScore {
         let commitment = features.tokens_wide.commitment;
         if commitment <= MULLIGAN_FLOOR {

@@ -1016,6 +1016,17 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
+    can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
+}
+
+fn can_activate_mana_ability_by_simulation(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    crate::game::perf_counters::record_state_clone_for_legality();
     let mut simulated = state.clone();
     activate_mana_ability(
         &mut simulated,
@@ -2795,6 +2806,31 @@ mod tests {
     }
 
     #[test]
+    fn is_mana_ability_serialized_only_when_true() {
+        // The AbilityDefinition Serialize impl emits the derived `is_mana_ability`
+        // UI key (skip_serializing_if = is_false), so the client routes mana-tap
+        // affordances off this engine flag instead of introspecting the effect AST.
+        let mana = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        let mana_json = serde_json::to_value(&mana).unwrap();
+        assert_eq!(mana_json["is_mana_ability"], serde_json::json!(true));
+
+        let non_mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let non_mana_json = serde_json::to_value(&non_mana).unwrap();
+        assert!(non_mana_json.get("is_mana_ability").is_none());
+    }
+
+    #[test]
     fn non_mana_api_type_not_detected() {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -3145,9 +3181,10 @@ mod tests {
                         ManaColor::Green,
                     ],
                 },
-                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                    "Elemental".to_string(),
-                )],
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Elemental".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                }],
                 grants: vec![],
                 expiry: None,
                 target: None,
@@ -3164,9 +3201,10 @@ mod tests {
             assert_eq!(
                 unit.restrictions,
                 vec![
-                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities(
-                        "Elemental".to_string()
-                    )
+                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                        spell_type: "Elemental".to_string(),
+                        ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                    }
                 ],
                 "Flamebraider mana must carry Elemental restriction"
             );

@@ -239,17 +239,13 @@ pub(crate) fn parse_named_color(text: &str) -> Option<ManaColor> {
 }
 
 /// CR 614.1b: Parse a step name from Oracle text using nom combinators.
-pub(crate) fn parse_step_name(input: &str) -> Option<Phase> {
-    use crate::parser::oracle_nom::error::OracleError;
-    let result: Result<(&str, Phase), nom::Err<OracleError<'_>>> = alt((
+pub(crate) fn parse_step_name_nom(input: &str) -> OracleResult<'_, Phase> {
+    alt((
         value(Phase::Draw, tag("draw step")),
         value(Phase::Untap, tag("untap step")),
         value(Phase::Upkeep, tag("upkeep step")),
     ))
-    .parse(input);
-    result
-        .ok()
-        .and_then(|(rest, phase)| rest.is_empty().then_some(phase))
+    .parse(input)
 }
 
 /// CR 205.2a: Check if a lowercase descriptor names a core card type that can modify
@@ -1751,14 +1747,21 @@ pub(crate) fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFil
     let (_, target_text) = take_until::<_, _, VE>(" cost").parse(input).ok()?;
 
     let target_text = target_text.trim();
-    let target_filter = parse_commander_subject_filter(target_text).or_else(|| {
-        let (filter, remainder) = parse_type_phrase(target_text);
-        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            Some(filter)
-        } else {
-            None
-        }
-    })?;
+    let target_filter = if matches!(
+        target_text,
+        "this creature" | "this permanent" | "this card" | "~" | "itself"
+    ) {
+        Some(TargetFilter::SelfRef)
+    } else {
+        parse_commander_subject_filter(target_text).or_else(|| {
+            let (filter, remainder) = parse_type_phrase(target_text);
+            if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+                Some(filter)
+            } else {
+                None
+            }
+        })
+    }?;
 
     Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
         FilterProp::Targets {

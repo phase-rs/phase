@@ -1,0 +1,84 @@
+{
+  "schema_version": 2,
+  "git_sha": "388eb9c77ed8",
+  "card_data_hash": "402a77140a3b32e01549faff7aaad4a3689b2f98",
+  "unix_timestamp_secs": 1781227121,
+  "difficulty": "Medium",
+  "games_per_matchup": 10,
+  "base_seed": 10573729,
+  "results": [
+    {
+      "matchup_id": "red-mirror",
+      "exercises": [
+        "AggroPressure"
+      ],
+      "p0_label": "Red Aggro (P0)",
+      "p1_label": "Red Aggro (P1)",
+      "expected": {
+        "kind": "Mirror",
+        "tolerance": 0.15
+      },
+      "p0_wins": 6,
+      "p1_wins": 4,
+      "draws": 0,
+      "games": [
+        {
+          "seed": 10579729,
+          "winner": 0,
+          "turns": 18
+        },
+        {
+          "seed": 10579730,
+          "winner": 0,
+          "turns": 17
+        },
+        {
+          "seed": 10579731,
+          "winner": 0,
+          "turns": 16
+        },
+        {
+          "seed": 10579732,
+          "winner": 1,
+          "turns": 12
+        },
+        {
+          "seed": 10579733,
+          "winner": 1,
+          "turns": 21
+        },
+        {
+          "seed": 10579734,
+          "winner": 1,
+          "turns": 12
+        },
+        {
+          "seed": 10579735,
+          "winner": 0,
+          "turns": 11
+        },
+        {
+          "seed": 10579736,
+          "winner": 1,
+          "turns": 12
+        },
+        {
+          "seed": 10579737,
+          "winner": 0,
+          "turns": 9
+        },
+        {
+          "seed": 10579738,
+          "winner": 0,
+          "turns": 19
+        }
+      ],
+      "total_turns": 147,
+      "total_duration_ms": 69075,
+      "avg_turns": 14.7,
+      "avg_duration_ms": 6907.5,
+      "status": "Pass",
+      "fail_reason": null
+    }
+  ]
+}

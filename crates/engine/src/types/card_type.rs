@@ -61,6 +61,12 @@ pub enum CoreType {
     Kindred,
     /// CR 309: Dungeons — nontraditional cards that exist in the command zone.
     Dungeon,
+    /// CR 311: Planes — nontraditional cards used in the Planechase variant that
+    /// remain face up in the command zone (CR 311.2).
+    Plane,
+    /// CR 312: Phenomena — nontraditional cards used in the Planechase variant
+    /// that are encountered from the planar deck (CR 312.2).
+    Phenomenon,
 }
 
 impl FromStr for CoreType {
@@ -79,6 +85,8 @@ impl FromStr for CoreType {
             "Battle" => Ok(CoreType::Battle),
             "Kindred" => Ok(CoreType::Kindred),
             "Dungeon" => Ok(CoreType::Dungeon),
+            "Plane" => Ok(CoreType::Plane),
+            "Phenomenon" => Ok(CoreType::Phenomenon),
             _ => Err(()),
         }
     }
@@ -98,6 +106,8 @@ impl fmt::Display for CoreType {
             CoreType::Battle => write!(f, "Battle"),
             CoreType::Kindred => write!(f, "Kindred"),
             CoreType::Dungeon => write!(f, "Dungeon"),
+            CoreType::Plane => write!(f, "Plane"),
+            CoreType::Phenomenon => write!(f, "Phenomenon"),
         }
     }
 }
@@ -148,7 +158,12 @@ impl CoreType {
             CoreType::Sorcery => Some("sorcery"),
             CoreType::Planeswalker => Some("planeswalker"),
             CoreType::Land => Some("land"),
-            CoreType::Tribal | CoreType::Battle | CoreType::Kindred | CoreType::Dungeon => None,
+            CoreType::Tribal
+            | CoreType::Battle
+            | CoreType::Kindred
+            | CoreType::Dungeon
+            | CoreType::Plane
+            | CoreType::Phenomenon => None,
         }
     }
 }
@@ -391,10 +406,12 @@ mod tests {
             Some("planeswalker")
         );
         assert_eq!(CoreType::Land.protection_quality_str(), Some("land"));
-        // 4 None — supplemental types never offered as a chosen card type.
+        // 6 None — supplemental types never offered as a chosen card type.
         assert_eq!(CoreType::Tribal.protection_quality_str(), None);
         assert_eq!(CoreType::Battle.protection_quality_str(), None);
         assert_eq!(CoreType::Kindred.protection_quality_str(), None);
         assert_eq!(CoreType::Dungeon.protection_quality_str(), None);
+        assert_eq!(CoreType::Plane.protection_quality_str(), None);
+        assert_eq!(CoreType::Phenomenon.protection_quality_str(), None);
     }
 }

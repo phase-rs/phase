@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, FaceDownBody, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -35,11 +35,15 @@ pub struct FaceDownData {
 /// down permanents default to 2/2 creatures with no name, subtypes, mana cost,
 /// color, abilities, or rules text.
 ///
-/// `profile` is the "otherwise specified by the effect" override from CR 708.2a:
-/// power/toughness default to 2 when `None`, `Creature` is always present in the
-/// core types (CR 708.2a), and any `extra_core_types`/`subtypes` the effect
-/// listed are applied on top (CR 205.1a). `FaceDownProfile::vanilla_2_2()`
-/// reproduces the manifest/morph default.
+/// `profile` is the "otherwise specified by the effect" override from CR 708.2a.
+/// For a `FaceDownBody::Creature` profile, power/toughness default to 2 when
+/// `None`, `Creature` is always present in the core types, and any
+/// `extra_core_types`/`subtypes` the effect listed are applied on top
+/// (CR 205.1a); `FaceDownProfile::vanilla_2_2()` reproduces the manifest/morph
+/// default. For a `FaceDownBody::Noncreature` profile (CR 708.2a sentence 2 —
+/// e.g. Yedora's "It's a Forest land."), the core types come entirely from
+/// `extra_core_types`, there is no implicit Creature type, and the permanent has
+/// no power/toughness (CR 208.1).
 pub fn apply_face_down_creature_characteristics(
     obj: &mut crate::game::game_object::GameObject,
     profile: &crate::types::ability::FaceDownProfile,
@@ -47,21 +51,34 @@ pub fn apply_face_down_creature_characteristics(
     obj.face_down = true;
     obj.name = String::new();
     obj.base_name = String::new();
-    // CR 708.2a: power/toughness default to 2 unless the effect specifies otherwise.
-    let power = profile.power.unwrap_or(2);
-    let toughness = profile.toughness.unwrap_or(2);
-    obj.power = Some(power);
-    obj.toughness = Some(toughness);
-    obj.base_power = Some(power);
-    obj.base_toughness = Some(toughness);
-    // CR 708.2a + CR 205.1a: Creature is always present; the effect may add
-    // further core types (e.g. Artifact) without removing Creature.
-    let mut core_types = vec![CoreType::Creature];
+    // CR 708.2a + CR 205.1a: assemble the face-down core-type set. A creature
+    // body (morph/manifest default, CR 708.2a sentence 1) always carries the
+    // Creature core type with the effect's extra types layered on top. A
+    // non-creature body (CR 708.2a sentence 2 — "It's a Forest land.") takes its
+    // core types entirely from the effect, with no implicit Creature.
+    let mut core_types = match profile.body {
+        FaceDownBody::Creature => vec![CoreType::Creature],
+        FaceDownBody::Noncreature => Vec::new(),
+    };
     for ct in &profile.extra_core_types {
         if !core_types.contains(ct) {
             core_types.push(*ct);
         }
     }
+    // CR 208.1 + CR 708.2a: only a creature body has power/toughness — it
+    // defaults to 2/2 unless the effect specifies otherwise. A non-creature
+    // body (a Forest land) has no power/toughness.
+    let (power, toughness) = match profile.body {
+        FaceDownBody::Creature => (
+            Some(profile.power.unwrap_or(2)),
+            Some(profile.toughness.unwrap_or(2)),
+        ),
+        FaceDownBody::Noncreature => (profile.power, profile.toughness),
+    };
+    obj.power = power;
+    obj.toughness = toughness;
+    obj.base_power = power;
+    obj.base_toughness = toughness;
     obj.card_types = CardType {
         supertypes: vec![],
         core_types,
@@ -744,6 +761,7 @@ mod tests {
         let profile = crate::types::ability::FaceDownProfile {
             power: Some(2),
             toughness: Some(2),
+            body: crate::types::ability::FaceDownBody::Creature,
             extra_core_types: vec![CoreType::Artifact],
             subtypes: vec!["Cyberman".to_string()],
             ward: None,

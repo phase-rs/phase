@@ -197,7 +197,7 @@ pub fn enter_attacking(
         ));
         // CR 508.4 + CR 506.4 + CR 613.1f: a permanent put onto the battlefield
         // attacking is an attacking creature; re-evaluate Layer 6
-        // FilterProp::Attacking grants immediately.
+        // FilterProp::Attacking { defender: None } grants immediately.
         state.layers_dirty.mark_full();
     }
 }
@@ -308,7 +308,7 @@ pub fn place_attacking_alongside(
             defending_player,
         ));
         // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
-        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking
+        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking { defender: None }
         // grants.
         state.layers_dirty.mark_full();
     }
@@ -2212,7 +2212,7 @@ pub fn declare_attackers_with_bands(
     // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
     // stays attacking until removed from combat or the combat phase ends. Marking
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
-    // FilterProp::Attacking (e.g. Crossway Troublemakers) to re-evaluate now, so
+    // FilterProp::Attacking { defender: None } (e.g. Crossway Troublemakers) to re-evaluate now, so
     // the grant is live for the whole combat, not just after damage.
     state.layers_dirty.mark_full();
     let attacker_count = combat.attackers.len();
@@ -7045,7 +7045,7 @@ mod tests {
     }
 
     /// CR 508.4 + CR 613.1f: a creature put onto the battlefield attacking must
-    /// dirty layers so Layer 6 FilterProp::Attacking grants re-evaluate. Fails on
+    /// dirty layers so Layer 6 FilterProp::Attacking { defender: None } grants re-evaluate. Fails on
     /// revert of the `enter_attacking` mark.
     #[test]
     fn enter_attacking_marks_layers_dirty() {
@@ -7085,7 +7085,7 @@ mod tests {
     }
 
     /// CR 702.49c + CR 702.190b + CR 613.1f: Ninjutsu/Sneak place a creature
-    /// already attacking; the layers must re-evaluate Layer 6 FilterProp::Attacking
+    /// already attacking; the layers must re-evaluate Layer 6 FilterProp::Attacking { defender: None }
     /// grants. Fails on revert of the `place_attacking_alongside` mark.
     #[test]
     fn place_attacking_alongside_marks_layers_dirty() {

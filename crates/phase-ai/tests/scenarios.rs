@@ -220,7 +220,15 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
 
     let ai_players = HashSet::from([P0]);
     let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
-    let results = run_ai_actions(runner.state_mut(), &ai_players, &ai_configs);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+    let results = run_ai_actions(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+    );
 
     assert!(
         !results.is_empty(),

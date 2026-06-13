@@ -5,8 +5,8 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
-    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
+    eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -27,7 +27,9 @@ use crate::types::card_type::{
 use crate::types::counter::{has_positive_counters, CounterType};
 #[cfg(test)]
 use crate::types::game_state::MayTriggerOrigin;
-use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
+use crate::types::game_state::{
+    DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 #[cfg(test)]
@@ -618,6 +620,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
+        | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
         | StaticCondition::CompletedADungeon
@@ -734,6 +737,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
+        | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
         | StaticCondition::CompletedADungeon
@@ -1053,6 +1057,8 @@ fn evaluate_condition_with_context(
         }),
         // CR 725.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => eval_is_monarch(state, controller),
+        // CR 726.3: True when the controller has the initiative.
+        StaticCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
         StaticCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
@@ -1561,6 +1567,7 @@ pub fn flush_layers(state: &mut GameState) {
     match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
         LayersDirty::Clean => {}
         LayersDirty::Full => {
+            super::perf_counters::record_layers_full_eval();
             evaluate_layers(state);
             super::public_state::mark_public_state_all_dirty(state);
         }
@@ -1569,9 +1576,12 @@ pub fn flush_layers(state: &mut GameState) {
                 return;
             }
             if incremental_flush_must_escalate(state, &ids) {
+                super::perf_counters::record_layers_escalated();
+                super::perf_counters::record_layers_full_eval();
                 evaluate_layers(state);
                 super::public_state::mark_public_state_all_dirty(state);
             } else {
+                super::perf_counters::record_layers_incremental();
                 apply_layers_incremental(state, &ids);
                 for id in &ids {
                     super::public_state::mark_public_state_object_dirty(state, *id);
@@ -1796,7 +1806,7 @@ fn any_active_static_condition_perturbed_by_entry(
 /// Cleared and repopulated wholesale (keyset is authoritative only for sources
 /// present + non-phased at this full eval; absence at consult fails closed).
 fn refresh_static_gate_truth(state: &mut GameState) {
-    let mut next: std::collections::HashMap<StaticGateKey, bool> = std::collections::HashMap::new();
+    let mut next: im::HashMap<StaticGateKey, bool> = im::HashMap::new();
     for_each_static_effect_source(state, |state, obj| {
         for (def_index, def) in obj.static_definitions.iter_all().enumerate() {
             if def.mode != StaticMode::Continuous {
@@ -2363,6 +2373,22 @@ fn active_continuous_effects_from_static_definitions(
                 // `static_definitions` for inspectability and downstream
                 // queries (e.g., parser/coverage walks).
             }
+            // CR 613.1f + CR 113.3: "~ has all activated abilities of [source]"
+            // (Myr Welder, Territory Forge, …). Expand into one `GrantAbility` per
+            // activated ability of each object matching `source`, so the dynamic
+            // set is recomputed each pass and reuses the existing GrantAbility
+            // apply + dedup. The meta-effect itself has no standalone layer-6
+            // behaviour, so skip pushing it.
+            if let ContinuousModification::GrantAllActivatedAbilitiesOf { source } = modification {
+                effects.extend(expand_granted_activated_abilities(
+                    state,
+                    source_id,
+                    timestamp,
+                    &affected_filter,
+                    source,
+                ));
+                continue;
+            }
             effects.push(ActiveContinuousEffect {
                 source_id,
                 controller,
@@ -2474,6 +2500,86 @@ fn expand_granted_static_effects(
     out
 }
 
+/// CR 613.1f + CR 113.3: Expand a `GrantAllActivatedAbilitiesOf { source }` host
+/// modification into one `GrantAbility` effect per activated ability of each
+/// object matching `source`. `source` is resolved relative to each recipient
+/// matching the host static's `affected_filter` (so `ExiledBySource` reads the
+/// recipient's own linked exiles). Provider objects are scanned across all zones
+/// — the granted-from cards are typically in exile, not on the battlefield — in
+/// deterministic `ObjectId` order. Both mana and non-mana activated abilities are
+/// granted. Synthesized effects target the recipient via `SelfRef`, reusing the
+/// layer-6 `GrantAbility` apply and its structural dedup, and are recomputed each
+/// pass so the granted set tracks the current `source` membership.
+fn expand_granted_activated_abilities(
+    state: &GameState,
+    host_source_id: ObjectId,
+    host_timestamp: u64,
+    host_affected_filter: &TargetFilter,
+    source: &TargetFilter,
+) -> Vec<ActiveContinuousEffect> {
+    let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
+    let mut out = Vec::new();
+    let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+    provider_ids.sort_unstable_by_key(|id| id.0);
+    for &recipient_id in &state.battlefield {
+        if !crate::game::filter::matches_target_filter(
+            state,
+            recipient_id,
+            host_affected_filter,
+            &host_ctx,
+        ) {
+            continue;
+        }
+        let recipient_controller = match state.objects.get(&recipient_id) {
+            Some(obj) => obj.controller,
+            None => continue,
+        };
+        // CR 109.5: `source` references like `ExiledBySource` resolve against the
+        // recipient that gained the ability.
+        let provider_ctx = crate::game::filter::FilterContext::from_source(state, recipient_id);
+        let mut next_mod_index = 0usize;
+        for &provider_id in &provider_ids {
+            if provider_id == recipient_id {
+                continue;
+            }
+            if !crate::game::filter::matches_target_filter(
+                state,
+                provider_id,
+                source,
+                &provider_ctx,
+            ) {
+                continue;
+            }
+            let Some(provider) = state.objects.get(&provider_id) else {
+                continue;
+            };
+            for ability in provider.abilities.iter() {
+                if ability.kind != crate::types::ability::AbilityKind::Activated {
+                    continue;
+                }
+                out.push(ActiveContinuousEffect {
+                    source_id: recipient_id,
+                    controller: recipient_controller,
+                    def_index: None,
+                    transient_id: None,
+                    mod_index: next_mod_index,
+                    layer: Layer::Ability,
+                    timestamp: host_timestamp,
+                    modification: ContinuousModification::GrantAbility {
+                        definition: Box::new(ability.clone()),
+                    },
+                    affected_filter: TargetFilter::SelfRef,
+                    condition: None,
+                    mode: StaticMode::Continuous,
+                    characteristic_defining: false,
+                });
+                next_mod_index += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Collect active transient effects, filtering out expired host-bound effects.
 pub(crate) fn gather_transient_continuous_effects(
     state: &GameState,
@@ -2490,11 +2596,8 @@ pub(crate) fn gather_transient_continuous_effects(
             continue;
         }
 
-        // CR 611.2b: ForAsLongAs durations embed a condition that must hold each layer cycle.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        if !transient_duration_holds(state, tce) {
+            continue;
         }
 
         let retained_condition = if let Some(condition) = &tce.condition {
@@ -2525,6 +2628,24 @@ pub(crate) fn gather_transient_continuous_effects(
                 characteristic_defining: false,
             });
         }
+    }
+}
+
+fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    let Duration::ForAsLongAs { ref condition } = tce.duration else {
+        return true;
+    };
+
+    // CR 611.2b: A recipient-referential condition ("for as long as IT has a
+    // shield counter" — Shield Broker's gain-control) refers to the object the
+    // effect applies to, not the source. For a single-object effect that object
+    // is the affected `SpecificObject`; evaluate against it so the duration
+    // tracks the controlled/granted creature's counters rather than the source.
+    match (&tce.affected, condition_uses_recipient_context(condition)) {
+        (TargetFilter::SpecificObject { id }, true) => {
+            evaluate_condition_with_recipient(state, condition, tce.controller, tce.source_id, *id)
+        }
+        _ => evaluate_condition(state, condition, tce.controller, tce.source_id),
     }
 }
 
@@ -2750,10 +2871,8 @@ fn collect_transient_combat_assignment_rule_effects(
             continue;
         }
 
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        if !transient_duration_holds(state, tce) {
+            continue;
         }
 
         let retained_condition = if let Some(condition) = &tce.condition {
@@ -3179,6 +3298,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::AddKeyword { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -3803,6 +3923,12 @@ fn apply_continuous_effect_filtered(
                     Arc::make_mut(&mut obj.abilities).push(*definition.clone());
                 }
             }
+            // CR 613.1f: Handled entirely at continuous-effect collection time —
+            // `active_continuous_effects_from_static_definitions` expands this into
+            // one `GrantAbility` effect per matching activated ability (it needs
+            // read access to the provider objects, which the per-object apply
+            // borrow cannot give). No direct per-object mutation here.
+            ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {}
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
@@ -7869,6 +7995,75 @@ mod tests {
         assert!(
             !obj.keywords.contains(&Keyword::Hexproof),
             "should not have hexproof on opponent's turn"
+        );
+    }
+
+    /// CR 613.1f + CR 113.3: A permanent with "has all activated abilities of all
+    /// cards exiled with it" (Myr Welder) gains each exiled card's activated
+    /// ability after layer evaluation, via the dynamic GrantAllActivatedAbilitiesOf
+    /// expansion. Issue #3101.
+    #[test]
+    fn grants_all_activated_abilities_of_cards_exiled_with_it() {
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        };
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Host: Myr Welder-like artifact carrying the self-static.
+        let host = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Myr Welder".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::ExiledBySource,
+                }])]
+            .into();
+        }
+
+        // A card exiled with the host, carrying a "{T}: deal 1 damage" activated
+        // ability.
+        let exiled = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Exiled Source".to_string(),
+            Zone::Exile,
+        );
+        let granted = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&exiled).unwrap().abilities).push(granted.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled,
+            source_id: host,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let host_obj = state.objects.get(&host).unwrap();
+        assert!(
+            host_obj.abilities.iter().any(|a| a == &granted),
+            "Myr Welder must gain the exiled card's activated ability; got {:?}",
+            host_obj.abilities
         );
     }
 

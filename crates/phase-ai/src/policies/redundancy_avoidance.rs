@@ -478,6 +478,7 @@ fn redundancy_delta(
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::Planeswalk
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }

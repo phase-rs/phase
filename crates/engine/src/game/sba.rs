@@ -162,6 +162,17 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // and no room ability from that dungeon is on the stack, complete the dungeon.
         check_dungeon_completion(state, events, &mut any_performed);
 
+        // CR 704.6f / CR 312.7: In a Planechase game, if a phenomenon is face up
+        // in the command zone and none of its triggered abilities are on the
+        // stack, its controller planeswalks. Gated on an active Planechase game.
+        if state.planar_controller.is_some() {
+            crate::game::planechase::check_phenomenon_planeswalk_sba(
+                state,
+                events,
+                &mut any_performed,
+            );
+        }
+
         if !any_performed {
             break;
         }
@@ -204,8 +215,10 @@ fn check_city_blessing(
         .iter()
         .map(|p| p.id)
         .filter(|pid| !state.city_blessing.contains(pid))
-        .filter(|pid| controls_ascend_permanent(state, *pid))
-        .filter(|pid| permanents_controlled(state, *pid) >= 10)
+        .filter(|pid| {
+            let status = ascend_status(state, *pid);
+            status.controls_ascend_permanent && status.permanents_controlled >= 10
+        })
         .collect();
 
     for player_id in players_to_bless {
@@ -216,28 +229,27 @@ fn check_city_blessing(
     }
 }
 
-/// CR 702.131b: "you control ten or more permanents" — every object on the
-/// battlefield is a permanent (CR 110.1).
-fn permanents_controlled(state: &GameState, player: PlayerId) -> usize {
+#[derive(Debug, Clone, Copy, Default)]
+struct AscendStatus {
+    permanents_controlled: usize,
+    controls_ascend_permanent: bool,
+}
+
+/// CR 702.131b: Ascend checks both "you control ten or more permanents" and
+/// whether that player controls a permanent with ascend. Every battlefield
+/// object is a permanent (CR 110.1), so one battlefield pass can answer both.
+fn ascend_status(state: &GameState, player: PlayerId) -> AscendStatus {
     state
         .battlefield
         .iter()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| obj.controller == player)
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .fold(AscendStatus::default(), |mut status, obj| {
+            status.permanents_controlled += 1;
+            status.controls_ascend_permanent |=
+                obj.has_keyword(&crate::types::keywords::Keyword::Ascend);
+            status
         })
-        .count()
-}
-
-/// CR 702.131: whether `player` controls any permanent with the Ascend keyword.
-fn controls_ascend_permanent(state: &GameState, player: PlayerId) -> bool {
-    state.battlefield.iter().any(|id| {
-        state.objects.get(id).is_some_and(|obj| {
-            obj.controller == player && obj.has_keyword(&crate::types::keywords::Keyword::Ascend)
-        })
-    })
 }
 
 /// CR 104.3b + CR 810.8a: Check if a player has active CantLoseTheGame protection
@@ -3535,7 +3547,7 @@ mod tests {
         for id in fillers.iter().take(5) {
             state.battlefield.retain(|bid| bid != id);
         }
-        assert_eq!(permanents_controlled(&state, PlayerId(0)), 5);
+        assert_eq!(ascend_status(&state, PlayerId(0)).permanents_controlled, 5);
 
         let mut events2 = Vec::new();
         check_state_based_actions(&mut state, &mut events2);

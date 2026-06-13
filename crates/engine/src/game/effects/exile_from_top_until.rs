@@ -49,14 +49,13 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("until".to_string())),
     };
 
-    let acting_player = if matches!(
-        player_filter,
-        crate::types::ability::TargetFilter::Controller
-    ) {
-        ability.scoped_player.unwrap_or(ability.controller)
-    } else {
-        super::resolve_player_for_context_ref(state, ability, player_filter)
-    };
+    // CR 109.5 + CR 608.2c: "your library" lowers to `TargetFilter::Controller`
+    // (the ability's controller). Mirror `exile_top::resolve` — do not consult
+    // `scoped_player`, which carries event-bound players on combat-damage triggers
+    // (The Infamous Cruelclaw, issue #2881) and would exile from the wrong library.
+    // Per-iteration "their library" uses `TargetFilter::ScopedPlayer` or a typed
+    // `ControllerRef::ScopedPlayer` filter instead.
+    let acting_player = super::resolve_player_for_context_ref(state, ability, player_filter);
     let player = state
         .players
         .iter()
@@ -356,7 +355,9 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
-                player: TargetFilter::Controller,
+                // CR 608.2c: faced-player villainous-choice branches bind
+                // "their library" to the scoped event player, not Controller.
+                player: TargetFilter::ScopedPlayer,
                 until: UntilCondition::NextMatches {
                     filter: nonland_filter(),
                 },

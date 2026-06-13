@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{multispace0, space1};
+use nom::character::complete::space1;
 use nom::combinator::{eof, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
@@ -16,9 +16,9 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
+use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
 use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
@@ -460,14 +460,11 @@ pub(super) fn try_parse_put_counter<'a>(
 }
 
 fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)> {
-    let remainder_lower = remainder.to_lowercase();
-    let ((), for_each_clause) = nom_on_lower(remainder, &remainder_lower, |input| {
-        let (rest, _) = multispace0.parse(input)?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>("for each ").parse(rest)?;
-        Ok((rest, ()))
-    })?;
-    let clause_lower = for_each_clause.to_lowercase();
-    let count = parse_for_each_clause_expr(clause_lower.trim())?;
+    // Delegate to the shared anchored "attach trailing for-each multiplier"
+    // authority (CR 107.1 integer count templating) in oracle_effect::lower.
+    // The multiplier consumes the entire tail; preserve the original contract
+    // of returning an empty post-suffix remainder.
+    let count = parse_for_each_multiplier_prefix(remainder)?;
     Some((count, ""))
 }
 
@@ -744,18 +741,27 @@ pub(super) fn try_parse_move_counters<'a>(
 ) -> Option<(Effect, &'a str)> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
-    // Detect "its counters" / "this creature's counters" / "those counters"
-    let ((), after_possessive) = nom_on_lower(after_put, after_put, |i| {
-        value(
-            (),
-            alt((
-                tag("its counter"),
-                tag("this creature's counter"),
-                tag("those counter"),
-            )),
-        )
-        .parse(i)
-    })?;
+    // Detect "its counters" / "~'s counters" / "this creature's counters" /
+    // "those counters".
+    let (source, after_possessive) = if let Some(((), rest)) =
+        nom_on_lower(after_put, after_put, |i| {
+            value((), tag("~'s counter")).parse(i)
+        }) {
+        (TargetFilter::SelfRef, rest)
+    } else {
+        let ((), rest) = nom_on_lower(after_put, after_put, |i| {
+            value(
+                (),
+                alt((
+                    tag("its counter"),
+                    tag("this creature's counter"),
+                    tag("those counter"),
+                )),
+            )
+            .parse(i)
+        })?;
+        (resolve_it_pronoun(ctx), rest)
+    };
     // Skip past optional "s" (counter vs counters) then expect " on "
     let after_counters = nom_on_lower(after_possessive, after_possessive, |i| {
         value((), tag("s")).parse(i)
@@ -777,7 +783,7 @@ pub(super) fn try_parse_move_counters<'a>(
             // object had are placed on the destination — read from the leaving
             // object's last-known information (CR 400.7), so the source must be
             // the triggering object, not the ability source.
-            source: resolve_it_pronoun(ctx),
+            source,
             counter_type: None,
             count: None,
             mode: CounterTransferMode::Put,
@@ -1848,6 +1854,26 @@ mod tests {
         );
     }
 
+    // Finding-4 regression: the counter for-each suffix must stay anchored — the
+    // remainder must *begin* with `for each ` (whitespace-only head). A remainder
+    // where `for each` is preceded by unrelated text must NOT be treated as a
+    // multiplier (which would silently drop the leading clause).
+    #[test]
+    fn counter_for_each_suffix_requires_anchored_marker() {
+        // Anchored: remainder begins with `for each ` → matches.
+        assert!(
+            parse_counter_for_each_suffix("for each creature you control").is_some(),
+            "an anchored `for each` remainder must parse as a multiplier",
+        );
+        // Mid-clause: `for each` preceded by non-whitespace text → rejected, so the
+        // leading clause is not dropped.
+        assert!(
+            parse_counter_for_each_suffix("until end of turn for each creature you control")
+                .is_none(),
+            "a `for each` preceded by unrelated text must not be treated as a multiplier",
+        );
+    }
+
     /// #588 (Summon: Good King Mog XII, chapter IV — "Put two +1/+1 counters
     /// on each other Moogle you control"): a creature subtype absent from the
     /// curated `SUBTYPES` list silently dropped BOTH the `Subtype` type-filter
@@ -1886,6 +1912,34 @@ mod tests {
             "\"other\" must map to FilterProp::Another, got {:?}",
             tf.properties
         );
+    }
+
+    /// CR 122.8 + CR 400.7: "~'s counters" in a self-sacrifice activated
+    /// ability (Zack Fair) — source is the ability's ~, not the parent target.
+    #[test]
+    fn move_counters_self_possessive_counters() {
+        let lower = "put ~'s counters on that creature";
+        let result = try_parse_move_counters(lower, lower, &mut default_ctx());
+        let Some((
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                count,
+                mode,
+                selection: _,
+                target,
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert!(matches!(source, TargetFilter::SelfRef));
+        assert_eq!(counter_type, None);
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert!(matches!(target, TargetFilter::ParentTarget));
+        assert!(rem.is_empty());
     }
 
     /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric
@@ -1990,7 +2044,7 @@ mod tests {
         assert!(
             tf.properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::Attacking)),
+                .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
             "target should be Attacking, got {:?}",
             tf.properties
         );

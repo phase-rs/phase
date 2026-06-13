@@ -2625,9 +2625,10 @@ mod tests {
                 source_id: ObjectId(1),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
-                restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
-                    "Colorless Eldrazi".to_string(),
-                )],
+                restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Colorless Eldrazi".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                }],
                 grants: vec![],
                 expiry: None,
             });
@@ -2678,6 +2679,56 @@ mod tests {
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
+        ));
+    }
+
+    #[test]
+    fn can_pay_any_ability_activation_with_generic_activation_restricted_mana() {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(1),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: "Colorless".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            }],
+            grants: vec![],
+            expiry: None,
+        });
+
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 0,
+        };
+        let source_types = vec!["Creature".to_string()];
+        let source_subtypes = vec!["Goblin".to_string()];
+        let goblin_activation = PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+        };
+        assert!(can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&goblin_activation),
+            crate::types::mana::CostPermissionContext::default(),
+        ));
+
+        let colored_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let colored_spell_ctx = PaymentContext::Spell(&colored_spell);
+        assert!(!can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&colored_spell_ctx),
+            crate::types::mana::CostPermissionContext::default(),
         ));
     }
 
