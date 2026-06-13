@@ -19,8 +19,14 @@ export const meta = {
 const CONTRIBUTE_CARD = '.claude/workflows/contribute-card.js'
 
 const TIER = 'Frontier'
-const MAX_PLAN_REVIEW_ROUNDS = 3
-const MAX_IMPL_REVIEW_ROUNDS = 3
+// The mechanic-cluster pipeline below EMBODIES THE /engine-implementer SKILL CONTRACT
+// (maintainer feedback on PR #3163): /engine-planner -> /review-engine-plan (looped until clean)
+// -> engine-implementation-executor agent -> /review-impl (looped until clean; the reviewer must
+// confirm the cards actually parse correctly, not just that the diff looks clean). "Two rounds and
+// ship" is NOT acceptable, so the review caps below are runaway-loop safeguards (hitting one marks
+// the unit `partial` and is surfaced, never silently shipped), not a ship-after-N gate.
+const MAX_PLAN_REVIEW_ROUNDS = 8
+const MAX_IMPL_REVIEW_ROUNDS = 8
 const MAX_CROSSCHECK_ROUNDS = 2
 const MAX_VERIFY_RETRIES = 2
 
@@ -356,7 +362,11 @@ function reviewImplPrompt(label) {
   return (
     `Use the \`review-impl\` skill against the current uncommitted working-tree ` +
     `diff for ${label}. Set clean=true only if there are no defects, gaps, or ` +
-    `missing cases. List each finding as a concrete string with file:line.`
+    `missing cases. CRITICAL (engine-implementer feedback_review_impl_verify_bug_fixed): ` +
+    `you MUST confirm the targeted behavior is ACTUALLY fixed via a discriminating runtime ` +
+    `check — regenerate the affected cards' parse (oracle-gen data --filter / cargo coverage) ` +
+    `and verify each is now supported with the correct AST — not merely that the code looks ` +
+    `clean. If any card is still wrong, clean=false. List each finding as a concrete string with file:line.`
   )
 }
 
@@ -448,20 +458,24 @@ async function implementMechanicCluster(mechanic, cards) {
   })
   const label = `the "${mechanic}" mechanic`
 
+  // Step 1-2: /engine-planner -> /review-engine-plan, looped until a full round is clean.
   let plan = await agent(clusterPlanPrompt(mechanic, cards), { label: `plan:${mechanic}`, phase: 'Implement' })
-  for (let r = 1; r <= MAX_PLAN_REVIEW_ROUNDS; r++) {
+  let planReviewClean = false
+  for (let r = 1; r <= MAX_PLAN_REVIEW_ROUNDS && !planReviewClean; r++) {
     const review = await agent(reviewPlanPrompt(label, plan), { label: `review-plan:${mechanic}#${r}`, phase: 'Implement', schema: REVIEW_SCHEMA })
-    if (review.clean) break
+    if (review.clean) { planReviewClean = true; break }
     plan = await agent(replanPrompt(label, plan, review.findings), { label: `replan:${mechanic}#${r}`, phase: 'Implement' })
   }
 
-  const impl = await agent(clusterImplementPrompt(mechanic, cards, plan), { label: `implement:${mechanic}`, phase: 'Implement', schema: IMPL_SCHEMA })
+  // Step 3: engine-implementation-executor agent performs the surgical edits.
+  const impl = await agent(clusterImplementPrompt(mechanic, cards, plan), { label: `implement:${mechanic}`, phase: 'Implement', schema: IMPL_SCHEMA, agentType: 'engine-implementation-executor' })
 
+  // Step 5: /review-impl, looped until clean; fixes applied by a fresh engine-implementation-executor.
   let implReviewClean = false
-  for (let r = 1; r <= MAX_IMPL_REVIEW_ROUNDS; r++) {
+  for (let r = 1; r <= MAX_IMPL_REVIEW_ROUNDS && !implReviewClean; r++) {
     const review = await agent(reviewImplPrompt(label), { label: `review-impl:${mechanic}#${r}`, phase: 'Implement', schema: REVIEW_SCHEMA })
     if (review.clean) { implReviewClean = true; break }
-    await agent(fixImplPrompt(label, review.findings), { label: `fix-impl:${mechanic}#${r}`, phase: 'Implement' })
+    await agent(fixImplPrompt(label, review.findings), { label: `fix-impl:${mechanic}#${r}`, phase: 'Implement', agentType: 'engine-implementation-executor' })
   }
 
   let cross = await agent(crossCheckPrompt(label), { label: `crosscheck:${mechanic}`, phase: 'Implement', schema: CROSSCHECK_SCHEMA })
@@ -471,7 +485,7 @@ async function implementMechanicCluster(mechanic, cards) {
   }
 
   const verify = await agent(clusterVerifyPrompt(mechanic, cards), { label: `verify:${mechanic}`, phase: 'Implement', schema: VERIFY_SCHEMA })
-  const partial = !implReviewClean || !cross.clean || !verify.passed
+  const partial = !planReviewClean || !implReviewClean || !cross.clean || !verify.passed
   const pr = await agent(clusterPrPrompt(mechanic, cards, { impl, verify, partial }), { label: `pr:${mechanic}`, phase: 'Implement', schema: PR_SCHEMA })
 
   return {

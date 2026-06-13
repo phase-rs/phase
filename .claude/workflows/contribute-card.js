@@ -19,8 +19,12 @@ const TIER = 'Frontier'
 // Published coverage endpoint (AI-CONTRIBUTOR.md §3).
 const COVERAGE_URL = 'https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json'
 
-const MAX_PLAN_REVIEW_ROUNDS = 3
-const MAX_IMPL_REVIEW_ROUNDS = 3
+// This per-card pipeline embodies the /engine-implementer contract: /engine-planner ->
+// /review-engine-plan (looped) -> engine-implementation-executor -> /review-impl (looped until
+// clean; reviewer confirms the card actually parses correctly). The review caps are runaway-loop
+// safeguards, not a "two rounds and ship" gate (which engine-implementer forbids).
+const MAX_PLAN_REVIEW_ROUNDS = 8
+const MAX_IMPL_REVIEW_ROUNDS = 8
 const MAX_CROSSCHECK_ROUNDS = 2
 const MAX_VERIFY_RETRIES = 2
 
@@ -192,7 +196,10 @@ function reviewImplPrompt(card) {
   return (
     `Use the \`review-impl\` skill against the current uncommitted working-tree diff ` +
     `for the card "${card}". Set clean=true only if there are no defects, gaps, or ` +
-    `missing cases. List each finding as a concrete string with file:line.`
+    `missing cases. CRITICAL (engine-implementer feedback_review_impl_verify_bug_fixed): you MUST ` +
+    `confirm "${card}" actually parses/behaves correctly now via a discriminating runtime check ` +
+    `(regenerate its parse via oracle-gen / cargo coverage and inspect the AST), not just that the ` +
+    `diff looks clean. If it is still wrong, clean=false. List each finding as a concrete string with file:line.`
   )
 }
 
@@ -329,14 +336,17 @@ async function planCard(card) {
 }
 
 async function implementCard(card, plan) {
+  // Step 3 of the /engine-implementer contract: surgical edits via the executor agent.
   return await agent(implementPrompt(card, plan), {
     label: `implement:${card}`,
     phase: 'Implement',
     schema: IMPL_SCHEMA,
+    agentType: 'engine-implementation-executor',
   })
 }
 
 async function reviewImpl(card) {
+  // /review-impl looped until clean (engine-implementer mandate); fixes via a fresh executor agent.
   for (let round = 1; round <= MAX_IMPL_REVIEW_ROUNDS; round++) {
     const review = await agent(reviewImplPrompt(card), {
       label: `review-impl:${card}#${round}`,
@@ -347,6 +357,7 @@ async function reviewImpl(card) {
     await agent(fixImplPrompt(card, review.findings), {
       label: `fix-impl:${card}#${round}`,
       phase: 'Review',
+      agentType: 'engine-implementation-executor',
     })
   }
   return false
