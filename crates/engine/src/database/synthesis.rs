@@ -15003,8 +15003,12 @@ mod annihilator_runtime_tests {
 mod myriad_runtime_tests {
     use super::*;
     use crate::game::combat::AttackTarget;
+    use crate::game::effects::become_copy;
+    use crate::game::keywords;
+    use crate::game::layers::evaluate_layers;
     use crate::game::printed_cards::apply_card_face_to_object;
     use crate::game::zones::create_object;
+    use crate::types::ability::{ResolvedAbility, TargetRef};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -15305,6 +15309,146 @@ mod myriad_runtime_tests {
             "each Myriad trigger creates its own token"
         );
         assert_eq!(state.delayed_triggers.len(), 2);
+    }
+
+    /// Issue #1558: Myriad on a creature that is itself a copy (Muddle becomes a
+    /// copy of Professional Face-Breaker "except it has myriad") must create
+    /// tapped attacking token copies without stalling the game. The token copies
+    /// inherit the source's current copiable values (Face-Breaker's abilities)
+    /// plus the granted Myriad trigger.
+    #[test]
+    fn myriad_on_copy_creature_creates_token_without_stall() {
+        // 3-player game so Myriad creates a token for the non-defending opponent.
+        let face = myriad_creature_face("Face-Breaker Analog", 0); // no keywords yet
+        let (mut state, target_id) = setup_attack_state(3, &face);
+
+        // Add a triggered ability to the target (simulates Face-Breaker's combat
+        // damage trigger) so we can verify the token copy inherits it.
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            let trigger = crate::types::ability::TriggerDefinition::new(
+                TriggerMode::DamageDoneOnceByController,
+            )
+            .description("Create a Treasure token".to_string());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+        evaluate_layers(&mut state);
+
+        // Create Muddle — a separate creature that will become a copy of the target.
+        let muddle_card_id = CardId(state.next_object_id);
+        let muddle_id = create_object(
+            &mut state,
+            muddle_card_id,
+            PlayerId(0),
+            "Muddle".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&muddle_id).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.entered_battlefield_turn = Some(1); // not summoning sick
+        }
+
+        // Make Muddle become a copy of the target "except it has myriad".
+        let copy_ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: Some(Duration::UntilEndOfTurn),
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Myriad,
+                }],
+            },
+            vec![TargetRef::Object(target_id)],
+            muddle_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        become_copy::resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        // Verify Muddle now has the Myriad keyword and trigger.
+        let muddle_obj = state.objects.get(&muddle_id).unwrap();
+        assert!(
+            keywords::has_keyword(muddle_obj, &Keyword::Myriad),
+            "Muddle should have Myriad keyword after becoming a copy"
+        );
+        let has_myriad_trigger = muddle_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(trigger.mode, TriggerMode::Attacks)
+                && trigger
+                    .execute
+                    .as_deref()
+                    .is_some_and(|a| a.optional && matches!(a.effect.as_ref(), Effect::Myriad))
+        });
+        assert!(
+            has_myriad_trigger,
+            "Muddle should have synthesized Myriad attack trigger"
+        );
+
+        // Declare Muddle as attacker against Player 1.
+        declare_attack(&mut state, muddle_id, PlayerId(1));
+        assert!(
+            !state.stack.is_empty(),
+            "Myriad attack trigger should go on stack"
+        );
+
+        // Resolve the Myriad trigger (accept the optional effect).
+        resolve_myriad_trigger(&mut state);
+
+        // The game must NOT be in a stalled state — it should return to Priority.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::DeclareBlockers { .. }
+            ),
+            "Game must not stall after Myriad resolves on a copy creature; got {:?}",
+            state.waiting_for
+        );
+
+        // A token copy should have been created attacking Player 2.
+        let tokens = myriad_tokens(&state, "Face-Breaker Analog");
+        assert_eq!(
+            tokens.len(),
+            1,
+            "Myriad on copy creature should create one token for the non-defending opponent"
+        );
+        let token_id = tokens[0];
+        let token_obj = state.objects.get(&token_id).unwrap();
+        assert!(token_obj.is_token, "created object should be a token");
+        assert!(token_obj.tapped, "Myriad token should enter tapped");
+
+        // Token should be attacking Player 2.
+        let token_attacker = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .find(|a| a.object_id == token_id)
+            .expect("Myriad token should be attacking");
+        assert_eq!(token_attacker.defending_player, PlayerId(2));
+
+        // Token should inherit the combat damage trigger from Face-Breaker.
+        let token_has_damage_trigger = token_obj
+            .trigger_definitions
+            .iter_all()
+            .any(|trigger| matches!(trigger.mode, TriggerMode::DamageDoneOnceByController));
+        assert!(
+            token_has_damage_trigger,
+            "Token copy should inherit the source's triggered abilities"
+        );
+
+        // EOC delayed trigger should be scheduled.
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "EOC exile trigger should be scheduled for the Myriad token"
+        );
     }
 }
 

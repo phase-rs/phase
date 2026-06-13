@@ -98,6 +98,7 @@ mod issue_1312_prepared_spell_cast_triggers;
 mod issue_1326_tabernacle_upkeep_destroy;
 mod issue_1327_zack_fair;
 mod issue_1328_inti;
+mod issue_1332_bronzehide_lion;
 mod issue_1333_brain_in_a_jar;
 mod issue_1334_marchesa;
 mod issue_1353_body_of_knowledge;
