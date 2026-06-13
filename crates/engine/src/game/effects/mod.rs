@@ -5389,21 +5389,38 @@ fn resolve_chain_body(
 
             // CR 608.2c + CR 603.7: An `If you do` boundary (`EffectOutcome
             // { OptionalEffectPerformed }`) opens a new instruction clause —
-            // "you may [do X]. If you do, [rider]." Nothing the gating action X
-            // affected can be named by a "those cards" / "one of them" reference
-            // inside the rider, so the rider's tracked set must NOT unify with
-            // the gating action's. Reset the chain-scoped tracked-set identity
-            // here so the rider's own producer (e.g. ExileTop) starts a fresh
-            // set. Without this, Party Thrasher's "you may discard a card. If
-            // you do, exile the top two cards…, then choose one of them" would
-            // co-publish the discarded card (now in the graveyard) with the two
-            // exiled cards, offering three cards to choose from (issue #1977).
+            // "you may [do X]. If you do, [rider]." The rider falls into one of
+            // two classes by what it does with the tracked-set channel:
+            //
+            //   * PRODUCER rider (e.g. Party Thrasher's `ExileTop`): the rider
+            //     creates its OWN fresh set and nothing the gating action X
+            //     affected may be named by a "those cards" / "one of them"
+            //     reference inside it. The chain-scoped tracked-set identity
+            //     MUST be reset here so the rider's producer starts clean.
+            //     Without this, Party Thrasher's "you may discard a card. If
+            //     you do, exile the top two cards…, then choose one of them"
+            //     co-publishes the discarded card (now in the graveyard) with
+            //     the two exiled cards, offering three to choose from (#1977).
+            //
+            //   * CONSUMER rider (e.g. God-Pharaoh's Gift's `CopyTokenOf {
+            //     target: TrackedSet }`): the rider's "that card" anaphor
+            //     CR 707.2a names the very card the gating exile published into
+            //     `chain_tracked_set_id` THIS resolution. Resetting here would
+            //     orphan it to the turn-global `latest_tracked_set_id` fallback,
+            //     so a second same-turn resolution (whose first exile's set also
+            //     persists) binds to the wrong card (#2350). Skip the reset for
+            //     consumer riders so the anaphor stays chain-local.
+            //
+            // `effect_references_tracked_set` discriminates the two: it is true
+            // exactly for consumer riders (any `TrackedSet` quantity/filter
+            // position, incl. `CopyTokenOf { target }`), false for producers.
             if matches!(
                 condition,
                 AbilityCondition::EffectOutcome {
                     signal: EffectOutcomeSignal::OptionalEffectPerformed,
                 }
-            ) {
+            ) && !effect_references_tracked_set(&sub.effect)
+            {
                 state.chain_tracked_set_id = None;
             }
 
