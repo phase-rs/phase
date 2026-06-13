@@ -2903,39 +2903,39 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
     publish_effect_tracked_set(state, None, affected_ids);
 }
 
-/// CR 603.7 + CR 608.2c: Publish the chain tracked set, supplying the
-/// publishing `effect` so an intermediate sacrifice/destroy clause can be kept
-/// out of an already-established "this way" pool (see
-/// [`publish_effect_tracked_set`]). Callers that resolve a known effect pass
-/// `Some(effect)`; callers outside `resolve_effect` (e.g. the discard-choice
-/// continuation, which is always the genuine publisher of the discarded pool)
-/// use the `effect`-free [`publish_tracked_set`].
+/// CR 608.2c: Publish the chain tracked set, supplying the publishing `effect`
+/// so an intermediate graveyard-moving clause can be kept out of an
+/// already-established "this way" pool (see
+/// [`effect_moves_objects_out_of_consumer_pool_as_intermediate`]). Callers that
+/// resolve a known effect pass `Some(effect)`; callers outside `resolve_effect`
+/// (e.g. the discard-choice continuation, which is always the genuine publisher
+/// of the discarded pool) use the `effect`-free [`publish_tracked_set`].
 pub(crate) fn publish_effect_tracked_set(
     state: &mut GameState,
     effect: Option<&Effect>,
     affected_ids: Vec<ObjectId>,
 ) {
-    // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
-    // resolution chain already published a tracked set, extend that set with
-    // the current publish so compound zone-changing effects expose every
-    // affected object to a single downstream "those cards" reference.
-    // Otherwise start a new chain-scoped set.
+    // CR 608.2c: Chain unification. If an ancestor in this resolution chain
+    // already published a tracked set, extend that set with the current publish
+    // so compound zone-changing effects expose every affected object to a single
+    // downstream "those cards" reference. Otherwise start a new chain-scoped set.
     if let Some(chain_id) = state.chain_tracked_set_id {
-        // CR 701.21a + CR 608.2c: an intermediate sacrifice/destroy clause is
-        // NOT a contributor to an existing "this way" pool. Instructions
-        // resolve in the order written (CR 608.2c); when an earlier clause has
-        // already published a tracked pool that a LATER clause returns ("exile
-        // all creature cards from your graveyard ... then puts all cards they
-        // exiled this way onto the battlefield" — Living Death, issue #2932), a
-        // sacrifice/destroy sitting between publisher and consumer moves
-        // battlefield permanents to the graveyard (CR 701.21a) as a separate
-        // action. Those objects must not join the exiled-this-way set —
-        // extending it would wrongly return the creatures sacrificed this way.
-        // Such a clause still publishes a FRESH set when it is the genuine
-        // publisher (no prior chain set, e.g. "destroy all creatures, then
-        // return those cards") via the `else` branch below, so this guard only
-        // suppresses the EXTEND branch.
-        if effect.is_some_and(effect_removes_to_graveyard_intermediate) {
+        // CR 608.2c: an intermediate clause that moves objects OUT to a zone the
+        // downstream "this way" reference does not consume (e.g. a graveyard) is
+        // NOT a contributor to an existing pool. Instructions resolve in the
+        // order written (CR 608.2c); when an earlier clause has already published
+        // a tracked pool that a LATER clause returns ("exile all creature cards
+        // from your graveyard ... then puts all cards they exiled this way onto
+        // the battlefield" — Living Death, issue #2932), a sacrifice / destroy /
+        // mill / discard sitting between publisher and consumer sends its objects
+        // to the graveyard (CR 701.21a / 701.8a / 701.17a / 701.9a) as a separate
+        // action. Those objects must not join the exiled-this-way set — extending
+        // it would wrongly return the creatures sacrificed (or the cards milled /
+        // discarded) this way. Such a clause still publishes a FRESH set when it
+        // is the genuine publisher (no prior chain set, e.g. "destroy all
+        // creatures, then return those cards") via the `else` branch below, so
+        // this guard only suppresses the EXTEND branch.
+        if effect.is_some_and(effect_moves_objects_out_of_consumer_pool_as_intermediate) {
             return;
         }
         state
@@ -2951,20 +2951,40 @@ pub(crate) fn publish_effect_tracked_set(
     }
 }
 
-/// CR 701.21a: an effect that moves permanents from the battlefield to the
-/// graveyard (sacrifice / destroy) rather than into the exiled-or-moved pool a
-/// downstream "this way" reference consumes. When such a clause is an
-/// intermediate step between a prior publisher and a later consumer (CR
-/// 608.2c sequential resolution), its affected objects must not extend the
-/// existing chain tracked set — the Living Death class ("exile ... then
-/// sacrifice ... then return the exiled cards", issue #2932).
-fn effect_removes_to_graveyard_intermediate(effect: &Effect) -> bool {
+/// CR 608.2c: `true` for an effect whose affected objects move into a zone
+/// OUTSIDE the pool a downstream "this way" reference consumes — i.e. an
+/// intermediate, non-publisher clause that relocates objects (almost always to a
+/// graveyard) as a *separate action* whose results must NOT join a prior
+/// tracked-set publisher's pool. Consulted only when a chain tracked set already
+/// exists; when such an effect is instead the genuine FIRST publisher (no prior
+/// chain set), it still starts a fresh set via the `else` branch in
+/// [`publish_effect_tracked_set`], so this gate never blocks a real publisher.
+///
+/// This is a CATEGORY, not a card list: every keyword action below moves its
+/// objects to the graveyard (or hand, for mass bounce) as its own action and
+/// emits the same `ZoneChanged`/`PermanentSacrificed`/`CreatureDestroyed`
+/// signals that [`affected_objects_from_events`] would otherwise fold into the
+/// chain pool — the Living Death class ("exile ... then <remove> ... then return
+/// the exiled cards", issue #2932), regardless of whether the intermediate
+/// removal is a sacrifice, destroy, mill, or discard.
+///
+///   - CR 701.21a: Sacrifice — moves from the battlefield directly to graveyard.
+///   - CR 701.8a: Destroy / DestroyAll — moves from the battlefield to graveyard.
+///   - CR 701.17a: Mill — puts cards from the library into the graveyard.
+///   - CR 701.9a: Discard — moves a card from hand to graveyard.
+///   - CR 400.7: BounceAll — moves objects off the battlefield (default Hand) as
+///     a new object that is likewise not part of the exiled pool.
+fn effect_moves_objects_out_of_consumer_pool_as_intermediate(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::Sacrifice { .. }
             | Effect::Destroy { .. }
             | Effect::DestroyAll { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::Mill { .. }
+            | Effect::Discard { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::BounceAll { .. }
     )
 }
 
@@ -6487,11 +6507,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Duration, EffectScope, FilterProp,
-        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        CardSelectionMode, CastingPermission, Chooser, ChosenAttribute, Comparator,
+        ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, EffectScope,
+        FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter,
+        PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext, StaticDefinition,
+        TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -9989,6 +10010,179 @@ mod tests {
         assert_eq!(
             spirits, 1,
             "only the controller's nontoken destroyed creature should be counted"
+        );
+    }
+
+    /// CR 608.2c: an intermediate clause that moves objects into a zone outside
+    /// the downstream consumer's pool (Mill / Discard → graveyard, like the
+    /// sacrifice in Living Death, issue #2932) must NOT extend an already-open
+    /// chain tracked set. This pins the suppression to the *category* of
+    /// graveyard-movers, not a single effect variant: with a Mill intermediate
+    /// between an exile-this-way publisher and a bare `TrackedSetFiltered`
+    /// consumer (Living Death's exact shape), the milled card would otherwise be
+    /// wrongly folded into the exiled-this-way set and returned. Fails with the
+    /// pre-generalization list (Mill/Discard absent → set extended); passes once
+    /// the whole graveyard-mover category is suppressed.
+    #[test]
+    fn intermediate_graveyard_movers_do_not_extend_open_chain_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+
+        // Step 1 (publisher): an object exiled-this-way seeds the open chain set.
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exiled This Way".to_string(),
+            Zone::Exile,
+        );
+        let chain_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(chain_id, vec![exiled]);
+        state.chain_tracked_set_id = Some(chain_id);
+
+        // Step 2 (intermediate): a milled card lands in the graveyard. Its
+        // `ZoneChanged` is exactly what `affected_objects_from_events` would fold
+        // into the chain pool if Mill were not recognized as a graveyard-mover.
+        let milled = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Milled Card".to_string(),
+            Zone::Graveyard,
+        );
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let mill_events = vec![GameEvent::ZoneChanged {
+            object_id: milled,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                milled,
+                Some(Zone::Library),
+                Zone::Graveyard,
+            )),
+        }];
+        let mill_ids = affected_objects_from_events(&mill, &mill_events, &[]);
+        assert_eq!(
+            mill_ids,
+            vec![milled],
+            "Mill publishes the milled card via its graveyard ZoneChanged"
+        );
+
+        // Publishing the Mill while a chain set is open must be SUPPRESSED.
+        publish_effect_tracked_set(&mut state, Some(&mill), mill_ids);
+
+        assert_eq!(
+            state.tracked_object_sets[&chain_id],
+            vec![exiled],
+            "the milled card must NOT join the exiled-this-way pool — only the \
+             object exiled in step 1 stays in the chain tracked set"
+        );
+
+        // Discard is the same category (hand → graveyard) and is likewise
+        // suppressed while the chain set is open.
+        let discarded = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Discarded Card".to_string(),
+            Zone::Graveyard,
+        );
+        let discard = Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+            selection: CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        };
+        let discard_events = vec![GameEvent::ZoneChanged {
+            object_id: discarded,
+            from: Some(Zone::Hand),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                discarded,
+                Some(Zone::Hand),
+                Zone::Graveyard,
+            )),
+        }];
+        let discard_ids = affected_objects_from_events(&discard, &discard_events, &[]);
+        publish_effect_tracked_set(&mut state, Some(&discard), discard_ids);
+        assert_eq!(
+            state.tracked_object_sets[&chain_id],
+            vec![exiled],
+            "the discarded card must NOT join the exiled-this-way pool either"
+        );
+    }
+
+    /// CR 608.2c / CR 701.21a / 701.8a / 701.17a / 701.9a / 400.7: the suppression
+    /// predicate describes the whole *category* of intermediate graveyard-movers
+    /// (sacrifice, destroy, mill, discard, mass bounce) — a single discriminating
+    /// place that future variant additions in this class must extend. Genuine
+    /// same-pool publishers (e.g. `ChangeZoneAll` exiling cards into the very set
+    /// a downstream "this way" reference consumes) are NOT in the category and
+    /// keep extending the chain.
+    #[test]
+    fn graveyard_mover_category_membership_is_exhaustive() {
+        let any = TargetFilter::Any;
+        let movers: Vec<Effect> = vec![
+            Effect::Sacrifice {
+                target: any.clone(),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            Effect::Destroy {
+                target: any.clone(),
+                cant_regenerate: false,
+            },
+            Effect::DestroyAll {
+                target: any.clone(),
+                cant_regenerate: false,
+            },
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Controller,
+            },
+            Effect::BounceAll {
+                target: any.clone(),
+                destination: None,
+                count: None,
+            },
+        ];
+        for effect in &movers {
+            assert!(
+                effect_moves_objects_out_of_consumer_pool_as_intermediate(effect),
+                "{effect:?} moves objects out of the consumer pool and must be suppressed",
+            );
+        }
+
+        // A genuine same-pool publisher (exile into the consumed set) is NOT a
+        // graveyard-mover and must keep extending the chain.
+        let publisher = Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: any,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            face_down_profile: None,
+        };
+        assert!(
+            !effect_moves_objects_out_of_consumer_pool_as_intermediate(&publisher),
+            "a same-pool exile publisher must NOT be suppressed — it extends the chain",
         );
     }
 
