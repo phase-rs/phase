@@ -1980,11 +1980,37 @@ pub(super) fn match_sacrificed(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PermanentSacrificed { object_id, .. } = event {
-        valid_card_matches(trigger, state, *object_id, source_id)
-    } else {
-        false
+    let GameEvent::PermanentSacrificed { object_id, .. } = event else {
+        return false;
+    };
+    // CR 603.10a: Sacrifice triggers "look back in time." The sacrificed
+    // permanent may already be in the graveyard with its battlefield
+    // characteristics stripped (CR 400.7), or — for a token (CR 111.7) — have
+    // ceased to exist and been removed from `state.objects` by a prior SBA pass.
+    // Match the live object first; when it no longer carries its battlefield
+    // appearance, fall back to the last-known-information snapshot captured on
+    // battlefield exit (`apply_zone_exit_cleanup`, zones.rs). Mirrors the
+    // identical fallback in `exploiter_matches_subject_filter`.
+    if valid_card_matches(trigger, state, *object_id, source_id) {
+        return true;
     }
+    let Some(filter) = &trigger.valid_card else {
+        // No filter ⇒ `valid_card_matches` already returned true above.
+        return false;
+    };
+    if state
+        .objects
+        .get(object_id)
+        .is_none_or(|o| o.zone != Zone::Battlefield)
+    {
+        if let Some(lki) = state.lki_cache.get(object_id) {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            return super::filter::matches_target_filter_on_lki_snapshot(
+                state, *object_id, lki, filter, &ctx,
+            );
+        }
+    }
+    false
 }
 
 pub(super) fn match_destroyed(
@@ -11986,6 +12012,118 @@ mod tests {
         assert!(
             !match_exploited(&event, &opponent, source, &state),
             "an opponent-controlled subject filter must NOT match the controller's own exploiter"
+        );
+    }
+
+    /// CR 603.10a + CR 111.7: Crime Novelist's "Whenever you sacrifice an
+    /// artifact" trigger must look back in time. When a sacrificed Treasure
+    /// TOKEN has already ceased to exist (CR 111.7 SBA purge removes it from
+    /// `state.objects`), the live `Artifact` type filter can no longer be
+    /// evaluated. Without the LKI fallback, `match_sacrificed` returns false and
+    /// the trigger silently no-ops (issue #754). With the fallback it matches
+    /// against the at-sacrifice snapshot. This is the discriminating guard:
+    /// reverting the fallback makes the positive assertion below fail.
+    #[test]
+    fn sacrifice_artifact_trigger_matches_ceased_to_exist_token_via_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Crime Novelist".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source);
+        // Crime Novelist's real trigger: typed Artifact filter, controller You.
+        let trigger = parse_trigger_line(
+            "Whenever you sacrifice an artifact, put a +1/+1 counter on ~ and add {R}.",
+            "Crime Novelist",
+        );
+        assert!(
+            trigger.valid_card.is_some(),
+            "fixture must exercise the typed-filter LKI path, not the None arm"
+        );
+
+        // A Treasure token, sacrificed by the controller.
+        let treasure = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Treasure Token".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&treasure) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+            obj.is_token = true;
+        }
+
+        // Real zone-change pipeline: snapshots LKI on battlefield exit.
+        crate::game::zones::move_to_zone(&mut state, treasure, Zone::Graveyard, &mut Vec::new());
+        assert!(state.lki_cache.contains_key(&treasure));
+        // CR 111.7: the token ceases to exist — the SBA purge removes it from
+        // `state.objects` BEFORE the trigger scan consumes the event.
+        state.objects.remove(&treasure);
+
+        let event = GameEvent::PermanentSacrificed {
+            object_id: treasure,
+            player_id: PlayerId(0),
+        };
+        assert!(
+            match_sacrificed(&event, &trigger, source, &state),
+            "CR 603.10a: sacrifice-artifact trigger must match a ceased-to-exist Treasure token via LKI"
+        );
+
+        // Negative: opponent-controlled snapshot must NOT match "you sacrifice".
+        let opp_treasure = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(1),
+            "Treasure Token".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&opp_treasure) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+            obj.is_token = true;
+        }
+        crate::game::zones::move_to_zone(
+            &mut state,
+            opp_treasure,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        state.objects.remove(&opp_treasure);
+        let opp_event = GameEvent::PermanentSacrificed {
+            object_id: opp_treasure,
+            player_id: PlayerId(1),
+        };
+        assert!(
+            !match_sacrificed(&opp_event, &trigger, source, &state),
+            "an opponent's sacrifice must NOT fire the controller's 'you sacrifice' trigger via LKI"
+        );
+
+        // Negative: a non-artifact token (creature) must fail the type filter.
+        let bear = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(0),
+            "Bear Token".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, bear);
+        if let Some(obj) = state.objects.get_mut(&bear) {
+            obj.is_token = true;
+        }
+        crate::game::zones::move_to_zone(&mut state, bear, Zone::Graveyard, &mut Vec::new());
+        state.objects.remove(&bear);
+        let bear_event = GameEvent::PermanentSacrificed {
+            object_id: bear,
+            player_id: PlayerId(0),
+        };
+        assert!(
+            !match_sacrificed(&bear_event, &trigger, source, &state),
+            "a non-artifact token must fail the Artifact type filter even via LKI"
         );
     }
 }
