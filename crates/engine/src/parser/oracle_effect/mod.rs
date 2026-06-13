@@ -13497,10 +13497,14 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         .parse(lower)
         .is_ok();
 
+    // Issue #377: Anikthea, Hand of Erebos — "create a token that's a copy of
+    // it" uses the bare pronoun "it" instead of "that card". Both anaphors
+    // refer to the card just exiled by the preceding clause (CR 603.7), so
+    // the tracked-set rewrite must fire for either phrasing.
     let copy_token_recall = (
         take_until::<_, _, OracleError<'_>>("copy of "),
         tag("copy of "),
-        tag("that card"),
+        alt((tag::<_, _, OracleError<'_>>("that card"), tag("it"))),
     )
         .parse(lower)
         .is_ok();
@@ -31184,6 +31188,54 @@ mod tests {
             vec![ContinuousModification::SetCardTypes {
                 core_types: vec![CoreType::Enchantment],
             }]
+        );
+    }
+
+    /// Issue #377 — Anikthea, Hand of Erebos: "exile up to one target non-Aura
+    /// enchantment card from your graveyard and create a token that's a copy of
+    /// it, except it's a 3/3 black Zombie creature in addition to its other
+    /// types." The bare pronoun "it" after an exile clause must rebind to the
+    /// tracked set (CR 603.7), identical to the "that card" class tested above.
+    /// Without the fix the copy target stays `ParentTarget` and the runtime
+    /// falls back to the source (Anikthea itself) instead of the exiled card.
+    #[test]
+    fn issue_377_exile_and_copy_of_it_uses_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile up to one target non-Aura enchantment card from your graveyard and create a token that's a copy of it, except it's a 3/3 black Zombie creature in addition to its other types.",
+            AbilityKind::Triggered,
+        );
+
+        let Effect::ChangeZone { destination, .. } = def.effect.as_ref() else {
+            panic!("expected ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(*destination, Zone::Exile);
+
+        let copy = def.sub_ability.as_deref().expect("copy sub-ability");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = copy.effect.as_ref()
+        else {
+            panic!("expected CopyTokenOf, got {:?}", copy.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            "copy target must be TrackedSet (the exiled card), not ParentTarget"
+        );
+        // CR 707.9d: The "in addition to its other types" phrasing means the
+        // Zombie creature type is ADDED, not replacing.
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "expected AddType(Creature) in modifications: {additional_modifications:?}"
         );
     }
 
