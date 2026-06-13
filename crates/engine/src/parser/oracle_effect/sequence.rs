@@ -4302,7 +4302,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::EntersTappedAttacking)
         }
-        // CR 701.15a/b: "The token(s) (is|are) goaded [duration]" after token creation.
+        // CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token creation.
         Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Populate
             if let Some(continuation) = try_parse_tokens_goaded_continuation(&lower) =>
         {
@@ -4391,7 +4391,7 @@ fn parse_nonland_permanent_domain(
     ))
 }
 
-/// CR 701.15a/b: Parse "the token(s) (is|are) goaded [duration]" after token creation.
+/// CR 701.15a + CR 701.15b: Parse "the token(s) (is|are) goaded [duration]" after token creation.
 /// Prefix stripping mirrors `rewrite_token_created_this_way_unimplemented` so the
 /// predicate (`are goaded`) stays in the remainder for duration stripping.
 fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> {
@@ -5320,6 +5320,37 @@ mod tests {
         );
     }
 
+    /// CR 701.15b + CR 611.2b: Saga-scoped goad persists while the Saga remains.
+    #[test]
+    fn tokens_goaded_continuation_after_create_token_until_host_leaves_play() {
+        let token_effect = Effect::Token {
+            name: "Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![crate::types::mana::ManaColor::White],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 3 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "the tokens are goaded for as long as this Saga remains on the battlefield",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::GoadLastCreated {
+                duration: Some(Duration::UntilHostLeavesPlay),
+            })
+        );
+    }
+
     /// CR 701.15b: singular form must still recognize (Nettling Nuisance class).
     #[test]
     fn token_goaded_continuation_after_create_token() {
@@ -5378,6 +5409,35 @@ mod tests {
             }
             Effect::Unimplemented { name, .. } => {
                 panic!("expected GenericEffect goad sub, got Unimplemented({name})")
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
+    }
+
+    /// CR 701.15b + CR 611.2b: The War Games class keeps the Saga-scoped duration.
+    #[test]
+    fn create_tokens_then_saga_scoped_goad_chain_has_host_duration() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "each player creates three tapped 1/1 white Warrior creature tokens. the tokens are goaded for as long as this Saga remains on the battlefield",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("goad sub_ability");
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )));
             }
             other => panic!("expected GenericEffect goad sub, got {other:?}"),
         }
