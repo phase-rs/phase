@@ -2900,12 +2900,44 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
 }
 
 pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
+    publish_effect_tracked_set(state, None, affected_ids);
+}
+
+/// CR 603.7 + CR 608.2c: Publish the chain tracked set, supplying the
+/// publishing `effect` so an intermediate sacrifice/destroy clause can be kept
+/// out of an already-established "this way" pool (see
+/// [`publish_effect_tracked_set`]). Callers that resolve a known effect pass
+/// `Some(effect)`; callers outside `resolve_effect` (e.g. the discard-choice
+/// continuation, which is always the genuine publisher of the discarded pool)
+/// use the `effect`-free [`publish_tracked_set`].
+pub(crate) fn publish_effect_tracked_set(
+    state: &mut GameState,
+    effect: Option<&Effect>,
+    affected_ids: Vec<ObjectId>,
+) {
     // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
     // the current publish so compound zone-changing effects expose every
     // affected object to a single downstream "those cards" reference.
     // Otherwise start a new chain-scoped set.
     if let Some(chain_id) = state.chain_tracked_set_id {
+        // CR 701.21a + CR 608.2c: an intermediate sacrifice/destroy clause is
+        // NOT a contributor to an existing "this way" pool. Instructions
+        // resolve in the order written (CR 608.2c); when an earlier clause has
+        // already published a tracked pool that a LATER clause returns ("exile
+        // all creature cards from your graveyard ... then puts all cards they
+        // exiled this way onto the battlefield" — Living Death, issue #2932), a
+        // sacrifice/destroy sitting between publisher and consumer moves
+        // battlefield permanents to the graveyard (CR 701.21a) as a separate
+        // action. Those objects must not join the exiled-this-way set —
+        // extending it would wrongly return the creatures sacrificed this way.
+        // Such a clause still publishes a FRESH set when it is the genuine
+        // publisher (no prior chain set, e.g. "destroy all creatures, then
+        // return those cards") via the `else` branch below, so this guard only
+        // suppresses the EXTEND branch.
+        if effect.is_some_and(effect_removes_to_graveyard_intermediate) {
+            return;
+        }
         state
             .tracked_object_sets
             .entry(chain_id)
@@ -2917,6 +2949,23 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         state.tracked_object_sets.insert(set_id, affected_ids);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// CR 701.21a: an effect that moves permanents from the battlefield to the
+/// graveyard (sacrifice / destroy) rather than into the exiled-or-moved pool a
+/// downstream "this way" reference consumes. When such a clause is an
+/// intermediate step between a prior publisher and a later consumer (CR
+/// 608.2c sequential resolution), its affected objects must not extend the
+/// existing chain tracked set — the Living Death class ("exile ... then
+/// sacrifice ... then return the exiled cards", issue #2932).
+fn effect_removes_to_graveyard_intermediate(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Sacrifice { .. }
+            | Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+    )
 }
 
 /// CR 603.7: A player-chosen "those creatures" set is a fresh resolution
@@ -4149,7 +4198,7 @@ fn resolve_chain_body(
         ids.dedup();
         state.last_zone_changed_ids = ids;
         if next_sub_needs_tracked_set(ability) {
-            publish_tracked_set(state, affected_ids);
+            publish_effect_tracked_set(state, Some(&scoped_template.effect), affected_ids);
         }
         if !paused {
             // CR 608.2e: this `player_scope` clause has completed. Clear its
@@ -4955,7 +5004,7 @@ fn resolve_chain_body(
             &events[events_before..],
             &ability.targets,
         );
-        publish_tracked_set(state, affected_ids);
+        publish_effect_tracked_set(state, Some(&ability.effect), affected_ids);
     }
 
     // ExileFromTopUntil handles its own sub_ability chain internally for both
