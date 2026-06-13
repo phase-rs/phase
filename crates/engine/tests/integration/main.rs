@@ -8,6 +8,7 @@ mod anaphoric_scope_allowlist_guard;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
+mod ark_of_hunger_play_from_graveyard_751;
 mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod auntie_ool_minus_one_counter_trigger;

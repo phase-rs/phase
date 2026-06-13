@@ -3166,7 +3166,18 @@ pub(super) fn parse_utility_imperative_ast(
                     let rem = &rest[rest.len() - rem_lower.len()..];
                     (target, rem)
                 } else {
-                    parse_target(rest)
+                    // CR 707.10 + CR 608.2k: thread ctx so "copy it" routes the
+                    // "it" pronoun through resolve_it_pronoun → TriggeringSource
+                    // (the triggering spell), matching "copy that spell".
+                    // Precondition (resolve_it_pronoun, oracle_effect/mod.rs:165):
+                    // this yields TriggeringSource ONLY for trigger subjects that
+                    // are non-SelfRef / non-Any (Taigam's subject is Controller —
+                    // the "you" arm — so it qualifies). For SelfRef/Any subjects
+                    // "it" stays SelfRef/ParentTarget and the CopySpell runtime
+                    // fallback (triggering_spell_stack_entry, copy_spell.rs)
+                    // keeps them working — behavior-neutral-or-better, never a
+                    // regression for non-Taigam "copy it" cards.
+                    parse_target_with_ctx(rest, ctx)
                 };
                 let retarget = if super::sequence::recognize_copy_retarget_clause(_rem.trim()) {
                     // CR 707.10c: "copy that spell and may choose new targets for the
@@ -5130,7 +5141,23 @@ pub(super) fn parse_exile_ast(
     // bodies ("Whenever an Elf you control dies, exile it") bind to the
     // triggering subject via `resolve_pronoun_target`, not the ability source.
     // Issue #319: Serpent's Soul-Jar exiled itself instead of the dying Elf.
-    let (parsed_target, _rem) = parse_target_with_ctx(rest_text, ctx);
+    let (parsed_target, rem) = parse_target_with_ctx(rest_text, ctx);
+    // CR 122.1 + CR 702.62: "exile … with N <type> counter(s) on it" lifts the
+    // counter clause onto the exile ChangeZone's `enter_with_counters` so the
+    // object enters Exile carrying them (Taigam, Master Opportunist: "exile the
+    // spell you cast with four time counters on it" — the count is PARSED from
+    // "four" via parse_number inside parse_with_counters_suffix, not hardcoded).
+    // The engine applies these at the exile destination (change_zone.rs
+    // resolved_counters path, covered by the egg-counter regression test).
+    // Excise the consumed clause so the debug-only compound-remainder assert
+    // below does not flag it.
+    let rem_lower = rem.to_ascii_lowercase();
+    let (enter_with_counters, counters_offset) =
+        super::parse_with_counters_suffix_spanned(&rem_lower);
+    let _rem = match counters_offset {
+        Some(off) => &rem[..off],
+        None => rem,
+    };
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
     // CR 701.5a: "exile target spell" must constrain targeting to the stack,
@@ -5145,7 +5172,7 @@ pub(super) fn parse_exile_ast(
         origin,
         target,
         all: false,
-        enter_with_counters: vec![],
+        enter_with_counters,
     })
 }
 

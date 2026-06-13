@@ -796,6 +796,33 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
+    // CR 608.2k / CR 603.7c: "the spell you cast" / bare "the spell" is an
+    // untargeted anaphor to the triggering spell object on a cast trigger
+    // (Taigam, Master Opportunist: "exile the spell you cast"). It maps to
+    // TriggeringSource, mirroring the bare-"that spell" arm above. Disambiguate
+    // purely by textual continuation (no ctx.subject gate): an explicit
+    // "you cast" continuation, or an empty / comma / semicolon continuation,
+    // names the triggering spell. A predicate continuation ("the spell is
+    // countered this way") keeps ParentTarget — preserving the
+    // "Counter target spell … the spell is countered this way" compound
+    // carve-out — by falling through to the bare "the spell" → ParentTarget arm
+    // below. Placed before the longest-match anaphor block so this earlier
+    // match wins, exactly as the "that spell" arm precedes its fallbacks.
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the ").parse(lower.as_str()) {
+        let original_rest = &text[lower.len() - rest_subject.len()..];
+        if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
+            let orig_after = original_rest.get("spell".len()..).unwrap_or(original_rest);
+            if let Ok((you_cast_after, _)) = tag::<_, _, OracleError<'_>>(" you cast").parse(after)
+            {
+                let consumed = after.len() - you_cast_after.len();
+                let orig_after = orig_after.get(consumed..).unwrap_or(orig_after);
+                return (TargetFilter::TriggeringSource, orig_after, syntax);
+            }
+            if after.is_empty() || after.starts_with([',', ';']) {
+                return (TargetFilter::TriggeringSource, orig_after, syntax);
+            }
+        }
+    }
     // CR 608.2c: Definite anaphoric references to previously-mentioned objects/players.
     // Longest-match-first: "the creature's controller" before "the creature".
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
