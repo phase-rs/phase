@@ -1,5 +1,5 @@
 ---
-source: crates/engine/tests/oracle_parser.rs
+source: crates/engine/tests/integration/oracle_parser.rs
 expression: result
 ---
 {
@@ -25,7 +25,8 @@ expression: result
       "condition": null,
       "optional_targeting": false,
       "optional": false,
-      "forward_result": false
+      "forward_result": false,
+      "is_mana_ability": true
     }
   ],
   "triggers": [],

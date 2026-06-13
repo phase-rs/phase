@@ -11289,17 +11289,24 @@ impl Serialize for AbilityDefinition {
             iteration_kind_binding,
         };
         /// Flatten wrapper: the mirror carries the real field set;
-        /// `consumes_source` is the computed UI key (#506).
+        /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
+        /// computed UI keys.
         #[derive(Serialize)]
         struct Outer<'a> {
             #[serde(flatten)]
             repr: AbilityDefinitionRepr<'a>,
             #[serde(skip_serializing_if = "is_false")]
             consumes_source: bool,
+            // CR 605.1a: derived mana-ability classification, emitted so the
+            // client routes mana-tap affordances off an engine-owned flag
+            // instead of introspecting the effect AST (`effect.type == "Mana"`).
+            #[serde(skip_serializing_if = "is_false")]
+            is_mana_ability: bool,
         }
         Outer {
             repr,
             consumes_source: self.consumes_source(),
+            is_mana_ability: crate::game::mana_abilities::is_mana_ability(self),
         }
         .serialize(s)
     }
