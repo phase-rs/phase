@@ -26,6 +26,7 @@ mod boon_reflection_gain_life_drain;
 mod bounce_destination_redirect;
 mod braids_arisen_nightmare_decline;
 mod brigid_mana_ability;
+mod bring_to_light_free_cast_2880;
 mod cascade_intervening_if_pipeline;
 mod case_solve_condition;
 mod cast_during_resolution_pipeline;
