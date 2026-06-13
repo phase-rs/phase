@@ -928,8 +928,15 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::NumPermanentsDestroyedThisWay(perms_filter) => {
             let filter = convert_permanents(perms_filter).unwrap_or(TargetFilter::Any);
             let qty = if filter_is_nontrivial(&filter) {
+                // CR 608.2c: `landed_in: None` is the legacy default — counts
+                // every filtered member of the tracked set regardless of landing
+                // zone. The mtgish-import `GameNumber` carries no zone, so we
+                // preserve the by-filter-only behavior this converter has always
+                // had. (The oracle parser emits `Some(zone)` only where it parses
+                // an explicit landing zone from the card text — #2932.)
                 QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
+                    landed_in: None,
                 }
             } else {
                 QuantityRef::TrackedSetSize
@@ -1527,7 +1534,7 @@ mod tests {
 
         match converted {
             QuantityExpr::Ref {
-                qty: QuantityRef::FilteredTrackedSetSize { filter },
+                qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
             } => match *filter {
                 TargetFilter::Typed(ref tf) => assert!(
                     tf.type_filters
