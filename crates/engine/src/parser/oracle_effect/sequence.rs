@@ -2261,7 +2261,7 @@ pub(super) fn apply_clause_continuation(
                                     // selection anaphor over a single-producer
                                     // set — zone-agnostic (every member is in the
                                     // mill destination already).
-                                    landed_in: None,
+                                    caused_by: None,
                                 },
                                 enters_under,
                                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -2290,7 +2290,7 @@ pub(super) fn apply_clause_continuation(
                                     filter: Box::new(card_filter),
                                     // Selection anaphor over the single milled
                                     // set — zone-agnostic (see the `All` arm).
-                                    landed_in: None,
+                                    caused_by: None,
                                 },
                                 owner_library: false,
                                 enter_transformed: false,

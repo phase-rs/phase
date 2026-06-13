@@ -12,7 +12,7 @@ use crate::types::ability::{
     CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
     FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
     ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2629,58 +2629,77 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     )
 }
 
-/// CR 608.2c + CR 400.7: Pair each object affected by `effect` with the zone it
-/// landed in, mirroring [`affected_objects_from_events`] one-for-one but
-/// retaining the per-object destination so [`publish_tracked_set_with_zones`]
-/// can stamp the landing-zone side map. The landing zone is the consumer-binding
-/// the parser threads through `landed_in`:
+/// CR 608.2c + CR 614.6: Pair each object affected by `effect` with the producer
+/// ACTION that made it part of the tracked set, mirroring
+/// [`affected_objects_from_events`] one-for-one but retaining a per-object
+/// [`ThisWayCause`] so [`publish_tracked_set_with_causes`] can stamp the
+/// member-cause side map. The cause is derived from the resolving EFFECT KIND,
+/// NOT the member's final landing zone, so it is stable under a replacement that
+/// redirects the destination (CR 614.1 / CR 614.6) and never collides with
+/// another action that shares the same destination:
 ///
-///   - Destroy / DestroyAll → Graveyard (CR 701.8a).
-///   - Sacrifice → Graveyard (CR 701.21a).
-///   - Mill → its destination, default Graveyard (CR 701.17a).
-///   - Discard / DiscardCard → Graveyard (CR 701.9a).
-///   - BounceAll → its destination, default Hand (CR 400.7 / CR 611.2c).
-///   - ChangeZone / ChangeZoneAll / ExileTop / RevealUntil → the effect's
-///     recorded destination (the per-event `to`, filtered to it).
-///   - counter / reveal / tap-untap producers do not relocate their objects;
-///     the affected objects keep their current zone and are consumed only by
-///     `landed_in: None` (selection-set) downstream references, so a fixed
-///     informational zone is recorded but never discriminates.
-fn affected_objects_with_landing_zones(
+///   - Destroy / DestroyAll → `Destroyed` (CR 701.8a).
+///   - Sacrifice → `Sacrificed` (CR 701.21a) — still `Sacrificed` even when a
+///     replacement sends the permanent to Exile instead of the graveyard.
+///   - Mill → `Milled` (CR 701.17a).
+///   - Discard / DiscardCard → `Discarded` (CR 701.9a).
+///   - ChangeZone / ChangeZoneAll → by destination: Exile → `Exiled`
+///     (CR 701.13a), Battlefield → `Returned` (CR 400.7), Hand → `Bounced`
+///     (CR 400.7); other destinations are not "this way"-referenced verbs, so
+///     they carry no cause (consumed only by `caused_by: None`).
+///   - BounceAll → `Bounced` if its destination is Hand, `Returned` if
+///     Battlefield (default Hand → `Bounced`, CR 400.7 / CR 611.2c).
+///   - ExileTop / ExileFromTopUntil → `Exiled` (CR 701.13a).
+///   - RevealUntil's kept card / counter / reveal / tap-untap producers do not
+///     name a "<verb>ed this way" set; they carry no cause and are consumed only
+///     by `caused_by: None` (selection-set) downstream references.
+fn affected_objects_with_causes(
     effect: &Effect,
     events: &[GameEvent],
     fallback_targets: &[TargetRef],
-) -> Vec<(ObjectId, crate::types::zones::Zone)> {
-    use crate::types::zones::Zone;
+) -> Vec<(ObjectId, Option<ThisWayCause>)> {
     let ids = affected_objects_from_events(effect, events, fallback_targets);
-    // Per-object zone: ZoneChanged carries the real destination; sacrifices /
-    // destroys land in the graveyard; non-moving producers keep the object's
-    // pre-effect zone (informational — consumed only by `landed_in: None`).
-    let zone_for = |id: ObjectId| -> Zone {
-        events
-            .iter()
-            .find_map(|event| match event {
-                GameEvent::ZoneChanged { object_id, to, .. } if *object_id == id => Some(*to),
-                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == id => {
-                    // CR 701.21a: a sacrificed permanent is put into its owner's
-                    // graveyard.
-                    Some(Zone::Graveyard)
-                }
-                GameEvent::CreatureDestroyed { object_id } if *object_id == id => {
-                    // CR 701.8a: a destroyed permanent is put into its owner's
-                    // graveyard.
-                    Some(Zone::Graveyard)
-                }
-                _ => None,
-            })
-            // Non-moving producers (counters, reveals, taps): the object is still
-            // where it was. Record Battlefield as the informational default —
-            // these sets are only ever consumed with `landed_in: None`, so the
-            // value never gates membership. Every relocating producer is already
-            // covered by the event arms above, so no per-effect dispatch is needed.
-            .unwrap_or(Zone::Battlefield)
+    // CR 608.2c: the cause is a property of the EFFECT being resolved, not of any
+    // individual member's event — so every member of this publish shares one
+    // cause. `None` for producers that do not name a "this way" verb (reveals,
+    // taps, counters, the RevealUntil kept card, and zone changes to a
+    // destination no consumer references), which are read only by
+    // `caused_by: None`.
+    let cause = this_way_cause_for_effect(effect);
+    ids.into_iter().map(|id| (id, cause)).collect()
+}
+
+/// CR 608.2c + CR 614.6: Map a resolving effect to the producer-action cause
+/// stamped onto the tracked-set members it publishes. Derived purely from the
+/// effect kind (and its declared destination), so it is independent of any
+/// replacement that later redirects the members' landing zone.
+fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
+    use crate::types::zones::Zone;
+    // CR 400.7: a generic zone change names a "this way" verb only for the
+    // destinations a consumer references — Exile (exiled), Battlefield
+    // (returned/put onto the battlefield), Hand (bounced/returned to hand).
+    let cause_for_zone = |destination: Zone| match destination {
+        Zone::Exile => Some(ThisWayCause::Exiled),
+        Zone::Battlefield => Some(ThisWayCause::Returned),
+        Zone::Hand => Some(ThisWayCause::Bounced),
+        _ => None,
     };
-    ids.into_iter().map(|id| (id, zone_for(id))).collect()
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(ThisWayCause::Destroyed),
+        Effect::Sacrifice { .. } => Some(ThisWayCause::Sacrificed),
+        Effect::Mill { .. } => Some(ThisWayCause::Milled),
+        Effect::Discard { .. } | Effect::DiscardCard { .. } => Some(ThisWayCause::Discarded),
+        Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
+            cause_for_zone(*destination)
+        }
+        // CR 611.2c: mass-bounce destination defaults to Hand.
+        Effect::BounceAll { destination, .. } => cause_for_zone(destination.unwrap_or(Zone::Hand)),
+        Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => Some(ThisWayCause::Exiled),
+        // Reveals, taps, counter producers, the RevealUntil kept card, and any
+        // other producer do not name a "<verb>ed this way" set — leave them
+        // unstamped (matched only by `caused_by: None`).
+        _ => None,
+    }
 }
 
 fn affected_objects_from_events(
@@ -2973,33 +2992,40 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
     }
 }
 
-/// CR 608.2c: Publish the chain tracked set together with the per-object
-/// *landing zone* recorded by the producing effect. Producers publish/extend
-/// exactly as [`publish_tracked_set`] does (so every existing tracked-set
-/// reader is unchanged), but each member's destination zone is additionally
-/// stamped into the [`GameState::tracked_set_landing_zones`] side map keyed by
-/// `(chain set, object)`. A downstream "this way" consumer bound to a specific
-/// zone (`landed_in: Some(_)` on [`TargetFilter::TrackedSetFiltered`] /
+/// CR 608.2c + CR 614.6: Publish the chain tracked set together with the
+/// per-object producer-action *cause* recorded by the producing effect.
+/// Producers publish/extend exactly as [`publish_tracked_set`] does (so every
+/// existing tracked-set reader is unchanged), but each member is additionally
+/// stamped — when its producer names a "this way" verb — into the
+/// [`GameState::tracked_set_member_causes`] side map keyed by `(chain set,
+/// object)`. A downstream "this way" consumer bound to a specific action
+/// (`caused_by: Some(_)` on [`TargetFilter::TrackedSetFiltered`] /
 /// [`QuantityRef::FilteredTrackedSetSize`]) consults that side map so it counts
-/// only the members the matching verb produced — e.g. Living Death's "exiled
-/// this way" return reads only the EXILE members of a merged exile→sacrifice
+/// only the members the matching action produced — e.g. Living Death's "exiled
+/// this way" return reads only the `Exiled` members of a merged exile→sacrifice
 /// chain set, while a sibling "sacrificed this way" life-gain reads only the
-/// GRAVEYARD members of the very same set (issue #2932).
-pub(crate) fn publish_tracked_set_with_zones(
+/// `Sacrificed` members of the very same set. Because the stamp is the ACTION,
+/// it is unaffected by a replacement that redirects a member's destination
+/// (CR 614.6) and never collides with a same-destination action (issue #2932).
+/// Members whose producer carries no "this way" verb (`None`) are not stamped
+/// and remain visible only to `caused_by: None` references.
+pub(crate) fn publish_tracked_set_with_causes(
     state: &mut GameState,
-    affected: Vec<(ObjectId, crate::types::zones::Zone)>,
+    affected: Vec<(ObjectId, Option<ThisWayCause>)>,
 ) {
     let ids: Vec<ObjectId> = affected.iter().map(|(id, _)| *id).collect();
     // Publish/extend the id-only set first (identical to `publish_tracked_set`),
     // which establishes or reuses `chain_tracked_set_id`.
     publish_tracked_set(state, ids);
-    // CR 608.2c: stamp each member's landing zone under the now-current chain
-    // set so a zone-bound "this way" consumer can discriminate producers that
+    // CR 608.2c: stamp each member's producer action under the now-current chain
+    // set so an action-bound "this way" consumer can discriminate producers that
     // contributed to the same merged set.
     if let Some(chain_id) = state.chain_tracked_set_id {
-        let zones = state.tracked_set_landing_zones.entry(chain_id).or_default();
-        for (id, zone) in affected {
-            zones.insert(id, zone);
+        let causes = state.tracked_set_member_causes.entry(chain_id).or_default();
+        for (id, cause) in affected {
+            if let Some(cause) = cause {
+                causes.insert(id, cause);
+            }
         }
     }
 }
@@ -4196,9 +4222,9 @@ fn resolve_chain_body(
         {
             state.last_effect_amount = Some(amount);
         }
-        let affected_with_zones =
+        let affected_with_causes =
             if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile {
-                affected_objects_with_landing_zones(
+                affected_objects_with_causes(
                     &scoped_template.effect,
                     scoped_events,
                     &scoped_template.targets,
@@ -4206,7 +4232,7 @@ fn resolve_chain_body(
             } else {
                 Vec::new()
             };
-        let affected_ids: Vec<ObjectId> = affected_with_zones.iter().map(|(id, _)| *id).collect();
+        let affected_ids: Vec<ObjectId> = affected_with_causes.iter().map(|(id, _)| *id).collect();
         if after_scope_needs_linked_exile {
             for id in &affected_ids {
                 if state
@@ -4235,7 +4261,7 @@ fn resolve_chain_body(
         ids.dedup();
         state.last_zone_changed_ids = ids;
         if next_sub_needs_tracked_set(ability) {
-            publish_tracked_set_with_zones(state, affected_with_zones);
+            publish_tracked_set_with_causes(state, affected_with_causes);
         }
         if !paused {
             // CR 608.2e: this `player_scope` clause has completed. Clear its
@@ -5036,12 +5062,12 @@ fn resolve_chain_body(
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
     if next_sub_needs_tracked_set(ability) {
-        let affected_with_zones = affected_objects_with_landing_zones(
+        let affected_with_causes = affected_objects_with_causes(
             &ability.effect,
             &events[events_before..],
             &ability.targets,
         );
-        publish_tracked_set_with_zones(state, affected_with_zones);
+        publish_tracked_set_with_causes(state, affected_with_causes);
     }
 
     // ExileFromTopUntil handles its own sub_ability chain internally for both
@@ -9745,7 +9771,7 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
-                    landed_in: None,
+                    caused_by: None,
                 },
             },
             vec![],
@@ -9822,7 +9848,7 @@ mod tests {
                 target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
-                    landed_in: None,
+                    caused_by: None,
                 },
             },
             vec![],
@@ -9989,7 +10015,7 @@ mod tests {
                                 .controller(ControllerRef::You)
                                 .properties(vec![FilterProp::NonToken]),
                         )),
-                        landed_in: None,
+                        caused_by: None,
                     },
                 },
                 owner: TargetFilter::Controller,
@@ -10250,7 +10276,7 @@ mod tests {
                     filter: Box::new(TargetFilter::Typed(
                         TypedFilter::creature().subtype("Vampire".to_string()),
                     )),
-                    landed_in: None,
+                    caused_by: None,
                 },
             },
             vec![],

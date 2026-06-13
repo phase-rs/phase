@@ -5066,7 +5066,7 @@ pub(super) fn parse_exile_ast(
                     filter: Box::new(target),
                     // "from among them" is a selection-set anaphor — its members
                     // were not relocated by the producer, so it is zone-agnostic.
-                    landed_in: None,
+                    caused_by: None,
                 },
                 all: false,
                 enter_with_counters: vec![],
@@ -7100,13 +7100,13 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 TargetFilter::TrackedSetFiltered {
                     id,
                     filter,
-                    landed_in,
+                    caused_by,
                 } => TargetFilter::TrackedSetFiltered {
                     id: *id,
                     filter: Box::new(TargetFilter::Not {
                         filter: filter.clone(),
                     }),
-                    landed_in: *landed_in,
+                    caused_by: *caused_by,
                 },
                 TargetFilter::TrackedSet { id } => TargetFilter::TrackedSet { id: *id },
                 _ => TargetFilter::TrackedSet {

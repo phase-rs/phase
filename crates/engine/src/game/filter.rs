@@ -1464,11 +1464,11 @@ fn filter_inner_for_object(
         TargetFilter::TrackedSetFiltered {
             id,
             filter,
-            landed_in,
+            caused_by,
         } => {
             // CR 608.2c: `TrackedSetId(0)` is a sentinel for "the most recent
-            // tracked set"; resolve it to the concrete set so the `landed_in`
-            // check can consult the same set's landing-zone provenance.
+            // tracked set"; resolve it to the concrete set so the `caused_by`
+            // check can consult the same set's producer-action provenance.
             let resolved = if id.0 == 0 {
                 state
                     .tracked_object_sets
@@ -1482,17 +1482,18 @@ fn filter_inner_for_object(
                 if !set.contains(&object_id) {
                     return false;
                 }
-                // CR 608.2c + CR 400.7: a zone-bound consumer ("exiled this
+                // CR 608.2c + CR 614.6: an action-bound consumer ("exiled this
                 // way", "sacrificed this way", …) matches only members whose
-                // recorded landing zone equals the bound zone. `None` keeps the
-                // legacy "any member" behavior (selection sets, dig anaphors).
-                match landed_in {
+                // recorded producer action equals the bound cause — independent
+                // of the member's final zone. `None` keeps the legacy "any
+                // member" behavior (selection sets, dig anaphors).
+                match caused_by {
                     None => true,
-                    Some(zone) => state
-                        .tracked_set_landing_zones
+                    Some(cause) => state
+                        .tracked_set_member_causes
                         .get(&set_id)
-                        .and_then(|zones| zones.get(&object_id))
-                        .is_some_and(|landed| landed == zone),
+                        .and_then(|causes| causes.get(&object_id))
+                        .is_some_and(|member_cause| member_cause == cause),
                 }
             });
             in_set

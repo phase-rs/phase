@@ -1182,13 +1182,13 @@ pub fn resolve_add_all(
         TargetFilter::TrackedSetFiltered {
             id: crate::types::identifiers::TrackedSetId(0),
             filter,
-            landed_in,
+            caused_by,
         } => {
             if let Some(id) = state.chain_tracked_set_id {
                 TargetFilter::TrackedSetFiltered {
                     id,
                     filter,
-                    landed_in,
+                    caused_by,
                 }
             } else if let Some(source_filter) =
                 crate::game::targeting::current_combat_damage_source_filter(state)
@@ -1202,13 +1202,13 @@ pub fn resolve_add_all(
                 TargetFilter::TrackedSetFiltered {
                     id,
                     filter,
-                    landed_in,
+                    caused_by,
                 }
             } else {
                 TargetFilter::TrackedSetFiltered {
                     id: crate::types::identifiers::TrackedSetId(0),
                     filter,
-                    landed_in,
+                    caused_by,
                 }
             }
         }

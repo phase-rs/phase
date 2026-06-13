@@ -13,7 +13,7 @@ use super::ability::{
     CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
     KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition,
+    ThisWayCause, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -5425,23 +5425,28 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_tracked_set_id: Option<TrackedSetId>,
 
-    /// CR 608.2c + CR 400.7: Per-member landing-zone provenance for tracked
+    /// CR 608.2c + CR 614.6: Per-member producer-action provenance for tracked
     /// sets. When a producer publishes (or extends) a chain tracked set, each
-    /// affected object is additionally stamped here with the zone it landed in
-    /// (Exile for exiles, Graveyard for sacrifice/destroy/mill/discard, the
-    /// event `to` for generic zone changes). A downstream "this way" consumer
-    /// that binds to a specific verb — `TargetFilter::TrackedSetFiltered`/
-    /// `QuantityRef::FilteredTrackedSetSize` with `landed_in: Some(zone)` —
-    /// consults this map so it counts only the members the matching verb
-    /// produced. This keeps `tracked_object_sets` (the id-only membership read
-    /// by every existing consumer) byte-identical while letting a single merged
-    /// exile→sacrifice chain set serve both an "exiled this way" return and a
-    /// sibling "sacrificed this way" reference (issue #2932). Members published
-    /// without zone provenance (selection sets via `publish_fresh_tracked_set`
-    /// / the discard-choice continuation) are absent here and are read only by
-    /// `landed_in: None` references.
+    /// affected object is additionally stamped here with the ACTION that made it
+    /// part of the set — derived from the resolving EFFECT, NOT the member's
+    /// final landing zone (Sacrificed for `Effect::Sacrifice`, Destroyed for
+    /// `Effect::Destroy`/`DestroyAll`, Milled for `Effect::Mill`, Discarded for
+    /// `Effect::Discard`/`DiscardCard`, Exiled/Returned/Bounced for zone changes
+    /// by destination). A downstream "this way" consumer that binds to a
+    /// specific verb — `TargetFilter::TrackedSetFiltered`/
+    /// `QuantityRef::FilteredTrackedSetSize` with `caused_by: Some(cause)` —
+    /// consults this map so it counts only the members the matching action
+    /// produced. Because the stamp is the action, a sacrifice that a replacement
+    /// redirects to Exile (CR 614.6) is still `Sacrificed`, and same-destination
+    /// actions (mill vs. sacrifice, both → graveyard) never collide. This keeps
+    /// `tracked_object_sets` (the id-only membership read by every existing
+    /// consumer) byte-identical while letting a single merged exile→sacrifice
+    /// chain set serve both an "exiled this way" return and a sibling
+    /// "sacrificed this way" reference (issue #2932). Members published without
+    /// action provenance (selection sets via `publish_fresh_tracked_set`) are
+    /// absent here and are read only by `caused_by: None` references.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub tracked_set_landing_zones: HashMap<TrackedSetId, HashMap<ObjectId, super::zones::Zone>>,
+    pub tracked_set_member_causes: HashMap<TrackedSetId, HashMap<ObjectId, ThisWayCause>>,
 
     // Commander support
     #[serde(default)]
@@ -6749,7 +6754,7 @@ impl GameState {
             tracked_object_sets: HashMap::new(),
             next_tracked_set_id: 1,
             chain_tracked_set_id: None,
-            tracked_set_landing_zones: HashMap::new(),
+            tracked_set_member_causes: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
@@ -7170,7 +7175,7 @@ impl PartialEq for GameState {
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
-            && self.tracked_set_landing_zones == other.tracked_set_landing_zones
+            && self.tracked_set_member_causes == other.tracked_set_member_causes
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return

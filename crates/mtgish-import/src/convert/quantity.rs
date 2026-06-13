@@ -928,15 +928,16 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::NumPermanentsDestroyedThisWay(perms_filter) => {
             let filter = convert_permanents(perms_filter).unwrap_or(TargetFilter::Any);
             let qty = if filter_is_nontrivial(&filter) {
-                // CR 608.2c: `landed_in: None` is the legacy default — counts
-                // every filtered member of the tracked set regardless of landing
-                // zone. The mtgish-import `GameNumber` carries no zone, so we
-                // preserve the by-filter-only behavior this converter has always
-                // had. (The oracle parser emits `Some(zone)` only where it parses
-                // an explicit landing zone from the card text — #2932.)
+                // CR 608.2c: `caused_by: None` is the legacy default — counts
+                // every filtered member of the tracked set regardless of the
+                // producer action. The mtgish-import `GameNumber` carries no
+                // action provenance, so we preserve the by-filter-only behavior
+                // this converter has always had. (The oracle parser emits
+                // `Some(cause)` only where it parses an explicit producer verb
+                // from the card text — #2932.)
                 QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
-                    landed_in: None,
+                    caused_by: None,
                 }
             } else {
                 QuantityRef::TrackedSetSize

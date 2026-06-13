@@ -116,11 +116,11 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         TargetFilter::TrackedSetFiltered {
             id,
             filter,
-            landed_in,
+            caused_by,
         } => TargetFilter::TrackedSetFiltered {
             id: *id,
             filter: Box::new(relax_pitch_bound_x_filter(filter)),
-            landed_in: *landed_in,
+            caused_by: *caused_by,
         },
         TargetFilter::None
         | TargetFilter::Any

@@ -1684,7 +1684,7 @@ fn resolve_ref(
         // set that also satisfy the inner filter. Used for "for each nontoken
         // creature you controlled that was destroyed this way" — the tracked set
         // holds all destroyed creatures; the filter narrows to controlled nontokens.
-        QuantityRef::FilteredTrackedSetSize { filter, landed_in } => {
+        QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
             let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
             else {
                 return 0;
@@ -1692,19 +1692,20 @@ fn resolve_ref(
             let count = ids
                 .iter()
                 .filter(|&&oid| {
-                    // CR 608.2c + CR 400.7: a zone-bound count ("the number of
+                    // CR 608.2c + CR 614.6: an action-bound count ("the number of
                     // creatures sacrificed this way") tallies only members whose
-                    // recorded landing zone equals the bound zone; `None` counts
-                    // every filtered member (legacy parity).
-                    let zone_ok = match landed_in {
+                    // recorded producer action equals the bound cause —
+                    // independent of final zone; `None` counts every filtered
+                    // member (legacy parity).
+                    let cause_ok = match caused_by {
                         None => true,
-                        Some(zone) => state
-                            .tracked_set_landing_zones
+                        Some(cause) => state
+                            .tracked_set_member_causes
                             .get(set_id)
-                            .and_then(|zones| zones.get(&oid))
-                            .is_some_and(|landed| landed == zone),
+                            .and_then(|causes| causes.get(&oid))
+                            .is_some_and(|member_cause| member_cause == cause),
                     };
-                    zone_ok
+                    cause_ok
                         && crate::game::filter::matches_target_filter(
                             state,
                             oid,
@@ -3751,7 +3752,7 @@ mod tests {
     use crate::types::ability::{
         AggregateFunction, ChoiceValue, ControllerRef, DamageKindFilter, DevotionColors, Effect,
         FilterProp, KickerVariant, ObjectProperty, SharedQuality, TargetFilter, TargetRef,
-        TypeFilter, TypedFilter,
+        ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -10161,81 +10162,105 @@ mod tests {
         assert_eq!(count, 0, "every opponent of P1 is attacked → count 0");
     }
 
-    /// CR 608.2c + CR 400.7: A merged chain tracked set whose members landed in
-    /// different zones must partition by `landed_in`: a `Some(Exile)` count sees
-    /// only the exiled members, a `Some(Graveyard)` count sees only the
-    /// graveyard members (the two are disjoint), and `None` counts every member
-    /// (legacy "any member" parity). This is the building block behind Living
-    /// Death's exiled-this-way return vs. sacrificed-this-way life-gain reading
-    /// the very same chain set disjointly (#2932).
+    /// CR 608.2c + CR 614.6: A merged chain tracked set whose members were
+    /// produced by different actions must partition by `caused_by`, NOT by final
+    /// zone. The decisive case: a `Sacrificed` member and a `Milled` member that
+    /// BOTH land in the graveyard (CR 701.21a / 701.17a) — a zone-only model
+    /// would merge them, but the cause model keeps them disjoint. A
+    /// `Some(Sacrificed)` count sees only the sacrificed member, a `Some(Milled)`
+    /// count sees only the milled member, and `None` counts every member (legacy
+    /// "any member" parity). This is the building block behind Living Death's
+    /// exiled-this-way return vs. sacrificed-this-way life-gain reading the very
+    /// same chain set disjointly, and the same-destination disambiguation the
+    /// zone model fails (#2932).
     #[test]
-    fn filtered_tracked_set_size_partitions_members_by_landing_zone() {
+    fn filtered_tracked_set_size_partitions_members_by_cause() {
         let mut state = GameState::new_two_player(42);
-        // Three creature cards published into one chain set with mixed landings:
-        // two exiled, one sacrificed-to-graveyard.
-        let exiled_a = create_object(
+        // Four creature cards published into one chain set with mixed CAUSES.
+        // Sacrificed and milled both land in the graveyard — they are
+        // distinguishable only by producer action, not by zone.
+        let exiled = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
-            "Exiled A".into(),
+            "Exiled".into(),
             Zone::Exile,
         );
-        let exiled_b = create_object(
+        let sacrificed = create_object(
             &mut state,
             CardId(2),
-            PlayerId(0),
-            "Exiled B".into(),
-            Zone::Exile,
-        );
-        let graveyard = create_object(
-            &mut state,
-            CardId(3),
             PlayerId(0),
             "Sacrificed".into(),
             Zone::Graveyard,
         );
-        for id in [exiled_a, exiled_b, graveyard] {
+        let milled = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Milled".into(),
+            Zone::Graveyard,
+        );
+        // A sacrifice redirected to Exile by a replacement (CR 614.6) — still
+        // `Sacrificed` even though it landed where the exiled member did.
+        let sacrificed_to_exile = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Sacrificed-to-exile".into(),
+            Zone::Exile,
+        );
+        for id in [exiled, sacrificed, milled, sacrificed_to_exile] {
             state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
         }
 
         let set_id = TrackedSetId(state.next_tracked_set_id);
         state.next_tracked_set_id += 1;
-        state
-            .tracked_object_sets
-            .insert(set_id, vec![exiled_a, exiled_b, graveyard]);
+        state.tracked_object_sets.insert(
+            set_id,
+            vec![exiled, sacrificed, milled, sacrificed_to_exile],
+        );
         state.chain_tracked_set_id = Some(set_id);
-        // Stamp each member's recorded landing zone, mirroring
-        // `publish_tracked_set_with_zones`.
-        let mut zones = HashMap::new();
-        zones.insert(exiled_a, Zone::Exile);
-        zones.insert(exiled_b, Zone::Exile);
-        zones.insert(graveyard, Zone::Graveyard);
-        state.tracked_set_landing_zones.insert(set_id, zones);
+        // Stamp each member's producer ACTION, mirroring
+        // `publish_tracked_set_with_causes`.
+        let mut causes = HashMap::new();
+        causes.insert(exiled, ThisWayCause::Exiled);
+        causes.insert(sacrificed, ThisWayCause::Sacrificed);
+        causes.insert(milled, ThisWayCause::Milled);
+        causes.insert(sacrificed_to_exile, ThisWayCause::Sacrificed);
+        state.tracked_set_member_causes.insert(set_id, causes);
 
         let creature_filter = Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
-        let count_for = |landed_in| {
+        let count_for = |caused_by| {
             let expr = QuantityExpr::Ref {
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: creature_filter.clone(),
-                    landed_in,
+                    caused_by,
                 },
             };
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999))
         };
 
+        // Same-destination disambiguation: sacrificed and milled both reached
+        // the graveyard, yet each cause-bound count sees only its own action.
         assert_eq!(
-            count_for(Some(Zone::Exile)),
+            count_for(Some(ThisWayCause::Sacrificed)),
             2,
-            "Some(Exile) must count only the two exiled members"
+            "Some(Sacrificed) counts the graveyard sacrifice AND the replacement-redirected \
+             sacrifice-to-exile, not the milled graveyard member"
         );
         assert_eq!(
-            count_for(Some(Zone::Graveyard)),
+            count_for(Some(ThisWayCause::Milled)),
             1,
-            "Some(Graveyard) must count only the single sacrificed member"
+            "Some(Milled) counts only the milled member, not the same-graveyard sacrifice"
+        );
+        assert_eq!(
+            count_for(Some(ThisWayCause::Exiled)),
+            1,
+            "Some(Exiled) counts only the exiled member, not the sacrifice-to-exile"
         );
         assert_eq!(
             count_for(None),
-            3,
+            4,
             "None must count every member of the set (legacy parity)"
         );
     }

@@ -1050,7 +1050,7 @@ pub fn parse_target_with_syntax<'a>(
                     filter: Box::new(filter),
                     // "each of those <type>" is an anaphor over the affected set
                     // with no verb-specific zone binding.
-                    landed_in: None,
+                    caused_by: None,
                 },
                 remainder,
                 syntax,
@@ -2425,7 +2425,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
             filter: Box::new(filter),
             // "counters put this way" names objects that received counters but
             // did not change zones — a selection set with no zone binding.
-            landed_in: None,
+            caused_by: None,
         }
     } else {
         filter
@@ -8060,7 +8060,7 @@ mod tests {
             TargetFilter::TrackedSetFiltered {
                 id: TrackedSetId(0),
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
-                landed_in: None,
+                caused_by: None,
             }
         );
     }
@@ -8076,7 +8076,7 @@ mod tests {
             TargetFilter::TrackedSetFiltered {
                 id: TrackedSetId(0),
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
-                landed_in: None,
+                caused_by: None,
             }
         );
     }
