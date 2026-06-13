@@ -9,6 +9,7 @@ import type {
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { assertNever } from "../../utils/assertNever.ts";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { DialogShell } from "./DialogShell.tsx";
@@ -27,10 +28,6 @@ interface KeywordCopy {
   /** True when the card's printed Oracle text is helpful context for the chosen keyword. */
   showOracleText: boolean;
   subtitle: string;
-}
-
-function assertNeverKeyword(keyword: never): never {
-  throw new Error(`Unhandled alternative cast keyword: ${String(keyword)}`);
 }
 
 // Per-keyword display copy. Driven by the engine-provided `keyword` axis;
@@ -171,7 +168,7 @@ function keywordCopy(
         subtitle: t("alternativeCost.spectacleSubtitle", { name: cardName }),
       };
   }
-  return assertNeverKeyword(keyword);
+  return assertNever(keyword);
 }
 
 /**

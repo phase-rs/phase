@@ -16,14 +16,15 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, Chooser, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownBody, FaceDownProfile,
-    LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, CastingPermission, Chooser, ContinuousModification,
+    ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect, FaceDownBody,
+    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
+    QuantityRef, StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
@@ -477,6 +478,28 @@ fn parse_exile_looked_at_card(lower: &str) -> Option<bool> {
     .ok()?;
     eof::<_, OracleError<'_>>(rest).ok()?;
     Some(face_down)
+}
+
+/// CR 702.75a + CR 406.3: Recognize "exile one of them face down" — a player
+/// CHOICE of one card from among the cards a preceding private `Dig` looked at
+/// (the Gonti, Lord of Luxury class: "look at the top four cards of an
+/// opponent's library, exile one of them face down ..."). Distinct from
+/// `parse_exile_looked_at_card` ("exile it/them ...", the Gonti, Canny
+/// Acquisitor wholesale impulse idiom): "one of them" means the controller
+/// selects exactly one of the N looked-at cards. The "face down" suffix is the
+/// CR 406.3 hidden-information marker required by this class; pure-peek Digs
+/// (Delver of Secrets — no exile clause) never reach this recognizer.
+fn parse_exile_one_of_them_face_down(lower: &str) -> bool {
+    let trimmed = lower.trim().trim_end_matches('.').trim_end();
+    (
+        tag::<_, _, OracleError<'_>>("exile "),
+        alt((tag("one of them"), tag("one of those cards"))),
+        multispace1,
+        tag("face down"),
+        eof,
+    )
+        .parse(trimmed)
+        .is_ok()
 }
 
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
@@ -2127,6 +2150,22 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
+        ContinuationAst::GoadLastCreated { duration } => {
+            // CR 701.15b: Goaded is a static ability on the just-created tokens.
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::LastCreated)
+                        .modifications(vec![ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded,
+                        }])
+                        .description("goaded".to_string())],
+                    duration: duration.or(Some(Duration::Permanent)),
+                    target: Some(TargetFilter::LastCreated),
+                },
+            ));
+        }
         ContinuationAst::FlashbackCostEqualsManaCost => {}
         ContinuationAst::CantRegenerate => {
             let Some(previous) = defs.last_mut() else {
@@ -2685,6 +2724,42 @@ pub(super) fn apply_clause_continuation(
                 face_down,
             };
         }
+        // CR 702.75a + CR 406.3: "exile one of them face down" patches the
+        // preceding private `Dig` into the Hideaway shape — the controller
+        // selects ONE looked-at card and the `DigChoice` flow routes it to
+        // exile. Mirror `database/hideaway.rs`: keep_count:1, destination:Exile,
+        // reveal stays false (CR 701.20e — the look was private), and chain a
+        // `HideawayConceal` sub-ability to turn the chosen card face down and
+        // link it to the source (so the trailing "you may cast that card ..."
+        // permission, which reads the published tracked set / `ExiledBySource`,
+        // binds to the dug card). Without this fusion the Dig short-circuited as
+        // a keep_count:0 pure-peek and a sibling `ChangeZone { ParentTarget }`
+        // exiled the trigger source itself (#1146).
+        ContinuationAst::ExileOneOfThemFaceDown => {
+            let Some(previous) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
+            else {
+                return;
+            };
+            if let Effect::Dig {
+                keep_count,
+                up_to,
+                destination,
+                ..
+            } = &mut *previous.effect
+            {
+                *keep_count = Some(1);
+                *up_to = false;
+                *destination = Some(Zone::Exile);
+            }
+            // CR 608.2c: chain the conceal continuation onto the Dig. The
+            // `DigChoice` resolution binds the chosen (exiled) card onto this
+            // sub-ability's `ParentTarget`; `HideawayConceal` then flips it face
+            // down (CR 406.3) and links it to the source (CR 607.2a / CR 702.75a).
+            append_conceal_sub_ability(previous);
+        }
         ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter } => {
             let Some(filter) = sacrifice_filter else {
                 return;
@@ -2701,6 +2776,29 @@ pub(super) fn apply_clause_continuation(
             }
         }
     }
+}
+
+/// CR 702.75a + CR 608.2c: Append the Hideaway conceal continuation to the
+/// deepest point of `dig`'s sub-ability chain. Mirrors `database/hideaway.rs`:
+/// the chained `HideawayConceal { target: ParentTarget }` flips the just-exiled
+/// dug card face down (CR 406.3) and links it to the source. Appended at the
+/// deepest sub so it never clobbers an existing continuation (e.g. a trailing
+/// "put the rest on the bottom" patch lives on the Dig itself, not as a sub).
+fn append_conceal_sub_ability(dig: &mut AbilityDefinition) {
+    let conceal = Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::HideawayConceal {
+            target: TargetFilter::ParentTarget,
+        },
+    ));
+    let mut cursor = dig;
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_mut()
+            .expect("sub_ability checked above");
+    }
+    cursor.sub_ability = Some(conceal);
 }
 
 fn apply_search_destination_to_ability_chain(
@@ -2779,6 +2877,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::FlashbackCostEqualsManaCost => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
+        ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
@@ -2799,6 +2898,10 @@ pub(super) fn continuation_absorbs_current(
         // parse_followup_continuation_ast; the "exile it [face down]" clause is
         // folded into that Dig (rewritten to ExileTop) and emits no sibling def.
         ContinuationAst::ExileLookedAtCard { .. } => true,
+        // Recognition was already gated on a preceding `Dig`; the "exile one of
+        // them face down" clause patches that Dig (keep_count:1 / Exile) and
+        // pushes the conceal sub-ability — it emits no sibling def.
+        ContinuationAst::ExileOneOfThemFaceDown => true,
         ContinuationAst::ChooseAndSacrificeRestFilter { .. } => true,
     }
 }
@@ -3898,6 +4001,18 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::CopyMayRetarget)
         }
+        // CR 702.75a + CR 406.3: "exile one of them face down" after a private
+        // `Dig` (the "look at the top N cards of <player>'s library" look step)
+        // — the Gonti, Lord of Luxury class. The controller selects ONE of the N
+        // looked-at cards and exiles it face down. Patches the `Dig` into the
+        // Hideaway shape (keep_count: 1, destination: Exile) + chains a
+        // `HideawayConceal` so the player-selected dug card is the one exiled
+        // face down and linked to the source — NOT a sibling
+        // `ChangeZone { ParentTarget }`, which exiled the trigger source itself.
+        // `reveal: false` scopes this to the private look form.
+        Effect::Dig { reveal: false, .. } if parse_exile_one_of_them_face_down(&lower) => {
+            Some(ContinuationAst::ExileOneOfThemFaceDown)
+        }
         // CR 201.2 + CR 608.2c: "[You may] put one of those cards onto the
         // battlefield if it has the same name as a permanent" after Dig —
         // Mitotic-Manipulation-style name-match selection. Patches the
@@ -4357,6 +4472,12 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::EntersTappedAttacking)
         }
+        // CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token creation.
+        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Populate
+            if let Some(continuation) = try_parse_tokens_goaded_continuation(&lower) =>
+        {
+            Some(continuation)
+        }
         Effect::ControlNextTurn { .. }
             if nom_primitives::scan_contains(&lower, "after that turn")
                 && nom_primitives::scan_contains(&lower, "takes an extra turn") =>
@@ -4438,6 +4559,34 @@ fn parse_nonland_permanent_domain(
             TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
         ),
     ))
+}
+
+/// CR 701.15a + CR 701.15b: Parse "the token(s) (is|are) goaded [duration]" after token creation.
+/// Prefix stripping mirrors `rewrite_token_created_this_way_unimplemented` so the
+/// predicate (`are goaded`) stays in the remainder for duration stripping.
+fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> {
+    let lower = lower.trim().trim_end_matches('.');
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the tokens created this way "),
+        tag("the token created this way "),
+        tag("the tokens "),
+        tag("the token "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (mod_text, duration) = super::lower::strip_trailing_duration(rest.trim());
+    let mods = crate::parser::oracle_static::parse_continuous_modifications(mod_text);
+    if !mods.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::Goaded
+            }
+        )
+    }) {
+        return None;
+    }
+    Some(ContinuationAst::GoadLastCreated { duration })
 }
 
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
@@ -5308,6 +5457,160 @@ mod tests {
                 sacrifice_filter: None,
             })
         );
+    }
+
+    /// CR 701.15b: plural "the tokens are goaded" after CreateToken.
+    #[test]
+    fn tokens_goaded_continuation_after_create_token() {
+        let token_effect = Effect::Token {
+            name: "Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![crate::types::mana::ManaColor::White],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 3 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "the tokens are goaded for the rest of the game",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::GoadLastCreated {
+                duration: Some(Duration::Permanent),
+            })
+        );
+    }
+
+    /// CR 701.15b + CR 611.2b: Saga-scoped goad persists while the Saga remains.
+    #[test]
+    fn tokens_goaded_continuation_after_create_token_until_host_leaves_play() {
+        let token_effect = Effect::Token {
+            name: "Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![crate::types::mana::ManaColor::White],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 3 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "the tokens are goaded for as long as this Saga remains on the battlefield",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::GoadLastCreated {
+                duration: Some(Duration::UntilHostLeavesPlay),
+            })
+        );
+    }
+
+    /// CR 701.15b: singular form must still recognize (Nettling Nuisance class).
+    #[test]
+    fn token_goaded_continuation_after_create_token() {
+        let token_effect = Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![crate::types::mana::ManaColor::Red],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "the token is goaded for the rest of the game",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::GoadLastCreated {
+                duration: Some(Duration::Permanent),
+            })
+        );
+    }
+
+    /// CR 701.15b: absorbed continuation grants permanent goad on LastCreated.
+    #[test]
+    fn create_tokens_then_goad_chain_has_no_effect_the_gap() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "each player creates three tapped 1/1 white Warrior creature tokens. the tokens are goaded for the rest of the game",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("goad sub_ability");
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::Permanent));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )));
+            }
+            Effect::Unimplemented { name, .. } => {
+                panic!("expected GenericEffect goad sub, got Unimplemented({name})")
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
+    }
+
+    /// CR 701.15b + CR 611.2b: The War Games class keeps the Saga-scoped duration.
+    #[test]
+    fn create_tokens_then_saga_scoped_goad_chain_has_host_duration() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "each player creates three tapped 1/1 white Warrior creature tokens. the tokens are goaded for as long as this Saga remains on the battlefield",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("goad sub_ability");
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7181,6 +7484,82 @@ mod tests {
         assert!(
             chunks.len() > 1,
             "expected a split (sticky must not engage), got single chunk: {chunks:?}"
+        );
+    }
+
+    /// Build a private-look (`reveal: false`) peek `Dig` matching the shape a
+    /// "look at the top N cards" clause lowers to before any exile follow-on.
+    fn make_peek_dig() -> Effect {
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 4 },
+            destination: None,
+            keep_count: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+        }
+    }
+
+    /// #1146: "exile one of them face down" after a private `Dig` is recognized
+    /// as the Gonti-class continuation (not the wholesale impulse `ExileTop`).
+    #[test]
+    fn exile_one_of_them_face_down_recognized_after_peek_dig() {
+        let dig = make_peek_dig();
+        let result = parse_followup_continuation_ast(
+            "Exile one of them face down.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::ExileOneOfThemFaceDown),
+            "the Gonti-class exile-the-dug-card clause must be recognized"
+        );
+    }
+
+    /// #1146: the variant phrasing "exile one of those cards face down" maps to
+    /// the same continuation.
+    #[test]
+    fn exile_one_of_those_cards_face_down_recognized_after_peek_dig() {
+        let dig = make_peek_dig();
+        let result = parse_followup_continuation_ast(
+            "Exile one of those cards face down.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(result, Some(ContinuationAst::ExileOneOfThemFaceDown));
+    }
+
+    /// #1146 scope guard: the recognizer requires the "face down" CR 406.3
+    /// marker — a "one of them" clause WITHOUT it is NOT this continuation, so a
+    /// card with different selection semantics is not mis-fused.
+    #[test]
+    fn exile_one_of_them_without_face_down_is_not_gonti_continuation() {
+        assert!(
+            !parse_exile_one_of_them_face_down("exile one of them"),
+            "without the 'face down' marker this is not the Gonti look-and-exile class"
+        );
+    }
+
+    /// #1146 regression guard: a genuine pure-peek `Dig` with NO exile clause
+    /// (the Delver of Secrets idiom — "look at the top card … you may reveal it")
+    /// must NOT lower to the Gonti exile-the-dug-card continuation, so it stays a
+    /// `keep_count: 0` peek and never surfaces a `DigChoice`.
+    #[test]
+    fn delver_pure_peek_is_not_gonti_continuation() {
+        let dig = make_peek_dig();
+        let result = parse_followup_continuation_ast(
+            "You may reveal it.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_ne!(
+            result,
+            Some(ContinuationAst::ExileOneOfThemFaceDown),
+            "a pure-peek 'you may reveal it' must not be fused into the Gonti exile continuation"
         );
     }
 }

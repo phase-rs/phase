@@ -230,6 +230,9 @@ pub(crate) enum ContinuationAst {
     CopyMayRetarget,
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
+    /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
+    /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
+    GoadLastCreated { duration: Option<Duration> },
     /// "The flashback cost is equal to its mana cost." after a flashback grant.
     FlashbackCostEqualsManaCost,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
@@ -368,6 +371,17 @@ pub(crate) enum ContinuationAst {
         count: QuantityExpr,
         face_down: bool,
     },
+    /// CR 702.75a + CR 406.3: "exile one of them face down" after a private
+    /// `Dig` (the "look at the top N cards of <player>'s library" look step) —
+    /// the Gonti, Lord of Luxury class. Unlike `ExileLookedAtCard` (which exiles
+    /// the looked-at card(s) wholesale via `ExileTop`), this is a player choice
+    /// of ONE card from among the N looked at. It patches the preceding `Dig`
+    /// into the Hideaway shape (`keep_count: Some(1)`, `destination: Exile`) so
+    /// the dug card is player-selected and routed to exile by the `DigChoice`
+    /// flow, then chains a `HideawayConceal` sub-ability to turn the chosen card
+    /// face down and link it to the source. Gated on the exile-the-dug-card
+    /// continuation, so genuine pure-peek Digs (Delver of Secrets) are untouched.
+    ExileOneOfThemFaceDown,
     /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
     /// following a choose-and-sacrifice-rest effect, optionally narrowing the
     /// final sacrifice sweep ("all other nonland permanents they control").

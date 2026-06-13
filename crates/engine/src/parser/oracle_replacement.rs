@@ -348,26 +348,36 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::GainLife).description(text.to_string());
+        // CR 119.10 + CR 614.6: "If [a player] would gain life, [that player]
+        // gains no life instead." — the lifegain-negation replacement. The
+        // body lowers to a bare "gain no life" which `parse_effect_chain` would
+        // turn into an `Unimplemented` no-op effect (a silent runtime
+        // passthrough). Instead, emit the structured `Prevent` quantity
+        // modification, which `gain_life_applier` Branch 1 reads to fully
+        // suppress the gain (CR 614.6: a replaced event never happens). Mirrors
+        // `parse_global_player_counter_prohibition`: a `Prevent` replacement
+        // carries no `execute` effect, so no stray `Unimplemented` pollutes the
+        // AST. Scoped to the un-durationed form — the "...would gain life THIS
+        // TURN..." durational replacement (Flames of the Blood Hand, CR 611.2a:
+        // a resolving spell's continuous effect lasts only as long as stated) is
+        // deferred, since a flat `Prevent` would wrongly become permanent.
+        let body_negates_lifegain = effect_text
+            .as_deref()
+            .is_some_and(|e| body_is_lifegain_negation(&e.to_lowercase()));
+        if body_negates_lifegain
+            && !nom_primitives::scan_contains(&lower, "would gain life this turn")
+        {
+            def = def.quantity_modification(QuantityModification::Prevent);
+            // Apply player scope before short-circuiting (shared with the
+            // execute path below): "a player" / opponent / controller scoping.
+            apply_gain_life_player_scope(&lower, &mut def);
+            return Some(def);
+        }
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
         // CR 614.1a: Parse the subject to determine player scope.
-        if nom_primitives::scan_contains(&lower, "an opponent would gain life")
-            || nom_primitives::scan_contains(&lower, "opponent would gain life")
-        {
-            def.valid_player = Some(ReplacementPlayerScope::Opponent);
-        } else if nom_primitives::scan_contains(&lower, "would cause its controller to gain life")
-            || nom_primitives::scan_contains(&lower, "a player would gain life")
-        {
-            // CR 614.1a: "a spell or ability would cause its controller to gain
-            // life" (Rain of Gore) and "a player would gain life" are global —
-            // the replacement watches every player's life gain, not just the
-            // source controller's. Step 4 note: the "caused by a spell or
-            // ability" qualifier is effectively universal (even combat lifelink
-            // is ability-sourced), so no `ReplacementCondition` is needed.
-            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
-        }
-        // else: "you would gain life" → valid_player stays None (controller-only).
+        apply_gain_life_player_scope(&lower, &mut def);
         // CR 614.1a: A "while [condition]" gate in the antecedent suppresses the
         // replacement when the condition is false. Phial of Galadriel ("If you
         // would gain life while you have 5 or less life, you gain twice that
@@ -4103,6 +4113,50 @@ fn scan_combat_scope(text: &str) -> Option<CombatDamageScope> {
     })
 }
 
+/// CR 119.10 + CR 614.6: True iff the replacement body negates the life gain
+/// ("[that player] gains no life" / "[you] gain no life"). The optional
+/// player-subject anaphor (`that player` / `the player` / `you` / `they`) is
+/// consumed by a nom `alt` before the negation `tag`, so the negation phrase is
+/// matched structurally rather than by verbatim full-sentence comparison. This
+/// covers the "gains no life instead" *replacement* class (Sulfuric Vortex);
+/// the separate `StaticAbilityMode::CantGainLife` hate-permanent class
+/// (Erebos, Leyline of Punishment, …) uses no replacement framing and is
+/// matched elsewhere.
+fn body_is_lifegain_negation(lower_body: &str) -> bool {
+    let subject = opt(alt((
+        tag::<_, _, OracleError<'_>>("that player "),
+        tag("the player "),
+        tag("you "),
+        tag("they "),
+    )));
+    let mut combinator = preceded(
+        subject,
+        value((), alt((tag("gains no life"), tag("gain no life")))),
+    );
+    combinator.parse(lower_body.trim()).is_ok()
+}
+
+/// CR 614.1a: Assign the replacement's player scope from the antecedent subject
+/// ("an opponent" → Opponent, "a player" / "its controller" → AnyPlayer,
+/// "you" → controller-only/None). Shared by the `Prevent` short-circuit and the
+/// generic execute path so both surfaces compute scope identically.
+fn apply_gain_life_player_scope(lower: &str, def: &mut ReplacementDefinition) {
+    if nom_primitives::scan_contains(lower, "an opponent would gain life")
+        || nom_primitives::scan_contains(lower, "opponent would gain life")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    } else if nom_primitives::scan_contains(lower, "would cause its controller to gain life")
+        || nom_primitives::scan_contains(lower, "a player would gain life")
+    {
+        // CR 614.1a: "a spell or ability would cause its controller to gain
+        // life" (Rain of Gore) and "a player would gain life" are global — the
+        // replacement watches every player's life gain, not just the source
+        // controller's.
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    }
+    // else: "you would gain life" → valid_player stays None (controller-only).
+}
+
 fn parse_color_word(word: &str) -> Option<ManaColor> {
     match word {
         "white" => Some(ManaColor::White),
@@ -6386,6 +6440,88 @@ mod tests {
             "self-damage prevention must be scoped to the source, got {:?}",
             def.valid_card
         );
+    }
+
+    #[test]
+    fn gains_no_life_instead_lowers_to_prevent_not_unimplemented() {
+        // CR 119.10 + CR 614.6 + issue #743: "If a player would gain life, that
+        // player gains no life instead." must emit a structured `Prevent`
+        // quantity modification (which `gain_life_applier` Branch 1 reads to
+        // fully suppress the gain), NOT an `Unimplemented` no-op effect
+        // (which the runtime silently passes through, letting the gain proceed).
+        let def = parse_replacement_line(
+            "If a player would gain life, that player gains no life instead.",
+            "Sulfuric Vortex",
+        )
+        .expect("Sulfuric Vortex lifegain-negation replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::GainLife);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent),
+            "lifegain-negation must carry Prevent, got {:?}",
+            def.quantity_modification
+        );
+        // No execute effect: a Prevent replacement carries no `Unimplemented`
+        // (or any) effect, mirroring the counter-prohibition precedent.
+        assert!(
+            def.execute.is_none(),
+            "Prevent replacement must not carry an execute effect, got {:?}",
+            def.execute
+        );
+        // "a player would gain life" → global scope (CR 614.1a).
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+
+        // Class coverage: the "you gain no life" sibling phrasing lowers the
+        // same way (controller-only scope).
+        let you_def = parse_replacement_line(
+            "If you would gain life, you gain no life instead.",
+            "Test Card",
+        )
+        .expect("'you gain no life' sibling should parse");
+        assert_eq!(
+            you_def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(you_def.valid_player, None);
+    }
+
+    #[test]
+    fn lifegain_doubler_still_doubles_not_prevented() {
+        // Negative guard: "gain twice that much life" must NOT collapse into
+        // Prevent — the negation detector only fires on "no life".
+        let def = parse_replacement_line(
+            "If you would gain life, you gain twice that much life instead.",
+            "Boon Reflection",
+        )
+        .expect("doubler should parse");
+        assert_eq!(def.event, ReplacementEvent::GainLife);
+        assert_ne!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent),
+            "doubler must not be turned into a Prevent"
+        );
+    }
+
+    #[test]
+    fn flames_durational_lifegain_negation_is_not_permanent_prevent() {
+        // CR 611.2a + issue #743 scoping: Flames of the Blood Hand's clause is a
+        // duration-scoped ("this turn") replacement created by a resolving
+        // spell. It must NOT be lowered to a permanent `Prevent` (which would
+        // suppress the player's lifegain forever). Deferred as a follow-up until
+        // the durational replacement shape is supported.
+        let def = parse_replacement_line(
+            "If that player or that planeswalker's controller would gain life this turn, that player gains no life instead.",
+            "Flames of the Blood Hand",
+        );
+        // Whether it parses to some other shape or None, it must never carry a
+        // permanent Prevent.
+        if let Some(def) = def {
+            assert_ne!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent),
+                "durational 'this turn' negation must not become a permanent Prevent"
+            );
+        }
     }
 
     #[test]

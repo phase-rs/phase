@@ -95,6 +95,67 @@ interface SetCoverageSummary {
 
 const MAX_VISIBLE_CARDS = 200;
 
+// The coverage export is a single large JSON. Every dashboard view needs the
+// same parsed document, so fetch + parse it once at module scope and share the
+// promise — switching tabs (or remounting a view) reuses the cached result
+// instead of re-fetching and re-parsing megabytes each time.
+let coveragePromise: Promise<CoverageSummary> | null = null;
+
+function loadCoverageData(): Promise<CoverageSummary> {
+  if (!coveragePromise) {
+    coveragePromise = fetch(__COVERAGE_DATA_URL__)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<CoverageSummary>;
+      })
+      .catch((e) => {
+        // Don't cache failures: clear the shared slot so the next view mount
+        // (e.g. a tab switch) re-fetches, preserving the per-view retry the old
+        // per-component fetch had. Only successful results stay cached.
+        coveragePromise = null;
+        throw e;
+      });
+  }
+  return coveragePromise;
+}
+
+interface CoverageDataState {
+  coverage: CoverageSummary | null;
+  loading: boolean;
+  error: string | null;
+}
+
+/** Shared loader for the coverage export, consumed by all dashboard views. */
+function useCoverageData(): CoverageDataState {
+  const [state, setState] = useState<CoverageDataState>({
+    coverage: null,
+    loading: true,
+    error: null,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    loadCoverageData()
+      .then((data) => {
+        if (!cancelled) setState({ coverage: data, loading: false, error: null });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setState({
+            coverage: null,
+            loading: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return state;
+}
+
 type MainView = "card-coverage" | "by-set" | "gap-analysis" | "supported-handlers";
 type HandlerTab = "effects" | "triggers" | "keywords" | "statics" | "replacements";
 type StatusFilter = "all" | "supported" | "unsupported";
@@ -189,9 +250,7 @@ export function CardCoverageDashboard() {
 
 function CardCoverageView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { coverage, loading, error } = useCoverageData();
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -199,17 +258,6 @@ function CardCoverageView() {
   const [focusIndex, setFocusIndex] = useState(-1);
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
 
   const hasActiveFilter = search.length >= 2 || statusFilter !== "all";
 
@@ -554,21 +602,9 @@ function buildSetRows(coverage: CoverageSummary): SetCoverage[] {
 
 function BySetView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { coverage, loading } = useCoverageData();
   const [expandedSet, setExpandedSet] = useState<string | null>(null);
   const [selectedGapCard, setSelectedGapCard] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch(() => setCoverage(null))
-      .finally(() => setLoading(false));
-  }, []);
 
   const setList = useSetList();
   const sets = useMemo(() => {
@@ -772,21 +808,9 @@ function SetRow({
 
 function GapAnalysisView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { coverage, loading } = useCoverageData();
   const [expandedGap, setExpandedGap] = useState<string | null>(null);
   const [formatFilter, setFormatFilter] = useState<FormatFilter>("all");
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch(() => setCoverage(null))
-      .finally(() => setLoading(false));
-  }, []);
 
   if (loading) {
     return (
@@ -1698,21 +1722,9 @@ function extractHandlerUsage(
 
 function SupportedHandlersView() {
   const { t } = useTranslation("game");
-  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { coverage, loading } = useCoverageData();
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState<HandlerTab>("effects");
-
-  useEffect(() => {
-    fetch(__COVERAGE_DATA_URL__)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: CoverageSummary) => setCoverage(data))
-      .catch(() => setCoverage(null))
-      .finally(() => setLoading(false));
-  }, []);
 
   const usage = useMemo(
     () => (coverage ? extractHandlerUsage(coverage.cards) : null),

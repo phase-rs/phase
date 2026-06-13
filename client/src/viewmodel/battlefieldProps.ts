@@ -9,13 +9,23 @@ function canGroup(obj: GameObject): boolean {
 function groupKey(obj: GameObject): string {
   const kw = obj.keywords.map((k) => typeof k === "string" ? k : JSON.stringify(k)).sort().join(",");
   const colors = [...obj.color].sort().join("");
+  // counters is a known-shape Partial<Record<CounterType, number>>. Build the
+  // key from sorted entries rather than JSON.stringify — cheaper (no serialize
+  // allocation per permanent on every board rebuild) and order-independent, so
+  // two identical permanents always land in the same group regardless of the
+  // order their counters were applied (the old stringify could split them by
+  // insertion order; this matches the sorted keyword key above).
+  const counters = Object.entries(obj.counters)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([type, n]) => `${type}:${n}`)
+    .join(",");
   // Tokens that share a display name (e.g. SOS vs BLC Pest) differ by rules text
   // and/or preset art — include both so visually distinct tokens never stack.
   const tokenRules = obj.token_rules_text ?? "";
   const tokenPreset = obj.token_image_ref?.preset_id ?? "";
   const isToken = obj.is_token ?? false;
   const isCommander = obj.is_commander ?? false;
-  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${JSON.stringify(obj.counters)}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
+  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${counters}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
 }
 
 export interface BattlefieldPartition {
