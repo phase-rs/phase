@@ -1433,6 +1433,17 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     }
 }
 
+fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::HasCityBlessing => true,
+        AbilityCondition::Not { condition } => condition_contains_city_blessing(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_contains_city_blessing)
+        }
+        _ => false,
+    }
+}
+
 /// CR 608.2c: Whether a parent effect computes its own "if you do" outcome
 /// signal (`optional_effect_performed`) rather than that signal meaning "the
 /// mandatory action occurred."
@@ -5197,6 +5208,20 @@ fn resolve_chain_body(
     // parents pay nothing.
     if ability.sub_ability.is_some() {
         crate::game::layers::flush_layers(state);
+    }
+
+    // CR 702.131b + CR 702.131d: If the sub-ability's condition is gated on
+    // the city's blessing, re-evaluate the blessing now — before checking the
+    // condition — so a permanent created by the parent effect (e.g. Ocelot
+    // Pride's Cat token becoming the 10th permanent) is reflected in
+    // `state.city_blessing`. This mirrors the SBA loop's "any time" semantics
+    // without waiting for the next priority pass.
+    if ability.sub_ability.as_ref().is_some_and(|sub| {
+        sub.condition
+            .as_ref()
+            .is_some_and(condition_contains_city_blessing)
+    }) {
+        crate::game::sba::apply_city_blessing_if_triggered(state, events);
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -17213,6 +17238,84 @@ mod tests {
         assert!(
             !mandatory_parent_effect_performed(&copy, &not_made),
             "a CopySpell that made no copy is NOT 'performed' — the draw rider must run"
+        );
+    }
+
+    /// CR 702.131b + CR 702.131d (#2873): Ocelot Pride's race. The parent
+    /// `Effect::Token` pushes the controller from 9 to 10 permanents *during*
+    /// resolution. The sub-ability is gated on `HasCityBlessing`. Without the
+    /// eager re-evaluation in `resolve_chain_body`, `state.city_blessing` is
+    /// still empty when the sub-ability condition is checked (it would only be
+    /// updated by the SBA loop at the next priority pass), so the sub-ability's
+    /// token would NOT be created. With the fix, the blessing is granted before
+    /// the gate fires, so BOTH tokens exist.
+    ///
+    /// Discriminating assertion: `state.battlefield.len() == 11` (9 + 2 tokens)
+    /// and `state.city_blessing.contains(PlayerId(0))`. Reverting the fix makes
+    /// the sub-ability gate read a false `HasCityBlessing`, dropping the second
+    /// token (battlefield 10, not 11).
+    #[test]
+    fn city_blessing_race_grants_sub_ability_token_same_resolution() {
+        let mut state = GameState::new_two_player(42);
+
+        for i in 0..9u64 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Permanent {i}"),
+                Zone::Battlefield,
+            );
+            if i == 0 {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .keywords
+                    .push(Keyword::Ascend);
+            }
+        }
+        assert!(
+            !state.city_blessing.contains(&PlayerId(0)),
+            "precondition: no city's blessing at 9 permanents"
+        );
+
+        let make_cat = || Effect::Token {
+            name: "Cat".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Cat".to_string()],
+            colors: vec![ManaColor::White],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        let mut sub = ResolvedAbility::new(make_cat(), vec![], ObjectId(1000), PlayerId(0));
+        sub.condition = Some(AbilityCondition::HasCityBlessing);
+
+        let mut parent = ResolvedAbility::new(make_cat(), vec![], ObjectId(1000), PlayerId(0));
+        parent.sub_ability = Some(Box::new(sub));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &parent, &mut events, 0).unwrap();
+
+        assert!(
+            state.city_blessing.contains(&PlayerId(0)),
+            "the parent token made the 10th permanent, so the blessing must be granted \
+             before the sub-ability gate fires"
+        );
+        assert_eq!(
+            state.battlefield.len(),
+            11,
+            "9 starting permanents + parent Cat + sub-ability Cat = 11; a missing \
+             city's-blessing re-evaluation would drop the sub-ability token (10)"
         );
     }
 }
