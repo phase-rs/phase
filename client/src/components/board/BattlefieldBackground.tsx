@@ -67,6 +67,13 @@ export function BattlefieldBackground() {
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
   const deckColor = useMemo(() => {
+    // The dominant-color scan walks the full library + hand + battlefield, and
+    // its result is consumed ONLY by the "auto-wubrg" background — and only
+    // until resolveBackground locks in a color-matched image on first detection
+    // (lockedRef). For every other background mode, and on every action after
+    // the lock, the result is discarded. Without this guard the scan re-ran on
+    // every gameState change (mana tap, phase tick, priority pass) for nothing.
+    if (boardBackground !== "auto-wubrg" || lockedRef.current) return null;
     if (!gameState) return null;
     const player = gameState.players[playerId];
     if (!player) return null;
@@ -77,7 +84,7 @@ export function BattlefieldBackground() {
       gameState.objects,
       playerId,
     );
-  }, [gameState, playerId]);
+  }, [gameState, playerId, boardBackground]);
 
   const bg = resolveBackground(boardBackground, customBackgroundUrl, deckColor, lockedRef);
 
