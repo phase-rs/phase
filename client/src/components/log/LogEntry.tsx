@@ -4,6 +4,7 @@ import type { GameLogEntry, LogSegment, ObjectId, PlayerId } from "../../adapter
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
+import { assertNever } from "../../utils/assertNever.ts";
 import { categoryColorClass } from "../../viewmodel/logFormatting.ts";
 
 interface LogEntryProps {
@@ -69,6 +70,10 @@ function renderSegment(
           {segment.value}
         </span>
       );
+    default:
+      // Exhaustive over LogSegment — a new engine segment type fails to compile
+      // here instead of silently rendering nothing.
+      return assertNever(segment);
   }
 }
 
