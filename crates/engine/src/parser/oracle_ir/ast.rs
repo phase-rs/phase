@@ -306,6 +306,12 @@ pub(crate) enum ContinuationAst {
         /// from-among put-step.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 701.20a vs 701.20e: True when the from-among clause's stripped verb
+        /// was "reveal" (a public action) rather than "put"/"choose" (a private
+        /// look). Promotes the patched Dig to `reveal: true` even when the kept
+        /// cards route to a fixed library position (Fertile Thicket).
+        #[serde(default)]
+        reveal_verb: bool,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.

@@ -888,6 +888,38 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     {
         let after_then = &trimmed["then ".len()..];
         let after_then_lower = &trimmed_lower["then ".len()..];
+        // CR 701.20e + CR 608.2c: "reveal up to N <filter> from among them, then
+        // put that card <kept-destination> ..." is a single from-among selection
+        // action — the ", then put that card …" placement tail is the KEPT-card
+        // destination of the same `DigFromAmong` continuation, not a standalone
+        // clause. `parse_dig_from_among` → `parse_dig_destination_tail` consumes
+        // this tail to patch the preceding `Dig`'s destination, so it must stay
+        // one chunk. Without this, the body is bisected and the look-`Dig` is
+        // never promoted to a selecting dig (Fertile Thicket: no DigChoice).
+        //
+        // Scoped to a KEPT-card anaphor ("that card", "those cards", "it",
+        // "them", "the card") — the exact set `parse_dig_destination_tail`
+        // strips. A "then put THE REST <destination>" tail (Zimone's Experiment:
+        // "reveal up to two ... from among them, then put the rest on the
+        // bottom") is the REST placement, which must still split off into its own
+        // `PutRest` continuation to set `rest_destination`; suppressing that
+        // split would drop the "rest on the bottom" routing. Unrelated trailers
+        // ("…, then shuffle") also still split.
+        let put_kept_card_tail = preceded(
+            tag::<_, _, OracleError<'_>>("put "),
+            alt((
+                tag("that card "),
+                tag("those cards "),
+                tag("the card "),
+                tag("it "),
+                tag("them "),
+            )),
+        )
+        .parse(after_then_lower)
+        .is_ok();
+        if nom_primitives::scan_contains(&current_lower, "from among") && put_kept_card_tail {
+            return None;
+        }
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
@@ -2145,6 +2177,7 @@ pub(super) fn apply_clause_continuation(
             enters_under,
             face_down_profile,
             enter_tapped,
+            reveal_verb,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
             // earlier "look at the top N" instruction. When a transparent
@@ -2215,8 +2248,14 @@ pub(super) fn apply_clause_continuation(
                 // cards are NOT auto-routed by the Dig resolver; downstream sub_abilities
                 // read the tracked set and route by type. Also promote the
                 // Dig to reveal:true — "from among them" is a reveal-form.
+                //
+                // CR 701.20a vs 701.20e: a "reveal ... from among them" clause is
+                // public, so promote to reveal:true even when the kept card routes
+                // to a fixed library position (Fertile Thicket: reveal_verb=true,
+                // kept_dest=Some(Library)). Look-only digs (reveal_verb=false,
+                // kept_dest=Some(...)) keep reveal=false (private look, CR 701.20e).
                 *destination = kept_dest;
-                if kept_dest.is_none() {
+                if kept_dest.is_none() || reveal_verb {
                     *reveal = true;
                 }
                 if let Some(rd) = rest_dest {
@@ -2955,6 +2994,8 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             enters_under: None,
             face_down_profile: None,
             enter_tapped,
+            // "put N of them" strips only "put" — never a reveal verb (private).
+            reveal_verb: false,
         });
     }
 
@@ -2969,24 +3010,26 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
     .parse(lower)
     {
         let before_milled = before_milled.trim();
-        let (after_put, prefix_optional) = if let Ok((rest, _)) = alt((
-            tag::<_, _, OracleError<'_>>("you may put "),
-            tag("you may reveal "),
-            tag("you may return "),
+        // CR 701.20a vs 701.20e: capture whether the stripped verb is "reveal"
+        // (public) so the patch arm promotes the Dig to `reveal: true`.
+        let (after_put, prefix_optional, reveal_verb) = if let Ok((rest, is_reveal)) = alt((
+            value(false, tag::<_, _, OracleError<'_>>("you may put ")),
+            value(true, tag("you may reveal ")),
+            value(false, tag("you may return ")),
         ))
         .parse(before_milled)
         {
-            (rest, true)
-        } else if let Ok((rest, _)) = alt((
-            tag::<_, _, OracleError<'_>>("put "),
-            tag("reveal "),
-            tag("return "),
+            (rest, true, is_reveal)
+        } else if let Ok((rest, is_reveal)) = alt((
+            value(false, tag::<_, _, OracleError<'_>>("put ")),
+            value(true, tag("reveal ")),
+            value(false, tag("return ")),
         ))
         .parse(before_milled)
         {
-            (rest, false)
+            (rest, false, is_reveal)
         } else {
-            (before_milled, false)
+            (before_milled, false, false)
         };
 
         // CR 701.17c: A mass quantifier ("put all/each creature cards milled this
@@ -3076,6 +3119,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             enters_under,
             face_down_profile,
             enter_tapped,
+            reveal_verb,
         });
     }
 
@@ -3086,17 +3130,20 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
     let before_from = &before_from.trim();
 
     // Strip leading "put " or "you may reveal " using nom combinators.
-    let after_put = alt((
-        tag::<_, _, OracleError<'_>>("you may put "),
-        tag("you may reveal "),
-        tag("you may return "),
-        tag("put "),
-        tag("reveal "),
-        tag("return "),
+    // CR 701.20a vs 701.20e: capture whether the stripped verb was "reveal"
+    // (a public action) vs "put"/"return" (a private look) so the patch arm can
+    // promote the Dig to `reveal: true` even when the kept card routes to a
+    // fixed destination (Fertile Thicket).
+    let (after_put, reveal_verb) = alt((
+        value(true, tag::<_, _, OracleError<'_>>("you may reveal ")),
+        value(false, tag("you may put ")),
+        value(false, tag("you may return ")),
+        value(false, tag("put ")),
+        value(true, tag("reveal ")),
+        value(false, tag("return ")),
     ))
     .parse(*before_from)
-    .map(|(rest, _)| rest)
-    .unwrap_or(before_from);
+    .unwrap_or((before_from, false));
 
     // CR 701.20e: Mass quantifier ("put all/each <filter> from among them onto
     // the battlefield ...") moves the entire matching set → `PutCount::All`.
@@ -3175,6 +3222,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         enters_under,
         face_down_profile,
         enter_tapped,
+        reveal_verb,
     })
 }
 
@@ -3211,6 +3259,10 @@ fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)>
 }
 
 fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
+    // Strip a leading clause separator: "from among them, then put that card on
+    // top ..." (Fertile Thicket) leaves a ", " before the "then put" verb.
+    let input = input.trim_start();
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(input).ok()?;
     let input = input.trim_start();
     let (input, _) = opt(alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))))
         .parse(input)
@@ -3252,6 +3304,22 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     .is_ok()
     {
         return Some((Some(Zone::Hand), false));
+    }
+
+    // CR 401.4: cards put at a specific library position (top) are arranged by
+    // owner; the DigChoice resolver inserts the kept card at index 0 and the
+    // rest at the bottom. Mirrors `parse_put_one_dig_card_on_top` (the
+    // unfiltered "back on top" phrasing) for the "reveal ... then put that card
+    // on top of your library" form (Fertile Thicket).
+    if alt((
+        tag::<_, _, OracleError<'_>>("on top of your library"),
+        tag("on top of their library"),
+        tag("on top"),
+    ))
+    .parse(input)
+    .is_ok()
+    {
+        return Some((Some(Zone::Library), false));
     }
 
     None
@@ -3854,6 +3922,8 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                // "put one of those cards onto the battlefield" — a put, not a reveal.
+                reveal_verb: false,
             })
         }
         // "You may put one of those cards back on top of your library" after
@@ -3868,6 +3938,8 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                // "put one ... back on top" — a put, not a reveal.
+                reveal_verb: false,
             })
         }
         // "put them back in any order" after Dig means all looked-at cards
@@ -5541,6 +5613,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             })
         );
     }
@@ -5564,6 +5637,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             })
         );
     }
@@ -5592,6 +5666,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             })
         );
     }
@@ -5614,6 +5689,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             })
         );
     }
@@ -5636,8 +5712,48 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             })
         );
+    }
+
+    /// Issue #2349 — Fertile Thicket. "reveal up to one basic land card from
+    /// among them, then put that card on top of your library and the rest on the
+    /// bottom in any order." The kept card routes to a fixed library position
+    /// (top), but the clause's verb is "reveal" (CR 701.20a, public), so
+    /// `reveal_verb` must be true. Previously `parse_dig_destination_tail` did
+    /// not recognize "on top of your library", so the kept destination resolved
+    /// to None and the clause became Unimplemented.
+    #[test]
+    fn fertile_thicket_reveal_basic_land_to_top_rest_on_bottom() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Reveal up to one basic land card from among them, then put that card on top of your library and the rest on the bottom in any order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            rest_destination,
+            reveal_verb,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::Up(1));
+        // CR 401.4: kept card goes on TOP of the library; the rest go to the bottom.
+        assert_eq!(destination, Some(Zone::Library));
+        assert_eq!(rest_destination, Some(Zone::Library));
+        // CR 701.20a vs 701.20e: "reveal ... from among them" is a public reveal,
+        // so the Dig must be promoted to reveal:true even though the kept card
+        // routes to a fixed library position.
+        assert!(reveal_verb, "the 'reveal' verb must set reveal_verb");
+        // The from-among filter restricts the kept card to a basic land card.
+        let (expected_filter, _) = parse_target("basic land card");
+        assert_eq!(filter, expected_filter);
     }
 
     #[test]
@@ -5825,6 +5941,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             },
             AbilityKind::Spell,
         );
@@ -5861,6 +5978,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             },
             AbilityKind::Spell,
         );
@@ -5901,6 +6019,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             },
             AbilityKind::Spell,
         );
@@ -5959,6 +6078,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             },
             AbilityKind::Spell,
         );
@@ -6541,6 +6661,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                reveal_verb: false,
             })
         );
     }

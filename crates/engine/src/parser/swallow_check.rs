@@ -1756,6 +1756,55 @@ fn plotted_grant_linkage_is_only_if_marker(stripped: &str) -> bool {
     !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
 }
 
+fn def_tree_has_dig(def: &AbilityDefinition) -> bool {
+    if matches!(&*def.effect, Effect::Dig { .. }) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_dig(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_dig(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_dig)
+}
+
+/// CR 608.2c + CR 701.20: "you may look at the top N cards ... If you do,
+/// reveal/put ... from among them ..." (Fertile Thicket, Munda, Planar Atlas).
+/// The optional "look" lowers to an optional `Dig`; the dependent "reveal ...
+/// from among them" is a continuation that patches that same `Dig`. The
+/// "if you do" is not an independent game-state condition — per CR 608.2c
+/// (read the whole text and apply the rules of English) it links the dependent
+/// reveal to the optional look having happened, and the optional `Dig` (the
+/// player may decline the look, and then nothing in the chain resolves) IS that
+/// gate. So when the parse contains a `Dig` inside an optional ability/trigger,
+/// the "if you do" marker is represented, not swallowed.
+fn any_optional_ability_has_dig(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(|def| def_tree_has_optional(def) && def_tree_has_dig(def))
+        || parsed.triggers.iter().any(|t| {
+            trigger_tree_has_optional(t) && t.execute.as_deref().is_some_and(def_tree_has_dig)
+        })
+}
+
+fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !stripped.contains("if you do") {
+        return false;
+    }
+    let without_link = stripped.replace("if you do", "");
+    let has_if_marker = without_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -1820,6 +1869,15 @@ fn detect_condition_if(
     // the "if you do" is the optional-exile linkage, represented by the
     // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
     if any_ability_has_plotted_grant(parsed) && plotted_grant_linkage_is_only_if_marker(&stripped) {
+        return;
+    }
+    // CR 608.2c + CR 701.20: "you may look at the top N cards ... If you do,
+    // reveal ... from among them ..." (Fertile Thicket, Munda Ambush Leader,
+    // Planar Atlas). The optional look lowers to an optional `Dig` and the
+    // dependent "reveal ... from among them" is a continuation patching that
+    // same `Dig`; the "if you do" linkage IS represented by the optional `Dig`
+    // (declining the look stops the whole chain), not swallowed.
+    if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -3482,6 +3540,55 @@ mod tests {
         ));
         assert!(!super::plotted_grant_linkage_is_only_if_marker(
             "you may exile a card. if you do, it becomes plotted. if another condition is true, draw a card."
+        ));
+    }
+
+    /// CR 608.2c + CR 701.20: "you may look at the top N cards ... If you do,
+    /// reveal ... from among them ..." — the optional look lowers to an optional
+    /// `Dig` and the dependent reveal patches it, so the "if you do" linkage is
+    /// represented (not a swallowed condition). Fertile Thicket, Munda, and
+    /// Planar Atlas are the motivating cards (#2349).
+    #[test]
+    fn condition_if_accepts_you_may_look_if_you_do_reveal_from_among() {
+        let fertile = parse_named(
+            "When this land enters, you may look at the top five cards of your library. \
+             If you do, reveal up to one basic land card from among them, then put that \
+             card on top of your library and the rest on the bottom in any order.",
+            "Fertile Thicket",
+            &["Land"],
+        );
+        assert!(!has_swallowed_detector(&fertile, "Condition_If"));
+
+        let munda = parse_named(
+            "Whenever this creature or another Ally you control enters, you may look at \
+             the top four cards of your library. If you do, reveal any number of Ally \
+             cards from among them, then put those cards on top of your library in any \
+             order and the rest on the bottom in any order.",
+            "Munda, Ambush Leader",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&munda, "Condition_If"));
+
+        let atlas = parse_named(
+            "When this artifact enters, you may look at the top four cards of your \
+             library. If you do, reveal up to one land card from among them, then put \
+             that card on top of your library and the rest on the bottom in a random order.",
+            "Planar Atlas",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&atlas, "Condition_If"));
+    }
+
+    /// CR 608.2c: the optional-look "if you do" exemption is scoped to the
+    /// linkage phrase; a separate game-state conditional on the same card must
+    /// still reach the detector.
+    #[test]
+    fn dig_if_you_do_exemption_is_text_scoped() {
+        assert!(super::dig_if_you_do_is_only_if_marker(
+            "you may look at the top five cards. if you do, reveal a land card from among them."
+        ));
+        assert!(!super::dig_if_you_do_is_only_if_marker(
+            "you may look at the top five cards. if you do, reveal a land. if you control a forest, draw a card."
         ));
     }
 
