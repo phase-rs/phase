@@ -15,8 +15,8 @@ pub(crate) use search::parse_search_name_reference_suffix;
 
 pub(crate) use lower::{
     capitalize, lower_effect_chain_ir, parse_controls_permanent_object,
-    parse_counter_suffix_body_combinator, parse_with_counters_suffix, strip_trailing_duration,
-    strip_trailing_where_x,
+    parse_counter_suffix_body_combinator, parse_with_counters_suffix,
+    parse_with_counters_suffix_spanned, strip_trailing_duration, strip_trailing_where_x,
 };
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
