@@ -266,11 +266,12 @@ fn target_is_in_other_players_graveyard(
 /// Shared by the Suspend/Rebound self-cast (`target == source`) and the
 /// foreign-graveyard free-cast (Memory Plunder). `initiate_cast_during_resolution`
 /// grants the zero-cost `ExileWithAltCost` permission keyed with a
-/// `ResolutionCastCleanup` marker (which arms the CR 608.2g sorcery-speed /
-/// empty-stack timing bypass in `restrictions::check_spell_timing`), prepares the
-/// cast, and continues it on `Auto` payment. The returned `WaitingFor` (target
-/// selection if the cast spell targets, else priority with it on the stack)
-/// becomes the resolution's pending prompt.
+/// `ResolutionCastCleanup` marker (which authorizes the cast from the card's
+/// current zone and arms the CR 608.2g sorcery-speed / empty-stack timing bypass
+/// in `restrictions::check_spell_timing`), prepares the cast, and continues it on
+/// `Auto` payment. The returned `WaitingFor` (target selection if the cast spell
+/// targets, else priority with it on the stack) becomes the resolution's pending
+/// prompt.
 fn cast_single_target_during_resolution(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -279,13 +280,6 @@ fn cast_single_target_during_resolution(
     cast_transformed: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 601.2a: ensure the card is in exile before the cast. Suspend/Rebound
-    // self-casts already are; a foreign-graveyard target (Memory Plunder) is
-    // moved there first so the casting pipeline reads it from a single, uniform
-    // origin zone and the exile alt-cost permission applies in place.
-    if state.objects.get(&card).map(|o| o.zone) != Some(Zone::Exile) {
-        zones::move_to_zone(state, card, Zone::Exile, events);
-    }
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
@@ -548,14 +542,15 @@ mod tests {
     /// in the OPPONENT's graveyard, where a lingering `ExileWithAltCost` grant is
     /// inert (the graveyard cast surface only offers cards in the controller's own
     /// graveyard). The free cast must therefore be driven DURING resolution
-    /// (CR 608.2g): the card leaves the opponent's graveyard for exile and is cast
-    /// from there, rather than staying in the graveyard with a dead permission.
+    /// (CR 608.2g): the card moves directly from that graveyard to the stack
+    /// under CR 601.2a, rather than staying in the graveyard with a dead
+    /// permission or detouring through exile.
     ///
     /// Discriminator vs. `graveyard_target_grant_stays_in_graveyard_with_timed_permission`:
     /// the only difference is the target's owner — own-graveyard → lingering
     /// permission (stays put); opponent-graveyard → cast during resolution.
     #[test]
-    fn opponent_graveyard_free_cast_leaves_graveyard_for_during_resolution_cast() {
+    fn opponent_graveyard_free_cast_moves_directly_to_stack() {
         let mut state = make_test_state();
         // Target sits in PlayerId(1)'s graveyard; the ability controller is P0.
         let obj_id = {
@@ -589,20 +584,42 @@ mod tests {
         let mut events = vec![];
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // CR 608.2g: the card was cast during resolution — it left the opponent's
-        // graveyard (it is no longer sitting there holding a dead permission). The
-        // no-target instant lands on the stack via the cast-during-resolution path.
+        // CR 608.2g + CR 601.2a: the card was cast during resolution, moving
+        // from the opponent's graveyard directly to the stack. A graveyard→exile
+        // pre-move would make this rules-incorrect for zone-change consumers.
         let obj = state.objects.get(&obj_id).unwrap();
-        assert_ne!(
-            obj.zone,
-            Zone::Graveyard,
-            "the opponent-graveyard free cast must not leave the card inert in the \
-             graveyard with a lingering permission"
-        );
         assert_eq!(
             obj.zone,
             Zone::Stack,
             "the free cast must put the targeted spell on the stack during resolution"
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Graveyard),
+                        to: Zone::Stack,
+                        ..
+                    } if *object_id == obj_id
+                )
+            }),
+            "the free cast must move from the opponent's graveyard directly to the stack"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Graveyard),
+                        to: Zone::Exile,
+                        ..
+                    } if *object_id == obj_id
+                )
+            }),
+            "Memory Plunder must not fake an exile origin before casting"
         );
     }
 
