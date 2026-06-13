@@ -93,7 +93,10 @@ describe("isManaObjectAction", () => {
   it("recognizes only engine-provided mana actions", () => {
     const object = makeGameObject({
       abilities: [
-        { effect: { type: "Mana" } },
+        // CR 605.1a: the engine classifies mana abilities and exposes the
+        // verdict as the derived `is_mana_ability` flag — isManaObjectAction
+        // reads the flag rather than introspecting the effect AST.
+        { is_mana_ability: true, effect: { type: "Mana" } },
         { effect: { type: "Draw" } },
       ],
     });
