@@ -2781,10 +2781,15 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // binds only to its own disjunct — distributing it onto a sibling
             // leg ("host card with augment") would empty that leg's match set.
             | FilterProp::HasKeywordKind { .. }
-            // CR 201.2: "card named X" binds the name predicate only to its own
-            // disjunct (Journey for the Elixir, "a basic land card and a card
-            // named Jiang Yanggu") — distributing `Named` onto a sibling leg
-            // ("basic land named jiang yanggu") would empty that leg's match set.
+            // CR 201.2 / CR 201.2a: a card-name predicate binds only to its own
+            // disjunct — distributing `Named` onto a sibling leg ("basic land
+            // named jiang yanggu") would empty that leg's match set. Named is
+            // inherently leg-local, the same class as HasKeywordKind/WithKeyword.
+            // This is defense-in-depth: no current card routes a `Named` leg
+            // through the Or distributor (name-disjunction cards either use bare
+            // "and", which takes the dual-filter MatchEachFilter path and never
+            // reaches this distributor, or carry `Named` on every leg and are
+            // deduped by `same_kind`), but excluding it future-proofs the guard.
             | FilterProp::Named { .. }
     )
 }

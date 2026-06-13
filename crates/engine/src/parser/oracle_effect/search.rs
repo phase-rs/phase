@@ -5128,24 +5128,87 @@ mod tests {
         );
     }
 
-    /// #2892 anti-regression — Journey for the Elixir: "a basic land card and a
-    /// card named Jiang Yanggu". CR 201.2: the name predicate must stay on its
-    /// own disjunct; distributing `Named` onto the basic-land leg ("basic land
-    /// named jiang yanggu") would empty that leg's match set.
+    /// #2892 building-block guard — CR 201.2 / CR 201.2a (card name) +
+    /// CR 202.3 (mana value): asserts the leg-locality registry directly on the
+    /// distributor, independent of any card's parse path. `FilterProp::Named` is
+    /// inherently leg-local (a name predicate binds only to its own disjunct,
+    /// same class as `HasKeywordKind`/`WithKeyword`), so it must NOT distribute
+    /// across an `Or`; `FilterProp::Cmc` is a trailing-suffix predicate and MUST.
+    ///
+    /// Constructing the `Or` AST directly is deliberate: no current card routes a
+    /// `Named` leg through a real `" or "`/`" and/or "` disjunction with a
+    /// non-`Named` earlier leg (name-disjunction cards either use bare "and",
+    /// which takes the dual-filter `MatchEachFilter` path and never reaches this
+    /// distributor, or carry `Named` on every leg and are deduped by
+    /// `same_kind`). The exclusion is defense-in-depth; this test guards it.
+    ///
+    /// The `Cmc` positive control is the discriminator: if the `Named` exclusion
+    /// were removed, `Named` would wrongly land on the first leg and the first
+    /// assertion would fail — while the `Cmc` assertions prove the test does not
+    /// merely block all distribution.
     #[test]
-    fn search_disjunction_keeps_named_leg_local() {
-        let details = parse_search_library_details(
-            "search your library and graveyard for a basic land card and a card named jiang yanggu",
-            &mut ParseContext::default(),
+    fn distribute_or_keeps_named_leg_local_but_distributes_cmc() {
+        // Or { Creature [], Card [Named "jiang yanggu", Cmc<=3] }
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Named {
+                            name: "jiang yanggu".to_string(),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        let out = distribute_properties_to_or(filter);
+        let TargetFilter::Or { filters } = &out else {
+            panic!("expected Or filter, got {out:?}");
+        };
+        let TargetFilter::Typed(first) = &filters[0] else {
+            panic!("expected first leg Typed, got {:?}", filters[0]);
+        };
+        let TargetFilter::Typed(second) = &filters[1] else {
+            panic!("expected second leg Typed, got {:?}", filters[1]);
+        };
+
+        // Named stayed leg-local: the Creature leg did NOT receive it. This is
+        // the assertion that flips if the `Named` exclusion is removed from
+        // `is_adjective_prefix_prop`.
+        assert!(
+            !first
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Named { .. })),
+            "Named must NOT distribute to the earlier (Creature) leg, got {first:?}"
         );
-        let (with_named, _typed) = legs_with_prop(
-            &details.filter,
-            |p| matches!(p, FilterProp::Named { name } if name == "jiang yanggu"),
+        // ...but the originating (Card) leg still carries its own Named.
+        assert!(
+            second
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Named { name } if name == "jiang yanggu")),
+            "Named must remain on its originating (Card) leg, got {second:?}"
         );
-        assert_eq!(
-            with_named, 1,
-            "Named must remain on the non-land leg only, got {:?}",
-            details.filter
+
+        // Positive control: the trailing Cmc<=N predicate DID distribute back to
+        // the earlier leg, proving the guard doesn't wrongly suppress everything.
+        assert!(
+            first.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    ..
+                }
+            )),
+            "Cmc<=N must distribute to the earlier (Creature) leg, got {first:?}"
         );
     }
 }
