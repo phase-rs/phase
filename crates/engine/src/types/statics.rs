@@ -849,6 +849,11 @@ pub enum StaticMode {
     RevealTopOfLibrary {
         all_players: bool,
     },
+    /// CR 400.2 + CR 701.20a: Play with hands revealed.
+    /// `who` identifies whose hand is public: controller, opponents, or all players.
+    RevealHand {
+        who: ProhibitionScope,
+    },
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
     /// matching cards from owner's graveyard.
     GraveyardCastPermission {
@@ -1386,6 +1391,7 @@ impl Hash for StaticMode {
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
+            StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
                 // TargetFilter does not implement Hash; discriminant only.
                 BlockExceptionKind::Quality(_) => {}
@@ -1517,6 +1523,7 @@ impl StaticMode {
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
             | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::RevealHand { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
@@ -1739,6 +1746,7 @@ impl fmt::Display for StaticMode {
                     write!(f, "RevealTopOfLibrary(you)")
                 }
             }
+            StaticMode::RevealHand { who } => write!(f, "RevealHand({who})"),
             // Tier 1
             StaticMode::CantBeBlocked => write!(f, "CantBeBlocked"),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
@@ -2337,6 +2345,14 @@ impl FromStr for StaticMode {
                     StaticMode::RevealTopOfLibrary {
                         all_players: rest == "all",
                     }
+                } else if let Some(inner) = other
+                    .strip_prefix("RevealHand(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::RevealHand { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(rest) = other.strip_prefix("AdditionalLandDrop(") {
                     let rest = rest.strip_suffix(')').unwrap_or(rest);
                     StaticMode::AdditionalLandDrop {
@@ -2611,6 +2627,12 @@ mod tests {
             StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::AllPlayers,
+            },
             // Tier 1: keyword/evasion statics
             StaticMode::CantBeBlocked,
             StaticMode::CantBeBlockedExceptBy {

@@ -12150,17 +12150,47 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         let duration = dur.or_else(|| {
             scan_contains_phrase(lower, "this turn").then_some(Duration::UntilEndOfTurn)
         });
+        // CR 118.9 + CR 701.9a: "cast that card by discarding a card rather
+        // than paying its mana cost" (The Infamous Cruelclaw).
+        let alt_ability_cost = parse_alt_ability_cost_rider(lower);
+        // CR 608.2g + CR 118.9 + CR 118.9b: a bare "cast that card / it without
+        // paying its mana cost" with no lingering-permission duration is a
+        // resolution-only free cast (Bring to Light tutors a card into the
+        // controller's own exile, then casts it AS this effect resolves — issue
+        // #2880). The card goes on the stack now; no standing `ExileWithAltCost`
+        // permission lingers afterward. Restricted to `mode == Cast`: CR 305.1
+        // land plays are a special action, not a cast, and have no
+        // during-resolution casting mechanism — the Play-mode hideaway/wish
+        // cards (Mosswort Bridge, Djinn of Wishes, etc.) must stay on the
+        // lingering-permission path. An `alt_ability_cost` or an explicit
+        // `duration` likewise keeps the lingering grant (Cruelclaw's discard
+        // alt cost; Rebound-style durational recasts). A `constraint` (a
+        // conditional free-cast such as Beseech the Mirror's "you may cast the
+        // exiled card without paying its mana cost if that spell's mana value
+        // is 4 or less", with a "put into your hand if it wasn't cast this way"
+        // fallback) also keeps the lingering grant: the constraint is evaluated
+        // when the permission is exercised, and the not-cast fallback relies on
+        // the standing permission, neither of which the one-shot
+        // during-resolution path models.
+        let driver = if mode == CardPlayMode::Cast
+            && without_paying
+            && alt_ability_cost.is_none()
+            && duration.is_none()
+            && constraint.is_none()
+        {
+            crate::types::ability::CastFromZoneDriver::DuringResolution
+        } else {
+            crate::types::ability::CastFromZoneDriver::LingeringPermission
+        };
         return Some(Effect::CastFromZone {
             target: TargetFilter::ParentTarget,
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
-            // CR 118.9 + CR 701.9a: "cast that card by discarding a card rather
-            // than paying its mana cost" (The Infamous Cruelclaw).
-            alt_ability_cost: parse_alt_ability_cost_rider(lower),
+            alt_ability_cost,
             constraint,
             duration,
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            driver,
         });
     }
 
@@ -21531,6 +21561,29 @@ mod tests {
     }
 
     #[test]
+    fn effect_pump_creatures_attacking_opponents_and_planeswalkers() {
+        let e = parse_effect(
+            "creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn",
+        );
+        let Effect::PumpAll {
+            target,
+            power,
+            toughness,
+        } = e
+        else {
+            panic!("expected Pump, got {e:?}");
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::Opponent),
+        }));
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(0));
+    }
+
+    #[test]
     fn effect_counterspell() {
         let e = parse_effect("Counter target spell");
         assert!(matches!(
@@ -27042,6 +27095,32 @@ mod tests {
                 }
             ),
             "Expected ExileTop(controller, 1, face_down=true), got {:?}",
+            effect
+        );
+    }
+
+    /// Issue #2397 (Wall of Mourning ETB) — "exile a card from the top of your
+    /// library face down for each opponent you have" must lower to ExileTop, not
+    /// a library-wide ChangeZone choice prompt.
+    #[test]
+    fn exile_card_from_top_of_your_library_face_down_for_each_opponent() {
+        let effect = parse_effect(
+            "Exile a card from the top of your library face down for each opponent you have.",
+        );
+        assert!(
+            matches!(
+                &effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCount {
+                            filter: crate::types::ability::PlayerFilter::Opponent,
+                        },
+                    },
+                    face_down: true,
+                }
+            ),
+            "Expected ExileTop(controller, opponents, face_down), got {:?}",
             effect
         );
     }

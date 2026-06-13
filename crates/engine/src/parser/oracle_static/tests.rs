@@ -5265,6 +5265,66 @@ fn static_creatures_attacking_your_opponents_have_double_strike() {
 }
 
 #[test]
+fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
+    let def = parse_static_line(
+        "Creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+}
+
+#[test]
+fn static_creatures_attacking_you_get_pump() {
+    let def = parse_static_line("Creatures attacking you get -1/-0.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::You)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: -1 }));
+}
+
+#[test]
+fn boarded_window_full_text_has_no_swallowed_clause_regression() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    let parsed = parse_oracle_text(
+        "Creatures attacking you get -1/-0.\nAt the beginning of each end step, if you were dealt 4 or more damage this turn, exile this artifact.",
+        "Boarded Window",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let swallowed: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. }))
+        .collect();
+    assert!(
+        swallowed.is_empty(),
+        "Boarded Window must not emit swallowed-clause warnings: {swallowed:?}"
+    );
+}
+
+#[test]
 fn static_during_your_turn_creatures_you_control_have_hexproof() {
     let def = parse_static_line("During your turn, creatures you control have hexproof.").unwrap();
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -10856,6 +10916,93 @@ fn cant_draw_opponents() {
 }
 
 #[test]
+fn reveal_hand_opponents() {
+    let def = parse_static_line("Your opponents play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players() {
+    let def = parse_static_line("Players play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players_explicit_subject() {
+    let def = parse_static_line("All players play with their hands revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_each_player_singular_hand() {
+    let def = parse_static_line("Each player plays with their hand revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn reveal_hand_all_players_with_untapped_condition() {
+    let def =
+        parse_static_line("As long as ~ is untapped, all players play with their hands revealed.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::Not { ref condition })
+                if matches!(**condition, StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn reveal_hand_controller_with_optional_you_subject() {
+    let def = parse_static_line("You play with your hand revealed.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::RevealHand {
+            who: ProhibitionScope::Controller,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let imperative = parse_static_line("Play with your hand revealed.").unwrap();
+    assert_eq!(imperative.mode, def.mode);
+    assert_eq!(imperative.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
 fn spell_cost_reduction_uses_card_types_in_graveyard_quantity() {
     let def = parse_static_line(
         "This spell costs {1} less to cast for each card type among cards in your graveyard.",
@@ -11189,6 +11336,25 @@ fn static_assigns_damage_from_toughness_all_creatures() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::AssignDamageFromToughness));
+}
+
+#[test]
+fn static_assigns_damage_from_toughness_all_creatures_during_your_turn() {
+    // CR 510.1c + CR 611.3a: Baldin's global toughness-damage static is
+    // active only during its controller's turn.
+    let def = parse_static_line(
+        "During your turn, each creature assigns combat damage equal to its toughness rather than its power.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature()))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AssignDamageFromToughness));
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
 }
 
 #[test]

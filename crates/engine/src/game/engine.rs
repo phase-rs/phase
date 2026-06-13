@@ -1281,6 +1281,16 @@ fn finalize_copy_retarget(
         // generic copy-spell choices whose completion source is the copy.
         source_id: effect_source_id.unwrap_or(copy_id),
     });
+    // CR 707.10c + CR 603.2: Copy observers (Magecraft) must drain only after
+    // the copy's targets are finalized, not while `CopyRetarget` is still open.
+    if let Some(wf) =
+        triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+    {
+        state.waiting_for = wf;
+        state.priority_player = player;
+        effects::drain_pending_continuation(state, events);
+        return Ok(());
+    }
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     effects::drain_pending_continuation(state, events);

@@ -250,6 +250,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "no maximum hand size",
     "may choose not to untap",
     "play with the top card",
+    // CR 400.2 + CR 701.20a: Telepathy/Revelation class. Keep this narrower
+    // than generic hand-reveal effects ("reveal a card from your hand") by
+    // matching the continuous "hand(s) revealed" wording.
+    "hands revealed",
+    "hand revealed",
     "cost {",
     "costs {",
     "cost less",

@@ -2330,6 +2330,7 @@ fn detect_duration_this_turn(
         // IS the "this turn" scope; `LandsPlayedThisTurn` in the AST means the clause
         // was captured by the intervening-if condition parser, not swallowed.
         "LandsPlayedThisTurn",
+        "DamageDealtThisTurn",
         "AttackedThisTurn",
         "CounterAddedThisTurn",
         "NthSpellThisTurn",

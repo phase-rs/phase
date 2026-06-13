@@ -7,6 +7,7 @@ use super::{
     anthem::*, cda::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*, mana_transform::*,
     restriction::*, type_change::*,
 };
+use crate::types::statics::ProhibitionScope;
 
 /// Whether the inverted `"As long as <cond>, <effect>"` detector may fire.
 ///
@@ -120,6 +121,81 @@ fn parse_skip_step_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinit
     )
 }
 
+#[derive(Clone, Copy)]
+enum RevealHandSubject {
+    Opponents,
+    Players,
+    AllPlayers,
+    EachPlayer,
+    Controller,
+}
+
+fn parse_reveal_hand_subject(input: &str) -> OracleResult<'_, RevealHandSubject> {
+    alt((
+        value(RevealHandSubject::Opponents, tag("your opponents")),
+        value(RevealHandSubject::AllPlayers, tag("all players")),
+        value(RevealHandSubject::Players, tag("players")),
+        value(RevealHandSubject::EachPlayer, tag("each player")),
+        map(opt(tag("you")), |_| RevealHandSubject::Controller),
+    ))
+    .parse(input)
+}
+
+fn parse_reveal_hand_verb(subject: RevealHandSubject, input: &str) -> OracleResult<'_, ()> {
+    match subject {
+        RevealHandSubject::Opponents
+        | RevealHandSubject::Players
+        | RevealHandSubject::AllPlayers
+        | RevealHandSubject::Controller => value((), tag("play with")).parse(input),
+        RevealHandSubject::EachPlayer => value((), tag("plays with")).parse(input),
+    }
+}
+
+fn parse_reveal_hand_possessive(subject: RevealHandSubject, input: &str) -> OracleResult<'_, ()> {
+    match subject {
+        RevealHandSubject::Controller => value((), tag("your")).parse(input),
+        RevealHandSubject::Opponents
+        | RevealHandSubject::Players
+        | RevealHandSubject::AllPlayers
+        | RevealHandSubject::EachPlayer => value((), tag("their")).parse(input),
+    }
+}
+
+fn reveal_hand_scope(subject: RevealHandSubject) -> ProhibitionScope {
+    match subject {
+        RevealHandSubject::Opponents => ProhibitionScope::Opponents,
+        RevealHandSubject::Players
+        | RevealHandSubject::AllPlayers
+        | RevealHandSubject::EachPlayer => ProhibitionScope::AllPlayers,
+        RevealHandSubject::Controller => ProhibitionScope::Controller,
+    }
+}
+
+fn parse_reveal_hand_scope(input: &str) -> OracleResult<'_, ProhibitionScope> {
+    let (input, subject) = parse_reveal_hand_subject(input)?;
+    let (input, _) = space0(input)?;
+    let (input, _) = parse_reveal_hand_verb(subject, input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = parse_reveal_hand_possessive(subject, input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = alt((tag("hands"), tag("hand"))).parse(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("revealed").parse(input)?;
+    Ok((input, reveal_hand_scope(subject)))
+}
+
+fn parse_reveal_hand_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let (_, who) = all_consuming(terminated(parse_reveal_hand_scope, (opt(tag(".")), space0)))
+        .parse(tp.lower)
+        .ok()?;
+
+    Some(
+        StaticDefinition::new(StaticMode::RevealHand { who })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -201,6 +277,24 @@ pub(crate) fn parse_static_line_inner(
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
             if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
                 return Some(def);
+            }
+            // CR 400.2 + CR 701.20a: "As long as <condition>, all players
+            // play with their hands revealed." The generic continuous fallback
+            // can otherwise accept the canonical rewrite before this data-
+            // carrying static sees the isolated effect clause.
+            {
+                let effect_lower = split.effect_text.to_lowercase();
+                let tp_effect = TextPair::new(&split.effect_text, &effect_lower);
+                if let Some(mut def) = parse_reveal_hand_static(&tp_effect, &split.effect_text) {
+                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                        StaticCondition::Unrecognized {
+                            text: split.condition_text.clone(),
+                        },
+                    );
+                    def.condition = Some(condition);
+                    def.description = Some(text.to_string());
+                    return Some(def);
+                }
             }
             if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
                 return Some(def.description(text.to_string()));
@@ -455,6 +549,12 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // --- "Your opponents/Players play with their hands revealed" ---
+    // CR 400.2 + CR 701.20a: continuous effect making hand cards public.
+    if let Some(def) = parse_reveal_hand_static(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Skip your [step] step" / "Players skip their [step] steps" ---
     if let Some(def) = parse_skip_step_static(&tp, &text) {
         return Some(def);
@@ -598,10 +698,30 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // CR 508.1b: "Creatures attacking your opponents have double strike." —
-    // attackers whose defending player is an opponent of the source's controller
-    // (Blast-Furnace Hellkite).
-    if let Some(rest) = nom_tag_tp(&tp, "creatures attacking your opponents ") {
+    // CR 508.1b: "Creatures attacking you <predicate>" — same defender scope as
+    // the "all creatures" form above (Boarded Window, Watchdog-class statics
+    // without the quantifier).
+    if let Some(rest) = nom_tag_tp(&tp, "creatures attacking you ") {
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                }]),
+            );
+        if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
+            return Some(def);
+        }
+    }
+
+    // CR 508.1b: "Creatures attacking your opponents [and/or planeswalkers they
+    // control] have/get ..." — attackers whose defending player is an opponent
+    // of the source's controller (Blast-Furnace Hellkite, Neyali).
+    if let Some(rest) = nom_tag_tp(
+        &tp,
+        "creatures attacking your opponents and/or planeswalkers they control ",
+    )
+    .or_else(|| nom_tag_tp(&tp, "creatures attacking your opponents "))
+    {
         let filter =
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::Attacking {
@@ -692,6 +812,14 @@ pub(crate) fn parse_static_line_inner(
 
     // --- "Each creature you control [with condition] assigns combat damage equal to its toughness" ---
     // CR 510.1c: Doran-class effects that cause creatures to use toughness for combat damage.
+    if let Some(rest_tp) = nom_tag_tp(&tp, "during your turn, ") {
+        if let Some(def) = parse_assigns_damage_from_toughness(rest_tp.lower, rest_tp.original) {
+            return Some(
+                def.condition(StaticCondition::DuringYourTurn)
+                    .description(text.to_string()),
+            );
+        }
+    }
     if let Some(def) = parse_assigns_damage_from_toughness(&lower, &text) {
         return Some(def);
     }

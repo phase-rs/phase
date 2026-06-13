@@ -6457,6 +6457,25 @@ mod tests {
     }
 
     #[test]
+    fn parser_reaches_static_line_for_hands_revealed() {
+        let r = parse(
+            "Your opponents play with their hands revealed.",
+            "Telepathy",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 0, "{r:#?}");
+        assert_eq!(r.statics.len(), 1, "{r:#?}");
+        assert_eq!(
+            r.statics[0].mode,
+            crate::types::statics::StaticMode::RevealHand {
+                who: crate::types::statics::ProhibitionScope::Opponents,
+            }
+        );
+    }
+
+    #[test]
     fn bonesplitter_static_plus_equip() {
         let r = parse(
             "Equipped creature gets +2/+0.\nEquip {1}",

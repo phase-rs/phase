@@ -12,7 +12,7 @@ use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{ProhibitionScope, StaticMode};
 use crate::types::zones::Zone;
 
 /// Compute display-only derived fields (CR 302.6 summoning sickness, CR 700.5 devotion).
@@ -257,6 +257,7 @@ pub fn derive_display_state(state: &mut GameState) {
     // momentary reveals at the start of each action, so re-sync here on every
     // derive pass before the state is exported to clients.
     sync_continuous_library_top_reveals(state);
+    sync_continuous_hand_reveals(state);
 }
 
 /// CR 400.2: Repopulate `revealed_cards` for every active `RevealTopOfLibrary`
@@ -304,6 +305,48 @@ fn sync_continuous_library_top_reveals(state: &mut GameState) {
     }
 }
 
+/// CR 400.2 + CR 701.20a: Continuous "play with [a] hand revealed" statics
+/// keep affected players' hands public after action-boundary reveal clears.
+fn sync_continuous_hand_reveals(state: &mut GameState) {
+    let mut reveal_all_players = false;
+    let mut reveal_controllers = HashSet::<PlayerId>::new();
+    let mut reveal_opponents_of = HashSet::<PlayerId>::new();
+
+    for (source, def) in game_active_statics(state) {
+        let StaticMode::RevealHand { who } = &def.mode else {
+            continue;
+        };
+        match who {
+            ProhibitionScope::AllPlayers => reveal_all_players = true,
+            ProhibitionScope::Controller => {
+                reveal_controllers.insert(source.controller);
+            }
+            ProhibitionScope::Opponents => {
+                reveal_opponents_of.insert(source.controller);
+            }
+            ProhibitionScope::EnchantedCreatureController => {}
+        }
+    }
+
+    if !reveal_all_players && reveal_controllers.is_empty() && reveal_opponents_of.is_empty() {
+        return;
+    }
+
+    let hand_cards = state
+        .players
+        .iter()
+        .filter(|player| {
+            reveal_all_players
+                || reveal_controllers.contains(&player.id)
+                || reveal_opponents_of
+                    .iter()
+                    .any(|controller| player.id != *controller)
+        })
+        .flat_map(|player| player.hand.iter().copied());
+
+    state.revealed_cards.extend(hand_cards);
+}
+
 /// Commander damage received by `victim`, grouped by the commander's
 /// controller (the attacking opponent). Each inner entry is
 /// `(commander_object_id, damage)`. The frontend renders one badge per
@@ -346,8 +389,10 @@ pub fn commander_damage_received(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::StaticDefinition;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+    use crate::types::statics::ProhibitionScope;
     use crate::types::zones::Zone;
 
     #[test]
@@ -418,6 +463,90 @@ mod tests {
         // Should have set the flag (false for a card with no mechanics)
         let obj = &state.objects[&id];
         assert!(obj.unimplemented_mechanics.is_empty());
+    }
+
+    #[test]
+    fn derive_reveals_opponents_hands_for_static_reveal_hand() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Telepathy".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            }));
+        let controller_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Card".to_string(),
+            Zone::Hand,
+        );
+        let opponent_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Hand,
+        );
+
+        derive_display_state(&mut state);
+
+        assert!(
+            !state.revealed_cards.contains(&controller_card),
+            "Telepathy-style static must not reveal its controller's hand"
+        );
+        assert!(
+            state.revealed_cards.contains(&opponent_card),
+            "Telepathy-style static must reveal opponents' hands"
+        );
+    }
+
+    #[test]
+    fn derive_reveals_all_hands_for_static_reveal_hand() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revelation".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::RevealHand {
+                who: ProhibitionScope::AllPlayers,
+            }));
+        let controller_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Card".to_string(),
+            Zone::Hand,
+        );
+        let opponent_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Hand,
+        );
+
+        derive_display_state(&mut state);
+
+        assert!(state.revealed_cards.contains(&controller_card));
+        assert!(state.revealed_cards.contains(&opponent_card));
     }
 
     #[test]

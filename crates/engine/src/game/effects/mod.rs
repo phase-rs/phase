@@ -2631,6 +2631,21 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     )
 }
 
+/// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`
+/// parent copies the resolving spell, not the object the parent just moved.
+/// Rebinding `source_id` to the forwarded permanent breaks the
+/// `resolving_stack_entry` fallback in `copy_spell::resolve` once the spell
+/// has left the stack (Sevinne's Reclamation — issue #2860).
+fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bool {
+    matches!(
+        &sub.effect,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
 /// CR 608.2c + CR 614.6: Pair each object affected by `effect` with the producer
 /// ACTION that made it part of the tracked set, mirroring
 /// [`affected_objects_from_events`] one-for-one but retaining a per-object
@@ -5374,21 +5389,38 @@ fn resolve_chain_body(
 
             // CR 608.2c + CR 603.7: An `If you do` boundary (`EffectOutcome
             // { OptionalEffectPerformed }`) opens a new instruction clause —
-            // "you may [do X]. If you do, [rider]." Nothing the gating action X
-            // affected can be named by a "those cards" / "one of them" reference
-            // inside the rider, so the rider's tracked set must NOT unify with
-            // the gating action's. Reset the chain-scoped tracked-set identity
-            // here so the rider's own producer (e.g. ExileTop) starts a fresh
-            // set. Without this, Party Thrasher's "you may discard a card. If
-            // you do, exile the top two cards…, then choose one of them" would
-            // co-publish the discarded card (now in the graveyard) with the two
-            // exiled cards, offering three cards to choose from (issue #1977).
+            // "you may [do X]. If you do, [rider]." The rider falls into one of
+            // two classes by what it does with the tracked-set channel:
+            //
+            //   * PRODUCER rider (e.g. Party Thrasher's `ExileTop`): the rider
+            //     creates its OWN fresh set and nothing the gating action X
+            //     affected may be named by a "those cards" / "one of them"
+            //     reference inside it. The chain-scoped tracked-set identity
+            //     MUST be reset here so the rider's producer starts clean.
+            //     Without this, Party Thrasher's "you may discard a card. If
+            //     you do, exile the top two cards…, then choose one of them"
+            //     co-publishes the discarded card (now in the graveyard) with
+            //     the two exiled cards, offering three to choose from (#1977).
+            //
+            //   * CONSUMER rider (e.g. God-Pharaoh's Gift's `CopyTokenOf {
+            //     target: TrackedSet }`): the rider's "that card" anaphor
+            //     CR 707.2a names the very card the gating exile published into
+            //     `chain_tracked_set_id` THIS resolution. Resetting here would
+            //     orphan it to the turn-global `latest_tracked_set_id` fallback,
+            //     so a second same-turn resolution (whose first exile's set also
+            //     persists) binds to the wrong card (#2350). Skip the reset for
+            //     consumer riders so the anaphor stays chain-local.
+            //
+            // `effect_references_tracked_set` discriminates the two: it is true
+            // exactly for consumer riders (any `TrackedSet` quantity/filter
+            // position, incl. `CopyTokenOf { target }`), false for producers.
             if matches!(
                 condition,
                 AbilityCondition::EffectOutcome {
                     signal: EffectOutcomeSignal::OptionalEffectPerformed,
                 }
-            ) {
+            ) && !effect_references_tracked_set(&sub.effect)
+            {
                 state.chain_tracked_set_id = None;
             }
 
@@ -5473,34 +5505,41 @@ fn resolve_chain_body(
         // resolve to it.
         if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
-            sub_with_context.source_id = forwarded_objects[0];
-            if matches!(sub.effect, Effect::Attach { .. }) {
-                if !sub_with_context
-                    .targets
-                    .iter()
-                    .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+            // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
+            // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
+            // rebinding `source_id` to the just-moved permanent would make
+            // `copy_spell::resolve` look up the wrong stack entry after
+            // `resolve_top` has popped the spell (issue #2860).
+            if !copy_spell_self_ref_keeps_resolving_spell_source(sub) {
+                sub_with_context.source_id = forwarded_objects[0];
+                if matches!(sub.effect, Effect::Attach { .. }) {
+                    if !sub_with_context
+                        .targets
+                        .iter()
+                        .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                    {
+                        sub_with_context
+                            .targets
+                            .push(TargetRef::Object(ability.source_id));
+                    }
+                } else if sub_with_context.targets.is_empty()
+                    && !effect_uses_implicit_tracked_set_targets(&sub.effect)
                 {
-                    sub_with_context
-                        .targets
-                        .push(TargetRef::Object(ability.source_id));
-                }
-            } else if sub_with_context.targets.is_empty()
-                && !effect_uses_implicit_tracked_set_targets(&sub.effect)
-            {
-                // CR 608.2c: ParentTarget consumers in a forward_result sub-chain
-                // need the moved object's id in `targets`, not just a rebound
-                // `source_id`. Goryo's Vengeance ("return target … creature …
-                // That creature gains haste. Exile it at the beginning of the
-                // next end step.") carries explicit cast-time targets on the
-                // parent `ChangeZone`; Emperor-of-Bones-style descriptors do
-                // not. Both shapes must snapshot the just-moved card for
-                // downstream ParentTarget / delayed-trigger registration.
-                if !ability.targets.is_empty() {
-                    sub_with_context.targets = ability.targets.clone();
-                } else {
-                    sub_with_context
-                        .targets
-                        .insert(0, TargetRef::Object(forwarded_objects[0]));
+                    // CR 608.2c: ParentTarget consumers in a forward_result sub-chain
+                    // need the moved object's id in `targets`, not just a rebound
+                    // `source_id`. Goryo's Vengeance ("return target … creature …
+                    // That creature gains haste. Exile it at the beginning of the
+                    // next end step.") carries explicit cast-time targets on the
+                    // parent `ChangeZone`; Emperor-of-Bones-style descriptors do
+                    // not. Both shapes must snapshot the just-moved card for
+                    // downstream ParentTarget / delayed-trigger registration.
+                    if !ability.targets.is_empty() {
+                        sub_with_context.targets = ability.targets.clone();
+                    } else {
+                        sub_with_context
+                            .targets
+                            .insert(0, TargetRef::Object(forwarded_objects[0]));
+                    }
                 }
             }
             apply_parent_chain_context(

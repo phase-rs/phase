@@ -2096,6 +2096,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    if let Some((prop, consumed)) = parse_attacking_defender_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
     if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
         properties.extend(zone_props);
@@ -3126,6 +3131,60 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
         return Some((FilterProp::FaceDown, text.len() - rest.len()));
     }
 
+    None
+}
+
+/// CR 508.1b: Postnominal "attacking you" / "attacking your opponents" on a
+/// typed phrase ("target creature attacking you"). The prefix form emits
+/// `Attacking { defender: None }`; this suffix scopes the defending player.
+fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    for (pattern, defender) in [
+        (
+            "attacking you or a planeswalker you control",
+            ControllerRef::You,
+        ),
+        (
+            "attacking you and/or planeswalkers you control",
+            ControllerRef::You,
+        ),
+        ("attacking you", ControllerRef::You),
+        (
+            "attacking your opponents and/or planeswalkers they control",
+            ControllerRef::Opponent,
+        ),
+        ("attacking your opponents", ControllerRef::Opponent),
+    ] {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(trimmed) {
+            let rest_trim = rest.trim_start();
+            // "...attacking you if it's controlled by..." is a target resolution
+            // gate, not a defender suffix (Stalking Leonin). Accepting the bare
+            // "attacking you" prefix leaves the trailing " if " unrepresented
+            // and trips swallowed-clause detection.
+            if alt((
+                tag::<_, _, OracleError<'_>>("if "),
+                tag::<_, _, OracleError<'_>>("unless "),
+                tag::<_, _, OracleError<'_>>("and/or "),
+                tag::<_, _, OracleError<'_>>("or "),
+            ))
+            .parse(rest_trim)
+            .is_ok()
+            {
+                continue;
+            }
+            match rest.chars().next() {
+                None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
+                    return Some((
+                        FilterProp::Attacking {
+                            defender: Some(defender),
+                        },
+                        text.len() - rest.len(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
     None
 }
 
@@ -5927,6 +5986,54 @@ mod tests {
             )
         );
         assert_eq!(rest, "");
+    }
+
+    /// Issue #2386 (Lulu, Stern Guardian): "target creature attacking you"
+    /// must scope attackers to the controller, not every creature.
+    #[test]
+    fn parse_target_creature_attacking_you() {
+        let (filter, remainder) = parse_target("target creature attacking you");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+        }));
+    }
+
+    /// Stalking Leonin: "attacking you if it's controlled by..." must not treat
+    /// the defender suffix as complete at "attacking you" — the trailing " if "
+    /// clause is a separate target gate.
+    #[test]
+    fn parse_target_creature_attacking_you_if_controlled_does_not_consume_if_clause() {
+        let phrase = "creature that's attacking you if it's controlled by the chosen player";
+        let (filter, remainder) = parse_type_phrase(phrase);
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(!typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+        }));
+        assert_eq!(
+            remainder.trim_start(),
+            "that's attacking you if it's controlled by the chosen player"
+        );
+    }
+
+    #[test]
+    fn parse_creatures_attacking_your_opponents_and_planeswalkers() {
+        let (filter, remainder) =
+            parse_target("creatures attacking your opponents and/or planeswalkers they control");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::Opponent),
+        }));
     }
 
     // CR 701.60b: "suspected" is a battlefield designation usable as a type-phrase

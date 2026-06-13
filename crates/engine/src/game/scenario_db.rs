@@ -64,8 +64,23 @@ impl GameScenarioDbExt for GameScenario {
 
         // Move from Library to the requested zone
         remove_from_zone(&mut self.state, id, Zone::Library, player);
-        add_to_zone(&mut self.state, id, zone, player);
-        self.state.objects.get_mut(&id).unwrap().zone = zone;
+        if zone == Zone::Battlefield {
+            let mut events = Vec::new();
+            let req = crate::game::zone_pipeline::ZoneMoveRequest::effect(id, zone, id);
+            match crate::game::zone_pipeline::move_object(&mut self.state, req, &mut events) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    panic!(
+                        "add_real_card battlefield entry for '{}' paused on an as-enters choice",
+                        name
+                    );
+                }
+            }
+        } else {
+            add_to_zone(&mut self.state, id, zone, player);
+            self.state.objects.get_mut(&id).unwrap().zone = zone;
+        }
 
         // Creatures entering the battlefield are not summoning-sick by default
         if zone == Zone::Battlefield {

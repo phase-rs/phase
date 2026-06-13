@@ -132,6 +132,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 400.2 + CR 701.20a: RevealHand carries the affected player
+            // scope (`opponents`, `all_players`, or `controller`). Runtime
+            // visibility sync is in derived.rs::sync_continuous_hand_reveals().
+            | StaticMode::RevealHand { .. }
             // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
             // CounterType + fixed count. Runtime enforcement is in the
             // battlefield-entry counter hook in effects/change_zone.rs, which
@@ -6896,6 +6900,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("play with the top card")
                     || effective_lower.contains("play with the top")
             }
+            StaticMode::RevealHand { .. } => {
+                effective_lower.contains("play with")
+                    && effective_lower.contains("hand")
+                    && effective_lower.contains("revealed")
+            }
             // CR 601.2f: ReduceCost / RaiseCost / MinimumCost coverage markers,
             // discriminated by the `mode` axis. Trinisphere's "would cost less than"
             // distinguishes Minimum from Reduce ("less to cast") and Raise ("more").
@@ -10715,6 +10724,38 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "'You can't draw cards.' should be fully supported by CantDraw(controller), but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 400.2 + CR 701.20a: parameterized `RevealHand` statics must be
+    /// coverage-recognized so Telepathy/Revelation-class cards do not become
+    /// silent drops after parsing.
+    #[test]
+    fn reveal_hand_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "Your opponents play with their hands revealed.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(oracle.to_string()),
+            attack_defended: None,
+        });
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "'Your opponents play with their hands revealed.' should be fully supported by RevealHand(opponents), but got gaps: {:?}",
             gaps
         );
     }

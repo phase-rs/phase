@@ -114,12 +114,18 @@ pub fn resolve(
     // isn't cast. Emit a distinct `SpellCopied` event so copy-sensitive
     // triggers (Magecraft) fire without wrongly firing cast-only triggers.
     if let Some(card_id) = copied_spell_card_id {
-        events.push(GameEvent::SpellCopied {
+        let spell_copied = GameEvent::SpellCopied {
             card_id,
             controller: copy_controller,
             object_id: copy_id,
             original_id: top_entry.id,
-        });
+        };
+        events.push(spell_copied.clone());
+        // CR 603.2 + CR 707.10: Magecraft (`SpellCastOrCopy`) and other copy
+        // observers must react when a spell copy is created mid-resolution.
+        // Collect now; drain after the copy is fully formed (CR 707.10c retarget
+        // choice completes, or immediately when no retarget pause is needed).
+        crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
     }
 
     // CR 707.10c: If the copy has targets, allow the controller to choose new ones.
@@ -151,6 +157,7 @@ pub fn resolve(
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
             });
+            drain_spell_copied_observer_triggers(state, events, copied_spell_card_id.is_some())?;
             return Ok(());
         };
         open_copy_retarget_choice(
@@ -171,6 +178,27 @@ pub fn resolve(
         source_id: ability.source_id,
     });
 
+    drain_spell_copied_observer_triggers(state, events, copied_spell_card_id.is_some())?;
+    Ok(())
+}
+
+/// CR 603.2 + CR 707.10: Drain `SpellCopied` observers collected when the copy
+/// was announced. Deferred until the copy is fully formed — after any CR 707.10c
+/// retarget choice, or immediately when no retarget pause is armed.
+fn drain_spell_copied_observer_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    spell_copied_collected: bool,
+) -> Result<(), EffectError> {
+    if spell_copied_collected {
+        if let Some(wf) =
+            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
+                state, events,
+            )
+        {
+            state.waiting_for = wf;
+        }
+    }
     Ok(())
 }
 
@@ -1639,7 +1667,6 @@ mod tests {
     /// cast/copy event, so no trigger was placed).
     #[test]
     fn magecraft_trigger_fires_when_a_sorcery_is_copied() {
-        use crate::game::triggers::process_triggers;
         use crate::game::zones::create_object;
         use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
         use crate::types::card_type::CoreType;
@@ -1712,11 +1739,8 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::SpellCopied { .. })),
             "copy resolver must emit SpellCopied"
         );
-        // Two spells on the stack: original + copy.
-        assert_eq!(state.stack.len(), 2);
-
-        // Drive the normal post-event trigger pass with the resolver's events.
-        process_triggers(&mut state, &events);
+        // Two spells on the stack plus the Magecraft trigger parked by resolve.
+        assert_eq!(state.stack.len(), 3);
 
         // CR 707.10: the Magecraft trigger landed on the stack.
         let magecraft_triggers = state

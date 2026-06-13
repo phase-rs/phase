@@ -4985,6 +4985,25 @@ pub(super) fn parse_exile_ast(
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
 
+    // CR 701.13a: "exile a card from the top of your library" — synonymous with
+    // "exile the top card of your library". Without ExileTop lowering the generic
+    // path emits ChangeZone(Library→Exile) with a library-wide EffectZoneChoice
+    // prompt (Wall of Mourning, issue #2397).
+    if let Ok((after_lib, _)) = (
+        opt(nom_primitives::parse_article),
+        tag("card from the top of your library"),
+    )
+        .parse(rest_lower)
+    {
+        let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
+        let count = parse_exile_card_from_top_for_each_suffix(after_lib);
+        return Some(ZoneCounterImperativeAst::ExileTop {
+            player: TargetFilter::Controller,
+            count,
+            face_down,
+        });
+    }
+
     // CR 400.12: "exile their graveyard" / "exile target player's graveyard"
     // act on all cards in that zone. Bare possessive zone references and
     // "target {player,opponent}'s <zone>" share semantics with "exile all/each".
@@ -5128,6 +5147,40 @@ pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
 /// Bomat Courier, Asmodeus the Archfiend, Knowledge Vault). Matching at this
 /// boundary keeps the downstream `where x is` and "those cards" lowering
 /// paths untouched.
+/// Parse an optional trailing "for each opponent you have" (or bare "for each
+/// opponent") suffix on an `exile a card from the top of your library` clause.
+fn parse_exile_card_from_top_for_each_suffix(after_lib: &str) -> QuantityExpr {
+    let trimmed = after_lib.trim_start();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("for each opponent you have").parse(trimmed)
+    {
+        if rest.trim().trim_start_matches('.').is_empty() {
+            return QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: crate::types::ability::PlayerFilter::Opponent,
+                },
+            };
+        }
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("for each opponent").parse(trimmed) {
+        if rest.trim().trim_start_matches('.').is_empty() {
+            return QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: crate::types::ability::PlayerFilter::Opponent,
+                },
+            };
+        }
+    }
+    if let Ok((rest, qty)) =
+        crate::parser::oracle_nom::quantity::parse_for_each_clause_ref.parse(trimmed)
+    {
+        let tail = rest.trim().trim_start_matches('.').trim();
+        if tail.is_empty() {
+            return QuantityExpr::Ref { qty };
+        }
+    }
+    QuantityExpr::Fixed { value: 1 }
+}
+
 fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
     let trimmed = after_lib.trim_start();
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("face down").parse(trimmed) {

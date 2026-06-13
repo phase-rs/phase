@@ -13444,6 +13444,21 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::AttackersDeclared);
         assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(typed),
+                    ..
+                } if typed.type_filters.contains(&TypeFilter::Creature)
+                    && typed.properties.contains(&FilterProp::Attacking {
+                        defender: Some(ControllerRef::You),
+                    })
+            ),
+            "expected TargetOnly(creature attacking you), got {:?}",
+            execute.effect
+        );
     }
 
     /// Issue #594 — Maralen, Fae Ascendant's ETB trigger: the full Oracle
@@ -17365,6 +17380,33 @@ mod tests {
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             }) if *source == TargetFilter::Any && *target == TargetFilter::SelfRef
+        ));
+    }
+
+    #[test]
+    fn trigger_intervening_if_you_were_dealt_damage_threshold_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if you were dealt 4 or more damage this turn, exile this artifact.",
+            "Boarded Window",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        source,
+                        target,
+                        ..
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }) if *source == TargetFilter::Any
+                && matches!(
+                    &*target,
+                    TargetFilter::Typed(ref typed)
+                        if typed.controller == Some(ControllerRef::You)
+                )
         ));
     }
 

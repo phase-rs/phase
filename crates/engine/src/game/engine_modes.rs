@@ -1,5 +1,5 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{CostResume, GameState, PayCostKind, PendingCast, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 
@@ -157,6 +157,41 @@ fn handle_activated_mode_choice(
             pending_x.chosen_modes = chosen_modes;
             state.pending_cast = Some(Box::new(pending_x));
             return casting_costs::enter_payment_step(state, player, None, events);
+        }
+
+        // CR 118.3 + CR 602.2b: Modal activated abilities detour to the
+        // interactive sacrifice prompt before targets or direct cost payment.
+        // Non-modal activations take this path in `handle_activate_ability`;
+        // without it, `pay_ability_cost` no-ops non-self `Sacrifice` sub-costs.
+        if let Some((count, sac_filter)) = casting::find_non_self_sacrifice_cost(cost) {
+            let eligible =
+                casting::find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
+            let (min_count, max_count) = casting::sacrifice_cost_bounds(count, eligible.len());
+            if eligible.len() < min_count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to sacrifice".into(),
+                ));
+            }
+            let mut pending_sac =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_sac.activation_cost = Some(cost.clone());
+            pending_sac.activation_ability_index = ability_index;
+            pending_sac.target_constraints = target_constraints_from_modal(&modal);
+            pending_sac.distribute = mode_distribute.clone();
+            pending_sac.deferred_target_selection = true;
+            let mut chosen_modes = indices.clone();
+            chosen_modes.sort_unstable();
+            pending_sac.chosen_modes = chosen_modes;
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Sacrifice,
+                choices: eligible,
+                count: max_count,
+                min_count,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_sac),
+                },
+            });
         }
     }
 

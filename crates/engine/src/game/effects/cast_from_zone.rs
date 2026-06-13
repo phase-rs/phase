@@ -161,29 +161,45 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 702.62a + CR 608.2g: Suspend's last-time-counter ability casts the
-    // card it is attached to, for free, AS THE TRIGGER RESOLVES. The card casts
-    // itself (the single resolved target IS the ability's source), there is no
-    // mana cost (`without_paying`), and no replacement alt-cost
-    // (`alt_ability_cost == None`). Per CR 702.62a/702.62d the cast happens
-    // during resolution — it must NOT be deferred to a lingering permission the
-    // player acts on at a later priority window (issue #1520: accepting the
-    // optional "cast it?" prompt appeared to do nothing because only a
-    // permission was stamped — the spell was never put on the stack, and a
-    // sorcery like Treasure Cruise was additionally blocked by the
-    // sorcery-speed timing gate at upkeep). Drive the cast immediately through
-    // the same cast-during-resolution authority Cascade/Discover use
-    // (`initiate_cast_during_resolution`).
+    // CR 608.2g: A `DuringResolution` cast-from-zone casts the single resolved
+    // target, for free, AS THE GRANTING ABILITY RESOLVES — the card goes onto
+    // the stack immediately rather than being deferred to a lingering
+    // permission the player acts on at a later priority window. Two producers
+    // share this path:
+    //
+    //   - CR 702.62a + CR 702.62d: Suspend's last-time-counter ability casts
+    //     the card it is attached to (the single resolved target IS the
+    //     ability's source). Issue #1520: accepting the optional "cast it?"
+    //     prompt appeared to do nothing because only a permission was stamped —
+    //     the spell was never put on the stack, and a sorcery like Treasure
+    //     Cruise was additionally blocked by the sorcery-speed timing gate at
+    //     upkeep.
+    //   - CR 701.23 + CR 608.2g (tutor-and-cast): Bring to Light tutors a card into the
+    //     controller's OWN exile, then "you may cast it without paying its mana
+    //     cost." The tutored card is NOT the source (target != source) and sits
+    //     in the controller's own exile, so the Suspend-specific
+    //     `target == source` defense and the foreign-graveyard defense below
+    //     both miss it. Issue #2880: it fell to `grant_lingering_permissions`,
+    //     which stamped an indefinite `ExileWithAltCost { duration: None }` —
+    //     a free-cast permission that persists forever instead of being a
+    //     one-shot resolution offer.
+    //
+    // Drive the cast immediately through the same cast-during-resolution
+    // authority Cascade/Discover use (`initiate_cast_during_resolution`).
     //
     // The router reads the EXPLICIT `driver` discriminator
-    // (`CastFromZoneDriver::DuringResolution`, set by
-    // `build_suspend_last_counter_cast_trigger`), NOT `duration`. `duration` is
+    // (`CastFromZoneDriver::DuringResolution`), NOT `duration`. `duration` is
     // CR 611.2a permission-expiry and says nothing about the casting mechanism;
     // routing on it conflated two axes. The structural-shape guard
-    // (`without_paying` + no alt-cost + single self target) is retained as a
+    // (`without_paying` + no alt-cost + single target) is retained as a
     // defense-in-depth invariant — a `DuringResolution` body must always be a
-    // self-free-cast, since `initiate_cast_during_resolution` casts the single
-    // card object itself at zero cost.
+    // free cast of a single card, since `initiate_cast_during_resolution` casts
+    // that single card object at zero cost. The Suspend-era
+    // `target == source` clause is intentionally dropped: every existing
+    // `DuringResolution` producer (Suspend) uses `target: SelfRef`, so
+    // `target == source` still holds for them, and the tutor-and-cast producer
+    // (Bring to Light, `target != source` but in the controller's own exile)
+    // must reach this path.
     //
     // FOLLOW-UP (#1520 twin): Rebound (CR 702.88a) is still a
     // `LingeringPermission` driver because its recast permission legitimately
@@ -199,11 +215,10 @@ pub fn resolve(
     // `ExiledBySource` filter, or an `alt_ability_cost`) are also
     // `LingeringPermission`: the controller casts them during the granting
     // effect's own priority window.
-    let self_free_cast = driver.is_during_resolution()
+    let driver_free_cast = driver.is_during_resolution()
         && without_paying
         && alt_ability_cost.is_none()
-        && target_ids.len() == 1
-        && target_ids[0] == ability.source_id;
+        && target_ids.len() == 1;
 
     // CR 608.2g: A targeted free-cast of a card the controller could never
     // surface a *later* cast for must also be driven DURING resolution. Memory
@@ -223,7 +238,7 @@ pub fn resolve(
         && target_ids.len() == 1
         && target_is_in_other_players_graveyard(state, target_ids[0], ability.controller);
 
-    if self_free_cast || foreign_graveyard_free_cast {
+    if driver_free_cast || foreign_graveyard_free_cast {
         return cast_single_target_during_resolution(
             state,
             ability,

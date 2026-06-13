@@ -2741,49 +2741,68 @@ fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, Quantity
 /// CR 700.4: Shared tail for "creature(s) that died" / graveyard-from-battlefield
 /// phrasing. Engine tracking is per-turn-only, so the trailing "this turn"
 /// qualifier is semantically redundant when present.
-fn parse_creatures_died_this_turn_tail(input: &str) -> OracleResult<'_, ()> {
+///
+/// Returns `Some(ControllerRef::You)` for forms qualified by "under your
+/// control" or "your graveyard" (CR 109.5: "your" graveyard = the source's
+/// controller), and `None` for unqualified forms that count every player's
+/// deaths. The longer qualified tags MUST precede the bare "that died" /
+/// "a graveyard" tags so the qualified suffix isn't shadowed by `alt`.
+fn parse_creatures_died_this_turn_tail(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
     alt((
-        value((), tag("creatures that died under your control this turn")),
-        value((), tag("creatures that died under your control")),
-        value((), tag("creatures that died this turn")),
-        value((), tag("creatures that died")),
-        value((), tag("creature that died under your control this turn")),
-        value((), tag("creature that died under your control")),
-        value((), tag("creature that died this turn")),
-        value((), tag("creature that died")),
+        value(
+            Some(ControllerRef::You),
+            tag("creatures that died under your control this turn"),
+        ),
+        value(
+            Some(ControllerRef::You),
+            tag("creatures that died under your control"),
+        ),
+        value(None, tag("creatures that died this turn")),
+        value(None, tag("creatures that died")),
+        value(
+            Some(ControllerRef::You),
+            tag("creature that died under your control this turn"),
+        ),
+        value(
+            Some(ControllerRef::You),
+            tag("creature that died under your control"),
+        ),
+        value(None, tag("creature that died this turn")),
+        value(None, tag("creature that died")),
         // CR 700.4: "creature put into [a/your] graveyard from the battlefield"
         // is the long form of "died" — both reference the same battlefield→
-        // graveyard transition tracked in `zone_changes_this_turn`.
+        // graveyard transition tracked in `zone_changes_this_turn`. CR 109.5:
+        // "your" graveyard scopes the count to the source's controller.
         value(
-            (),
+            Some(ControllerRef::You),
             tag("creatures put into your graveyard from the battlefield this turn"),
         ),
         value(
-            (),
+            Some(ControllerRef::You),
             tag("creatures put into your graveyard from the battlefield"),
         ),
         value(
-            (),
+            None,
             tag("creatures put into a graveyard from the battlefield this turn"),
         ),
         value(
-            (),
+            None,
             tag("creatures put into a graveyard from the battlefield"),
         ),
         value(
-            (),
+            Some(ControllerRef::You),
             tag("creature put into your graveyard from the battlefield this turn"),
         ),
         value(
-            (),
+            Some(ControllerRef::You),
             tag("creature put into your graveyard from the battlefield"),
         ),
         value(
-            (),
+            None,
             tag("creature put into a graveyard from the battlefield this turn"),
         ),
         value(
-            (),
+            None,
             tag("creature put into a graveyard from the battlefield"),
         ),
     ))
@@ -2793,15 +2812,15 @@ fn parse_creatures_died_this_turn_tail(input: &str) -> OracleResult<'_, ()> {
 /// CR 700.4: Parse "creature(s) that died" → filtered zone-change count for
 /// "for each creature that died this turn" iteration sources.
 fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_creatures_died_this_turn_tail(input)?;
-    Ok((rest, creatures_died_this_turn_ref()))
+    let (rest, controller) = parse_creatures_died_this_turn_tail(input)?;
+    Ok((rest, creatures_died_this_turn_ref(controller)))
 }
 
 /// CR 700.4: Parse "the number of creature(s) that died this turn" → the same
 /// `ZoneChangeCountThisTurn` quantity ref used by for-each iteration.
 fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_creatures_died_this_turn_tail(input)?;
-    Ok((rest, creatures_died_this_turn_ref()))
+    let (rest, controller) = parse_creatures_died_this_turn_tail(input)?;
+    Ok((rest, creatures_died_this_turn_ref(controller)))
 }
 
 /// CR 400.7 + CR 603.10a: Parse "creature that left the battlefield under your
@@ -2860,11 +2879,21 @@ fn parse_for_each_subtype_died_this_turn(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
-fn creatures_died_this_turn_ref() -> QuantityRef {
+/// CR 700.4: "died" = put into a graveyard from the battlefield, so the count
+/// is taken over `zone_changes_this_turn` records from battlefield to graveyard.
+/// CR 109.5: when the phrasing is qualified by "under your control" / "your
+/// graveyard", `controller` is `Some(ControllerRef::You)` and the count is
+/// scoped to creatures controlled by the source's controller when they died;
+/// otherwise it is `None` and every player's deaths are counted.
+fn creatures_died_this_turn_ref(controller: Option<ControllerRef>) -> QuantityRef {
+    let mut tf = TypedFilter::creature();
+    if let Some(c) = controller {
+        tf = tf.controller(c);
+    }
     QuantityRef::ZoneChangeCountThisTurn {
         from: Some(Zone::Battlefield),
         to: Some(Zone::Graveyard),
-        filter: TargetFilter::Typed(TypedFilter::creature()),
+        filter: TargetFilter::Typed(tf),
     }
 }
 
@@ -5235,6 +5264,73 @@ mod tests {
                     ),
                     "{phrase:?} got {q:?}"
                 );
+                // CR 700.4: unqualified "creatures that died this turn" counts
+                // every player's deaths — controller must stay unscoped.
+                let QuantityRef::ZoneChangeCountThisTurn {
+                    filter: TargetFilter::Typed(tf),
+                    ..
+                } = q
+                else {
+                    unreachable!()
+                };
+                assert_eq!(tf.controller, None, "{phrase:?} must not scope controller");
+            }
+        }
+    }
+
+    /// CR 109.5 + #1129: "creatures that died under your control" / "put into
+    /// your graveyard" forms must scope the zone-change count to the source's
+    /// controller (`ControllerRef::You`) for BOTH the for-each and "the number
+    /// of" surfaces, while unqualified forms leave the controller unset. Mirrors
+    /// `parse_for_each_creature_left_battlefield_under_your_control`.
+    #[test]
+    fn parse_creatures_died_under_your_control_scopes_controller() {
+        let qualified = [
+            "creatures that died under your control this turn",
+            "creature that died under your control",
+            "creatures put into your graveyard from the battlefield this turn",
+        ];
+        for phrase in qualified {
+            let (_, for_each) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("for-each {phrase:?} should parse"));
+            let (_, number_of) = parse_quantity_ref(&format!("the number of {phrase}"))
+                .unwrap_or_else(|_| panic!("number-of {phrase:?} should parse"));
+            for q in [for_each, number_of] {
+                let QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    filter: TargetFilter::Typed(tf),
+                } = q
+                else {
+                    panic!("expected graveyard ZoneChangeCountThisTurn for {phrase:?}, got {q:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "{phrase:?} must scope to the controller"
+                );
+            }
+        }
+
+        let unqualified = [
+            "creatures that died this turn",
+            "creatures put into a graveyard from the battlefield",
+        ];
+        for phrase in unqualified {
+            let (_, for_each) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("for-each {phrase:?} should parse"));
+            let (_, number_of) = parse_quantity_ref(&format!("the number of {phrase}"))
+                .unwrap_or_else(|_| panic!("number-of {phrase:?} should parse"));
+            for q in [for_each, number_of] {
+                let QuantityRef::ZoneChangeCountThisTurn {
+                    filter: TargetFilter::Typed(tf),
+                    ..
+                } = q
+                else {
+                    panic!("expected ZoneChangeCountThisTurn for {phrase:?}, got {q:?}");
+                };
+                assert_eq!(tf.controller, None, "{phrase:?} must not scope controller");
             }
         }
     }
