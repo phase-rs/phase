@@ -479,6 +479,28 @@ fn parse_exile_looked_at_card(lower: &str) -> Option<bool> {
     Some(face_down)
 }
 
+/// CR 702.75a + CR 406.3: Recognize "exile one of them face down" — a player
+/// CHOICE of one card from among the cards a preceding private `Dig` looked at
+/// (the Gonti, Lord of Luxury class: "look at the top four cards of an
+/// opponent's library, exile one of them face down ..."). Distinct from
+/// `parse_exile_looked_at_card` ("exile it/them ...", the Gonti, Canny
+/// Acquisitor wholesale impulse idiom): "one of them" means the controller
+/// selects exactly one of the N looked-at cards. The "face down" suffix is the
+/// CR 406.3 hidden-information marker required by this class; pure-peek Digs
+/// (Delver of Secrets — no exile clause) never reach this recognizer.
+fn parse_exile_one_of_them_face_down(lower: &str) -> bool {
+    let trimmed = lower.trim().trim_end_matches('.').trim_end();
+    (
+        tag::<_, _, OracleError<'_>>("exile "),
+        alt((tag("one of them"), tag("one of those cards"))),
+        multispace1,
+        tag("face down"),
+        eof,
+    )
+        .parse(trimmed)
+        .is_ok()
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -2645,6 +2667,42 @@ pub(super) fn apply_clause_continuation(
                 face_down,
             };
         }
+        // CR 702.75a + CR 406.3: "exile one of them face down" patches the
+        // preceding private `Dig` into the Hideaway shape — the controller
+        // selects ONE looked-at card and the `DigChoice` flow routes it to
+        // exile. Mirror `database/hideaway.rs`: keep_count:1, destination:Exile,
+        // reveal stays false (CR 701.20e — the look was private), and chain a
+        // `HideawayConceal` sub-ability to turn the chosen card face down and
+        // link it to the source (so the trailing "you may cast that card ..."
+        // permission, which reads the published tracked set / `ExiledBySource`,
+        // binds to the dug card). Without this fusion the Dig short-circuited as
+        // a keep_count:0 pure-peek and a sibling `ChangeZone { ParentTarget }`
+        // exiled the trigger source itself (#1146).
+        ContinuationAst::ExileOneOfThemFaceDown => {
+            let Some(previous) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
+            else {
+                return;
+            };
+            if let Effect::Dig {
+                keep_count,
+                up_to,
+                destination,
+                ..
+            } = &mut *previous.effect
+            {
+                *keep_count = Some(1);
+                *up_to = false;
+                *destination = Some(Zone::Exile);
+            }
+            // CR 608.2c: chain the conceal continuation onto the Dig. The
+            // `DigChoice` resolution binds the chosen (exiled) card onto this
+            // sub-ability's `ParentTarget`; `HideawayConceal` then flips it face
+            // down (CR 406.3) and links it to the source (CR 607.2a / CR 702.75a).
+            append_conceal_sub_ability(previous);
+        }
         ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter } => {
             let Some(filter) = sacrifice_filter else {
                 return;
@@ -2661,6 +2719,29 @@ pub(super) fn apply_clause_continuation(
             }
         }
     }
+}
+
+/// CR 702.75a + CR 608.2c: Append the Hideaway conceal continuation to the
+/// deepest point of `dig`'s sub-ability chain. Mirrors `database/hideaway.rs`:
+/// the chained `HideawayConceal { target: ParentTarget }` flips the just-exiled
+/// dug card face down (CR 406.3) and links it to the source. Appended at the
+/// deepest sub so it never clobbers an existing continuation (e.g. a trailing
+/// "put the rest on the bottom" patch lives on the Dig itself, not as a sub).
+fn append_conceal_sub_ability(dig: &mut AbilityDefinition) {
+    let conceal = Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::HideawayConceal {
+            target: TargetFilter::ParentTarget,
+        },
+    ));
+    let mut cursor = dig;
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_mut()
+            .expect("sub_ability checked above");
+    }
+    cursor.sub_ability = Some(conceal);
 }
 
 fn apply_search_destination_to_ability_chain(
@@ -2759,6 +2840,10 @@ pub(super) fn continuation_absorbs_current(
         // parse_followup_continuation_ast; the "exile it [face down]" clause is
         // folded into that Dig (rewritten to ExileTop) and emits no sibling def.
         ContinuationAst::ExileLookedAtCard { .. } => true,
+        // Recognition was already gated on a preceding `Dig`; the "exile one of
+        // them face down" clause patches that Dig (keep_count:1 / Exile) and
+        // pushes the conceal sub-ability — it emits no sibling def.
+        ContinuationAst::ExileOneOfThemFaceDown => true,
         ContinuationAst::ChooseAndSacrificeRestFilter { .. } => true,
     }
 }
@@ -3828,6 +3913,18 @@ pub(super) fn parse_followup_continuation_ast(
                 && recognize_copy_retarget_clause(&lower) =>
         {
             Some(ContinuationAst::CopyMayRetarget)
+        }
+        // CR 702.75a + CR 406.3: "exile one of them face down" after a private
+        // `Dig` (the "look at the top N cards of <player>'s library" look step)
+        // — the Gonti, Lord of Luxury class. The controller selects ONE of the N
+        // looked-at cards and exiles it face down. Patches the `Dig` into the
+        // Hideaway shape (keep_count: 1, destination: Exile) + chains a
+        // `HideawayConceal` so the player-selected dug card is the one exiled
+        // face down and linked to the source — NOT a sibling
+        // `ChangeZone { ParentTarget }`, which exiled the trigger source itself.
+        // `reveal: false` scopes this to the private look form.
+        Effect::Dig { reveal: false, .. } if parse_exile_one_of_them_face_down(&lower) => {
+            Some(ContinuationAst::ExileOneOfThemFaceDown)
         }
         // CR 201.2 + CR 608.2c: "[You may] put one of those cards onto the
         // battlefield if it has the same name as a permanent" after Dig —
@@ -7059,6 +7156,82 @@ mod tests {
         assert!(
             chunks.len() > 1,
             "expected a split (sticky must not engage), got single chunk: {chunks:?}"
+        );
+    }
+
+    /// Build a private-look (`reveal: false`) peek `Dig` matching the shape a
+    /// "look at the top N cards" clause lowers to before any exile follow-on.
+    fn make_peek_dig() -> Effect {
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 4 },
+            destination: None,
+            keep_count: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+        }
+    }
+
+    /// #1146: "exile one of them face down" after a private `Dig` is recognized
+    /// as the Gonti-class continuation (not the wholesale impulse `ExileTop`).
+    #[test]
+    fn exile_one_of_them_face_down_recognized_after_peek_dig() {
+        let dig = make_peek_dig();
+        let result = parse_followup_continuation_ast(
+            "Exile one of them face down.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::ExileOneOfThemFaceDown),
+            "the Gonti-class exile-the-dug-card clause must be recognized"
+        );
+    }
+
+    /// #1146: the variant phrasing "exile one of those cards face down" maps to
+    /// the same continuation.
+    #[test]
+    fn exile_one_of_those_cards_face_down_recognized_after_peek_dig() {
+        let dig = make_peek_dig();
+        let result = parse_followup_continuation_ast(
+            "Exile one of those cards face down.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(result, Some(ContinuationAst::ExileOneOfThemFaceDown));
+    }
+
+    /// #1146 scope guard: the recognizer requires the "face down" CR 406.3
+    /// marker — a "one of them" clause WITHOUT it is NOT this continuation, so a
+    /// card with different selection semantics is not mis-fused.
+    #[test]
+    fn exile_one_of_them_without_face_down_is_not_gonti_continuation() {
+        assert!(
+            !parse_exile_one_of_them_face_down("exile one of them"),
+            "without the 'face down' marker this is not the Gonti look-and-exile class"
+        );
+    }
+
+    /// #1146 regression guard: a genuine pure-peek `Dig` with NO exile clause
+    /// (the Delver of Secrets idiom — "look at the top card … you may reveal it")
+    /// must NOT lower to the Gonti exile-the-dug-card continuation, so it stays a
+    /// `keep_count: 0` peek and never surfaces a `DigChoice`.
+    #[test]
+    fn delver_pure_peek_is_not_gonti_continuation() {
+        let dig = make_peek_dig();
+        let result = parse_followup_continuation_ast(
+            "You may reveal it.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_ne!(
+            result,
+            Some(ContinuationAst::ExileOneOfThemFaceDown),
+            "a pure-peek 'you may reveal it' must not be fused into the Gonti exile continuation"
         );
     }
 }
