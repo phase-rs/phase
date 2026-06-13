@@ -7434,6 +7434,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],

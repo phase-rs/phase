@@ -784,13 +784,16 @@ pub fn resolve_all(
     // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
     // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
     // behavior — only the multi-zone shape opts into the union scan.
-    let (origin_zones, dest_zone, target_filter, enter_tapped) = match &ability.effect {
+    let (origin_zones, dest_zone, target_filter, enter_tapped, enter_with_counters) = match &ability
+        .effect
+    {
         Effect::ChangeZoneAll {
             origin,
             destination,
             target,
             enters_under: _,
             enter_tapped,
+            enter_with_counters,
             face_down_profile: _,
         } => {
             let extracted = target.extract_zones();
@@ -803,7 +806,26 @@ pub fn resolve_all(
             } else {
                 vec![Zone::Battlefield]
             };
-            (scan_zones, *destination, target.clone(), *enter_tapped)
+            // CR 122.1 + CR 122.1h: Resolve each `QuantityExpr` counter count
+            // to a concrete u32 once, mirroring the single-object `ChangeZone`
+            // arm. Every entering object receives these counters (e.g. a
+            // finality counter on Shilgengar's mass return).
+            let resolved_counters: Vec<(CounterType, u32)> = enter_with_counters
+                .iter()
+                .map(|(ct, qty)| {
+                    let n =
+                        crate::game::quantity::resolve_quantity_with_targets(state, qty, ability)
+                            .max(0) as u32;
+                    (ct.clone(), n)
+                })
+                .collect();
+            (
+                scan_zones,
+                *destination,
+                target.clone(),
+                *enter_tapped,
+                resolved_counters,
+            )
         }
         _ => return Err(EffectError::MissingParam("ChangeZoneAll".to_string())),
     };
@@ -1004,6 +1026,8 @@ pub fn resolve_all(
         // Mass zone moves don't use enter_transformed; enter_tapped and
         // controller override are carried for "return ... tapped/under your
         // control" effects.
+        // CR 122.1 + CR 122.1h: each object enters with the resolved counters
+        // (e.g. a finality counter on Shilgengar's mass return).
         match execute_zone_move(
             state,
             obj_id,
@@ -1014,7 +1038,7 @@ pub fn resolve_all(
             false,
             enter_tapped,
             enters_under_player,
-            &[],
+            &enter_with_counters,
             face_down_profile.as_ref(),
             track_exiled_by_source,
             events,
@@ -1072,7 +1096,9 @@ pub fn resolve_all(
                         enter_tapped,
                         enters_under_player,
                         enters_attacking: false,
-                        enter_with_counters: vec![],
+                        // CR 122.1h: resumed members of a paused mass return still
+                        // receive their counters (Shilgengar's finality counter).
+                        enter_with_counters: enter_with_counters.clone(),
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
                         moved_count: Some(moved_count),
@@ -1107,7 +1133,9 @@ pub fn resolve_all(
                         enter_tapped,
                         enters_under_player,
                         enters_attacking: false,
-                        enter_with_counters: vec![],
+                        // CR 122.1h: resumed members of a paused mass return still
+                        // receive their counters (Shilgengar's finality counter).
+                        enter_with_counters: enter_with_counters.clone(),
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
                         moved_count: Some(moved_count + 1),
@@ -1948,6 +1976,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -2701,6 +2730,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -2750,6 +2780,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2838,6 +2869,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -2909,6 +2941,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2971,6 +3004,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3043,6 +3077,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -3074,6 +3109,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3146,6 +3182,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -3248,6 +3285,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -3609,6 +3647,7 @@ mod tests {
                     }),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 vec![],
@@ -4725,6 +4764,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -4799,6 +4839,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -4849,6 +4890,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::Opponent),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -4946,6 +4988,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             // Parent target supplies the "that name" referent.
@@ -5091,6 +5134,7 @@ mod tests {
                     ])),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
                     face_down_profile: None,
                 },
                 vec![TargetRef::Object(seed)],
@@ -5292,6 +5336,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5358,6 +5403,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5438,6 +5484,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5510,6 +5557,7 @@ mod tests {
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile {
                     power: Some(2),
                     toughness: Some(2),
@@ -5590,6 +5638,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Tapped,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5659,6 +5708,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],
@@ -5696,6 +5746,7 @@ mod tests {
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
             },
             vec![],
@@ -6053,6 +6104,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
                 face_down_profile: None,
             },
             vec![],

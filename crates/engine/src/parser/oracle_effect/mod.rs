@@ -1909,6 +1909,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             target: mass_target,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
             face_down_profile: None,
         }
     } else {
@@ -8240,7 +8241,10 @@ fn try_parse_verb_and_target<'a>(
         };
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
-                if is_mass && d.enter_with_counters.is_empty() {
+                // CR 400.7: Mass returns to the battlefield route to
+                // `ChangeZoneAll` regardless of `enter_with_counters`, threading
+                // the counters through (Shilgengar's finality counter, CR 122.1h).
+                if is_mass {
                     Some((
                         TargetedImperativeAst::ReturnAllToZone {
                             target,
@@ -8248,6 +8252,7 @@ fn try_parse_verb_and_target<'a>(
                             destination: Zone::Battlefield,
                             enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
+                            enter_with_counters: d.enter_with_counters,
                         },
                         rem,
                     ))
@@ -8276,6 +8281,7 @@ fn try_parse_verb_and_target<'a>(
                             destination: Zone::Hand,
                             enters_under: None,
                             enter_tapped: false,
+                            enter_with_counters: vec![],
                         },
                         rem,
                     ))
@@ -8292,6 +8298,7 @@ fn try_parse_verb_and_target<'a>(
                             destination: d.zone,
                             enters_under: None,
                             enter_tapped: false,
+                            enter_with_counters: vec![],
                         },
                         rem,
                     ))
@@ -14901,6 +14908,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             ])),
             enters_under: None,
             enter_tapped,
+            enter_with_counters: vec![],
             face_down_profile: None,
         },
     )));
@@ -17735,6 +17743,7 @@ fn try_parse_put_zone_change_parts(
                         enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
                             enter_tapped,
                         ),
+                        enter_with_counters: vec![],
                         face_down_profile: None,
                     },
                     choice_count,
@@ -22561,6 +22570,7 @@ mod tests {
                     target: TargetFilter::Player,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: _,
                     face_down_profile: None,
                 }
             ),
@@ -22623,6 +22633,7 @@ mod tests {
                     target: TargetFilter::ExiledBySource,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_with_counters: _,
                     face_down_profile: None,
                 }
             ),
@@ -25315,6 +25326,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: _,
                 face_down_profile: None,
             }
         ));
@@ -25331,6 +25343,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: _,
                 face_down_profile: None,
             }
         ));
@@ -46471,6 +46484,7 @@ mod snapshot_tests {
             target,
             enters_under,
             enter_tapped,
+            enter_with_counters: _,
             face_down_profile: None,
         } = &*same_name.effect
         else {
@@ -46542,12 +46556,15 @@ mod snapshot_tests {
             AbilityKind::Activated,
         );
 
-        let Effect::ChangeZone {
+        // CR 400.7: "return each ... to the battlefield" is a mass move, so it
+        // lowers to `ChangeZoneAll` (not single-target `ChangeZone`) even though
+        // a `finality` counter rides along — the counters are threaded through.
+        let Effect::ChangeZoneAll {
             enter_with_counters,
             ..
         } = &*def.effect
         else {
-            panic!("expected ChangeZone, got {:?}", def.effect);
+            panic!("expected ChangeZoneAll, got {:?}", def.effect);
         };
         assert_eq!(
             enter_with_counters,

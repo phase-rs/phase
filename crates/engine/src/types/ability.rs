@@ -6886,6 +6886,13 @@ pub enum Effect {
             skip_serializing_if = "EtbTapState::is_unspecified"
         )]
         enter_tapped: EtbTapState,
+        /// CR 122.1 + CR 122.1h: Counters placed on each object as it enters the
+        /// battlefield during the mass move. Each entry is `(counter_type,
+        /// count)`. Mirrors `Effect::ChangeZone.enter_with_counters` for the mass
+        /// case — e.g. Shilgengar's "return each creature card from your
+        /// graveyard to the battlefield. They enter with a finality counter."
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
         /// CR 708.2a + CR 708.3: when `Some`, each object that enters the
         /// battlefield via this move is turned face down (before entry, CR
         /// 708.3) with these characteristics. `None` = normal face-up entry.
