@@ -555,18 +555,31 @@ pub(crate) enum NumericImperativeAst {
     },
 }
 
-/// Replace a fixed quantity with a for-each quantity, preserving multipliers.
+/// CR 107.1: Scale a *fixed* base count by a per-each `for_each` quantity.
 /// Fixed(0) is preserved as-is (zero effect regardless of for-each count).
 /// Fixed(1) is replaced directly with the for-each quantity.
 /// Fixed(N>1) wraps in Multiply { factor: N, inner: for_each }.
+///
+/// A non-`Fixed` base (e.g. `EventContextAmount` from "that many", a `Ref`, or
+/// a nested `Multiply` from "twice X") is returned **unchanged**: there is no
+/// `QuantityExpr` variant for the product of two arbitrary dynamic quantities
+/// (`Multiply` takes a constant `factor`, not a second dynamic operand), so the
+/// only rules-safe choice is to keep the parsed base rather than silently
+/// discard it in favor of the bare for-each. Callers must therefore only reach
+/// the for-each-attach path with a `Fixed` base; if a future card pairs a
+/// dynamic base with a for-each multiplier, a general product variant is the
+/// correct extension (gated through `add-engine-variant`).
 pub(crate) fn replace_fixed_quantity(fixed: QuantityExpr, for_each: QuantityExpr) -> QuantityExpr {
     match fixed {
         QuantityExpr::Fixed { value: 0 } => QuantityExpr::Fixed { value: 0 },
+        QuantityExpr::Fixed { value: 1 } => for_each,
         QuantityExpr::Fixed { value } if value > 1 => QuantityExpr::Multiply {
             factor: value,
             inner: Box::new(for_each),
         },
-        _ => for_each,
+        // Non-`Fixed` base (or a negative Fixed, which a draw/counter count never
+        // produces): keep the parsed base rather than dropping it for `for_each`.
+        base => base,
     }
 }
 

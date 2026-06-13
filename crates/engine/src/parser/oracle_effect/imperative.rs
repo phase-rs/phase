@@ -11,6 +11,7 @@ use super::counter::{
     try_parse_double_effect, try_parse_move_counters_from, try_parse_put_counter,
     try_parse_remove_counter,
 };
+use super::lower::strip_for_each_multiplier_suffix;
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
 use super::{
@@ -449,8 +450,10 @@ pub(super) fn parse_numeric_imperative_ast(
             Some((_, after)) => (after, true),
             None => (rest, false),
         };
-        // CR 121.1 / CR 609.3: dynamic-count tails — "cards equal to <ref>",
-        // "a card equal to <ref>", "that many cards", "that many".
+        // CR 121.1 / CR 107.1: dynamic-count tails — "cards equal to <ref>",
+        // "a card equal to <ref>", "that many cards", "that many". The count is a
+        // game-state integer reference, not the CR 609.3 "do as much as possible"
+        // rule.
         let rest_lower = rest.to_ascii_lowercase();
         if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
             return Some(NumericImperativeAst::Draw { count, up_to });
@@ -459,7 +462,18 @@ pub(super) fn parse_numeric_imperative_ast(
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
         // dynamic-quantity gaps from the coverage report.
-        let count = parse_count_expr(rest).map(|(q, _)| q)?;
+        let mut count = parse_count_expr(rest).map(|(q, _)| q)?;
+        // CR 121.1 + CR 107.1: a trailing "for each <countable>" multiplier scales
+        // the draw count ("draw a card for each spell you've cast this turn …") by
+        // an integer per-each quantity — count templating, not the CR 609.3 "do as
+        // much as possible" rule. `parse_count_expr` discards its remainder, so the
+        // multiplier lives in the original `rest`; attach it via the shared
+        // for-each authority, rebinding the base Fixed count to factor × <for-each>.
+        // Only upgrades a successfully parsed Fixed count — preserves Fixed(1) when
+        // no/unparsed `for each` tail, and keeps a dynamic base unchanged.
+        if let Some((for_each_expr, _head)) = strip_for_each_multiplier_suffix(rest) {
+            count = replace_fixed_quantity(count, for_each_expr);
+        }
         return Some(NumericImperativeAst::Draw { count, up_to });
     }
 
@@ -602,8 +616,9 @@ pub(super) fn parse_numeric_imperative_ast(
         ))
         .parse(input)
     }) {
-        // CR 121.1 / CR 609.3 / CR 701.13a: dynamic-count tails for the
-        // shared mill/scry/surveil family.
+        // CR 121.1 / CR 107.1 / CR 701.13a: dynamic-count tails for the
+        // shared mill/scry/surveil family. The count is a game-state integer
+        // reference, not the CR 609.3 "do as much as possible" rule.
         let rest_lower = rest.to_ascii_lowercase();
         if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
             // allow-noncombinator: dispatch on already-parsed verb tag (combinator output, not Oracle text)
@@ -1260,9 +1275,10 @@ pub(super) fn parse_targeted_action_ast(
             parse_discard_unless_filter(after_discard, original_after);
         // Re-derive original_after for the narrowed (unless-stripped) text.
         let original_after = &original_after[..after_discard.len()];
-        // CR 121.1 / CR 609.3 / CR 701.8a: dynamic-count tails for Discard
+        // CR 121.1 / CR 107.1 / CR 701.8a: dynamic-count tails for Discard
         // — Fervent Mastery, Hordewing Skaab discard sub-ability, Sirocco
-        // chains, etc.
+        // chains, etc. The count is a game-state integer reference, not the
+        // CR 609.3 "do as much as possible" rule.
         let after_discard_lower = after_discard.to_ascii_lowercase();
         if let Some(count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
             let filter = parse_discard_card_filter(after_discard);
@@ -12447,5 +12463,99 @@ mod tests {
             },
             other => panic!("expected GainLife imperative, got {other:?}"),
         }
+    }
+
+    // CR 121.1 + CR 107.1: a trailing "for each …" multiplier must scale the draw
+    // count off Fixed(1). Cluster-01 (Surge of Brilliance class).
+    #[test]
+    fn draw_for_each_attaches_multiplier() {
+        let text = "draw a card for each creature you control";
+        match parse_numeric_imperative_ast(text, text) {
+            Some(NumericImperativeAst::Draw { count, .. }) => {
+                assert_ne!(
+                    count,
+                    QuantityExpr::Fixed { value: 1 },
+                    "the for-each multiplier must replace the Fixed(1) base count"
+                );
+            }
+            other => panic!("expected Draw imperative, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_for_each_spell_cast_origin() {
+        let text =
+            "draw a card for each spell you've cast this turn from anywhere other than your hand";
+        match parse_numeric_imperative_ast(text, text) {
+            Some(NumericImperativeAst::Draw { count, .. }) => {
+                // Must resolve to the SpellsCastThisTurn ref carrying the cast-origin
+                // filter, not a Fixed(1) draw.
+                match count {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn { filter, .. },
+                    } => {
+                        let filter = filter.expect("cast-origin filter must be present");
+                        assert!(
+                            matches!(&filter, TargetFilter::Typed(t)
+                                if t.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { .. }))),
+                            "draw count must carry the cast-origin InAnyZone filter, got {filter:?}"
+                        );
+                    }
+                    other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+                }
+            }
+            other => panic!("expected Draw imperative, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_plain_card_stays_fixed_one() {
+        let text = "draw a card";
+        match parse_numeric_imperative_ast(text, text) {
+            Some(NumericImperativeAst::Draw { count, .. }) => {
+                assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected Draw imperative, got {other:?}"),
+        }
+    }
+
+    // CR 107.1: `replace_fixed_quantity` must never silently discard a non-Fixed
+    // base when a for-each multiplier attaches. There is no product-of-two-dynamic
+    // `QuantityExpr` variant, so a dynamic base is preserved unchanged rather than
+    // replaced by the bare for-each (which would lose the parsed base count).
+    #[test]
+    fn replace_fixed_quantity_preserves_dynamic_base() {
+        let for_each = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Any,
+            },
+        };
+        // Fixed(1) → for_each (direct substitution).
+        assert_eq!(
+            replace_fixed_quantity(QuantityExpr::Fixed { value: 1 }, for_each.clone()),
+            for_each,
+        );
+        // Fixed(0) → Fixed(0) (zero effect regardless of multiplier).
+        assert_eq!(
+            replace_fixed_quantity(QuantityExpr::Fixed { value: 0 }, for_each.clone()),
+            QuantityExpr::Fixed { value: 0 },
+        );
+        // Fixed(N>1) → Multiply { factor: N, inner: for_each }.
+        assert_eq!(
+            replace_fixed_quantity(QuantityExpr::Fixed { value: 3 }, for_each.clone()),
+            QuantityExpr::Multiply {
+                factor: 3,
+                inner: Box::new(for_each.clone()),
+            },
+        );
+        // Dynamic base (e.g. "that many" → EventContextAmount): kept unchanged,
+        // NOT dropped in favor of the bare for-each.
+        let dynamic_base = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(
+            replace_fixed_quantity(dynamic_base.clone(), for_each),
+            dynamic_base,
+        );
     }
 }
