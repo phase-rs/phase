@@ -13499,7 +13499,7 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
 
     // Issue #377: Anikthea, Hand of Erebos — "create a token that's a copy of
     // it" uses the bare pronoun "it" instead of "that card". Both anaphors
-    // refer to the card just exiled by the preceding clause (CR 603.7), so
+    // refer to the card just exiled by the preceding clause (CR 608.2c), so
     // the tracked-set rewrite must fire for either phrasing.
     let copy_token_recall = (
         take_until::<_, _, OracleError<'_>>("copy of "),
@@ -31195,7 +31195,7 @@ mod tests {
     /// enchantment card from your graveyard and create a token that's a copy of
     /// it, except it's a 3/3 black Zombie creature in addition to its other
     /// types." The bare pronoun "it" after an exile clause must rebind to the
-    /// tracked set (CR 603.7), identical to the "that card" class tested above.
+    /// tracked set (CR 608.2c), identical to the "that card" class tested above.
     /// Without the fix the copy target stays `ParentTarget` and the runtime
     /// falls back to the source (Anikthea itself) instead of the exiled card.
     #[test]
