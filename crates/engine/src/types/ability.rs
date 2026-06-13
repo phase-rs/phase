@@ -226,10 +226,16 @@ impl ChoiceType {
     /// engine enumerating a fixed option set.
     ///
     /// `CardName` options come from the frontend's local card database (the
-    /// engine sends an empty list to avoid serializing 30k+ names), and `Word`
-    /// / `Artist` are free-form text the player types. For every other choice
-    /// type the engine fully enumerates the legal options, so an empty option
-    /// list means there is genuinely nothing to choose.
+    /// engine sends an empty list to avoid serializing 30k+ names) and are
+    /// wired end-to-end via the free-text name search. `Word` / `Artist` are
+    /// likewise player-supplied free-text in principle, but their free-text
+    /// frontend/legal-action path is not yet implemented (only `CardName` is
+    /// synthesized by `named_choice_actions` and given a text input by
+    /// `NamedChoiceModal`) — a separate known gap. They are kept here so an
+    /// empty engine list for them is treated as a still-to-be-supplied value
+    /// rather than silently skipped as impossible. For every other choice type
+    /// the engine fully enumerates the legal options, so an empty option list
+    /// means there is genuinely nothing to choose.
     ///
     /// Used to distinguish a legitimately-empty engine option list (this
     /// predicate is true) from an impossible choice that must resolve as a

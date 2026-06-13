@@ -44,8 +44,10 @@ pub fn resolve(
     // rest of the chain. Emitting a `WaitingFor::NamedChoice` with no options
     // would wedge the game (issue #3040): the legal-action enumerator yields no
     // `ChooseOption`, so no player can advance the decision. `CardName` / `Word`
-    // / `Artist` are excluded because the player supplies their value at runtime
-    // — an empty engine list there is expected, not impossible.
+    // / `Artist` are excluded because their value is player-supplied, so an
+    // empty engine list there is expected, not impossible (only `CardName` has
+    // a wired free-text supply path today; `Word` / `Artist` are a separate
+    // known frontend gap — see `options_supplied_by_player`).
     if options.is_empty() && !choice_type.options_supplied_by_player() {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
