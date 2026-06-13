@@ -2535,6 +2535,15 @@ pub(super) fn parse_choose_ast(
             return Some(ast);
         }
 
+        // CR 108.3 + CR 701.38d: "choose a permanent owned by the voter" —
+        // voter-referential ownership scoping on the Battlefield. This must be
+        // checked BEFORE is_choose_as_targeting so it routes to the interactive
+        // ChooseFromZone seam (which pauses for player choice) instead of the
+        // non-interactive TargetOnly path.
+        if let Some(ast) = try_parse_choose_owned_by_voter(rest, rest_lower, ctx) {
+            return Some(ast);
+        }
+
         if super::is_choose_as_targeting(rest_lower) {
             // CR 115.1c + CR 601.2c: "Choose target X and target Y" declares
             // two independent target slots on the same activated/triggered
@@ -2583,6 +2592,30 @@ pub(super) fn parse_choose_ast(
     }
 
     None
+}
+
+/// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
+/// `ChooseFromZone { Battlefield, ScopedPlayer }` so the interactive choice
+/// seam handles mid-resolution target binding for per-ballot vote effects.
+fn try_parse_choose_owned_by_voter(
+    _text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    // Match: "a permanent owned by the voter", "a creature owned by the voter", etc.
+    // The chain splitter has already stripped any " and gain control of it" continuation.
+    let owned_by_voter = " owned by the voter";
+    let idx = lower.find(owned_by_voter)?;
+    let filter_text = &lower[..idx];
+    let filter = super::search::parse_search_filter(filter_text, ctx);
+    Some(ChooseImperativeAst::FromZone {
+        count: 1,
+        zones: vec![Zone::Battlefield],
+        zone_owner: ZoneOwner::ScopedPlayer,
+        filter,
+        chooser: Chooser::Controller,
+        up_to: false,
+    })
 }
 
 fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {

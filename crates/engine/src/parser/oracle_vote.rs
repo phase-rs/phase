@@ -1135,4 +1135,88 @@ mod tests {
         let text = "For each player, choose friend. Each friend draws a card.";
         assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
+
+    /// CR 701.38d + issue #821: Expropriate — the money clause's "choose a
+    /// permanent owned by the voter" must parse to `ChooseFromZone` with
+    /// `zone_owner: ScopedPlayer` (interactive choice seam) and a sub_ability
+    /// of `GainControl`. The chain splitter splits on " and gain control of
+    /// it" producing two clauses that get linked via sub_ability.
+    #[test]
+    fn parses_expropriate_money_clause_with_voter_ownership() {
+        use crate::types::ability::{ControllerRef, ZoneOwner};
+        use crate::types::zones::Zone;
+        let text = "starting with you, each player votes for time or money. \
+                    For each time vote, take an extra turn after this one. \
+                    For each money vote, choose a permanent owned by the voter \
+                    and gain control of it.";
+        let def =
+            parse_vote_block(text, AbilityKind::Spell).expect("Expropriate vote block must parse");
+        match *def.effect {
+            Effect::Vote {
+                ref choices,
+                ref per_choice_effect,
+                starting_with,
+                voter_scope,
+            } => {
+                assert_eq!(choices, &vec!["time".to_string(), "money".to_string()]);
+                assert_eq!(starting_with, ControllerRef::You);
+                assert_eq!(voter_scope, VoterScope::AllPlayers);
+                assert_eq!(per_choice_effect.len(), 2);
+                // time → ExtraTurn
+                assert!(
+                    matches!(*per_choice_effect[0].effect, Effect::ExtraTurn { .. }),
+                    "expected time → ExtraTurn, got {:?}",
+                    per_choice_effect[0].effect
+                );
+                // money → ChooseFromZone { Battlefield, ScopedPlayer }
+                let money_effect = &per_choice_effect[1];
+                // The per-choice sub-effect should NOT have player_scope
+                // (it uses per-ballot iteration, not per-voter fan-out).
+                assert!(
+                    money_effect.player_scope.is_none(),
+                    "money clause must not carry player_scope (uses per-ballot iteration)"
+                );
+                // Verify the money clause produces ChooseFromZone with
+                // zone_owner = ScopedPlayer (voter identity).
+                match *money_effect.effect {
+                    Effect::ChooseFromZone {
+                        ref zone,
+                        zone_owner,
+                        ..
+                    } => {
+                        assert_eq!(
+                            *zone,
+                            Zone::Battlefield,
+                            "money clause must choose from Battlefield, got {:?}",
+                            zone
+                        );
+                        assert_eq!(
+                            zone_owner,
+                            ZoneOwner::ScopedPlayer,
+                            "money clause zone_owner must be ScopedPlayer (voter)"
+                        );
+                    }
+                    ref other => panic!("expected money → ChooseFromZone, got {:?}", other),
+                }
+                // Verify GainControl is present in the sub_ability chain.
+                fn chain_contains_gain_control(
+                    def: &crate::types::ability::AbilityDefinition,
+                ) -> bool {
+                    if matches!(*def.effect, Effect::GainControl { .. }) {
+                        return true;
+                    }
+                    if let Some(ref sub) = def.sub_ability {
+                        return chain_contains_gain_control(sub);
+                    }
+                    false
+                }
+                assert!(
+                    chain_contains_gain_control(money_effect),
+                    "money clause must contain GainControl in its sub_ability chain, got {:?}",
+                    money_effect
+                );
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
 }

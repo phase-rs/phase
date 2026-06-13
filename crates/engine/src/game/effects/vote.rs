@@ -201,7 +201,7 @@ pub fn resolve_tally(
         if *votes == 0 {
             continue;
         }
-        // CR 608.2c + CR 701.38 + CR 800.4g: Two distinct ways the per-choice
+        // CR 608.2c + CR 701.38 + CR 800.4g: Three distinct ways the per-choice
         // sub-effect resolves N voters' worth of work:
         //
         //   * `player_scope: Some(...)` — the parsed body fans out per-voter
@@ -210,17 +210,66 @@ pub fn resolve_tally(
         //     each Y" patterns. Each iteration runs once with the iterated
         //     voter as the rebound controller; `OriginalController` and
         //     `ScopedPlayer` route the two halves of the body distribution.
-        //   * `player_scope: None` — classic Council's-dilemma "For each
-        //     <choice> vote, <effect>" (Tivit / Capital Punishment). The body
-        //     runs N times against the SAME controller via `repeat_for`,
-        //     mirroring "fire effect once per ballot".
-        //
-        // The two paths must be mutually exclusive: stacking `player_scope`
-        // and `repeat_for` would multiply iterations (N voters × N votes) and
-        // break tally fan-out semantics.
+        //   * aggregate-tally — `QuantityRef::VoteCount` in the count slot.
+        //     Resolves once; `resolve_ref` sums the full tally.
+        //   * per-ballot iteration — classic Council's-dilemma "For each
+        //     <choice> vote, <effect>" (Tivit / Capital Punishment /
+        //     Expropriate). The body runs once per ballot. Each iteration
+        //     carries the ballot's voter as `scoped_player` so voter-
+        //     referential filters ("owned by the voter") resolve correctly
+        //     (CR 701.38d). `original_controller` preserves the spell caster
+        //     for effects like GainControl.
         let per_choice_player_scope = per_choice_effect[idx].player_scope.clone();
-        let repeat_for = if per_choice_player_scope.is_some() {
-            None
+        if per_choice_player_scope.is_some() {
+            // player_scope path — single dispatch, fan-out handled by
+            // resolve_ability_chain's player_scope driver.
+            let chain = ResolvedAbility {
+                effect: (*per_choice_effect[idx].effect).clone(),
+                targets: Vec::new(),
+                source_id,
+                source_incarnation: None,
+                controller,
+                original_controller: None,
+                scoped_player: None,
+                target_chooser: None,
+                kind: per_choice_effect[idx].kind,
+                sub_ability: per_choice_effect[idx]
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
+                else_ability: None,
+                duration: per_choice_effect[idx].duration.clone(),
+                condition: per_choice_effect[idx].condition.clone(),
+                context: Default::default(),
+                optional_targeting: per_choice_effect[idx].optional_targeting,
+                optional: per_choice_effect[idx].optional,
+                optional_for: None,
+                multi_target: None,
+                target_constraints: Vec::new(),
+                target_choice_timing: per_choice_effect[idx].target_choice_timing,
+                description: per_choice_effect[idx].description.clone(),
+                repeat_for: None,
+                min_x_value: per_choice_effect[idx].min_x_value,
+                cant_be_copied: per_choice_effect[idx].cant_be_copied,
+                copy_count_status: crate::types::ability::CopyCountStatus::Pending,
+                forward_result: per_choice_effect[idx].forward_result,
+                unless_pay: None,
+                distribution: None,
+                player_scope: per_choice_player_scope,
+                starting_with: per_choice_effect[idx].starting_with.clone(),
+                chosen_x: None,
+                cost_paid_object: None,
+                effect_context_object: None,
+                ability_index: None,
+                may_trigger_origin: None,
+                target_selection_mode: per_choice_effect[idx].target_selection_mode,
+                chosen_players: Vec::new(),
+                repeat_until: None,
+                sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                modal: None,
+                mode_abilities: vec![],
+            };
+            resolve_ability_chain(state, &chain, events, 1)?;
         } else if per_choice_effect[idx]
             .effect
             .count_expr()
@@ -231,67 +280,119 @@ pub fn resolve_tally(
             // `QuantityRef::VoteCount`, so the effect resolves as ONE aggregate
             // event whose `resolve_ref` sums the full tally — do NOT repeat it
             // per ballot, which would multiply the tally by itself.
-            None
+            let chain = ResolvedAbility {
+                effect: (*per_choice_effect[idx].effect).clone(),
+                targets: Vec::new(),
+                source_id,
+                source_incarnation: None,
+                controller,
+                original_controller: None,
+                scoped_player: None,
+                target_chooser: None,
+                kind: per_choice_effect[idx].kind,
+                sub_ability: per_choice_effect[idx]
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
+                else_ability: None,
+                duration: per_choice_effect[idx].duration.clone(),
+                condition: per_choice_effect[idx].condition.clone(),
+                context: Default::default(),
+                optional_targeting: per_choice_effect[idx].optional_targeting,
+                optional: per_choice_effect[idx].optional,
+                optional_for: None,
+                multi_target: None,
+                target_constraints: Vec::new(),
+                target_choice_timing: per_choice_effect[idx].target_choice_timing,
+                description: per_choice_effect[idx].description.clone(),
+                repeat_for: None,
+                min_x_value: per_choice_effect[idx].min_x_value,
+                cant_be_copied: per_choice_effect[idx].cant_be_copied,
+                copy_count_status: crate::types::ability::CopyCountStatus::Pending,
+                forward_result: per_choice_effect[idx].forward_result,
+                unless_pay: None,
+                distribution: None,
+                player_scope: None,
+                starting_with: per_choice_effect[idx].starting_with.clone(),
+                chosen_x: None,
+                cost_paid_object: None,
+                effect_context_object: None,
+                ability_index: None,
+                may_trigger_origin: None,
+                target_selection_mode: per_choice_effect[idx].target_selection_mode,
+                chosen_players: Vec::new(),
+                repeat_until: None,
+                sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                modal: None,
+                mode_abilities: vec![],
+            };
+            resolve_ability_chain(state, &chain, events, 1)?;
         } else {
-            // Classic "For each <choice> vote, <effect>" (Tivit / Capital
-            // Punishment): the body has a fixed count and fires once per ballot.
-            Some(QuantityExpr::Fixed {
-                value: *votes as i32,
-            })
-        };
-        let chain = ResolvedAbility {
-            effect: (*per_choice_effect[idx].effect).clone(),
-            targets: Vec::new(),
-            source_id,
-            source_incarnation: None,
-            controller,
-            original_controller: None,
-            scoped_player: None,
-            target_chooser: None,
-            kind: per_choice_effect[idx].kind,
-            sub_ability: per_choice_effect[idx]
-                .sub_ability
-                .as_ref()
-                .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
-            else_ability: None,
-            duration: per_choice_effect[idx].duration.clone(),
-            condition: per_choice_effect[idx].condition.clone(),
-            context: Default::default(),
-            optional_targeting: per_choice_effect[idx].optional_targeting,
-            optional: per_choice_effect[idx].optional,
-            optional_for: None,
-            multi_target: None,
-            target_constraints: Vec::new(),
-            target_choice_timing: per_choice_effect[idx].target_choice_timing,
-            description: per_choice_effect[idx].description.clone(),
-            repeat_for,
-            min_x_value: per_choice_effect[idx].min_x_value,
-            cant_be_copied: per_choice_effect[idx].cant_be_copied,
-            copy_count_status: crate::types::ability::CopyCountStatus::Pending,
-            forward_result: per_choice_effect[idx].forward_result,
-            unless_pay: None,
-            distribution: None,
-            player_scope: per_choice_player_scope,
-            // CR 101.4 + CR 800.4: Inherit the parent ability's turn-order
-            // override so per-vote-choice fan-out preserves it across the
-            // synthesized chain (vote sub-effects are children of the
-            // resolving ability and must share its iteration semantics).
-            starting_with: per_choice_effect[idx].starting_with.clone(),
-            chosen_x: None,
-            cost_paid_object: None,
-            effect_context_object: None,
-            ability_index: None,
-            may_trigger_origin: None,
-            target_selection_mode: per_choice_effect[idx].target_selection_mode,
-            chosen_players: Vec::new(),
-            repeat_until: None,
-            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
-            modal: None,
-            mode_abilities: vec![],
-        };
-        // CR 608.2c: depth = 1 so the chain entry doesn't clear
-        // `state.last_vote_ballots`; see ledger-publication note above.
-        resolve_ability_chain(state, &chain, events, 1)?;
+            // CR 701.38d + CR 608.2c: Per-ballot iteration. Each ballot that
+            // chose this option triggers one resolution of the sub-effect.
+            // The ballot's voter is carried as `scoped_player` so voter-
+            // referential filters ("owned by the voter" → ScopedPlayer)
+            // resolve to the correct player. `original_controller` preserves
+            // the spell caster for effects that grant control (Expropriate).
+            // For cards without voter-referential filters (Tivit, Capital
+            // Punishment), `scoped_player` is harmlessly set but never read.
+            let choice_ballots: Vec<PlayerId> = ballots
+                .iter()
+                .filter(|(_, choice)| *choice == idx as u8)
+                .map(|(voter, _)| *voter)
+                .collect();
+            for voter in &choice_ballots {
+                let chain = ResolvedAbility {
+                    effect: (*per_choice_effect[idx].effect).clone(),
+                    targets: Vec::new(),
+                    source_id,
+                    source_incarnation: None,
+                    controller,
+                    original_controller: Some(controller),
+                    scoped_player: Some(*voter),
+                    target_chooser: None,
+                    kind: per_choice_effect[idx].kind,
+                    sub_ability: per_choice_effect[idx]
+                        .sub_ability
+                        .as_ref()
+                        .map(|sub| Box::new(resolved_from_def(sub, source_id, controller))),
+                    else_ability: None,
+                    duration: per_choice_effect[idx].duration.clone(),
+                    condition: per_choice_effect[idx].condition.clone(),
+                    context: Default::default(),
+                    optional_targeting: per_choice_effect[idx].optional_targeting,
+                    optional: per_choice_effect[idx].optional,
+                    optional_for: None,
+                    multi_target: None,
+                    target_constraints: Vec::new(),
+                    target_choice_timing: per_choice_effect[idx].target_choice_timing,
+                    description: per_choice_effect[idx].description.clone(),
+                    repeat_for: None,
+                    min_x_value: per_choice_effect[idx].min_x_value,
+                    cant_be_copied: per_choice_effect[idx].cant_be_copied,
+                    copy_count_status: crate::types::ability::CopyCountStatus::Pending,
+                    forward_result: per_choice_effect[idx].forward_result,
+                    unless_pay: None,
+                    distribution: None,
+                    player_scope: None,
+                    starting_with: per_choice_effect[idx].starting_with.clone(),
+                    chosen_x: None,
+                    cost_paid_object: None,
+                    effect_context_object: None,
+                    ability_index: None,
+                    may_trigger_origin: None,
+                    target_selection_mode: per_choice_effect[idx].target_selection_mode,
+                    chosen_players: Vec::new(),
+                    repeat_until: None,
+                    sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                    modal: None,
+                    mode_abilities: vec![],
+                };
+                // CR 608.2c: depth = 1 so the chain entry doesn't clear
+                // `state.last_vote_ballots`; see ledger-publication note above.
+                resolve_ability_chain(state, &chain, events, 1)?;
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {

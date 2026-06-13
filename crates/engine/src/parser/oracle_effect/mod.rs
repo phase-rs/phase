@@ -12847,6 +12847,13 @@ fn is_choose_as_targeting(rest: &str) -> bool {
         return true;
     }
 
+    // CR 108.3 + CR 701.38d: Passive ownership form "owned by <player-ref>".
+    // Expropriate: "choose a permanent owned by the voter and gain control of it."
+    // The ownership suffix scopes the candidate pool to a specific player.
+    if scan_contains_phrase(rest, "owned by") {
+        return true;
+    }
+
     false
 }
 
