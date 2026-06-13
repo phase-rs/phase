@@ -11279,6 +11279,25 @@ fn static_assigns_damage_from_toughness_all_creatures() {
 }
 
 #[test]
+fn static_assigns_damage_from_toughness_all_creatures_during_your_turn() {
+    // CR 510.1c + CR 611.3a: Baldin's global toughness-damage static is
+    // active only during its controller's turn.
+    let def = parse_static_line(
+        "During your turn, each creature assigns combat damage equal to its toughness rather than its power.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature()))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AssignDamageFromToughness));
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+}
+
+#[test]
 fn static_assigns_damage_from_toughness_self() {
     // CR 510.1c: Self-referential variant — "This creature assigns..."
     let def = parse_static_line(

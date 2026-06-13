@@ -196,6 +196,24 @@ fn parse_reveal_hand_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefin
     )
 }
 
+fn parse_during_your_turn_prefix(input: &str) -> OracleResult<'_, StaticCondition> {
+    // CR 611.3a: The following continuous static applies only while the
+    // "during your turn" condition is true.
+    let (input, _) = tag::<_, _, OracleError<'_>>("during your turn").parse(input)?;
+    let (input, _) = tag(",").parse(input)?;
+    let (input, _) = space1(input)?;
+    Ok((input, StaticCondition::DuringYourTurn))
+}
+
+fn strip_during_your_turn_prefix<'a>(tp: &TextPair<'a>) -> Option<(TextPair<'a>, StaticCondition)> {
+    let (rest_lower, condition) = parse_during_your_turn_prefix(tp.lower).ok()?;
+    let consumed = tp.lower.len() - rest_lower.len();
+    Some((
+        TextPair::new(&tp.original[consumed..], rest_lower),
+        condition,
+    ))
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -790,8 +808,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "Each creature you control [with condition] assigns combat damage equal to its toughness" ---
     // CR 510.1c: Doran-class effects that cause creatures to use toughness for combat damage.
+    // CR 611.3a: Optional leading "during your turn" gates that continuous effect.
+    if let Some((rest_tp, condition)) = strip_during_your_turn_prefix(&tp) {
+        if let Some(def) = parse_assigns_damage_from_toughness(rest_tp.lower, rest_tp.original) {
+            return Some(def.condition(condition).description(text.to_string()));
+        }
+    }
     if let Some(def) = parse_assigns_damage_from_toughness(&lower, &text) {
         return Some(def);
     }
