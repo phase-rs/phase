@@ -12080,6 +12080,19 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         .map(|(rest, _)| rest)
         .unwrap_or(lower);
 
+    // CR 401.5 + CR 701.25: Eye of Duskmantle's permission is scoped to
+    // cards in your graveyard that you surveilled this turn. The current cast
+    // permission targets can model graveyard, exile-linked, top-library, and
+    // parent-target pools, but not this tracked surveil graveyard subset. Keep
+    // the line unsupported rather than partially accepting only "play lands"
+    // and swallowing the spell/pay-life half.
+    if nom_primitives::scan_contains(lower, "from among cards in your graveyard")
+        && (nom_primitives::scan_contains(lower, "you've surveilled this turn")
+            || nom_primitives::scan_contains(lower, "you\u{2019}ve surveilled this turn"))
+    {
+        return None;
+    }
+
     // CR 305.1: "play" means cast if spell, play as land if land.
     let (rest, mode) = alt((
         value(CardPlayMode::Cast, tag::<_, _, E>("cast ")),
@@ -12087,6 +12100,17 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     ))
     .parse(lower)
     .ok()?;
+
+    // CR 305.2a: A bare "play lands" fragment is not an effect granting a
+    // zone-scoped play permission. Static permission parsers own sourced forms
+    // such as "play lands from your graveyard" and "play lands and cast spells
+    // from the top of your library"; accepting the bare fragment here lets
+    // conjunction splitting turn a larger unsupported permission into a
+    // misleading land-only `CastFromZone`.
+    let normalized_rest = rest.trim().trim_end_matches('.');
+    if mode == CardPlayMode::Play && normalized_rest == "lands" {
+        return None;
+    }
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Static-shaped "you may [play|cast] X
     // from the top of your library" lines (Realmwalker, Future Sight, Bolas's

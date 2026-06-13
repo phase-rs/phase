@@ -3515,6 +3515,55 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    #[test]
+    fn alt_cost_cast_permissions_do_not_swallow_pay_life_riders() {
+        for (oracle, name, types) in [
+            (
+                "Flying\n\
+                 Lifelink\n\
+                 You may play lands and cast spells from among cards in your graveyard you've \
+                 surveilled this turn. If you cast a spell this way, you pay life equal to its \
+                 mana value rather than paying its mana cost.",
+                "Eye of Duskmantle",
+                &["Creature"][..],
+            ),
+            (
+                "Menace\n\
+                 Whenever The Infamous Cruelclaw deals combat damage to a player, exile cards \
+                 from the top of your library until you exile a nonland card. You may cast that \
+                 card by discarding a card rather than paying its mana cost.",
+                "The Infamous Cruelclaw",
+                &["Creature"][..],
+            ),
+            (
+                "Devoid\n\
+                 Menace\n\
+                 Whenever this creature deals combat damage to a player, that player exiles cards \
+                 from the top of their library until they exile a nonland card. You may cast that \
+                 card by paying life equal to the spell's mana value rather than paying its mana cost.",
+                "Bismuth Mindrender",
+                &["Creature"][..],
+            ),
+            (
+                "Casualty 2\n\
+                 Each opponent exiles the top card of their library. You may cast spells from among \
+                 those cards this turn. If you cast a spell this way, pay life equal to that spell's \
+                 mana value rather than pay its mana cost.",
+                "Xander's Pact",
+                &["Sorcery"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                parsed.parse_warnings.iter().all(|warning| {
+                    !matches!(warning, OracleDiagnostic::SwallowedClause { .. })
+                }),
+                "{name} must not gain coverage via a swallowed clause: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
     /// Issue #2233: Condition_Unless — representative cards from the drilldown.
     #[test]
     fn condition_unless_accepts_representative_cards() {
