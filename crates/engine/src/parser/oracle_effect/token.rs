@@ -373,9 +373,17 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
             (None, None, rest)
         };
 
-    let (colors, rest) = parse_token_color_prefix(rest);
+    let (mut colors, rest) = parse_token_color_prefix(rest);
     let (descriptor, suffix) = split_token_head(rest)?;
     let (name_override, suffix) = parse_token_name_clause(suffix);
+    // CR 105.1 + CR 105.2: "that's all colors" (Mechtitan Core, etc.) makes the
+    // token each of the five colors. Strip the clause before keyword parsing so
+    // the trailing keyword ("... and haste that's all colors") still survives,
+    // then set the colors.
+    let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix);
+    if is_all_colors {
+        colors = ManaColor::ALL.to_vec();
+    }
     let keywords = parse_token_keyword_clause(suffix);
     let (mut name, types) = parse_token_identity(descriptor)?;
 
@@ -567,6 +575,41 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
             supertypes.push(supertype);
         }
         text = stripped;
+    }
+}
+
+/// Strip a trailing "that's all colors" color clause from a token suffix.
+///
+/// CR 105.1 + CR 105.2: a token that is "all colors" is each of the five
+/// WUBRG colors. The clause appears as a relative-pronoun suffix on the token
+/// description (e.g. Mechtitan Core's "... and haste that's all colors"), so it
+/// is detected by scanning word boundaries for the relative-pronoun variants
+/// followed by "all colors". Returns the suffix with the clause removed and a
+/// flag indicating whether it was present, so the caller can both set the five
+/// colors and keep the preceding keyword list intact.
+///
+/// Building block for the whole class of "create <token> ... that's all colors"
+/// effects, not just Mechtitan Core.
+fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
+    let all_colors_clause = |i| -> OracleResult<'_, ()> {
+        let (i, _) = alt((
+            tag(" that's"),
+            tag(" that is"),
+            tag(" thats"),
+            tag(" that are"),
+        ))
+        .parse(i)?;
+        value((), tag(" all colors")).parse(i)
+    };
+    let lower = text.to_lowercase();
+    let hit = (0..lower.len()).find_map(|pos| {
+        (lower.as_bytes().get(pos) == Some(&b' '))
+            .then(|| all_colors_clause(&lower[pos..]).ok().map(|_| pos))
+            .flatten()
+    });
+    match hit {
+        Some(pos) => (text[..pos].trim_end(), true),
+        None => (text, false),
     }
 }
 
@@ -1420,6 +1463,37 @@ mod tests {
     }
 
     #[test]
+    fn keyword_clause_keeps_keyword_before_all_colors_clause() {
+        // CR 105.1/105.2 + CR 702.10: the "that's all colors" clause is stripped
+        // before keyword parsing so the trailing keyword survives.
+        let (suffix, is_all_colors) =
+            strip_token_all_colors_suffix("with flying and haste that's all colors");
+        assert!(is_all_colors, "'that's all colors' must be detected");
+        assert_eq!(suffix, "with flying and haste");
+        let kws = parse_token_keyword_clause(suffix);
+        assert_eq!(kws, vec![Keyword::Flying, Keyword::Haste]);
+    }
+
+    #[test]
+    fn all_colors_suffix_relative_pronoun_variants() {
+        // CR 105.1/105.2: each relative-pronoun variant of the all-colors clause
+        // is recognized; non-color "that's" clauses are left untouched.
+        for clause in [
+            "with flying that's all colors",
+            "with flying that is all colors",
+            "with flying thats all colors",
+            "with flying that are all colors",
+        ] {
+            let (suffix, is_all_colors) = strip_token_all_colors_suffix(clause);
+            assert!(is_all_colors, "must detect all-colors in {clause:?}");
+            assert_eq!(suffix, "with flying");
+        }
+        let (suffix, is_all_colors) = strip_token_all_colors_suffix("with flying");
+        assert!(!is_all_colors);
+        assert_eq!(suffix, "with flying");
+    }
+
+    #[test]
     fn extract_static_cant_block_from_quoted_ability() {
         use crate::types::ability::TargetFilter;
         use crate::types::statics::StaticMode;
@@ -1709,6 +1783,57 @@ mod tests {
                 }
             ),
             "X count must resolve to CountersOn(Source, P1P1), got {count:?}"
+        );
+    }
+
+    /// CR 111.3 + CR 702.10 (Haste) + CR 105.1/105.2 (all five colors):
+    /// Mechtitan Core's token has a "with <keywords> that's all colors" suffix
+    /// where the "that's all colors" color clause trails the keyword list. The
+    /// final keyword ("haste") and the all-five-colors characteristic must both
+    /// survive parsing. Building-block regression for the whole class of
+    /// "create <token> with <keywords> that's all colors" effects.
+    #[test]
+    fn token_with_keywords_then_thats_all_colors_keeps_haste_and_colors() {
+        use crate::types::mana::ManaColor;
+
+        let text = "create mechtitan, a legendary 10/10 construct artifact creature token with flying, vigilance, trample, lifelink, and haste that's all colors";
+        let effect = try_parse_token(
+            text,
+            "Create Mechtitan, a legendary 10/10 Construct artifact creature token with flying, vigilance, trample, lifelink, and haste that's all colors",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            keywords, colors, ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert!(
+            keywords.contains(&Keyword::Haste),
+            "the trailing keyword before \"that's all colors\" must survive: {keywords:?}",
+        );
+        for keyword in [
+            Keyword::Flying,
+            Keyword::Vigilance,
+            Keyword::Trample,
+            Keyword::Lifelink,
+        ] {
+            assert!(
+                keywords.contains(&keyword),
+                "{keyword:?} must be present: {keywords:?}",
+            );
+        }
+        for color in ManaColor::ALL {
+            assert!(
+                colors.contains(&color),
+                "\"that's all colors\" must set {color:?}: {colors:?}",
+            );
+        }
+        assert_eq!(
+            colors.len(),
+            5,
+            "all-colors must be exactly the five WUBRG colors: {colors:?}",
         );
     }
 }
