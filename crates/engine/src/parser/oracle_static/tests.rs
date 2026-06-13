@@ -2012,6 +2012,47 @@ fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents()
     );
 }
 
+/// CR 601.2f + CR 102.2/102.3: Heliod, the Warped Eclipse. "Spells you cast cost
+/// {1} less to cast for each card your opponents have drawn this turn." must lower
+/// to a `ModifyCost { mode: Reduce, dynamic_count: CardsDrawnThisTurn{Opponent{Sum}} }`.
+/// On the buggy parser the for-each clause fell to `ObjectCount{Typed{[Card]}}`
+/// (every card on the battlefield), over-reducing. This pins the typed
+/// opponents'-draw shape and asserts the dynamic_count is NOT an `ObjectCount`.
+#[test]
+fn heliod_warped_eclipse_cost_reduction_counts_opponents_draws() {
+    let def = parse_static_line(
+        "Spells you cast cost {1} less to cast for each card your opponents have drawn this turn.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(1));
+    assert_eq!(
+        dynamic_count,
+        Some(QuantityRef::CardsDrawnThisTurn {
+            player: PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+        }),
+        "dynamic_count must be opponents' SUM of cards drawn, not an ObjectCount; got {dynamic_count:?}"
+    );
+    // Discriminating against the over-reduction bug: the generic-card-count
+    // misparse would surface as an `ObjectCount` here.
+    assert!(
+        !matches!(dynamic_count, Some(QuantityRef::ObjectCount { .. })),
+        "dynamic_count must NOT be the generic ObjectCount{{Card}} misparse"
+    );
+}
+
 #[test]
 fn ghalta_self_cost_reduction_is_active_from_command_zone() {
     let def = parse_static_line(

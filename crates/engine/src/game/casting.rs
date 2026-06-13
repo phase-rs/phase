@@ -19124,6 +19124,103 @@ mod tests {
         );
     }
 
+    /// CR 601.2f + CR 102.2/102.3: Heliod, the Warped Eclipse, in a 3-player
+    /// game. "Spells you cast cost {1} less to cast for each card your opponents
+    /// have drawn this turn." With opponents having drawn 2 and 3, the SUM-across-
+    /// opponents reduction is {5}, so a {5}-generic spell drops to {0}. The reverted
+    /// `ObjectCount{Card}` over-reduction would not equal exactly 5 → discriminates.
+    #[test]
+    fn heliod_warped_eclipse_reduces_by_sum_of_opponents_draws() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // CR 102.2/102.3: the two opponents drew 2 and 3 cards this turn → SUM 5.
+        state.players[1].cards_drawn_this_turn = 2;
+        state.players[2].cards_drawn_this_turn = 3;
+
+        // Heliod on the battlefield with the parsed cost-reduction static:
+        // affected = spells the controller casts; dynamic_count = opponents' SUM.
+        let heliod = create_object(
+            &mut state,
+            CardId(840),
+            PlayerId(0),
+            "Heliod, the Warped Eclipse".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&heliod)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(1),
+                    spell_filter: None,
+                    dynamic_count: Some(QuantityRef::CardsDrawnThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::You),
+                )),
+            );
+
+        // A {5} generic spell in the controller's hand.
+        let spell = create_object(
+            &mut state,
+            CardId(841),
+            PlayerId(0),
+            "Generic Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 5,
+                shards: vec![],
+            };
+        }
+
+        let mut mana_cost = state.objects.get(&spell).unwrap().mana_cost.clone();
+        apply_battlefield_cost_modifiers(&state, PlayerId(0), spell, &mut mana_cost);
+
+        match mana_cost {
+            ManaCost::Cost { generic, .. } => assert_eq!(
+                generic, 0,
+                "opponents' SUM draw (2 + 3 = 5) must reduce {{5}} to {{0}}, got {generic}"
+            ),
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+
+        // 0-draw control: with no opponent draws the reduction is {0} → full {5}.
+        // The buggy ObjectCount{Card} would over-reduce here too (counting the
+        // battlefield permanents), so this discriminates against the misparse.
+        let mut zero_state = state.clone();
+        zero_state.players[1].cards_drawn_this_turn = 0;
+        zero_state.players[2].cards_drawn_this_turn = 0;
+        let mut zero_cost = zero_state.objects.get(&spell).unwrap().mana_cost.clone();
+        apply_battlefield_cost_modifiers(&zero_state, PlayerId(0), spell, &mut zero_cost);
+        match zero_cost {
+            ManaCost::Cost { generic, .. } => assert_eq!(
+                generic, 5,
+                "no opponent draws must leave the {{5}} spell unreduced, got {generic}"
+            ),
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
         let mut state = setup_game_at_main_phase();

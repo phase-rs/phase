@@ -400,18 +400,36 @@ fn parse_pre_controller_chosen_filter_suffix(input: &str) -> OracleResult<'_, Fi
     .parse(input)
 }
 
-/// CR 121.1 + CR 604.3: "cards you've drawn this turn" after "the number of".
-/// Reuses the runtime `CardsDrawnThisTurn` quantity ref already wired for
-/// condition checks (Duelist of the Mind CDA).
+/// CR 121.1 + CR 604.3: "card(s) [you('ve) / your opponents have] drawn this
+/// turn". Reuses the runtime `CardsDrawnThisTurn` quantity ref already wired for
+/// condition checks (Duelist of the Mind CDA) and now for the opponents'-draw
+/// cost reduction (Heliod, the Warped Eclipse).
+///
+/// The leading "card" word is optionally plural so this combinator serves both
+/// surface forms uniformly: the "the number of *cards* …" count phrase (plural)
+/// and the "for each *card* …" cost-mod clause (singular). The scope tails come
+/// from a shared sub-combinator; opponents arms come FIRST so their longer,
+/// more-specific phrase wins over the controller arms (longest-match-first,
+/// avoiding a controller arm shadowing the opponents phrase on the shared
+/// "card[s] " prefix).
 fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
     let (rest, player) = alt((
-        value(PlayerScope::Controller, tag("cards you've drawn this turn")),
+        // CR 121.1 + CR 102.2/102.3: opponents' draws this turn, summed across
+        // all opponents.
         value(
-            PlayerScope::Controller,
-            tag("cards you have drawn this turn"),
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+            tag("your opponents have drawn this turn"),
         ),
+        // CR 121.1: the caster's own draws this turn.
+        value(PlayerScope::Controller, tag("you've drawn this turn")),
+        value(PlayerScope::Controller, tag("you have drawn this turn")),
     ))
-    .parse(input)?;
+    .parse(rest)?;
     Ok((rest, QuantityRef::CardsDrawnThisTurn { player }))
 }
 
@@ -482,7 +500,18 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // dedicated party combinator instead of a generic zone fallback.
         parse_party_size_ref,
         parse_speed_ref,
-        parse_cards_in_zone_ref,
+        // CR 121.1: bare "card(s) [you('ve) / your opponents have] drawn this
+        // turn" (no "the number of" prefix) — reached from the for-each cost-mod
+        // path (Heliod, the Warped Eclipse) and other bare-quantity contexts.
+        // Nested with `parse_cards_in_zone_ref` to keep the outer `alt` within
+        // nom's tuple arity. The draws arm must precede the zone arm: the zone
+        // arm requires a " in " tag after the card word and so cannot consume
+        // "cards your opponents have …", while the draws arm only fires on the
+        // exact complete phrase (no greedy prefix consumption).
+        alt((
+            parse_number_of_cards_drawn_this_turn,
+            parse_cards_in_zone_ref,
+        )),
         parse_self_power_ref,
         parse_self_toughness_ref,
         parse_damage_dealt_this_turn_ref,
@@ -3264,6 +3293,69 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    /// CR 121.1 + CR 102.2/102.3: the opponents'-draw form must parse to a
+    /// SUM-across-opponents scope, both bare (for-each cost-mod path, Heliod,
+    /// the Warped Eclipse) and behind "the number of". The controller forms must
+    /// still resolve to `Controller` (regression lock against the opponents arm
+    /// shadowing them).
+    #[test]
+    fn parse_cards_drawn_this_turn_opponents_sum_and_controller_regression() {
+        // Bare opponents form — reachable only via the new top-level arm.
+        for text in [
+            "cards your opponents have drawn this turn",
+            "the number of cards your opponents have drawn this turn",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            assert_eq!(
+                q,
+                QuantityRef::CardsDrawnThisTurn {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+                "{text:?} must be opponents' SUM, not ObjectCount or Controller"
+            );
+        }
+
+        // Controller forms (bare + the-number-of) still resolve to Controller.
+        for text in [
+            "cards you've drawn this turn",
+            "cards you have drawn this turn",
+            "the number of cards you've drawn this turn",
+            "the number of cards you have drawn this turn",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            assert_eq!(
+                q,
+                QuantityRef::CardsDrawnThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                "{text:?} must remain Controller-scoped"
+            );
+        }
+    }
+
+    /// CR 601.2f: the for-each cost-mod path (Heliod) routes "card your opponents
+    /// have drawn this turn" through `parse_for_each_clause`. Previously this fell
+    /// to `None`/`ObjectCount{Card}`; it must now yield the opponents' SUM ref.
+    #[test]
+    fn parse_for_each_clause_opponents_cards_drawn() {
+        use crate::parser::oracle_quantity::parse_for_each_clause;
+
+        let qty = parse_for_each_clause("card your opponents have drawn this turn");
+        assert_eq!(
+            qty,
+            Some(QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            }),
+            "for-each over opponents' draws must yield the SUM-scoped ref, not None/ObjectCount"
+        );
     }
 
     /// End-to-end: CDA static lines must lower once the quantity arms parse.

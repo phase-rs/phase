@@ -7565,6 +7565,36 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(2), ObjectId(1)), 5);
     }
 
+    /// CR 121.1 + CR 102.2/102.3: Heliod, the Warped Eclipse. The
+    /// opponents'-SUM form of `CardsDrawnThisTurn` adds each opponent's draws.
+    /// From P0's seat (opponents P1=2, P2=3) the sum is 5; the buggy
+    /// `ObjectCount` misparse would never produce this player-scoped sum.
+    #[test]
+    fn resolve_quantity_cards_drawn_this_turn_sum_opponents() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].cards_drawn_this_turn = 7;
+        state.players[1].cards_drawn_this_turn = 2;
+        state.players[2].cards_drawn_this_turn = 3;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+
+        // From P0's seat: opponents are P1 + P2 = 2 + 3 = 5.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+        // From P1's seat: opponents are P0 + P2 = 7 + 3 = 10.
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)),
+            10
+        );
+    }
+
     /// CR 701.9: `CardsDiscardedThisTurn` reads the per-player discard-count
     /// map populated by discard resolution and composes through PlayerScope.
     #[test]
