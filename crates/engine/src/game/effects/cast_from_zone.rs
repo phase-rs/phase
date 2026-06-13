@@ -759,18 +759,19 @@ mod tests {
             CardId(9001),
             PlayerId(0),
             "Invasion of Ikoria".to_string(),
-            Zone::Exile,
+            Zone::Battlefield,
         );
         {
             let obj = state.objects.get_mut(&siege_id).unwrap();
             obj.card_types.core_types.push(CoreType::Battle);
             obj.mana_cost = ManaCost::generic(4);
         }
+        let captured_incarnation = state.objects[&siege_id].incarnation;
 
         // The Siege defeat sub-ability has SelfRef target and DuringResolution
         // driver. Crucially, ability.targets is EMPTY — the Siege card is the
         // source, not a pre-selected target.
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::CastFromZone {
                 target: TargetFilter::SelfRef,
                 without_paying_mana_cost: true,
@@ -785,8 +786,17 @@ mod tests {
             siege_id,
             PlayerId(0),
         );
+        ability.set_source_incarnation_recursive(Some(captured_incarnation));
 
         let mut events = Vec::new();
+        zones::move_to_zone(&mut state, siege_id, Zone::Exile, &mut events);
+        assert_eq!(
+            state.objects[&siege_id].incarnation, captured_incarnation,
+            "the engine's self-reference epoch guard is bumped on battlefield entry, so the \
+             Siege defeat zone exit must not make its same-resolution self-cast stale"
+        );
+        events.clear();
+
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(

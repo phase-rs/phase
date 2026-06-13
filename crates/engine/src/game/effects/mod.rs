@@ -1437,6 +1437,7 @@ fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::HasCityBlessing => true,
         AbilityCondition::Not { condition } => condition_contains_city_blessing(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_contains_city_blessing(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_contains_city_blessing)
         }
@@ -17258,6 +17259,7 @@ mod tests {
     fn city_blessing_race_grants_sub_ability_token_same_resolution() {
         let mut state = GameState::new_two_player(42);
 
+        let mut ascend_permanent = None;
         for i in 0..9u64 {
             let id = create_object(
                 &mut state,
@@ -17267,17 +17269,38 @@ mod tests {
                 Zone::Battlefield,
             );
             if i == 0 {
-                state
-                    .objects
-                    .get_mut(&id)
-                    .unwrap()
-                    .keywords
-                    .push(Keyword::Ascend);
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+                obj.base_power = Some(1);
+                obj.base_toughness = Some(1);
+                obj.power = Some(1);
+                obj.toughness = Some(1);
+                obj.keywords.push(Keyword::Ascend);
+                obj.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .condition(crate::types::ability::StaticCondition::HasCityBlessing)
+                        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 1 },
+                            ContinuousModification::AddToughness { value: 1 },
+                        ]),
+                );
+                ascend_permanent = Some(id);
             }
         }
+        crate::game::layers::flush_layers(&mut state);
         assert!(
             !state.city_blessing.contains(&PlayerId(0)),
             "precondition: no city's blessing at 9 permanents"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&ascend_permanent.unwrap())
+                .and_then(|obj| obj.power),
+            Some(1),
+            "the city's-blessing-gated continuous effect must be inactive before the grant"
         );
 
         let make_cat = || Effect::Token {
@@ -17316,6 +17339,28 @@ mod tests {
             11,
             "9 starting permanents + parent Cat + sub-ability Cat = 11; a missing \
              city's-blessing re-evaluation would drop the sub-ability token (10)"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&ascend_permanent.unwrap())
+                .and_then(|obj| obj.power),
+            Some(2),
+            "CR 702.131d: continuous effects gated on the city's blessing must be \
+             reapplied before the sub-ability condition/effect continues"
+        );
+    }
+
+    #[test]
+    fn condition_contains_city_blessing_recurses_through_condition_instead() {
+        let condition = AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::HasCityBlessing),
+        };
+
+        assert!(
+            condition_contains_city_blessing(&condition),
+            "city's-blessing gated continuations wrapped in ConditionInstead must run the \
+             mid-chain blessing check before the condition is evaluated"
         );
     }
 }
