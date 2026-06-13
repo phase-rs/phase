@@ -31202,7 +31202,7 @@ mod tests {
     fn issue_377_exile_and_copy_of_it_uses_tracked_set() {
         let def = parse_effect_chain(
             "Exile up to one target non-Aura enchantment card from your graveyard and create a token that's a copy of it, except it's a 3/3 black Zombie creature in addition to its other types.",
-            AbilityKind::Triggered,
+            AbilityKind::Spell,
         );
 
         let Effect::ChangeZone { destination, .. } = def.effect.as_ref() else {
