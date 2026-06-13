@@ -221,6 +221,22 @@ impl ChoiceType {
     pub fn color_excluding(excluded: Vec<ManaColor>) -> Self {
         Self::Color { excluded }
     }
+
+    /// Whether the player supplies the chosen value at runtime rather than the
+    /// engine enumerating a fixed option set.
+    ///
+    /// `CardName` options come from the frontend's local card database (the
+    /// engine sends an empty list to avoid serializing 30k+ names), and `Word`
+    /// / `Artist` are free-form text the player types. For every other choice
+    /// type the engine fully enumerates the legal options, so an empty option
+    /// list means there is genuinely nothing to choose.
+    ///
+    /// Used to distinguish a legitimately-empty engine option list (this
+    /// predicate is true) from an impossible choice that must resolve as a
+    /// no-op per CR 609.3 (this predicate is false).
+    pub fn options_supplied_by_player(&self) -> bool {
+        matches!(self, Self::CardName | Self::Word | Self::Artist)
+    }
 }
 
 impl Serialize for ChoiceType {

@@ -7820,6 +7820,61 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 1);
     }
 
+    #[test]
+    fn resolve_ability_chain_impossible_choice_does_not_wedge_chain() {
+        // CR 609.3 (issue #3040): a `Choose` whose engine-enumerated option set
+        // is empty is an impossible choice. It must resolve as a no-op so the
+        // rest of the chain continues, instead of emitting an unsatisfiable
+        // `WaitingFor::NamedChoice` that no `ChooseOption` can advance — which
+        // would stash the dependent sub-ability forever and hang the game.
+        use crate::types::ability::ChoiceType;
+
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
+
+        // Empty `Keyword` option list → "choose an ability the target has" with
+        // nothing to choose. The dependent Draw must still resolve.
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Keyword { options: vec![] },
+                persist: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(draw);
+        let mut events = Vec::new();
+
+        let result = resolve_ability_chain(&mut state, &ability, &mut events, 0);
+        assert!(result.is_ok());
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "impossible choice must not leave the chain wedged on an empty NamedChoice"
+        );
+        // The dependent sub-ability resolved inline (no choice paused the chain).
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "the chain must continue past an impossible choice and draw the card"
+        );
+    }
+
     /// Regression (issue #1977, Party Thrasher): "you may discard a card. If you
     /// do, exile the top two cards of your library, then choose one of them."
     /// CR 608.2c + CR 603.7: the discard is a gating action behind the
