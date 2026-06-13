@@ -2293,7 +2293,15 @@ pub(super) fn handle_resolution_choice(
                 })
                 .collect();
             if !discarded_to_graveyard.is_empty() {
-                effects::publish_tracked_set(state, discarded_to_graveyard);
+                // CR 701.9a + CR 608.2c: discarded cards land in the graveyard;
+                // stamp that landing zone so a `landed_in: Some(Graveyard)`
+                // "discarded this way" consumer counts these members while a
+                // `landed_in: None` consumer still reads the whole id-only set.
+                let with_zones = discarded_to_graveyard
+                    .into_iter()
+                    .map(|id| (id, Zone::Graveyard))
+                    .collect();
+                effects::publish_tracked_set_with_zones(state, with_zones);
             }
 
             // CR 608.2c: "discard a card. If you do, [effect]" — the IfYouDo

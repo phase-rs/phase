@@ -208,6 +208,7 @@ mod lathiel_end_step_counters_repro;
 mod leyline_taps_for_mana_repro;
 mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
+mod living_death_sacrificed_this_way_lifegain_2932;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod louisoix_sacrifice_counter;
 mod lurking_predators_1604_repro;

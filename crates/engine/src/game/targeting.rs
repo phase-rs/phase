@@ -1688,19 +1688,29 @@ pub(crate) fn resolve_tracked_set_sentinel(
         TargetFilter::TrackedSetFiltered {
             id: TrackedSetId(0),
             filter,
+            landed_in,
         } => {
             if let Some(id) = state.chain_tracked_set_id {
-                TargetFilter::TrackedSetFiltered { id, filter }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    landed_in,
+                }
             } else if let Some(source_filter) = current_combat_damage_source_filter(state) {
                 TargetFilter::And {
                     filters: vec![source_filter, *filter],
                 }
             } else if let Some(id) = latest_tracked_set_id(state) {
-                TargetFilter::TrackedSetFiltered { id, filter }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    landed_in,
+                }
             } else {
                 TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter,
+                    landed_in,
                 }
             }
         }

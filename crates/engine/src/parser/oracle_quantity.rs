@@ -1769,27 +1769,48 @@ fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFi
 }
 
 /// CR 608.2c + CR 400.7: Try to parse a "for each <filter> [that was/were]
-/// destroyed/sacrificed this way" clause. Returns `FilteredTrackedSetSize`
-/// when the type-phrase prefix restricts the tracked set; returns `None` to
-/// fall through to plain `TrackedSetSize` otherwise.
+/// <verb> this way" clause, where `<verb>` is one of the producer keyword
+/// actions. Returns the optional restricting filter (`None` = trivial → fall
+/// through to plain `TrackedSetSize`) PAIRED with the zone the matched verb left
+/// its objects in (`landed_in`):
+///
+///   - destroyed / sacrificed / milled / discarded this way → Graveyard
+///     (CR 701.8a / 701.21a / 701.17a / 701.9a).
+///   - exiled this way → Exile (CR 701.13a).
 ///
 /// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
-/// recognized suffix, then delegates the prefix to `parse_type_phrase`.
-fn parse_destroyed_or_sacrificed_this_way_filter(lower: &str) -> Option<Option<TargetFilter>> {
-    // Each suffix is tried in order; the first complete match wins.
-    // Longer/more-specific suffixes must come before shorter ones so
-    // "that was destroyed this way" is preferred over "destroyed this way".
-    let suffixes: &[&str] = &[
-        " that was destroyed this way",
-        " that were destroyed this way",
-        " destroyed this way",
-        "destroyed this way",
-        " that was sacrificed this way",
-        " that were sacrificed this way",
-        " sacrificed this way",
-        "sacrificed this way",
+/// recognized suffix, then delegates the prefix to `parse_type_phrase`. The
+/// `landed_in` zone lets the resulting `FilteredTrackedSetSize` count only the
+/// members the matching verb produced within a merged chain set (#2932).
+fn parse_destroyed_or_sacrificed_this_way_filter(
+    lower: &str,
+) -> Option<(Option<TargetFilter>, Zone)> {
+    // Each (suffix, landing zone) is tried in order; the first complete match
+    // wins. Longer/more-specific suffixes precede shorter ones so "that was
+    // destroyed this way" is preferred over "destroyed this way".
+    let suffixes: &[(&str, Zone)] = &[
+        (" that was destroyed this way", Zone::Graveyard),
+        (" that were destroyed this way", Zone::Graveyard),
+        (" destroyed this way", Zone::Graveyard),
+        ("destroyed this way", Zone::Graveyard),
+        (" that was sacrificed this way", Zone::Graveyard),
+        (" that were sacrificed this way", Zone::Graveyard),
+        (" sacrificed this way", Zone::Graveyard),
+        ("sacrificed this way", Zone::Graveyard),
+        (" that was milled this way", Zone::Graveyard),
+        (" that were milled this way", Zone::Graveyard),
+        (" milled this way", Zone::Graveyard),
+        ("milled this way", Zone::Graveyard),
+        (" that was discarded this way", Zone::Graveyard),
+        (" that were discarded this way", Zone::Graveyard),
+        (" discarded this way", Zone::Graveyard),
+        ("discarded this way", Zone::Graveyard),
+        (" that was exiled this way", Zone::Exile),
+        (" that were exiled this way", Zone::Exile),
+        (" exiled this way", Zone::Exile),
+        ("exiled this way", Zone::Exile),
     ];
-    for &suffix in suffixes {
+    for &(suffix, zone) in suffixes {
         // terminated(take_until(suffix), tag(suffix)) parses the noun-phrase
         // prefix, then consumes the suffix exactly, leaving an empty remainder.
         let result: OracleResult<'_, &str> =
@@ -1798,11 +1819,11 @@ fn parse_destroyed_or_sacrificed_this_way_filter(lower: &str) -> Option<Option<T
             let (filter, remainder) =
                 crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
             if remainder.trim().is_empty() {
-                return Some(Some(filter));
+                return Some((Some(filter), zone));
             }
             // A suffix matched but the filter is trivial or the phrase
             // didn't fully consume — fall through to TrackedSetSize.
-            return Some(None);
+            return Some((None, zone));
         }
     }
     None
@@ -1810,9 +1831,10 @@ fn parse_destroyed_or_sacrificed_this_way_filter(lower: &str) -> Option<Option<T
 
 fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
     match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
-        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+        (Some(filter), zone) if filter_is_nontrivial_for_tracked_set(&filter) => {
             Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
+                landed_in: Some(zone),
             })
         }
         _ => None,
@@ -1821,11 +1843,15 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
 
 fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<QuantityRef> {
     match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
-        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+        (Some(filter), zone) if filter_is_nontrivial_for_tracked_set(&filter) => {
             Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
+                landed_in: Some(zone),
             })
         }
+        // CR 608.2c: a bare "<verb> this way" with no restricting filter counts
+        // the whole tracked set; `TrackedSetSize` reads it id-only (no zone
+        // discrimination), matching legacy behavior.
         _ => Some(QuantityRef::TrackedSetSize),
     }
 }
@@ -5523,7 +5549,7 @@ mod tests {
         )
         .expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => match *filter {
                 TargetFilter::Typed(ref tf) => {
                     assert!(
                         tf.type_filters.contains(&TypeFilter::Creature),
@@ -5550,7 +5576,7 @@ mod tests {
         let qty =
             parse_quantity_ref("the number of permanents destroyed this way").expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter } => {
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => {
                 assert!(
                     matches!(filter.as_ref(), TargetFilter::Typed(_)),
                     "expected typed permanent filter, got {filter:?}"
@@ -5572,7 +5598,7 @@ mod tests {
             parse_for_each_clause("nontoken creature you controlled that was destroyed this way")
                 .expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter } => {
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => {
                 // Filter must include NonToken and ControlledByYou (controller=You).
                 match *filter {
                     TargetFilter::Typed(ref tf) => {
@@ -5601,7 +5627,7 @@ mod tests {
     fn vampire_destroyed_this_way_uses_filtered_tracked_set() {
         let qty = parse_for_each_clause("vampire that was destroyed this way").expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+            QuantityRef::FilteredTrackedSetSize { filter, .. } => match *filter {
                 TargetFilter::Typed(ref tf) => assert!(
                     tf.type_filters
                         .contains(&TypeFilter::Subtype("Vampire".to_string())),

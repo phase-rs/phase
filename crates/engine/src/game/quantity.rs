@@ -1684,14 +1684,33 @@ fn resolve_ref(
         // set that also satisfy the inner filter. Used for "for each nontoken
         // creature you controlled that was destroyed this way" — the tracked set
         // holds all destroyed creatures; the filter narrows to controlled nontokens.
-        QuantityRef::FilteredTrackedSetSize { filter } => {
-            let Some((_, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
+        QuantityRef::FilteredTrackedSetSize { filter, landed_in } => {
+            let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+            else {
                 return 0;
             };
             let count = ids
                 .iter()
                 .filter(|&&oid| {
-                    crate::game::filter::matches_target_filter(state, oid, filter, &filter_ctx)
+                    // CR 608.2c + CR 400.7: a zone-bound count ("the number of
+                    // creatures sacrificed this way") tallies only members whose
+                    // recorded landing zone equals the bound zone; `None` counts
+                    // every filtered member (legacy parity).
+                    let zone_ok = match landed_in {
+                        None => true,
+                        Some(zone) => state
+                            .tracked_set_landing_zones
+                            .get(set_id)
+                            .and_then(|zones| zones.get(&oid))
+                            .is_some_and(|landed| landed == zone),
+                    };
+                    zone_ok
+                        && crate::game::filter::matches_target_filter(
+                            state,
+                            oid,
+                            filter,
+                            &filter_ctx,
+                        )
                 })
                 .count();
             usize_to_i32_saturating(count)
@@ -3740,7 +3759,7 @@ mod tests {
     use crate::types::game_state::{
         DamageRecord, ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,
     };
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::zones::Zone;
@@ -10110,5 +10129,84 @@ mod tests {
         let event = attack_event(attacker, &[p0, p2]);
         let count = resolve_quantity_for_trigger_check(&state, &expr, p0, attacker, Some(&event));
         assert_eq!(count, 0, "every opponent of P1 is attacked → count 0");
+    }
+
+    /// CR 608.2c + CR 400.7: A merged chain tracked set whose members landed in
+    /// different zones must partition by `landed_in`: a `Some(Exile)` count sees
+    /// only the exiled members, a `Some(Graveyard)` count sees only the
+    /// graveyard members (the two are disjoint), and `None` counts every member
+    /// (legacy "any member" parity). This is the building block behind Living
+    /// Death's exiled-this-way return vs. sacrificed-this-way life-gain reading
+    /// the very same chain set disjointly (#2932).
+    #[test]
+    fn filtered_tracked_set_size_partitions_members_by_landing_zone() {
+        let mut state = GameState::new_two_player(42);
+        // Three creature cards published into one chain set with mixed landings:
+        // two exiled, one sacrificed-to-graveyard.
+        let exiled_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exiled A".into(),
+            Zone::Exile,
+        );
+        let exiled_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled B".into(),
+            Zone::Exile,
+        );
+        let graveyard = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sacrificed".into(),
+            Zone::Graveyard,
+        );
+        for id in [exiled_a, exiled_b, graveyard] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![exiled_a, exiled_b, graveyard]);
+        state.chain_tracked_set_id = Some(set_id);
+        // Stamp each member's recorded landing zone, mirroring
+        // `publish_tracked_set_with_zones`.
+        let mut zones = HashMap::new();
+        zones.insert(exiled_a, Zone::Exile);
+        zones.insert(exiled_b, Zone::Exile);
+        zones.insert(graveyard, Zone::Graveyard);
+        state.tracked_set_landing_zones.insert(set_id, zones);
+
+        let creature_filter = Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let count_for = |landed_in| {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: creature_filter.clone(),
+                    landed_in,
+                },
+            };
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999))
+        };
+
+        assert_eq!(
+            count_for(Some(Zone::Exile)),
+            2,
+            "Some(Exile) must count only the two exiled members"
+        );
+        assert_eq!(
+            count_for(Some(Zone::Graveyard)),
+            1,
+            "Some(Graveyard) must count only the single sacrificed member"
+        );
+        assert_eq!(
+            count_for(None),
+            3,
+            "None must count every member of the set (legacy parity)"
+        );
     }
 }

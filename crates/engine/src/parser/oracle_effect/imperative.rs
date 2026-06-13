@@ -5064,6 +5064,9 @@ pub(super) fn parse_exile_ast(
                 target: TargetFilter::TrackedSetFiltered {
                     id: crate::types::identifiers::TrackedSetId(0),
                     filter: Box::new(target),
+                    // "from among them" is a selection-set anaphor — its members
+                    // were not relocated by the producer, so it is zone-agnostic.
+                    landed_in: None,
                 },
                 all: false,
                 enter_with_counters: vec![],
@@ -7094,14 +7097,17 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // primary names a filtered subset, negate its inner filter;
             // otherwise (no inner filter) the complement is the full tracked set.
             let rest_target = match &target {
-                TargetFilter::TrackedSetFiltered { id, filter } => {
-                    TargetFilter::TrackedSetFiltered {
-                        id: *id,
-                        filter: Box::new(TargetFilter::Not {
-                            filter: filter.clone(),
-                        }),
-                    }
-                }
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    landed_in,
+                } => TargetFilter::TrackedSetFiltered {
+                    id: *id,
+                    filter: Box::new(TargetFilter::Not {
+                        filter: filter.clone(),
+                    }),
+                    landed_in: *landed_in,
+                },
                 TargetFilter::TrackedSet { id } => TargetFilter::TrackedSet { id: *id },
                 _ => TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
@@ -12378,7 +12384,7 @@ mod tests {
         match ast {
             NumericImperativeAst::GainLife { amount } => match amount {
                 QuantityExpr::Ref {
-                    qty: QuantityRef::FilteredTrackedSetSize { filter },
+                    qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
                 } => {
                     let tf = typed_leg(&filter).expect("filter must be Typed");
                     assert!(has_type(tf, TypeFilter::Creature));

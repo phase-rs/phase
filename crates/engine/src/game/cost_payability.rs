@@ -113,9 +113,14 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         TargetFilter::Not { filter } => TargetFilter::Not {
             filter: Box::new(relax_pitch_bound_x_filter(filter)),
         },
-        TargetFilter::TrackedSetFiltered { id, filter } => TargetFilter::TrackedSetFiltered {
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            landed_in,
+        } => TargetFilter::TrackedSetFiltered {
             id: *id,
             filter: Box::new(relax_pitch_bound_x_filter(filter)),
+            landed_in: *landed_in,
         },
         TargetFilter::None
         | TargetFilter::Any

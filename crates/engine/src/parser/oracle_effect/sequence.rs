@@ -2257,6 +2257,11 @@ pub(super) fn apply_clause_continuation(
                                 target: TargetFilter::TrackedSetFiltered {
                                     id: crate::types::identifiers::TrackedSetId(0),
                                     filter: Box::new(card_filter),
+                                    // "from among the milled cards" is a
+                                    // selection anaphor over a single-producer
+                                    // set — zone-agnostic (every member is in the
+                                    // mill destination already).
+                                    landed_in: None,
                                 },
                                 enters_under,
                                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -2283,6 +2288,9 @@ pub(super) fn apply_clause_continuation(
                                 target: TargetFilter::TrackedSetFiltered {
                                     id: crate::types::identifiers::TrackedSetId(0),
                                     filter: Box::new(card_filter),
+                                    // Selection anaphor over the single milled
+                                    // set — zone-agnostic (see the `All` arm).
+                                    landed_in: None,
                                 },
                                 owner_library: false,
                                 enter_transformed: false,
@@ -5970,7 +5978,7 @@ mod tests {
         assert_eq!(*destination, Zone::Hand);
         assert!(*up_to);
         match target {
-            TargetFilter::TrackedSetFiltered { id, filter } => {
+            TargetFilter::TrackedSetFiltered { id, filter, .. } => {
                 assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
                 assert_eq!(**filter, or_filter, "inner filter preserved");
             }
@@ -6009,7 +6017,7 @@ mod tests {
         };
         assert_eq!(*destination, Zone::Hand);
         match target {
-            TargetFilter::TrackedSetFiltered { id, filter } => {
+            TargetFilter::TrackedSetFiltered { id, filter, .. } => {
                 assert_eq!(id.0, 0);
                 assert_eq!(**filter, TargetFilter::Any);
             }
@@ -6062,7 +6070,7 @@ mod tests {
         };
         assert_eq!(*destination, Zone::Hand);
         assert!(*up_to, "\"you may put\" → up_to (optional)");
-        let TargetFilter::TrackedSetFiltered { id, filter } = target else {
+        let TargetFilter::TrackedSetFiltered { id, filter, .. } = target else {
             panic!("expected TrackedSetFiltered target, got {target:?}");
         };
         assert_eq!(id.0, 0, "sentinel TrackedSetId(0)");
@@ -6248,7 +6256,7 @@ mod tests {
         assert_eq!(*destination, Zone::Battlefield);
         assert_eq!(*enters_under, Some(ControllerRef::You));
         match target {
-            TargetFilter::TrackedSetFiltered { id, filter } => {
+            TargetFilter::TrackedSetFiltered { id, filter, .. } => {
                 assert_eq!(id.0, 0, "sentinel TrackedSetId(0)");
                 assert!(
                     matches!(&**filter, TargetFilter::Typed(_)),

@@ -4488,7 +4488,10 @@ fn sacrificed_this_way_count(
 ) -> Option<u32> {
     match dynamic_count {
         QuantityRef::TrackedSetSize => Some(sacrificed.len().try_into().unwrap_or(u32::MAX)),
-        QuantityRef::FilteredTrackedSetSize { filter } => {
+        // The `sacrificed` slice already encodes the "sacrificed this way" zone
+        // binding (these are the objects sacrificed as a cost), so `landed_in`
+        // is satisfied by construction and need not gate the count here.
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             let ctx = super::filter::FilterContext::from_source(state, spell_id);
             Some(
                 sacrificed
@@ -14168,6 +14171,7 @@ its replicate cost was paid.)\nDraw a card.";
             spell_filter: None,
             dynamic_count: Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                landed_in: None,
             }),
         })
         .affected(TargetFilter::SelfRef)

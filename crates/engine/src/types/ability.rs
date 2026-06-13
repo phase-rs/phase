@@ -2978,10 +2978,21 @@ pub enum TargetFilter {
     ///
     /// Example: Zimone's Experiment produces `TrackedSetFiltered { id: 0
     /// /* sentinel resolved to the most recent tracked set */, filter:
-    /// Typed(Land) }` for the land-routing sub_ability.
+    /// Typed(Land), landed_in: None }` for the land-routing sub_ability.
+    ///
+    /// CR 608.2c: `landed_in` binds the consumer to the verb that produced its
+    /// members. `None` (the legacy default at every existing construction site)
+    /// matches any member of the set — selection sets ("revealed this way",
+    /// dig anaphors) carry no destination, so they stay zone-agnostic. `Some(zone)`
+    /// restricts the match to members whose recorded landing zone
+    /// (`GameState::tracked_set_landing_zones`) equals `zone`, so a merged
+    /// exile→sacrifice chain set can serve both "exiled this way" (`Some(Exile)`)
+    /// and "sacrificed this way" (`Some(Graveyard)`) references disjointly (#2932).
     TrackedSetFiltered {
         id: super::identifiers::TrackedSetId,
         filter: Box<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        landed_in: Option<super::zones::Zone>,
     },
     /// CR 610.3: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
@@ -3523,7 +3534,19 @@ pub enum QuantityRef {
     /// additionally satisfy the inner filter. Used for "for each nontoken creature
     /// you controlled that was destroyed this way" patterns where the tracked set
     /// holds all affected objects but only a filtered subset is relevant.
-    FilteredTrackedSetSize { filter: Box<TargetFilter> },
+    ///
+    /// CR 608.2c: `landed_in` binds the count to the verb that produced the
+    /// members, mirroring [`TargetFilter::TrackedSetFiltered`]. `None` (legacy
+    /// default) counts every filtered member; `Some(zone)` counts only members
+    /// whose recorded landing zone (`GameState::tracked_set_landing_zones`)
+    /// equals `zone`. This lets "the number of creatures sacrificed this way"
+    /// (`Some(Graveyard)`) read exactly the sacrificed members of a merged
+    /// exile→sacrifice chain set, not the earlier exiled cards (#2932).
+    FilteredTrackedSetSize {
+        filter: Box<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        landed_in: Option<super::zones::Zone>,
+    },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
     /// "draws a card for each card exiled from their hand this way." The counter
@@ -9050,9 +9073,14 @@ impl TargetFilter {
                 filters: filters.into_iter().map(TargetFilter::normalized).collect(),
             },
             TargetFilter::And { filters } => normalize_and_filter(filters),
-            TargetFilter::TrackedSetFiltered { id, filter } => TargetFilter::TrackedSetFiltered {
+            TargetFilter::TrackedSetFiltered {
+                id,
+                filter,
+                landed_in,
+            } => TargetFilter::TrackedSetFiltered {
                 id,
                 filter: Box::new(filter.normalized()),
+                landed_in,
             },
             filter => filter,
         }

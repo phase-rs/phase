@@ -1048,6 +1048,9 @@ pub fn parse_target_with_syntax<'a>(
                 TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(filter),
+                    // "each of those <type>" is an anaphor over the affected set
+                    // with no verb-specific zone binding.
+                    landed_in: None,
                 },
                 remainder,
                 syntax,
@@ -2420,6 +2423,9 @@ pub fn parse_type_phrase_with_ctx<'a>(
         TargetFilter::TrackedSetFiltered {
             id: TrackedSetId(0),
             filter: Box::new(filter),
+            // "counters put this way" names objects that received counters but
+            // did not change zones — a selection set with no zone binding.
+            landed_in: None,
         }
     } else {
         filter
@@ -7734,7 +7740,7 @@ mod tests {
         use crate::types::TypeFilter;
         let (filter, rest) = parse_target("each of those Vampires");
         match filter {
-            TargetFilter::TrackedSetFiltered { id, filter } => {
+            TargetFilter::TrackedSetFiltered { id, filter, .. } => {
                 assert_eq!(id, TrackedSetId(0));
                 match *filter {
                     TargetFilter::Typed(tf) => {
@@ -8054,6 +8060,7 @@ mod tests {
             TargetFilter::TrackedSetFiltered {
                 id: TrackedSetId(0),
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                landed_in: None,
             }
         );
     }
@@ -8069,6 +8076,7 @@ mod tests {
             TargetFilter::TrackedSetFiltered {
                 id: TrackedSetId(0),
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                landed_in: None,
             }
         );
     }

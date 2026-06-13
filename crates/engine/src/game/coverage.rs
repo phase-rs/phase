@@ -417,7 +417,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             SeatDirection::Right => "player to your right".into(),
         },
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
-        TargetFilter::TrackedSetFiltered { id, filter } => {
+        TargetFilter::TrackedSetFiltered { id, filter, .. } => {
             format!("tracked set #{} matching {}", id.0, fmt_target(filter))
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
@@ -1146,7 +1146,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
-        QuantityRef::FilteredTrackedSetSize { filter } => {
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
