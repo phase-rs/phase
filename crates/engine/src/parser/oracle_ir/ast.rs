@@ -230,6 +230,11 @@ pub(crate) enum ContinuationAst {
     CopyMayRetarget,
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
+    /// CR 701.15a/b: "The token(s) (is|are) goaded [duration]" after token
+    /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
+    GoadLastCreated {
+        duration: Option<crate::types::ability::Duration>,
+    },
     /// "The flashback cost is equal to its mana cost." after a flashback grant.
     FlashbackCostEqualsManaCost,
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets

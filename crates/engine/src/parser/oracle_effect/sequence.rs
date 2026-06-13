@@ -16,14 +16,15 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, Chooser, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownBody, FaceDownProfile,
-    LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, CastingPermission, Chooser, ContinuousModification,
+    ControllerRef, CopyRetargetPermission, CounterSourceRider, Duration, Effect, FaceDownBody,
+    FaceDownProfile, LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr,
+    QuantityRef, StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
@@ -2095,6 +2096,22 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
+        ContinuationAst::GoadLastCreated { duration } => {
+            // CR 701.15b: Goaded is a static ability on the just-created tokens.
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::LastCreated)
+                        .modifications(vec![ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded,
+                        }])
+                        .description("goaded".to_string())],
+                    duration: duration.or(Some(Duration::Permanent)),
+                    target: Some(TargetFilter::LastCreated),
+                },
+            ));
+        }
         ContinuationAst::FlashbackCostEqualsManaCost => {}
         ContinuationAst::CantRegenerate => {
             let Some(previous) = defs.last_mut() else {
@@ -2739,6 +2756,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::FlashbackCostEqualsManaCost => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
+        ContinuationAst::GoadLastCreated { .. } => true,
         ContinuationAst::CantRegenerate => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
@@ -4284,6 +4302,12 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::EntersTappedAttacking)
         }
+        // CR 701.15a/b: "The token(s) (is|are) goaded [duration]" after token creation.
+        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Populate
+            if let Some(continuation) = try_parse_tokens_goaded_continuation(&lower) =>
+        {
+            Some(continuation)
+        }
         Effect::ControlNextTurn { .. }
             if nom_primitives::scan_contains(&lower, "after that turn")
                 && nom_primitives::scan_contains(&lower, "takes an extra turn") =>
@@ -4365,6 +4389,34 @@ fn parse_nonland_permanent_domain(
             TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
         ),
     ))
+}
+
+/// CR 701.15a/b: Parse "the token(s) (is|are) goaded [duration]" after token creation.
+/// Prefix stripping mirrors `rewrite_token_created_this_way_unimplemented` so the
+/// predicate (`are goaded`) stays in the remainder for duration stripping.
+fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> {
+    let lower = lower.trim().trim_end_matches('.');
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the tokens created this way "),
+        tag("the token created this way "),
+        tag("the tokens "),
+        tag("the token "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (mod_text, duration) = super::lower::strip_trailing_duration(rest.trim());
+    let mods = crate::parser::oracle_static::parse_continuous_modifications(mod_text);
+    if !mods.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::Goaded
+            }
+        )
+    }) {
+        return None;
+    }
+    Some(ContinuationAst::GoadLastCreated { duration })
 }
 
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
@@ -5235,6 +5287,100 @@ mod tests {
                 sacrifice_filter: None,
             })
         );
+    }
+
+    /// CR 701.15b: plural "the tokens are goaded" after CreateToken.
+    #[test]
+    fn tokens_goaded_continuation_after_create_token() {
+        let token_effect = Effect::Token {
+            name: "Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![crate::types::mana::ManaColor::White],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 3 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "the tokens are goaded for the rest of the game",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::GoadLastCreated {
+                duration: Some(Duration::Permanent),
+            })
+        );
+    }
+
+    /// CR 701.15b: singular form must still recognize (Nettling Nuisance class).
+    #[test]
+    fn token_goaded_continuation_after_create_token() {
+        let token_effect = Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![crate::types::mana::ManaColor::Red],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "the token is goaded for the rest of the game",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::GoadLastCreated {
+                duration: Some(Duration::Permanent),
+            })
+        );
+    }
+
+    /// CR 701.15b: absorbed continuation grants permanent goad on LastCreated.
+    #[test]
+    fn create_tokens_then_goad_chain_has_no_effect_the_gap() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "each player creates three tapped 1/1 white Warrior creature tokens. the tokens are goaded for the rest of the game",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("goad sub_ability");
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::Permanent));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )));
+            }
+            Effect::Unimplemented { name, .. } => {
+                panic!("expected GenericEffect goad sub, got Unimplemented({name})")
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
     }
 
     #[test]
