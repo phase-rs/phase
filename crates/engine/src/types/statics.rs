@@ -563,6 +563,14 @@ pub enum CostModifyMode {
     Minimum,
 }
 
+/// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
+/// Distinct from [`CostModifyMode`], which only adjusts the mana component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdditionalCostTaxAction {
+    /// "... cost an additional N life to cast."
+    Cast,
+}
+
 /// CR 702.122c: How a creature's contributed power is modified when it crews a
 /// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -733,6 +741,16 @@ pub enum StaticMode {
         /// Only meaningful for `Reduce` and `Raise` — always `None` for `Minimum`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
+    },
+    /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
+    /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
+    /// which adjusts only the mana component. Terror of the Peaks class:
+    /// "Spells your opponents cast that target this creature cost an additional
+    /// 3 life to cast."
+    ImposeAdditionalCost {
+        cost: super::ability::AbilityCost,
+        spell_filter: Option<TargetFilter>,
+        action: AdditionalCostTaxAction,
     },
     /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
     /// E.g., "Ninjutsu abilities you activate cost {1} less to activate."
@@ -1428,6 +1446,7 @@ impl Hash for StaticMode {
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
@@ -1481,6 +1500,7 @@ impl StaticMode {
             | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::AlternativeKeywordCost { .. }
             | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
@@ -1595,6 +1615,9 @@ impl fmt::Display for StaticMode {
                 CostModifyMode::Reduce => write!(f, "ReduceCost"),
                 CostModifyMode::Raise => write!(f, "RaiseCost"),
                 CostModifyMode::Minimum => write!(f, "MinimumCost"),
+            },
+            StaticMode::ImposeAdditionalCost { action, .. } => match action {
+                AdditionalCostTaxAction::Cast => write!(f, "ImposeAdditionalCastCost"),
             },
             StaticMode::ReduceAbilityCost {
                 keyword,

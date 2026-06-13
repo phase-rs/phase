@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
-use crate::types::statics::{CrewAction, CrewContributionKind};
+use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
@@ -2480,6 +2480,83 @@ fn static_opponent_spells_targeting_commanders_cost_more() {
 }
 
 #[test]
+fn parse_static_line_imposes_terror_tax() {
+    let def = parse_static_line(
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.",
+    )
+    .expect("parse_static_line should recognize terror tax");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ImposeAdditionalCost {
+            action: AdditionalCostTaxAction::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn try_parse_impose_additional_cost_terror_line() {
+    let text =
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.";
+    let lower = text.to_lowercase();
+    let def = try_parse_impose_additional_cost(text, &lower).expect("should parse terror tax");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ImposeAdditionalCost {
+            action: AdditionalCostTaxAction::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn static_opponent_spells_targeting_self_cost_additional_life_to_cast() {
+    let def = parse_static_line(
+        "Spells your opponents cast that target this creature cost an additional 3 life to cast.",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+    let StaticMode::ImposeAdditionalCost {
+        cost: AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+        },
+        spell_filter: Some(TargetFilter::Typed(target_tf)),
+        action: AdditionalCostTaxAction::Cast,
+    } = def.mode
+    else {
+        panic!(
+            "expected ImposeAdditionalCost PayLife(3), got {:?}",
+            def.mode
+        );
+    };
+    let filter = target_tf
+        .properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::Targets { filter } => Some(filter.as_ref()),
+            _ => None,
+        })
+        .expect("expected Targets property on spell filter");
+    assert!(matches!(filter, TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_mana_abilities_cost_additional_life_to_activate_stays_gap() {
+    assert!(
+        parse_static_line("Mana abilities of this land cost an additional 1 life to activate.")
+            .is_none(),
+        "activation taxes need activation-pipeline support before coverage can claim them"
+    );
+}
+
+#[test]
 fn static_spells_targeting_creature_cost_less() {
     let def =
         parse_static_line("Spells you cast that target a creature cost {2} less to cast.").unwrap();
@@ -4565,6 +4642,36 @@ fn parse_continuous_modifications_are_goaded_emits_goaded_static_mode() {
     )));
 }
 
+/// CR 613.1f + CR 113.3: "all activated abilities of all cards exiled with it" /
+/// "the exiled card" → `GrantAllActivatedAbilitiesOf { ExiledBySource }` (Myr
+/// Welder, Territory Forge). Issue #3101.
+#[test]
+fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
+    use crate::types::ability::TargetFilter;
+    for predicate in [
+        "all activated abilities of all cards exiled with it",
+        "all activated abilities of all cards exiled with ~",
+        "all activated abilities of the exiled card",
+    ] {
+        let mods = parse_continuous_modifications(predicate);
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::ExiledBySource
+            }],
+            "predicate: {predicate}"
+        );
+    }
+    // Typed/counter/battlefield forms stay a gap (no modification) for now.
+    assert!(
+        parse_continuous_modifications(
+            "all activated abilities of all creature cards exiled with it"
+        )
+        .is_empty(),
+        "typed 'creature cards exiled with it' must stay a gap (follow-up)"
+    );
+}
+
 #[test]
 fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     let defs = parse_static_line_multi(
@@ -5087,8 +5194,27 @@ fn static_attacking_creatures_you_control_have_double_strike() {
         Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Attacking]),
+                .properties(vec![FilterProp::Attacking { defender: None }]),
         ))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike,
+        }));
+}
+
+#[test]
+fn static_creatures_attacking_your_opponents_have_double_strike() {
+    let def = parse_static_line("Creatures attacking your opponents have double strike.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent)
+            }]
+        ),))
     );
     assert!(def
         .modifications
@@ -7239,7 +7365,9 @@ fn static_unblocked_attacking_ninjas_you_control_have_lifelink() {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Unblocked));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
     } else {
         panic!(
             "Expected Typed filter with Ninja subtype, got {:?}",
@@ -7260,7 +7388,9 @@ fn static_attacking_ninjas_you_control_have_deathtouch() {
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
-        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf
+            .properties
+            .contains(&FilterProp::Attacking { defender: None }));
         assert!(!tf.properties.contains(&FilterProp::Unblocked));
     } else {
         panic!(

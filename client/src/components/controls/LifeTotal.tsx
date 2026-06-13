@@ -9,7 +9,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 
 interface LifeTotalProps {
   playerId: number;
-  size?: "default" | "lg";
+  size?: "sm" | "default" | "lg";
   hideLabel?: boolean;
 }
 
@@ -130,16 +130,21 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       : flashColor === "green"
         ? "bg-green-500/30"
         : "bg-transparent";
+  const sizeClass = size === "lg"
+    ? "text-lg lg:text-2xl"
+    : size === "sm"
+      ? "text-sm lg:text-base"
+      : "text-base lg:text-lg";
 
   return (
-    <div className="flex items-baseline gap-2">
+    <div className={`flex items-baseline ${size === "sm" ? "gap-1" : "gap-2"}`}>
       {!hideLabel && <span className="text-xs text-slate-400">{t("lifeTotal.playerLabel", { seat: playerId + 1 })}</span>}
       <motion.span
         key={life}
         initial={{ scale: 1.3 }}
         animate={{ scale: 1 }}
         transition={{ duration: 0.2 }}
-        className={`rounded-md px-1 py-0.5 font-bold tabular-nums transition-colors duration-400 lg:px-1.5 ${size === "lg" ? "text-lg lg:text-2xl" : "text-base lg:text-lg"} ${colorClass} ${flashBg}`}
+        className={`rounded-md px-1 py-0.5 font-bold tabular-nums transition-colors duration-400 ${size === "sm" ? "" : "lg:px-1.5"} ${sizeClass} ${colorClass} ${flashBg}`}
       >
         <motion.span>{displayed}</motion.span>
       </motion.span>

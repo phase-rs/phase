@@ -742,6 +742,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 508.1g + CR 702.154a: Enlist is optional and the engine has
+        // already computed the eligible tap set for this instance.
+        WaitingFor::EnlistChoice {
+            player, eligible, ..
+        } => std::iter::once(candidate(
+            GameAction::ChooseEnlist { target: None },
+            TacticalClass::Pass,
+            Some(*player),
+        ))
+        .chain(eligible.iter().map(|target| {
+            candidate(
+                GameAction::ChooseEnlist {
+                    target: Some(*target),
+                },
+                TacticalClass::Utility,
+                Some(*player),
+            )
+        }))
+        .collect(),
         WaitingFor::EquipTarget {
             player,
             equipment_id,
@@ -4851,6 +4870,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 

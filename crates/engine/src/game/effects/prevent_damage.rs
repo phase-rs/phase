@@ -192,26 +192,29 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, amount_dynamic, target, scope, effect_source_filter) = match &ability.effect {
-        Effect::PreventDamage {
-            amount,
-            amount_dynamic,
-            target,
-            scope,
-            damage_source_filter,
-        } => (
-            *amount,
-            amount_dynamic.clone(),
-            target.clone(),
-            *scope,
-            damage_source_filter.clone(),
-        ),
-        _ => {
-            return Err(EffectError::InvalidParam(
-                "expected PreventDamage effect".to_string(),
-            ))
-        }
-    };
+    let (amount, amount_dynamic, target, scope, effect_source_filter, prevention_duration) =
+        match &ability.effect {
+            Effect::PreventDamage {
+                amount,
+                amount_dynamic,
+                target,
+                scope,
+                damage_source_filter,
+                prevention_duration,
+            } => (
+                *amount,
+                amount_dynamic.clone(),
+                target.clone(),
+                *scope,
+                damage_source_filter.clone(),
+                prevention_duration.clone(),
+            ),
+            _ => {
+                return Err(EffectError::InvalidParam(
+                    "expected PreventDamage effect".to_string(),
+                ))
+            }
+        };
 
     // CR 609.7 + CR 609.7a: A source-scoped prevent ("prevent all damage target
     // instant or sorcery spell would deal this turn") carries its chosen source
@@ -243,6 +246,19 @@ pub fn resolve(
     let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .prevention_shield(amount)
         .description("Prevent damage".to_string());
+
+    // CR 511.2 + CR 615: Apply the parsed prevention window as the shield's
+    // expiry. "this combat" -> `RestrictionExpiry::EndOfCombat`, pruned at the
+    // EndCombat phase (turns.rs) so a Suppressor Skyguard shield from combat 1
+    // does not bleed into a second combat the same turn. A `None` duration
+    // leaves `expiry` unset -> the legacy end-of-turn `is_shield` prune still
+    // applies, so existing fixed/All prevention behavior is unchanged.
+    if let Some(expiry) = crate::game::effects::add_target_replacement::expiry_from_duration(
+        prevention_duration.as_ref(),
+        ability.controller,
+    ) {
+        shield = shield.expiry(expiry);
+    }
 
     // CR 615 + CR 614.1a: Resolve damage source filter from effect definition.
     // Filters using IsChosenColor need the chosen color resolved from the source object
@@ -393,6 +409,7 @@ mod tests {
                 target: TargetFilter::Any,
                 scope,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             targets,
             source,
@@ -435,6 +452,61 @@ mod tests {
         assert!(!obj.replacement_definitions[0].is_consumed);
     }
 
+    /// CR 511.2 + CR 615 (issue #2924, Bug B): a `prevention_duration` of
+    /// `UntilEndOfCombat` ("this combat" — Suppressor Skyguard) must stamp the
+    /// built shield with `RestrictionExpiry::EndOfCombat` so the EndCombat prune
+    /// removes it and it does not bleed into a later combat the same turn.
+    /// `UntilEndOfTurn` maps to `EndOfTurn`; `None` leaves `expiry` unset (legacy
+    /// end-of-turn `is_shield` prune preserved — no regression).
+    #[test]
+    fn prevention_duration_sets_shield_expiry() {
+        use crate::types::ability::{Duration, RestrictionExpiry};
+
+        let cases = [
+            (
+                Some(Duration::UntilEndOfCombat),
+                Some(RestrictionExpiry::EndOfCombat),
+            ),
+            (
+                Some(Duration::UntilEndOfTurn),
+                Some(RestrictionExpiry::EndOfTurn),
+            ),
+            (None, None),
+        ];
+        for (duration, expected_expiry) in cases {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Suppressor Skyguard".to_string(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::Controller,
+                    scope: PreventionScope::CombatDamage,
+                    damage_source_filter: None,
+                    prevention_duration: duration.clone(),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let obj = state.objects.get(&source).unwrap();
+            assert_eq!(obj.replacement_definitions.len(), 1);
+            assert_eq!(
+                obj.replacement_definitions[0].expiry, expected_expiry,
+                "wrong shield expiry for prevention_duration {duration:?}"
+            );
+        }
+    }
+
     #[test]
     fn dynamic_amount_resolves_to_static_next_shield() {
         // CR 615.11: a dynamic prevention amount is resolved to a concrete
@@ -456,6 +528,7 @@ mod tests {
                 target: TargetFilter::Any,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             vec![],
             source,
@@ -514,6 +587,7 @@ mod tests {
                 target: TargetFilter::Any,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource),
+                prevention_duration: None,
             },
             vec![],
             source,
@@ -711,6 +785,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             vec![],
             shield_source,
@@ -798,6 +873,7 @@ mod tests {
                 target: TargetFilter::Player,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             vec![],
             shield_source,
@@ -933,6 +1009,7 @@ mod tests {
                 ),
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             vec![],
             pack_leader,
@@ -1168,6 +1245,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             vec![TargetRef::Object(chosen)],
             source,
@@ -1300,6 +1378,7 @@ mod tests {
                         ))),
                     ],
                 }),
+                prevention_duration: None,
             },
             vec![TargetRef::Object(chosen_spell)],
             dromoka,

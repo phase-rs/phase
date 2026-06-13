@@ -20,7 +20,7 @@ use nom::combinator::{eof, map, opt, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::condition::{parse_inner_condition, parse_source_has_counters};
+use super::condition::{parse_inner_condition, parse_recipient_has_counters};
 use super::error::OracleResult;
 use super::primitives::scan_contains;
 use crate::types::ability::{Duration, PlayerScope, StaticCondition};
@@ -181,11 +181,14 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
                 scan_contains(tail, "remains on the battlefield")
             }),
         ),
-        // CR 122.1: "[subject] has [N] [type] counter[s] on it" — delegate to
-        // the shared counter-condition combinator so the typed/bare/quantity
-        // grammar lives in a single authority.
+        // CR 122.1 + CR 611.2b: "[subject] has [N] [type] counter[s] on it" —
+        // delegate to the recipient-aware counter-condition combinator so the
+        // bound pronoun "it" in "for as long as it has a counter" binds to the
+        // affected object (the controlled/granted creature), evaluated by the
+        // layer system. A source subject ("~"/"this creature") stays
+        // `HasCounters`. The typed/bare/quantity grammar lives in one authority.
         map(
-            terminated(parse_source_has_counters, (multispace0, eof)),
+            terminated(parse_recipient_has_counters, (multispace0, eof)),
             |condition| Duration::ForAsLongAs { condition },
         ),
         // Any whole-clause condition the shared condition grammar recognizes.

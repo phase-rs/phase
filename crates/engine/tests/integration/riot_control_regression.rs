@@ -68,6 +68,7 @@ fn riot_control_chain_gains_life_and_prevents_damage() {
             target: TargetFilter::Controller,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
+            prevention_duration: None,
         },
         vec![],
         riot_control,

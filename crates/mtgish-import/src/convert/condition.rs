@@ -875,18 +875,24 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: None,
             min_count: 1,
         },
         Permanents::WasKickedWithKicker(cost) => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: Some(mana::convert(cost)?),
             min_count: 1,
         },
         Permanents::WasKickedTwice => TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
             variant: None,
+            origin: None,
+            origin_ordinal: None,
             kicker_cost: None,
             min_count: 2,
         },
@@ -1098,8 +1104,10 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
     match p {
         FilterProp::Tapped => Some("Tapped"),
         FilterProp::Untapped => Some("Untapped"),
-        FilterProp::Attacking => Some("Attacking"),
-        FilterProp::AttackingController => Some("AttackingController"),
+        FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+        } => Some("AttackingController"),
+        FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
         FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),
@@ -3437,6 +3445,8 @@ mod tests {
             TriggerCondition::AdditionalCostPaid {
                 source: AdditionalCostPaymentSource::Kicker,
                 variant: None,
+                origin: None,
+                origin_ordinal: None,
                 kicker_cost: None,
                 min_count: 1,
             }

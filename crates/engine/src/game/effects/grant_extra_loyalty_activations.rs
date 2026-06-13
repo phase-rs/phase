@@ -120,6 +120,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         }
     }
 

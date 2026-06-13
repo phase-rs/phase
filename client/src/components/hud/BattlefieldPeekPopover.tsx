@@ -3,15 +3,13 @@ import { useTranslation } from "react-i18next";
 
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
+import { groupByName, partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CardImage } from "../card/CardImage.tsx";
 
-// Hard cap on how many mini-cards the peek will render. At 88×123 with an
-// 8px gap, ~12 fits a viewport-friendly 3-row grid without dominating the
-// screen on a 1080p display or smaller. Legal targets are pinned in front
-// of the cap during targeting, so a token swarm never hides the cards the
-// targeter actually needs to see.
+// Hard cap on how many mini-cards the peek will render. Legal targets are
+// pinned in front of the cap during targeting, so a token swarm never hides
+// the cards the targeter actually needs to see.
 const MAX_VISIBLE_CARDS = 12;
 
 interface BattlefieldPeekPopoverProps {
@@ -76,21 +74,33 @@ export function BattlefieldPeekPopover({
   ];
 
   const legalSet = new Set(legalTargetIds);
+  const candidateObjects = candidates
+    .map((id) => objects[id])
+    .filter((obj): obj is NonNullable<typeof obj> => obj != null);
+  const groups = groupByName(candidateObjects);
   // Sort legal targets to the front during targeting so the cap can never
   // hide a card the player needs to see. In idle mode the order from
   // `partitionByType` (creatures → planeswalkers → support) is preserved
   // since there's no "more important" subset to surface.
-  const sorted: ObjectId[] = isTargeting
-    ? [...candidates].sort((a, b) => Number(legalSet.has(b)) - Number(legalSet.has(a)))
-    : candidates;
-  const visible = sorted.slice(0, MAX_VISIBLE_CARDS);
-  const overflowCount = Math.max(0, sorted.length - visible.length);
+  const sortedGroups = isTargeting
+    ? [...groups].sort((a, b) =>
+        Number(b.ids.some((id) => legalSet.has(id))) - Number(a.ids.some((id) => legalSet.has(id))),
+      )
+    : groups;
+  const visible = sortedGroups.slice(0, MAX_VISIBLE_CARDS);
+  const overflowCount = sortedGroups
+    .slice(MAX_VISIBLE_CARDS)
+    .reduce((total, group) => total + group.count, 0);
   // Seat-color border + glow. Alpha-suffixed hex values mirror the tab's
   // avatar-tile style so popover and tile read as the same identity.
   const containerStyle: CSSProperties = {
     borderColor: `${seatColor}cc`,
     boxShadow: `0 0 0 1px ${seatColor}55, 0 20px 40px rgba(0,0,0,0.55), 0 0 22px ${seatColor}3a`,
   };
+  const cardFrameStyle = {
+    "--card-w": "clamp(5.5rem, 18vw, 7rem)",
+    "--card-h": "calc(var(--card-w) * 1.4)",
+  } as CSSProperties;
 
   if (visible.length === 0) {
     return (
@@ -124,24 +134,28 @@ export function BattlefieldPeekPopover({
       >
         {t("battlefieldPeek.boardOf", { name: opponentName })}
       </div>
-      <div className="flex flex-wrap justify-center gap-2">
-        {visible.map((id) => {
+      <div
+        className="grid grid-cols-3 justify-items-center gap-2 sm:grid-cols-4"
+        style={cardFrameStyle}
+      >
+        {visible.map((group) => {
+          const id = group.ids[0];
           const obj = objects[id];
           if (!obj) return null;
           const pt = obj.power != null && obj.toughness != null
             ? `${obj.power}/${obj.toughness}`
             : null;
-          const isLegal = isTargeting && legalSet.has(id);
+          const isLegal = isTargeting && group.ids.some((candidateId) => legalSet.has(candidateId));
           const ringClass = isTargeting
             ? isLegal
               ? "ring-2 ring-cyan-300/80 shadow-[0_0_12px_rgba(34,211,238,0.5)]"
               : "ring-1 ring-white/10 opacity-60"
             : "ring-1 ring-white/15";
           return (
-            <div key={id} className="flex w-[88px] flex-col items-center gap-1">
+            <div key={group.ids.join(":")} className="relative flex min-w-0 flex-col items-center gap-1">
               <div
                 className={`overflow-hidden rounded ${ringClass}`}
-                style={{ width: 88, height: 123 }}
+                style={{ width: "var(--card-w)", height: "var(--card-h)" }}
               >
                 <CardImage
                   cardName={obj.name}
@@ -151,6 +165,11 @@ export function BattlefieldPeekPopover({
                   tokenImageRef={obj.token_image_ref}
                 />
               </div>
+              {group.count > 1 && (
+                <div className="absolute -left-2 -top-2 z-10 flex h-7 min-w-7 items-center justify-center rounded-full bg-black px-1.5 text-xs font-extrabold text-white ring-2 ring-white/75 shadow-[0_2px_8px_rgba(0,0,0,0.65)]">
+                  ×{group.count}
+                </div>
+              )}
               {pt && (
                 <div className="rounded bg-black/80 px-1.5 text-[10px] font-bold text-white">
                   {pt}

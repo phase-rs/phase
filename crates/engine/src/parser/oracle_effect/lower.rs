@@ -551,20 +551,27 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // and bind direct follow-up ParentTarget references to the affected set.
         if !current_defs.is_empty() {
             let source_text_lower = clause_ir.source_text.to_lowercase();
+            // CR 603.7: Scan ALL prior clauses for a tracked-set publisher — an
+            // intermediate non-publishing clause (e.g. Investigate) must not
+            // shadow an earlier exile clause. Example: Disorder in the Court
+            // (exile → investigate → return the exiled cards).
+            let any_prior_publishes = defs
+                .iter()
+                .any(|d| publishes_tracked_set_from_resolution(&d.effect));
+            if any_prior_publishes {
+                let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
+                    || contains_implicit_tracked_set_pronoun(&source_text_lower);
+                if has_tracked_ref {
+                    for current in &mut current_defs {
+                        mark_uses_tracked_set(current);
+                        rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                    }
+                }
+            }
+
             // Find the previous non-special, non-absorbed clause
             let prev_effect = defs.last().map(|d| &*d.effect);
             if let Some(prev_eff) = prev_effect {
-                if publishes_tracked_set_from_resolution(prev_eff) {
-                    let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
-                        || contains_implicit_tracked_set_pronoun(&source_text_lower);
-                    if has_tracked_ref {
-                        for current in &mut current_defs {
-                            mark_uses_tracked_set(current);
-                            rewrite_parent_targets_to_tracked_set(&mut current.effect);
-                        }
-                    }
-                }
-
                 // CR 603.7c: Stamp the prior clause's zone destination as the
                 // expected origin of any delayed `ParentTarget` return, so the
                 // resolver's CR 400.7 `origin` guard suppresses the return when the
@@ -2687,6 +2694,17 @@ pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of that combat, "),
             ),
+            // CR 511.2 + CR 603.7a: "At this turn's next end of combat, …"
+            // fires at the end-of-combat step of the current turn.
+            // Covers Triton Tactics, Glyph of Doom, Gaze of the Gorgon,
+            // Venomous Breath, and the full class of spells that schedule
+            // an end-of-combat effect during resolution.
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                tag("at this turn's next end of combat, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -3063,6 +3081,11 @@ pub(super) struct ReturnDestination {
     pub(super) enters_attacking: bool,
     // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
     pub(super) enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+    // CR 708.2a + CR 708.3: "face down" — the object is turned face down before
+    // it enters (CR 708.3). The default vanilla-2/2 profile is refined by a
+    // trailing "It's a <type> ..." sentence (Yedora's "It's a Forest land.")
+    // via the `FaceDownProfileSpec` continuation.
+    pub(super) face_down: bool,
 }
 
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
@@ -3325,9 +3348,31 @@ pub(super) fn strip_return_destination_ext_with_remainder(
         // intentionally NOT handled here. They require PutAtLibraryPosition (positional
         // placement without shuffling), not ChangeZone (which auto-shuffles).
     ];
+    // CR 708.3: "face down" is turned on before the permanent enters the
+    // battlefield, so the word sits immediately after "the battlefield" (and
+    // before any control clause): "... to the battlefield face down under its
+    // owner's control" (Yedora). The destination table is keyed on contiguous
+    // phrases, so a face-down return is recognized by matching the phrase with
+    // " face down" present and recording the rider. Rather than cross-product
+    // every control/tapped row with a face-down twin, we try each row a second
+    // time with " face down" spliced in right after "the battlefield".
     for (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking) in patterns {
-        if let Some(pos) = lower.rfind(phrase) {
-            let after_destination = &lower[pos + phrase.len()..];
+        // Prefer the face-down variant (" to the battlefield face down ...") when
+        // the text carries it; otherwise fall back to the plain destination row.
+        let face_down_phrase = phrase
+            // allow-noncombinator: structural construction of a face-down table-key variant from a static phrase, not parsing dispatch of input text (dispatch is the lower.rfind below, matching this existing rfind-table parser)
+            .strip_prefix(" to the battlefield")
+            .map(|rest| format!(" to the battlefield face down{rest}"));
+        let (phrase_len, face_down, pos) = match face_down_phrase
+            .as_deref()
+            // allow-noncombinator: positional table scan in this pre-existing rfind-keyed destination parser; mirrors the existing `lower.rfind(phrase)` row dispatch, extended for the face-down variant
+            .and_then(|fd| lower.rfind(fd).map(|p| (fd.len(), p)))
+        {
+            Some((len, pos)) => (len, true, Some(pos)),
+            None => (phrase.len(), false, lower.rfind(phrase)),
+        };
+        if let Some(pos) = pos {
+            let after_destination = &lower[pos + phrase_len..];
             let (enter_with_counters, counters_offset) =
                 parse_with_counters_suffix_spanned(after_destination);
             // CR 614.1c: when the "with N <type> counter(s)" clause is lifted
@@ -3343,14 +3388,14 @@ pub(super) fn strip_return_destination_ext_with_remainder(
                     // which is not word-anchored and would corrupt a remainder
                     // ending in "brand"/"island"); mirrors the leading
                     // `strip_leading_sequence_connector` analogue.
-                    let trimmed = text[pos + phrase.len()..pos + phrase.len() + off].trim_end();
+                    let trimmed = text[pos + phrase_len..pos + phrase_len + off].trim_end();
                     trimmed
                         // allow-noncombinator: structural cleanup of a trailing " and" connector on an already-sliced remainder, not parsing dispatch
                         .strip_suffix(" and")
                         .map(|s| s.trim_end())
                         .unwrap_or(trimmed)
                 }
-                None => &text[pos + phrase.len()..],
+                None => &text[pos + phrase_len..],
             };
             return (
                 text[..pos].trim(),
@@ -3361,6 +3406,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
                     enter_tapped: *enter_tapped,
                     enters_attacking: *enters_attacking,
                     enter_with_counters,
+                    face_down,
                 }),
                 original_after_destination,
             );
@@ -3400,6 +3446,13 @@ fn parse_leading_battlefield_return_destination(
         tag("onto the battlefield"),
     ))
     .parse(input)?;
+    // CR 708.3: "face down" is applied before entry, so it precedes the
+    // tapped/transformed/control modifiers.
+    let (input, face_down) = alt((
+        value(true, tag::<_, _, OracleError<'_>>(" face down")),
+        value(false, tag("")),
+    ))
+    .parse(input)?;
     // (transformed, enter_tapped, enters_attacking)
     let (input, modifier) = alt((
         value((true, true, false), tag(" tapped and transformed")),
@@ -3433,6 +3486,7 @@ fn parse_leading_battlefield_return_destination(
             enter_tapped: modifier.1,
             enters_attacking: modifier.2,
             enter_with_counters: vec![],
+            face_down,
         },
     ))
 }
@@ -3455,6 +3509,7 @@ fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, Return
             enter_tapped: false,
             enters_attacking: false,
             enter_with_counters: vec![],
+            face_down: false,
         },
     ))
 }
@@ -3476,6 +3531,7 @@ fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, R
             enter_tapped: false,
             enters_attacking: false,
             enter_with_counters: vec![],
+            face_down: false,
         },
     ))
 }
@@ -3491,6 +3547,7 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
             enter_tapped: false,
             enters_attacking: false,
             enter_with_counters: vec![],
+            face_down: false,
         },
     ))
 }
@@ -5021,6 +5078,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::AddKeyword { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -5112,6 +5170,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddKeyword { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -5815,6 +5874,22 @@ mod tests {
             strip_temporal_suffix("you lose the game at the beginning of that turn's end step");
         assert_eq!(rest, "you lose the game");
         assert_eq!(cond, Some(expected));
+    }
+
+    /// CR 511.2 + CR 603.7a: "At this turn's next end of combat, …" prefix-form
+    /// delayed trigger fires at the end-of-combat step of the current turn.
+    /// Covers Triton Tactics, Glyph of Doom.
+    #[test]
+    fn strip_temporal_prefix_at_this_turns_next_end_of_combat() {
+        let (text, cond) =
+            strip_temporal_prefix("at this turn's next end of combat, untap that creature");
+        assert_eq!(text, "untap that creature");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            })
+        );
     }
 
     /// Build-the-class: the extra-turn-with-a-cost family parses to BOTH an

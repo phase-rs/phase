@@ -25,7 +25,10 @@ const LAND_SUBTYPE_COLORS: Record<string, string> = {
  * `commanderIdentity` resolves `AnyInCommandersIdentity` per CR 903.4. When
  * the player has no commander (CR 903.4f), the pip contributes no colors.
  */
-function pipToColors(pip: ManaPip, commanderIdentity: ManaColor[] | undefined): string[] {
+export function manaPipToDisplayColors(
+  pip: ManaPip,
+  commanderIdentity: ManaColor[] | undefined,
+): string[] {
   switch (pip.type) {
     case "Color":
       return [pip.data];
@@ -49,7 +52,7 @@ export function getCardDisplayColors(
   if (isLand && availableManaPips && availableManaPips.length > 0) {
     const out: string[] = [];
     for (const pip of availableManaPips) {
-      for (const color of pipToColors(pip, commanderIdentity)) {
+      for (const color of manaPipToDisplayColors(pip, commanderIdentity)) {
         if (!out.includes(color)) out.push(color);
       }
     }

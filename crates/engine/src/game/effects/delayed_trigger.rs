@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, ManaProduction, PtValue,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, DelayedTriggerCondition, Effect, EffectError, EffectKind, ManaProduction,
+    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -65,14 +65,41 @@ pub fn resolve(
         }
     }
 
-    // CR 603.7c + CR 701.36a: If the delayed inner effect references the
-    // "token created this way" anaphor via `TargetFilter::LastCreated`,
-    // snapshot the currently-tracked token IDs into the delayed ability's
-    // targets NOW. The delayed trigger may fire arbitrarily later, by which
-    // time `last_created_token_ids` will have been overwritten by other
-    // token-creating effects (CR 603.7c: a delayed trigger refers to a
-    // particular object even if later events change it).
-    let snapshot_targets = if super::effect_refs_parent_target(&delayed_ability.effect) {
+    // CR 603.7c: A delayed trigger whose inner effect targets the trigger's
+    // source object via TriggeringSource or ParentTarget must snapshot that
+    // object at creation time. At creation, current_trigger_event =
+    // ZoneChanged { dying_creature } and TriggeringSource resolves correctly.
+    //
+    // Without the snapshot, at end-step firing:
+    //   current_trigger_event = PhaseChanged { End }
+    //   - is_pure_event_context_filter(TriggeringSource) = true → block IS entered
+    //   - resolve_event_context_target returns None (PhaseChanged carries no
+    //     ZoneChanged source object)
+    //   - execution falls through to chosen_targets_satisfy_filter check
+    //   - chosen_targets_satisfy_filter(TriggeringSource) = false
+    //     (matches_target_filter always returns false for TriggeringSource)
+    //   - second resolve_event_context_target attempt → None
+    //   - final ability.targets.clone() fallback returns [] (empty snapshot)
+    //     → the zone move silently skips (bugs #2883 Grave Betrayal,
+    //       #2886 Liliana emblem)
+    //
+    // With the snapshot: delayed_ability.targets = [dying_creature] at
+    // creation, and the final fallback correctly returns [dying_creature].
+    //
+    // CR 603.7c: See separate branch for LastCreated snapshots.
+    let snapshot_targets = if super::ability_refs_triggering_source(&delayed_ability) {
+        // CR 603.7c: TriggeringSource always reads the event context (the dying
+        // creature from the ZoneChanged event), not the parent ability's chosen
+        // targets. Bypasses parent_target_snapshot's ability.targets early-return,
+        // which is correct for ParentTarget (Flickerwisp) but wrong here.
+        crate::game::targeting::resolve_event_context_target(
+            state,
+            &crate::types::ability::TargetFilter::TriggeringSource,
+            ability.source_id,
+        )
+        .map(|t| vec![t])
+        .unwrap_or_default()
+    } else if super::effect_refs_parent_target(&delayed_ability.effect) {
         parent_target_snapshot(state, ability)
     } else if effect_references_last_created(&delayed_ability.effect)
         && !state.last_created_token_ids.is_empty()
@@ -85,6 +112,12 @@ pub fn resolve(
     } else {
         vec![]
     };
+
+    if super::ability_refs_triggering_source(&delayed_ability) {
+        if let Some(zone) = triggering_source_destination_zone(state) {
+            stamp_triggering_source_origins_in_ability_chain(&mut delayed_ability, zone);
+        }
+    }
 
     // CR 603.7 + CR 608.2h: Snapshot parent-resolution-dependent
     // quantity refs to Fixed before the delayed trigger gets stashed.
@@ -136,7 +169,56 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
     .unwrap_or_default()
 }
 
-/// CR 701.36a + CR 603.7c: Walk an effect (and any nested sub-ability
+fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
+    match state.current_trigger_event.as_ref()? {
+        GameEvent::ZoneChanged { to, .. } => Some(*to),
+        _ => None,
+    }
+}
+
+/// CR 603.7c + CR 400.7: A delayed trigger that snapshots a zone-change event's
+/// `TriggeringSource` may affect that object only if it remains in the event's
+/// destination zone. Stamp unset `origin` guards so the zone-move resolver can
+/// enforce that creation-event binding at delayed-trigger resolution.
+fn stamp_triggering_source_origins_in_ability_chain(ability: &mut ResolvedAbility, expected: Zone) {
+    stamp_triggering_source_origins(&mut ability.effect, expected);
+    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
+        stamp_triggering_source_origins_in_ability_chain(sub_ability, expected);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        stamp_triggering_source_origins_in_ability_chain(else_ability, expected);
+    }
+}
+
+fn stamp_triggering_source_origins_in_definition_chain(
+    ability: &mut AbilityDefinition,
+    expected: Zone,
+) {
+    stamp_triggering_source_origins(&mut ability.effect, expected);
+    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
+        stamp_triggering_source_origins_in_definition_chain(sub_ability, expected);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        stamp_triggering_source_origins_in_definition_chain(else_ability, expected);
+    }
+}
+
+fn stamp_triggering_source_origins(effect: &mut Effect, expected: Zone) {
+    match effect {
+        Effect::ChangeZone { origin, target, .. }
+        | Effect::ChangeZoneAll { origin, target, .. }
+            if origin.is_none() && super::filter_refs_triggering_source(target) =>
+        {
+            *origin = Some(expected);
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            stamp_triggering_source_origins_in_definition_chain(effect, expected);
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.7c: Walk an effect (and any nested sub-ability
 /// definitions) looking for `TargetFilter::LastCreated` in a target position.
 /// Used by `resolve` to decide whether to snapshot `last_created_token_ids`
 /// into the delayed ability's `targets` at creation time.
@@ -646,6 +728,242 @@ mod tests {
         );
     }
 
+    /// CR 603.7c: A delayed trigger whose inner effect targets the dying
+    /// creature via TriggeringSource (the "it" anaphor — e.g. Grave Betrayal
+    /// "return it to the battlefield") must snapshot the ZoneChanged source
+    /// object into delayed_ability.targets at creation time.
+    ///
+    /// Without the fix, delayed_ability.targets = [] and at end-step firing
+    /// the zone move silently skips (bugs #2883, #2886).
+    #[test]
+    fn triggering_source_snapshots_zone_change_object() {
+        let mut state = GameState::new_two_player(42);
+        let dying_creature = ObjectId(10);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: dying_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                dying_creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(dying_creature)],
+            "TriggeringSource delayed trigger must snapshot the dying creature; \
+             if this fails, effect_refs_triggering_source gate is missing"
+        );
+    }
+
+    /// CR 603.7c: TriggeringSource snapshot must read from the trigger event
+    /// even when the parent ability has non-empty targets. This distinguishes
+    /// TriggeringSource from ParentTarget, where ability.targets IS the snapshot.
+    #[test]
+    fn triggering_source_snapshot_ignores_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let dying_creature = ObjectId(10);
+        let other_target = ObjectId(20);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: dying_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                dying_creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(other_target)], // non-empty parent targets
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(dying_creature)],
+            "TriggeringSource snapshot must read from ZoneChanged event, not parent's chosen targets"
+        );
+    }
+
+    /// CR 603.7c: The snapshot gate must inspect the whole delayed ability chain,
+    /// not only the first effect, because sub-abilities inherit parent targets at
+    /// delayed-trigger resolution.
+    #[test]
+    fn triggering_source_snapshot_detects_sub_ability_reference() {
+        let mut state = GameState::new_two_player(42);
+        let dying_creature = ObjectId(10);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: dying_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                dying_creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let mut effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        )));
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(dying_creature)]
+        );
+    }
+
+    /// CR 603.7c + CR 400.7: when the delayed trigger snapshots a zone-change
+    /// `TriggeringSource`, the stored zone move must also remember the event's
+    /// destination as its expected origin. Otherwise an object that leaves that
+    /// zone before the delayed trigger fires can be moved anyway.
+    #[test]
+    fn triggering_source_snapshot_stamps_event_destination_origin() {
+        let mut state = GameState::new_two_player(42);
+        let dying_creature = ObjectId(10);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: dying_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                dying_creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.delayed_triggers[0].ability.effect {
+            Effect::ChangeZone { origin, .. } => assert_eq!(*origin, Some(Zone::Graveyard)),
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(dying_creature)]
+        );
+    }
+
     #[test]
     fn whenever_event_parent_target_binds_to_specific_source() {
         let mut state = GameState::new_two_player(42);
@@ -903,6 +1221,11 @@ mod tests {
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![],
+            "no current_trigger_event means TriggeringSource snapshot is empty"
+        );
         assert_eq!(
             state.delayed_triggers[0].condition,
             DelayedTriggerCondition::WhenEntersBattlefield {

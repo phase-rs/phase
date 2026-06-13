@@ -1415,6 +1415,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_tapped: d.enter_tapped,
                         enters_attacking: d.enters_attacking,
                         enter_with_counters: d.enter_with_counters,
+                        face_down: d.face_down,
                     })
                 }
             }
@@ -1641,6 +1642,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enters_attacking,
             enter_with_counters,
+            face_down,
         } => Effect::ChangeZone {
             origin,
             destination: Zone::Battlefield,
@@ -1652,7 +1654,10 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
-            face_down_profile: None,
+            // CR 708.2a + CR 708.3: a "face down" return seeds the default
+            // vanilla-2/2 face-down profile; a trailing "It's a <type>" sentence
+            // (Yedora's "It's a Forest land.") refines it via FaceDownProfileSpec.
+            face_down_profile: face_down.then(crate::types::ability::FaceDownProfile::vanilla_2_2),
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -3280,6 +3285,30 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::SwitchPT { target });
         }
     }
+    // CR 400.7j + CR 608.2h: Zack Fair — "attach an Equipment that was attached
+    // to ~ to that creature". The attachment is battlefield Equipment whose
+    // host was the ability source (including LKI after self-sacrifice).
+    if let Some(((), recipient_text)) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("attach ").parse(input)?;
+        let (input, _) = opt(alt((tag("an "), tag("up to one ")))).parse(input)?;
+        let (input, _) = tag("equipment that was attached to ").parse(input)?;
+        let (input, _) = alt((tag("~"), tag("this equipment"))).parse(input)?;
+        value((), tag(" to ")).parse(input)
+    }) {
+        let (target, _target_rem) = parse_attach_recipient(recipient_text, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_target_rem, text);
+        if _target_rem.trim().is_empty() {
+            return Some(UtilityImperativeAst::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .properties(vec![FilterProp::AttachedToSource]),
+                ),
+                target,
+            });
+        }
+    }
     if let Some(((attachment, target), rem)) = nom_on_lower(text, lower, |input| {
         preceded(tag("attach "), parse_attach_anaphor_to_token).parse(input)
     }) {
@@ -3487,6 +3516,16 @@ fn parse_prevent_effect(text: &str) -> Effect {
         PreventionScope::AllDamage
     };
 
+    // CR 511.2 + CR 615: the trailing duration window ("this combat" ->
+    // UntilEndOfCombat, "this turn" -> UntilEndOfTurn) bounds how long the
+    // prevention shield persists. `parse_duration` matches the demonstrative
+    // phrase at the END of the clause (target/scope are scanned mid-string),
+    // so scan word boundaries for it. Absent -> `None` (legacy end-of-turn
+    // prune via `is_shield`).
+    let prevention_duration =
+        nom_primitives::scan_preceded(rest, crate::parser::oracle_nom::duration::parse_duration)
+            .map(|(_, d, _)| d);
+
     // Determine amount: "all damage" vs "the next N damage"
     let amount = if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
         PreventionAmount::All
@@ -3524,6 +3563,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
             damage_source_filter: Some(TargetFilter::And {
                 filters: vec![TargetFilter::ParentTargetSlot { index: 0 }, source_filter],
             }),
+            prevention_duration,
         };
     }
 
@@ -3565,6 +3605,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
         target,
         scope,
         damage_source_filter,
+        prevention_duration,
     }
 }
 
@@ -8557,6 +8598,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_attach_equipment_was_attached_to_self_to_parent_target() {
+        let input = "attach an Equipment that was attached to ~ to that creature";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        match attachment {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Equipment")));
+                assert!(tf.properties.contains(&FilterProp::AttachedToSource));
+            }
+            other => panic!("expected typed Equipment filter, got {other:?}"),
+        }
+        assert!(matches!(target, TargetFilter::ParentTarget));
+    }
+
+    #[test]
     fn parse_attach_target_equipment_to_target_creature() {
         let input = "attach target Equipment you control to target creature you control";
         let lower = input.to_lowercase();
@@ -12262,6 +12324,43 @@ mod tests {
             damage_source_filter, None,
             "recipient prevent must not carry a source filter"
         );
+    }
+
+    /// CR 511.2 + CR 615 (issue #2924, Bug B): the trailing duration window on a
+    /// prevent clause is captured into `prevention_duration`. "this combat" ->
+    /// `UntilEndOfCombat` (Suppressor Skyguard — must NOT bleed into a later
+    /// combat the same turn), "this turn" -> `UntilEndOfTurn`, and no stated
+    /// window -> `None` (legacy end-of-turn `is_shield` prune).
+    #[test]
+    fn prevent_clause_captures_trailing_duration_window() {
+        let cases = [
+            (
+                "Prevent all combat damage that would be dealt to you this combat.",
+                Some(Duration::UntilEndOfCombat),
+            ),
+            (
+                "Prevent all combat damage that would be dealt to you this turn.",
+                Some(Duration::UntilEndOfTurn),
+            ),
+            (
+                "Prevent all combat damage that would be dealt to you.",
+                None,
+            ),
+        ];
+        for (text, expected) in cases {
+            let effect = parse_prevent_effect(text);
+            let Effect::PreventDamage {
+                prevention_duration,
+                ..
+            } = effect
+            else {
+                panic!("expected PreventDamage, got {effect:?}");
+            };
+            assert_eq!(
+                prevention_duration, expected,
+                "wrong prevention_duration for {text:?}"
+            );
+        }
     }
 
     /// CR 119.3 + CR 608.2c: Kaya's Wrath lifegain (issue #2943) must parse

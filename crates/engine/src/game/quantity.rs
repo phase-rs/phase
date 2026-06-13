@@ -318,6 +318,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
@@ -489,6 +490,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
@@ -2220,6 +2222,20 @@ fn resolve_ref(
             .get(&ctx.self_object())
             .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
             .unwrap_or(0),
+        QuantityRef::AdditionalCostPaymentCountFor {
+            origin,
+            origin_ordinal,
+        } => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| {
+                let count = origin_ordinal.map_or_else(
+                    || obj.instance_payment_count(*origin),
+                    |ordinal| obj.instance_payment_count_for_ordinal(*origin, ordinal),
+                );
+                u32_to_i32_saturating(count)
+            })
+            .unwrap_or(0),
         QuantityRef::ConvokedCreatureCount => state
             .objects
             .get(&ctx.self_object())
@@ -3627,6 +3643,24 @@ pub(crate) fn resolve_player_count(
                                         crate::game::targeting::extract_player_from_event(e, state)
                                     });
                                 triggering.is_none_or(|pid| pid != p.id)
+                            }
+                        }
+                        // CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the
+                        // triggering/attacking player who is NOT in that player's
+                        // attacked-this-combat set (Suppressor Skyguard: "that
+                        // player has another opponent who isn't being attacked").
+                        // Resolves the attacker via `triggering_event_player`,
+                        // which reads `current_trigger_event` OR the detection-time
+                        // thread-local — both intervening-if detection and the
+                        // resolution recheck see `current_trigger_event == None`,
+                        // so the fallback is mandatory here.
+                        PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
+                            match triggering_event_player(state) {
+                                Some(atk) => {
+                                    crate::game::players::is_opponent(state, atk, p.id)
+                                        && !state.player_attacked_player_this_combat(atk, p.id)
+                                }
+                                None => false,
                             }
                         }
                         // CR 608.2c + CR 701.38: Match each player who cast a
@@ -9996,5 +10030,85 @@ mod tests {
             resolve_quantity(&state, &choice1, PlayerId(0), ObjectId(0)),
             0
         );
+    }
+
+    /// CR 506.2 + CR 508.6 + CR 603.4 (issue #2924, Bug A): Suppressor Skyguard's
+    /// `PlayerCount { OpponentOfTriggeringPlayerNotAttacked }` intervening-if must
+    /// resolve through the trigger-DETECTION path, where `current_trigger_event`
+    /// is `None` and the attacking player is carried only in the candidate event.
+    ///
+    /// This drives `resolve_quantity_for_trigger_check` (which sets the
+    /// `DETECTION_TRIGGER_EVENT` thread-local) rather than `resolve_player_count`
+    /// directly — a direct call would see `current_trigger_event == None`, fail to
+    /// identify the attacker, and resolve to 0 (the Correction-1 bug this test
+    /// guards). With P1 attacking only P0 (3-player game), P1's other opponent P2
+    /// is un-attacked so the count is 1; when P1 also attacks P2 the count is 0.
+    #[test]
+    fn unattacked_opponent_count_resolves_via_detection_trigger_event() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::events::GameEvent;
+        use crate::types::format::FormatConfig;
+
+        // P0 controls the Skyguard (defending player); P1 is the attacker; P2 is
+        // P1's other opponent.
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+
+        let build_state = |attacked: &[PlayerId]| {
+            let mut state = GameState::new(FormatConfig::commander(), 3, 7);
+            // P1's attacking creature.
+            let attacker = create_object(
+                &mut state,
+                CardId(900),
+                p1,
+                "Raging Goblin".to_string(),
+                Zone::Battlefield,
+            );
+            let mut combat = CombatState::default();
+            for &def in attacked {
+                combat
+                    .attacked_defenders_this_combat
+                    .entry(p1)
+                    .or_default()
+                    .insert(def);
+                combat
+                    .attackers
+                    .push(AttackerInfo::new(attacker, AttackTarget::Player(def), def));
+            }
+            state.combat = Some(combat);
+            (state, attacker)
+        };
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentOfTriggeringPlayerNotAttacked,
+            },
+        };
+        let attack_event =
+            |attacker: ObjectId, attacked: &[PlayerId]| GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker],
+                defending_player: attacked[0],
+                attacks: attacked
+                    .iter()
+                    .map(|&d| (attacker, AttackTarget::Player(d)))
+                    .collect(),
+            };
+
+        // APPLY: P1 attacks only P0, so opponent P2 is un-attacked → count 1.
+        let (state, attacker) = build_state(&[p0]);
+        let event = attack_event(attacker, &[p0]);
+        assert!(
+            state.current_trigger_event.is_none(),
+            "detection path requires current_trigger_event to be None"
+        );
+        let count = resolve_quantity_for_trigger_check(&state, &expr, p0, attacker, Some(&event));
+        assert_eq!(count, 1, "P2 is P1's un-attacked opponent → count 1");
+
+        // CONTROL: P1 attacks both P0 and P2 (every opponent attacked) → count 0.
+        let (state, attacker) = build_state(&[p0, p2]);
+        let event = attack_event(attacker, &[p0, p2]);
+        let count = resolve_quantity_for_trigger_check(&state, &expr, p0, attacker, Some(&event));
+        assert_eq!(count, 0, "every opponent of P1 is attacked → count 0");
     }
 }

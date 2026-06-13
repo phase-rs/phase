@@ -17,9 +17,9 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownProfile, LibraryPosition,
-    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CopyRetargetPermission, CounterSourceRider, Effect, FaceDownBody, FaceDownProfile,
+    LibraryPosition, MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -572,190 +572,201 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 // Handles patterns like "you lose 1 life and create a Treasure token".
                 // Uses a restricted verb list to avoid false positives on noun phrases
                 // like "target creature and all other creatures" or "it and each other".
-                if paren_depth == 0
-                    && !in_single_quote
-                    && !in_double_quote
-                    && current.ends_with(" and ")
-                {
+                if paren_depth == 0 && !in_double_quote && current_ends_with_bare_and(&current) {
                     let remainder: String = chars.clone().collect();
                     let remainder_trimmed = remainder.trim_start();
-                    // Suppress split when "and put" follows "from among" — the
-                    // "put into hand / onto battlefield" is part of the same
-                    // compound action, not a separate clause.
-                    let before_and = &current[..current.len() - " and ".len()];
-                    let before_lower = before_and.to_ascii_lowercase();
-                    // CR 603.7a: Suppress bare-and splitting inside temporal prefix
-                    // clauses (e.g., "at the beginning of your next upkeep, draw a
-                    // card and gain 3 life"). The entire compound inner effect must
-                    // stay as one clause so CreateDelayedTrigger wraps all effects.
-                    // CR 608.2c: Preserve targeted compound actions so the effect
-                    // parser can retarget continuation clauses like
-                    // "tap target creature ... and put a stun counter on it".
-                    let targeted_compound_continuation =
-                        nom_primitives::scan_contains(&before_lower, "target")
-                            && tag::<_, _, OracleError<'_>>("put ")
+                    // CR 608.2c: Card-name possessives like "~'s controller …" open
+                    // quote mode on the apostrophe; suppress bare-and splitting inside
+                    // that quote so "~'s controller sacrifices it and draws a card"
+                    // stays one clause (Hold for Ransom). Zack Fair's counter-move +
+                    // attach tail is the sole exception: split at " and attach an
+                    // Equipment that was attached …" even inside quote mode.
+                    let allow_single_quote_attach_split = in_single_quote
+                        && starts_attach_equipment_was_attached_clause(remainder_trimmed);
+                    if !in_single_quote || allow_single_quote_attach_split {
+                        // Suppress split when "and put" follows "from among" — the
+                        // "put into hand / onto battlefield" is part of the same
+                        // compound action, not a separate clause.
+                        let before_and = &current[..current.len() - " and ".len()];
+                        let before_lower = before_and.to_ascii_lowercase();
+                        // CR 603.7a: Suppress bare-and splitting inside temporal prefix
+                        // clauses (e.g., "at the beginning of your next upkeep, draw a
+                        // card and gain 3 life"). The entire compound inner effect must
+                        // stay as one clause so CreateDelayedTrigger wraps all effects.
+                        // CR 608.2c: Preserve targeted compound actions so the effect
+                        // parser can retarget continuation clauses like
+                        // "tap target creature ... and put a stun counter on it".
+                        let targeted_compound_continuation =
+                            nom_primitives::scan_contains(&before_lower, "target")
+                                && tag::<_, _, OracleError<'_>>("put ")
+                                    .parse(remainder_trimmed)
+                                    .is_ok();
+                        // CR 615 + CR 615.5: "[If damage would be dealt to <target>
+                        // this turn,] prevent that damage and put that many <kind>
+                        // counter(s) on <target>" — the rider is the prevention
+                        // follow-up, not a separate clause. The full sentence is
+                        // owned by `try_parse_conditional_damage_prevention_with_followup`
+                        // and bisecting here would strip the rider into a fresh
+                        // chunk whose "on it" pronoun re-binds to the trigger source
+                        // via `resolve_pronoun_target` instead of the parent
+                        // target. Same suppression shape as the "tap target
+                        // creature ... and put a stun counter on it" continuation.
+                        let prevent_then_put_continuation =
+                            nom_primitives::scan_contains(&before_lower, "prevent that damage")
+                                && tag::<_, _, OracleError<'_>>("put ")
+                                    .parse(remainder_trimmed)
+                                    .is_ok();
+                        // CR 701.18a + CR 701.23: "search [zones] for [filter] and exile them"
+                        // is a single compound search-and-exile action — keep it together so
+                        // the imperative dispatcher can recognize the multi-zone pattern.
+                        // Accepts "search ..." and "then search ..." prefixes, and either
+                        // "with that name" or "with the same name as that card" suffixes.
+                        let has_search_prefix =
+                            nom_primitives::scan_contains(&before_lower, "search ");
+                        let search_with_that_name = has_search_prefix
+                            && parse_search_exile_name_suffix(&before_lower).is_ok()
+                            && tag::<_, _, OracleError<'_>>("exile them")
                                 .parse(remainder_trimmed)
                                 .is_ok();
-                    // CR 615 + CR 615.5: "[If damage would be dealt to <target>
-                    // this turn,] prevent that damage and put that many <kind>
-                    // counter(s) on <target>" — the rider is the prevention
-                    // follow-up, not a separate clause. The full sentence is
-                    // owned by `try_parse_conditional_damage_prevention_with_followup`
-                    // and bisecting here would strip the rider into a fresh
-                    // chunk whose "on it" pronoun re-binds to the trigger source
-                    // via `resolve_pronoun_target` instead of the parent
-                    // target. Same suppression shape as the "tap target
-                    // creature ... and put a stun counter on it" continuation.
-                    let prevent_then_put_continuation =
-                        nom_primitives::scan_contains(&before_lower, "prevent that damage")
-                            && tag::<_, _, OracleError<'_>>("put ")
-                                .parse(remainder_trimmed)
-                                .is_ok();
-                    // CR 701.18a + CR 701.23: "search [zones] for [filter] and exile them"
-                    // is a single compound search-and-exile action — keep it together so
-                    // the imperative dispatcher can recognize the multi-zone pattern.
-                    // Accepts "search ..." and "then search ..." prefixes, and either
-                    // "with that name" or "with the same name as that card" suffixes.
-                    let has_search_prefix = nom_primitives::scan_contains(&before_lower, "search ");
-                    let search_with_that_name = has_search_prefix
-                        && parse_search_exile_name_suffix(&before_lower).is_ok()
-                        && tag::<_, _, OracleError<'_>>("exile them")
-                            .parse(remainder_trimmed)
-                            .is_ok();
-                    // CR 707.9: ", except <body> and <body> [and …]" — inside
-                    // a copy-effect except clause, " and " is an internal
-                    // delimiter between recognised body shapes (SetName, P/T,
-                    // type additions, "has this ability", etc.) handled by
-                    // the shared `become_copy_except` parser. The chain
-                    // splitter must NOT bisect the body at this " and ", or
-                    // the second body fragment ("and she has this ability")
-                    // becomes a stray sub_ability and never reaches the
-                    // except parser.
-                    //
-                    // `scan_contains` matches phrases starting at word
-                    // boundaries (post-space), so we probe for the bare word
-                    // "except " rather than ", except " — a leading comma
-                    // never sits at a word start.
-                    let inside_except_clause =
-                        nom_primitives::scan_contains(&before_lower, "except ");
-                    let choice_partition_remainder =
-                        nom_primitives::scan_contains(&before_lower, "the chosen card")
-                            && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
-                                .parse(remainder_trimmed)
-                                .is_ok();
-                    let sacrifice_rest_remainder = preceded(
-                        opt(tag::<_, _, OracleError<'_>>("then ")),
-                        alt((
-                            tag::<_, _, OracleError<'_>>("sacrifices the rest"),
-                            tag("sacrifice the rest"),
-                        )),
-                    )
-                    .parse(remainder_trimmed)
-                    .is_ok();
-                    // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>"
-                    // (and analogous "you and <player-noun> each <body>" compound
-                    // subjects) is a SINGLE compound subject distributing the body
-                    // across two recipients — not two separate clauses.
-                    // `try_parse_compound_subject_each` in the effect parser owns the
-                    // distribution logic; here we must keep the text as one chunk so
-                    // the combinator sees the full prefix.
-                    //
-                    // The detection is tight: the chunk-so-far must be exactly the
-                    // first-subject token — "you" (player axis) or "~" (the
-                    // self-reference, object axis; e.g. Gogo's "~ and that creature
-                    // each ...") — so we do not suppress mid-sentence "you draw a
-                    // card and that player draws a card" (two clauses). The remainder
-                    // must start with a compound-subject noun phrase followed by
-                    // " each " — distinguishing it from the standard clause-starter
-                    // "that player <verb>" (which is a separate clause).
-                    // CR 603.12 + CR 109.5 + CR 115.1: strip leading reflexive
-                    // connector ("if you do, ", "when you do, ", ...) so the
-                    // compound-subject body stays intact even when introduced by
-                    // an "If you do," reflexive frame (Gogo, Mysterious Mime).
-                    let trimmed = before_lower.trim_end();
-                    let first_subject_token =
+                        // CR 707.9: ", except <body> and <body> [and …]" — inside
+                        // a copy-effect except clause, " and " is an internal
+                        // delimiter between recognised body shapes (SetName, P/T,
+                        // type additions, "has this ability", etc.) handled by
+                        // the shared `become_copy_except` parser. The chain
+                        // splitter must NOT bisect the body at this " and ", or
+                        // the second body fragment ("and she has this ability")
+                        // becomes a stray sub_ability and never reaches the
+                        // except parser.
+                        //
+                        // `scan_contains` matches phrases starting at word
+                        // boundaries (post-space), so we probe for the bare word
+                        // "except " rather than ", except " — a leading comma
+                        // never sits at a word start.
+                        let inside_except_clause =
+                            nom_primitives::scan_contains(&before_lower, "except ");
+                        let choice_partition_remainder =
+                            nom_primitives::scan_contains(&before_lower, "the chosen card")
+                                && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
+                                    .parse(remainder_trimmed)
+                                    .is_ok();
+                        let sacrifice_rest_remainder = preceded(
+                            opt(tag::<_, _, OracleError<'_>>("then ")),
+                            alt((
+                                tag::<_, _, OracleError<'_>>("sacrifices the rest"),
+                                tag("sacrifice the rest"),
+                            )),
+                        )
+                        .parse(remainder_trimmed)
+                        .is_ok();
+                        // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>"
+                        // (and analogous "you and <player-noun> each <body>" compound
+                        // subjects) is a SINGLE compound subject distributing the body
+                        // across two recipients — not two separate clauses.
+                        // `try_parse_compound_subject_each` in the effect parser owns the
+                        // distribution logic; here we must keep the text as one chunk so
+                        // the combinator sees the full prefix.
+                        //
+                        // The detection is tight: the chunk-so-far must be exactly the
+                        // first-subject token — "you" (player axis) or "~" (the
+                        // self-reference, object axis; e.g. Gogo's "~ and that creature
+                        // each ...") — so we do not suppress mid-sentence "you draw a
+                        // card and that player draws a card" (two clauses). The remainder
+                        // must start with a compound-subject noun phrase followed by
+                        // " each " — distinguishing it from the standard clause-starter
+                        // "that player <verb>" (which is a separate clause).
+                        // CR 603.12 + CR 109.5 + CR 115.1: strip leading reflexive
+                        // connector ("if you do, ", "when you do, ", ...) so the
+                        // compound-subject body stays intact even when introduced by
+                        // an "If you do," reflexive frame (Gogo, Mysterious Mime).
+                        let trimmed = before_lower.trim_end();
+                        let first_subject_token =
                         crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(
                             trimmed,
                         )
                         .map(|(rest, _)| rest.trim())
                         .unwrap_or(trimmed);
-                    let compound_subject_each = (first_subject_token == "you"
-                        || first_subject_token == "~")
-                        && remainder_trimmed_starts_with_compound_subject_each(remainder_trimmed);
-                    if compound_subject_each {
-                        compound_subject_each_sticky = true;
-                    }
-                    // CR 608.2c: "Otherwise, X and Y" — the body following an
-                    // "otherwise" prefix is a single Otherwise branch even when
-                    // it contains an internal " and ". Without this guard the
-                    // splitter peels "Y" off as a sibling clause that then
-                    // attaches as a sub_ability of the conditional's PARENT
-                    // effect instead of the else_ability body — the exemplar
-                    // is Approach of the Second Sun's "Otherwise, put ~ into
-                    // its owner's library seventh from the top and you gain
-                    // 7 life" where "you gain 7 life" must stay inside the
-                    // otherwise branch.
-                    //
-                    // Match only the printed Oracle-text shapes ("otherwise,
-                    // " and "otherwise "), mirroring the otherwise-prefix
-                    // table in `starts_prefix_clause`. This rejects accidental
-                    // prefix overlap from any future text whose first word
-                    // shares those letters but is not the conditional fallback
-                    // keyword.
-                    let inside_otherwise_body = alt((
-                        tag::<_, _, OracleError<'_>>("otherwise, "),
-                        tag("otherwise "),
-                    ))
-                    .parse(before_lower.trim_start())
-                    .is_ok();
-                    // CR 613.1d + CR 613.4b: "have base power and toughness N/N"
-                    // is a layer-7b continuous modification, never an imperative
-                    // clause starter. Suppress the split so
-                    // `parse_continuous_modifications` can handle the compound
-                    // (e.g. "lose all abilities and have base power and toughness
-                    // 1/1 until end of turn") as a single GenericEffect with the
-                    // correct `affected` filter inherited from the subject.
-                    let have_base_pt_continuation =
-                        starts_have_base_power_toughness(remainder_trimmed);
-                    let continuous_modifier_conjunct =
-                        starts_you_control_subject_predicate(&before_lower)
-                            && alt((
-                                tag::<_, _, OracleError<'_>>("gain "),
-                                tag("gains "),
-                                tag("have "),
-                                tag("has "),
-                            ))
-                            .parse(remainder_trimmed)
-                            .is_ok();
-                    // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
-                    // the modifier clause is part of the same RollDie effect
-                    // (it shifts the natural result) and must NOT be peeled
-                    // off as a sibling clause. Without this suppression
-                    // "Roll a d20 and add the number of cards in your hand"
-                    // would split into ["Roll a d20", "add ..."] and the
-                    // modifier silently becomes an Unimplemented sub_ability
-                    // — bypassing the typed modifier path on every D&D-set
-                    // d20 card.
-                    let roll_die_modifier_continuation = ends_with_roll_die_phrase(&before_lower)
-                        && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
-                            .parse(remainder_trimmed)
-                            .is_ok();
-                    // CR 705 + CR 707.10c: Comma splitting already keeps `if …`
-                    // prefix clauses intact (see `starts_prefix_clause` in
-                    // `split_comma_clause_boundary`), but a blocked comma leaves
-                    // `, and ` in the buffer — which then hits this bare-`and`
-                    // path and bisects the body anyway. Krark, the Thumbless:
-                    // "If you win the flip, copy that spell, and you may choose
-                    // new targets for the copy" must reach coin-flip branch
-                    // parsing as one chunk so the CopyMayRetarget continuation
-                    // absorbs the retarget grant. Only suppress when the ` and `
-                    // immediately follows a comma inside a prefix clause — bare
-                    // ` and ` without a comma (Chain cycle, many copies) must still
-                    // split so the retarget grant reaches followup absorption.
-                    let trimmed_before = before_lower.trim_end();
-                    let inside_prefix_comma_and_continuation = trimmed_before.ends_with(',')
-                        && starts_prefix_clause(trimmed_before.trim_end_matches(',').trim_end());
-                    let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
+                        let compound_subject_each = (first_subject_token == "you"
+                            || first_subject_token == "~")
+                            && remainder_trimmed_starts_with_compound_subject_each(
+                                remainder_trimmed,
+                            );
+                        if compound_subject_each {
+                            compound_subject_each_sticky = true;
+                        }
+                        // CR 608.2c: "Otherwise, X and Y" — the body following an
+                        // "otherwise" prefix is a single Otherwise branch even when
+                        // it contains an internal " and ". Without this guard the
+                        // splitter peels "Y" off as a sibling clause that then
+                        // attaches as a sub_ability of the conditional's PARENT
+                        // effect instead of the else_ability body — the exemplar
+                        // is Approach of the Second Sun's "Otherwise, put ~ into
+                        // its owner's library seventh from the top and you gain
+                        // 7 life" where "you gain 7 life" must stay inside the
+                        // otherwise branch.
+                        //
+                        // Match only the printed Oracle-text shapes ("otherwise,
+                        // " and "otherwise "), mirroring the otherwise-prefix
+                        // table in `starts_prefix_clause`. This rejects accidental
+                        // prefix overlap from any future text whose first word
+                        // shares those letters but is not the conditional fallback
+                        // keyword.
+                        let inside_otherwise_body = alt((
+                            tag::<_, _, OracleError<'_>>("otherwise, "),
+                            tag("otherwise "),
+                        ))
+                        .parse(before_lower.trim_start())
+                        .is_ok();
+                        // CR 613.1d + CR 613.4b: "have base power and toughness N/N"
+                        // is a layer-7b continuous modification, never an imperative
+                        // clause starter. Suppress the split so
+                        // `parse_continuous_modifications` can handle the compound
+                        // (e.g. "lose all abilities and have base power and toughness
+                        // 1/1 until end of turn") as a single GenericEffect with the
+                        // correct `affected` filter inherited from the subject.
+                        let have_base_pt_continuation =
+                            starts_have_base_power_toughness(remainder_trimmed);
+                        let continuous_modifier_conjunct =
+                            starts_you_control_subject_predicate(&before_lower)
+                                && alt((
+                                    tag::<_, _, OracleError<'_>>("gain "),
+                                    tag("gains "),
+                                    tag("have "),
+                                    tag("has "),
+                                ))
+                                .parse(remainder_trimmed)
+                                .is_ok();
+                        // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
+                        // the modifier clause is part of the same RollDie effect
+                        // (it shifts the natural result) and must NOT be peeled
+                        // off as a sibling clause. Without this suppression
+                        // "Roll a d20 and add the number of cards in your hand"
+                        // would split into ["Roll a d20", "add ..."] and the
+                        // modifier silently becomes an Unimplemented sub_ability
+                        // — bypassing the typed modifier path on every D&D-set
+                        // d20 card.
+                        let roll_die_modifier_continuation =
+                            ends_with_roll_die_phrase(&before_lower)
+                                && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
+                                    .parse(remainder_trimmed)
+                                    .is_ok();
+                        // CR 705 + CR 707.10c: Comma splitting already keeps `if …`
+                        // prefix clauses intact (see `starts_prefix_clause` in
+                        // `split_comma_clause_boundary`), but a blocked comma leaves
+                        // `, and ` in the buffer — which then hits this bare-`and`
+                        // path and bisects the body anyway. Krark, the Thumbless:
+                        // "If you win the flip, copy that spell, and you may choose
+                        // new targets for the copy" must reach coin-flip branch
+                        // parsing as one chunk so the CopyMayRetarget continuation
+                        // absorbs the retarget grant. Only suppress when the ` and `
+                        // immediately follows a comma inside a prefix clause — bare
+                        // ` and ` without a comma (Chain cycle, many copies) must still
+                        // split so the retarget grant reaches followup absorption.
+                        let trimmed_before = before_lower.trim_end();
+                        let inside_prefix_comma_and_continuation = trimmed_before.ends_with(',')
+                            && starts_prefix_clause(
+                                trimmed_before.trim_end_matches(',').trim_end(),
+                            );
+                        let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -770,29 +781,34 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || continuous_modifier_conjunct
                         || roll_die_modifier_continuation
                         || inside_prefix_comma_and_continuation;
-                    if !suppress && starts_bare_and_clause(remainder_trimmed) {
-                        push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
-                        current.clear();
-                        compound_subject_each_sticky = false;
-                    } else if !suppress {
-                        // CR 508.1d / CR 509.1c: "<subj> gains <keyword> until end
-                        // of turn and <attack|must-be-blocked> ... if able" — the
-                        // trailing conjunct is a recognized standalone combat
-                        // requirement that is NOT verb-headed by any entry in
-                        // `starts_bare_and_clause`'s list, so the bare-and logic
-                        // above never splits it. Split it here and prepend
-                        // conjunct 1's subject so each half reaches its existing
-                        // parser with the correct `affected`. The combat-requirement
-                        // gate keeps multi-keyword lists ("gains flying and haste")
-                        // — which do NOT match the recognizer — on the untouched
-                        // single-clause path.
-                        if let Some(prepend) =
-                            combat_requirement_conjunct_prepend(before_and, remainder_trimmed)
-                        {
+                        if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                             current.clear();
                             compound_subject_each_sticky = false;
-                            current.push_str(&prepend);
+                        } else if !suppress {
+                            // CR 508.1d / CR 509.1c: "<subj> gains <keyword> until end
+                            // of turn and <attack|must-be-blocked> ... if able" — the
+                            // trailing conjunct is a recognized standalone combat
+                            // requirement that is NOT verb-headed by any entry in
+                            // `starts_bare_and_clause`'s list, so the bare-and logic
+                            // above never splits it. Split it here and prepend
+                            // conjunct 1's subject so each half reaches its existing
+                            // parser with the correct `affected`. The combat-requirement
+                            // gate keeps multi-keyword lists ("gains flying and haste")
+                            // — which do NOT match the recognizer — on the untouched
+                            // single-clause path.
+                            if let Some(prepend) =
+                                combat_requirement_conjunct_prepend(before_and, remainder_trimmed)
+                            {
+                                push_clause_chunk(
+                                    &mut chunks,
+                                    before_and,
+                                    Some(ClauseBoundary::Comma),
+                                );
+                                current.clear();
+                                compound_subject_each_sticky = false;
+                                current.push_str(&prepend);
+                            }
                         }
                     }
                 }
@@ -1318,6 +1334,24 @@ fn controlled_creature_each_subject_starts(lower: &str) -> bool {
             .is_err()
 }
 
+/// CR 608.2c: Zack Fair — "put ~'s counters … and attach an Equipment that was
+/// attached …". Recognized as a bare-and tail even when ~'s quote mode is active.
+fn starts_attach_equipment_was_attached_clause(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let result = tag::<_, _, OracleError<'_>>("attach an equipment that was attached ")
+        .parse(lower.as_str());
+    result.is_ok()
+}
+
+/// True when `current` ends with the bare-and delimiter during character-by-
+/// character clause chunking. Must match only the terminal suffix — a naive
+/// `take_until(" and ")` from the start binds the first internal " and " (e.g.
+/// Gogo's "~ and that creature each get +2/+0 and gain …") and returns false.
+fn current_ends_with_bare_and(current: &str) -> bool {
+    // allow-noncombinator: terminal suffix probe on incremental chunk buffer during char scan, not parsing dispatch.
+    current.ends_with(" and ")
+}
+
 /// Restricted clause-start check for bare " and " splitting (not after comma).
 /// Only includes imperative verbs that are unambiguously clause starters —
 /// excludes bare pronouns/determiners like "all", "each", "it", "that", "those"
@@ -1394,6 +1428,8 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // 21-arm limit; adding it inline would push the cluster over and trip
     // the `Choice<...>` trait-bound check at compile time.
     .or(value((), tag("puts ")))
+    // CR 608.2c: "put … and attach an Equipment that was attached …" (Zack Fair).
+    .or(value((), tag("attach an equipment that was attached ")))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
         value((), tag("you gain ")),
@@ -3290,6 +3326,9 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
             return Some(FaceDownProfile {
                 power,
                 toughness,
+                // CR 708.2a: "They're ... creatures." is always a creature body —
+                // Creature is implicit and `extra_core_types` layer on top.
+                body: crate::types::ability::FaceDownBody::Creature,
                 extra_core_types,
                 subtypes,
                 ward: None,
@@ -3321,6 +3360,131 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
             continue;
         }
         // Unrecognized token before "creature(s)" → not a parseable profile.
+        return None;
+    }
+}
+
+/// CR 708.2a + CR 205.1a: Parse the singular "It's a/an <characteristics>
+/// <core-type-noun>." face-down characteristic clause for a permanent put onto
+/// the battlefield face down (Yedora, Grave Gardener: "It's a Forest land.").
+/// Returns `None` when the sentence is not an it's-characteristics clause.
+///
+/// Built entirely from typed combinators (no card-named hardcode), mirroring
+/// `parse_theyre_face_down_profile` for the plural creature form: optional N/M
+/// P/T, then accumulated extra core types and subtypes, terminating on a
+/// core-type noun. The terminating noun chooses the body — "creature(s)" →
+/// `FaceDownBody::Creature` (Creature implicit, 2/2 default), any other core
+/// type ("land", "artifact", ...) → `FaceDownBody::Noncreature` with that core
+/// type explicit and no power/toughness (CR 208.1).
+pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile> {
+    // CR 205.1a: "It's a / It is a <characteristics> <core-type>."
+    let (mut rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it's an "),
+        tag("it's a "),
+        tag("it is an "),
+        tag("it is a "),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // CR 208.1: optional leading N/M power/toughness ("It's a 0/0 ... creature.").
+    let (power, toughness) = match nom_primitives::parse_pt_value(rest) {
+        Ok((after_pt, (PtValue::Fixed(p), PtValue::Fixed(t)))) => {
+            rest = after_pt.trim_start();
+            (Some(p), Some(t))
+        }
+        // A non-literal (`*`/`X`) face-down P/T is not a "specified" characteristic.
+        Ok(_) => return None,
+        Err(_) => (None, None),
+    };
+
+    // Accumulate extra core types and subtypes until a terminating core-type
+    // noun. Creature is the only core type that maps to a creature body; every
+    // other core-type noun ("land", "artifact", ...) terminates a non-creature
+    // body whose core types come entirely from the effect.
+    let mut extra_core_types: Vec<CoreType> = Vec::new();
+    let mut subtypes: Vec<String> = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        // Terminator: a core-type noun then optional ".". The terminal noun maps
+        // directly to its `CoreType` — Creature is the only one that yields a
+        // creature body; every other core type ("land", "artifact", ...)
+        // terminates a non-creature body whose core types come from the effect.
+        if let Ok((after, terminal)) = alt((
+            value(
+                CoreType::Creature,
+                alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))),
+            ),
+            value(CoreType::Land, tag("land")),
+            value(CoreType::Artifact, tag("artifact")),
+            value(CoreType::Enchantment, tag("enchantment")),
+            value(CoreType::Planeswalker, tag("planeswalker")),
+        ))
+        .parse(rest)
+        {
+            let after = after.trim_start();
+            let after = opt(tag::<_, _, OracleError<'_>>("."))
+                .parse(after)
+                .map_or(after, |(r, _)| r);
+            if !after.trim().is_empty() {
+                return None;
+            }
+            return match terminal {
+                // "... creature(s)." — creature body, P/T defaults to 2/2.
+                CoreType::Creature => Some(FaceDownProfile {
+                    power,
+                    toughness,
+                    body: FaceDownBody::Creature,
+                    extra_core_types,
+                    subtypes,
+                    ward: None,
+                }),
+                // "... land/artifact/enchantment/planeswalker." — non-creature
+                // body whose core type is the terminal noun; no implicit
+                // Creature, no power/toughness.
+                ct => {
+                    if power.is_some() || toughness.is_some() {
+                        return None;
+                    }
+                    if !extra_core_types.contains(&ct) {
+                        extra_core_types.push(ct);
+                    }
+                    Some(FaceDownProfile {
+                        power: None,
+                        toughness: None,
+                        body: FaceDownBody::Noncreature,
+                        extra_core_types,
+                        subtypes,
+                        ward: None,
+                    })
+                }
+            };
+        }
+        // Non-terminal extra core type word (e.g. "artifact creature").
+        if let Ok((after, ct)) = alt((
+            value(
+                CoreType::Artifact,
+                tag::<_, _, OracleError<'_>>("artifact "),
+            ),
+            value(CoreType::Enchantment, tag("enchantment ")),
+            value(CoreType::Land, tag("land ")),
+            value(CoreType::Planeswalker, tag("planeswalker ")),
+        ))
+        .parse(rest)
+        {
+            if !extra_core_types.contains(&ct) {
+                extra_core_types.push(ct);
+            }
+            rest = after;
+            continue;
+        }
+        // Subtype (land type "Forest", creature type "Spirit", ...).
+        if let Some((canonical, consumed)) = crate::parser::oracle_util::parse_subtype(rest) {
+            subtypes.push(canonical);
+            rest = &rest[consumed..];
+            continue;
+        }
+        // Unrecognized token before a core-type noun → not a parseable profile.
         return None;
     }
 }
@@ -3564,6 +3728,8 @@ pub(super) fn parse_followup_continuation_ast(
     ctx: &mut ParseContext,
 ) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
+    let face_down_profile_spec =
+        parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
 
     match previous_effect {
         Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
@@ -4058,15 +4224,16 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
-        // CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures."
-        // after a put-face-down clause (the preceding Mill/ChangeZone/
-        // ChangeZoneAll carries `face_down_profile`). Refines the face-down
-        // profile with the specified characteristics. Placed BEFORE the broad
-        // Mill/Dig from-among arm so it claims the "They're ..." sentence.
+        // CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." (plural,
+        // Cyber-Controller) or "It's a/an [types] [subtype] <core-type>." (singular,
+        // Yedora's "It's a Forest land.") after a put-face-down clause (the
+        // preceding Mill/ChangeZone/ChangeZoneAll carries `face_down_profile`).
+        // Refines the face-down profile with the specified characteristics. Placed
+        // BEFORE the broad Mill/Dig from-among arm so it claims the spec sentence.
         Effect::Mill { .. } | Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
-            if parse_theyre_face_down_profile(&lower).is_some() =>
+            if face_down_profile_spec.is_some() =>
         {
-            let profile = parse_theyre_face_down_profile(&lower)?;
+            let profile = face_down_profile_spec.clone()?;
             Some(ContinuationAst::FaceDownProfileSpec { profile })
         }
         // "Put/return up to N [filter] from among them/those cards onto the
@@ -4607,6 +4774,36 @@ mod tests {
     fn bare_and_splits_draw_and_lose() {
         let chunks = clause_texts("draw a card and lose 1 life");
         assert_eq!(chunks, vec!["draw a card", "lose 1 life"]);
+    }
+
+    #[test]
+    fn bare_and_preserves_tilde_possessive_controller_draw() {
+        let chunks = clause_texts("~'s controller sacrifices it and draws a card");
+        assert_eq!(
+            chunks,
+            vec!["~'s controller sacrifices it and draws a card"]
+        );
+    }
+
+    #[test]
+    fn bare_and_starts_attach_clause() {
+        assert!(starts_bare_and_clause(
+            "attach an Equipment that was attached to ~ to that creature"
+        ));
+    }
+
+    #[test]
+    fn bare_and_splits_zack_fair_counter_move_and_attach() {
+        let chunks = clause_texts(
+            "put ~'s counters on that creature and attach an Equipment that was attached to ~ to that creature",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "put ~'s counters on that creature",
+                "attach an Equipment that was attached to ~ to that creature",
+            ]
+        );
     }
 
     #[test]
@@ -5955,6 +6152,46 @@ mod tests {
 
         // Not a they're clause → None.
         assert!(parse_theyre_face_down_profile("draw a card.").is_none());
+    }
+
+    /// CR 708.2a + CR 205.1a: the singular "It's a/an ... <core-type>." face-down
+    /// characteristic clause parses from parts for both non-creature (Yedora's
+    /// "It's a Forest land.") and creature bodies — no card-named hardcode.
+    #[test]
+    fn parse_its_face_down_profile_forest_land_and_siblings() {
+        // Yedora: "It's a Forest land." — a non-creature Land with the Forest
+        // land type, no power/toughness.
+        let forest = parse_its_face_down_profile("it's a forest land.").unwrap();
+        assert_eq!(forest.body, FaceDownBody::Noncreature);
+        assert_eq!(forest.extra_core_types, vec![CoreType::Land]);
+        assert_eq!(forest.subtypes, vec!["Forest".to_string()]);
+        assert_eq!(forest.power, None);
+        assert_eq!(forest.toughness, None);
+
+        // Sibling land type proves the class coverage (not Forest-specific).
+        let island = parse_its_face_down_profile("it's an island land").unwrap();
+        assert_eq!(island.body, FaceDownBody::Noncreature);
+        assert_eq!(island.extra_core_types, vec![CoreType::Land]);
+        assert_eq!(island.subtypes, vec!["Island".to_string()]);
+
+        // Non-creature artifact body (no land type).
+        let artifact = parse_its_face_down_profile("it's an artifact.").unwrap();
+        assert_eq!(artifact.body, FaceDownBody::Noncreature);
+        assert_eq!(artifact.extra_core_types, vec![CoreType::Artifact]);
+        assert!(artifact.power.is_none() && artifact.toughness.is_none());
+
+        // Singular creature body with P/T → creature body, explicit P/T override.
+        let creature = parse_its_face_down_profile("it's a 3/3 creature.").unwrap();
+        assert_eq!(creature.body, FaceDownBody::Creature);
+        assert_eq!(creature.power, Some(3));
+        assert_eq!(creature.toughness, Some(3));
+
+        // A non-creature body must reject a stray P/T ("It's a 2/2 land." is not
+        // a valid characteristic line — lands have no power/toughness).
+        assert!(parse_its_face_down_profile("it's a 2/2 land.").is_none());
+
+        // Not an it's-characteristics clause → None.
+        assert!(parse_its_face_down_profile("draw a card.").is_none());
     }
 
     /// CR 708.2a + CR 708.3 + CR 110.2a: Cyber-Controller's full two-sentence

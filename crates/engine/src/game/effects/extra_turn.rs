@@ -91,6 +91,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         }
     }
 

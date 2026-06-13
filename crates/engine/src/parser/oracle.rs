@@ -1885,6 +1885,7 @@ pub(crate) fn parse_oracle_ir(
             restrictions.push(ActivationRestriction::LevelCounterRange { minimum, maximum });
             def.activation_restrictions = restrictions;
             extract_cost_reduction_from_chain(&mut def);
+            extract_mana_spend_trigger_from_chain(&mut def);
             result.abilities.push(def);
             continue;
         }
@@ -1929,6 +1930,7 @@ pub(crate) fn parse_oracle_ir(
         result.triggers.extend(sc_triggers);
         for mut def in sc_abilities {
             extract_cost_reduction_from_chain(&mut def);
+            extract_mana_spend_trigger_from_chain(&mut def);
             result.abilities.push(def);
         }
         consumed
@@ -2324,6 +2326,7 @@ pub(crate) fn parse_oracle_ir(
                 // CR 601.2f: Extract self-referential cost reduction from the terminal
                 // sub_ability in the chain (it may be several levels deep).
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2361,6 +2364,7 @@ pub(crate) fn parse_oracle_ir(
                 // effects can reference "boast abilities" as a class.
                 def.ability_tag = Some(AbilityTag::Boast);
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2389,6 +2393,7 @@ pub(crate) fn parse_oracle_ir(
                     .push(ActivationRestriction::OnlyOnce);
                 def.ability_tag = Some(AbilityTag::Exhaust);
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2426,6 +2431,7 @@ pub(crate) fn parse_oracle_ir(
                 def.activation_restrictions
                     .push(ActivationRestriction::OnlyOnceEachTurn);
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2936,6 +2942,7 @@ pub(crate) fn parse_oracle_ir(
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: Some(TargetFilter::Typed(source_filter)),
+                    prevention_duration: None,
                 },
             ))
             .description(line.to_string());
@@ -3668,6 +3675,7 @@ fn parse_activated_ability_definition(
         def.activation_restrictions = constraints.restrictions;
     }
     extract_cost_reduction_from_chain(&mut def);
+    extract_mana_spend_trigger_from_chain(&mut def);
     (def, effect_text)
 }
 
@@ -4116,6 +4124,44 @@ fn strip_cost_reduction_node(
     strip_cost_reduction_node(&mut sub.sub_ability)
 }
 
+/// CR 106.6 + CR 603.3: Fold a trailing "When you spend this mana to cast a
+/// [filter] spell, [effect]" sub-ability into the parent mana effect's `grants`
+/// as a `ManaSpellGrant::TriggerOnSpend` (Lapis Orb of Dragonkind, Scaled
+/// Nurturer, Gilanra). Only applies to mana abilities; otherwise the clause
+/// drops to an `Effect:when` gap.
+fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Mana { .. }) {
+        return;
+    }
+    if let Some(grant) = strip_mana_spend_trigger_node(&mut def.sub_ability) {
+        if let Effect::Mana { grants, .. } = &mut *def.effect {
+            grants.push(grant);
+        }
+    }
+}
+
+/// Recursively walk the sub_ability chain. If a node is an `Unimplemented`
+/// "When you spend this mana to cast …" clause, remove it and return the parsed
+/// `ManaSpellGrant`.
+fn strip_mana_spend_trigger_node(
+    slot: &mut Option<Box<AbilityDefinition>>,
+) -> Option<crate::types::mana::ManaSpellGrant> {
+    let sub = slot.as_mut()?;
+    // Re-parse the gap node's text via the `Effect` accessor (rather than a
+    // hand-matched `Effect::Unimplemented` literal, which the parser-combinator
+    // gate forbids in parser modules).
+    if let Some(desc) = sub.effect.unimplemented_description() {
+        if let Some(grant) =
+            super::oracle_effect::mana::parse_mana_spend_trigger(&desc.to_lowercase())
+        {
+            // Remove this node, promote its child (usually None).
+            *slot = sub.sub_ability.take();
+            return Some(grant);
+        }
+    }
+    strip_mana_spend_trigger_node(&mut sub.sub_ability)
+}
+
 /// Find the position of ":" that indicates an activated ability cost/effect split.
 /// The left side must look like a cost (contains "{", or starts with cost-like words,
 /// or is a loyalty marker).
@@ -4273,13 +4319,21 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         // CR 602.2: "Any player may activate this ability." — strip as a recognized
         // annotation. This appears as a trailing sentence on activated abilities.
-        if let Some(prefix) = lower.strip_suffix("any player may activate this ability") {
-            let end = remaining.len() - "any player may activate this ability".len();
+        const ANY_PLAYER_ACTIVATE_SUFFIX: &str = "any player may activate this ability";
+        let any_player_suffix = all_consuming(terminated(
+            take_until::<_, _, OracleError<'_>>(ANY_PLAYER_ACTIVATE_SUFFIX),
+            tag::<_, _, OracleError<'_>>(ANY_PLAYER_ACTIVATE_SUFFIX),
+        ))
+        .parse(lower.as_str())
+        .is_ok();
+        if any_player_suffix {
+            let end = remaining.len() - ANY_PLAYER_ACTIVATE_SUFFIX.len();
+            let prefix = lower[..end].trim();
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints.any_player_may_activate = true;
-            if prefix.trim().is_empty() {
+            if prefix.is_empty() {
                 break;
             }
             continue;
@@ -7763,7 +7817,7 @@ mod tests {
         };
         assert_eq!(filters.len(), 2);
         for (filter, property) in [
-            (&filters[0], FilterProp::Attacking),
+            (&filters[0], FilterProp::Attacking { defender: None }),
             (&filters[1], FilterProp::Blocking),
         ] {
             let TargetFilter::Typed(typed) = filter else {
@@ -8758,6 +8812,70 @@ mod tests {
         let r = parse("({T}: Add {G}.)", "Forest", &[], &["Land"], &["Forest"]);
         // Reminder text should be stripped/skipped
         assert_eq!(r.abilities.len(), 0);
+    }
+
+    /// CR 106.6 + CR 603.3: Lapis Orb of Dragonkind — the trailing "When you
+    /// spend this mana to cast a Dragon creature spell, scry 2" clause folds into
+    /// the mana effect's `grants` as a `TriggerOnSpend`, consuming the sub-ability
+    /// (no leftover `Effect:when` gap). Issue #3101-style mana-spent trigger.
+    #[test]
+    fn lapis_orb_mana_spend_trigger_folds_into_grant() {
+        use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+        let r = parse(
+            "{T}: Add {U}. When you spend this mana to cast a Dragon creature spell, scry 2.",
+            "Lapis Orb of Dragonkind",
+            &[],
+            &["Artifact"],
+            &["Lapis Orb of Dragonkind"],
+        );
+        assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+        let Effect::Mana { grants, .. } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(grants.len(), 1, "grants: {:?}", grants);
+        let ManaSpellGrant::TriggerOnSpend {
+            restriction,
+            ability,
+        } = &grants[0]
+        else {
+            panic!("expected TriggerOnSpend, got {:?}", grants[0]);
+        };
+        assert_eq!(
+            *restriction,
+            Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string()))
+        );
+        assert!(
+            matches!(*ability.effect, Effect::Scry { .. }),
+            "reflexive effect must be Scry, got {:?}",
+            ability.effect
+        );
+        assert!(
+            r.abilities[0].sub_ability.is_none(),
+            "the spend-trigger clause must be folded out of the chain"
+        );
+    }
+
+    /// CR 106.6 + CR 603.3: a spell-referencing reflexive effect (Jade Orb of
+    /// Dragonkind — "it enters with an additional +1/+1 counter on it") is NOT
+    /// folded into a grant in the first pass — it stays a loud gap rather than
+    /// flipping the card to "supported" with a swallowed clause. Regression for
+    /// PR #3110 CI (coverage-honesty +2).
+    #[test]
+    fn jade_orb_spell_referencing_mana_spend_trigger_stays_a_gap() {
+        let r = parse(
+            "{T}: Add {G}. When you spend this mana to cast a Dragon creature spell, it enters with an additional +1/+1 counter on it.",
+            "Jade Orb of Dragonkind",
+            &[],
+            &["Artifact"],
+            &["Jade Orb of Dragonkind"],
+        );
+        let Effect::Mana { grants, .. } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+        };
+        assert!(
+            grants.is_empty(),
+            "spell-referencing effect must not fold into a grant (deferred): {grants:?}"
+        );
     }
 
     #[test]
@@ -9928,6 +10046,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -9957,6 +10077,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -11121,6 +11243,43 @@ mod tests {
             def.repeat_until, None,
             "the 'if you do' form is deferred — no predicate set, got {:?}",
             def.repeat_until,
+        );
+    }
+
+    #[test]
+    fn tainted_pact_parses_until_stop_repeat_and_unless_same_name_gate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityCondition, RepeatContinuation, TargetFilter};
+        let def = parse_effect_chain(
+            "Exile the top card of your library. You may put that card into your hand \
+             unless it has the same name as another card exiled this way. Repeat this process \
+             until you put a card into your hand or you exile two cards with the same name, \
+             whichever comes first.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::UntilStopConditions {
+                stop_on_put_to_hand: true,
+                stop_on_duplicate_exiled_names: true,
+            }),
+            "expected UntilStopConditions repeat_until, got {:?}",
+            def.repeat_until,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected optional put-to-hand sub_ability");
+        assert!(sub.optional, "put-to-hand rider must be optional");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetSharesNameWithOtherExiledThisWay {
+                    target: TargetFilter::ParentTarget,
+                }),
+            }),
+            "unless same-name gate must bind to ParentTarget, got {:?}",
+            sub.condition,
         );
     }
 
@@ -13259,9 +13418,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Colorless Eldrazi".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Colorless Eldrazi".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -13272,9 +13432,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Artifact".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -13285,18 +13446,74 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Assassin".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Assassin".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
+        );
+    }
+
+    /// CR 106.6: a bare "… or (to) activate an ability" suffix (no type qualifier)
+    /// permits casting the named spell type OR activating *any* ability — the
+    /// generic `AbilityActivationScope::Any` form (Sage of the Unknowable, Purple
+    /// Dragon Punks, Guidelight Optimizer).
+    #[test]
+    fn mana_spend_restriction_bare_activation_or_is_any_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an artifact spell or activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    /// CR 106.6: Sage of the Unknowable — "Spend this mana only to cast a
+    /// colorless spell or to activate an ability." The "or **to** activate an
+    /// ability" suffix is the generic any-ability form.
+    #[test]
+    fn mana_spend_restriction_colorless_or_to_activate_any_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast a colorless spell or to activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Colorless".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
         );
     }
 
     #[test]
-    fn mana_spend_restriction_bare_activation_or_is_unsupported() {
+    fn mana_spend_restriction_any_activation_tail_preserves_inner_or_spell_type() {
         let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
-            "spend this mana only to cast an artifact spell or activate an ability",
+            "spend this mana only to cast an instant or sorcery spell or activate an ability",
         );
-        assert_eq!(result, None);
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Instant or Sorcery".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_any_activation_tail_accepts_to_activate_plural() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast artifact spells or to activate abilities",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
     }
 
     #[test]
@@ -13306,9 +13523,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Ally".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Ally".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -15067,6 +15285,40 @@ mod tests {
         assert_eq!(trigger.mode, TriggerMode::DamageReceived);
         assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(trigger.valid_target, None);
+    }
+
+    #[test]
+    fn body_of_knowledge_damage_received_draws_event_amount() {
+        let result = parse(
+            "Body of Knowledge's power and toughness are each equal to the number of cards in your hand.\n\
+             You have no maximum hand size.\n\
+             Whenever this creature is dealt damage, draw that many cards.",
+            "Body of Knowledge",
+            &[],
+            &["Creature"],
+            &["Avatar"],
+        );
+        assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+        let trigger = &result.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::DamageReceived);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, None);
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("Body of Knowledge trigger must have an execute body");
+        match execute.effect.as_ref() {
+            Effect::Draw { count, target, .. } => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }
+                ));
+                assert_eq!(*target, TargetFilter::Controller);
+            }
+            other => panic!("expected Draw effect, got {other:?}"),
+        }
     }
 
     #[test]
@@ -18140,5 +18392,37 @@ mod pipeline_snapshot_tests {
             }
             other => panic!("sub-ability must be Draw, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn zack_fair_activated_parses_counter_move_and_attach_sub_chain() {
+        use crate::types::ability::TargetFilter;
+
+        let effect = "Target creature you control gains indestructible until end of turn. Put Zack Fair's counters on that creature and attach an Equipment that was attached to Zack Fair to that creature.";
+        let mut ctx = ParseContext::default();
+        let def = parse_activated_with_self_ref_fallback(effect, "Zack Fair", &mut ctx);
+
+        fn has_effect(def: &AbilityDefinition, pred: &dyn Fn(&Effect) -> bool) -> bool {
+            if pred(&def.effect) {
+                return true;
+            }
+            def.sub_ability
+                .as_ref()
+                .is_some_and(|sub| has_effect(sub, pred))
+        }
+
+        assert!(has_effect(&def, &|e| matches!(
+            e,
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                ..
+            }
+        )));
+        assert!(
+            has_effect(&def, &|e| matches!(e, Effect::Attach { .. })),
+            "expected Attach in sub chain, got {:?}",
+            def.sub_ability
+        );
+        assert!(!has_unimplemented(&def));
     }
 }

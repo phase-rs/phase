@@ -6,13 +6,14 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost, AttackSubject,
-    BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
+    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
+    CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
+    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
+    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
+    KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -961,6 +962,14 @@ pub struct PendingChangeZoneIteration {
     /// effects with the same count the uninterrupted mass path records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_count: Option<i32>,
+    /// CR 708.2a + CR 708.3: face-down entry profile carried across a
+    /// replacement-ordering / as-enters pause so a paused-then-resumed
+    /// face-down return (Yedora's dying creatures → face-down Forest lands)
+    /// still applies the profile on resume. `None` = normal face-up entry.
+    /// Mirrors the `enter_tapped`/`enter_transformed`/`enters_under_player`
+    /// carry-through pattern on this same struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -1533,6 +1542,18 @@ pub struct PendingCast {
     /// kicker costs and multikicker loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 601.2f/h: Required additional cost to pay after a multi-step
+    /// optional additional-cost flow completes. Used when a target-dependent
+    /// static imposes a required non-mana cost on a spell that is also walking
+    /// Kicker/Multikicker choices in `additional_cost_flow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_required_additional_cost: Option<AbilityCost>,
+    /// CR 601.2b/f + CR 113.2c: Queue of independent non-kicker additional-cost
+    /// keyword instances still being announced for this cast. Kicker keeps its
+    /// existing `additional_cost_flow` path because it already records
+    /// per-variant payments in `SpellContext::kickers_paid`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_queue: Vec<AdditionalCostInstance>,
     /// CR 601.2b + CR 702.48c: Source of the currently pending additional-cost
     /// component. This disambiguates same-shaped costs when a later object
     /// selection resumes payment.
@@ -1626,6 +1647,8 @@ impl PendingCast {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -2608,6 +2631,18 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<ObjectId>,
     },
+    /// CR 508.1g + CR 702.154a: As attackers are declared, the active player
+    /// may tap up to one eligible creature for each Enlist instance on an
+    /// attacking creature. `eligible` is the current legal tap set for this
+    /// instance; `remaining` is the queue of later Enlist instances this
+    /// declaration.
+    EnlistChoice {
+        player: PlayerId,
+        attacker: ObjectId,
+        eligible: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<ObjectId>,
+    },
     GameOver {
         winner: Option<PlayerId>,
     },
@@ -2930,6 +2965,15 @@ pub enum WaitingFor {
         owner_library: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         track_exiled_by_source: bool,
+        /// CR 708.2a + CR 708.3: face-down entry profile carried across the
+        /// `EffectZoneChoice` round-trip so a selected `ChangeZone` card that
+        /// must enter face down (Yedora-style "return it face down ... It's a
+        /// Forest land") still applies the profile when the choice resolves,
+        /// instead of resuming face up and exposing its real characteristics.
+        /// `None` = normal face-up entry. Mirrors the `enter_tapped` /
+        /// `enter_transformed` / `enters_under_player` carry-through above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<crate::types::ability::FaceDownProfile>,
         /// CR 701.68a: N for Blight N — number of -1/-1 counters to place.
         /// Zero for all non-blight EffectZoneChoice uses.
         #[serde(default)]
@@ -3979,6 +4023,7 @@ impl WaitingFor {
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
             WaitingFor::ExertChoice { .. } => "ExertChoice",
+            WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
@@ -4114,6 +4159,7 @@ impl WaitingFor {
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::UntapChoice { player, .. }
             | WaitingFor::ExertChoice { player, .. }
+            | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
@@ -5004,6 +5050,8 @@ pub struct StackPaidSnapshot {
     pub kickers_paid: usize,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub additional_cost_payment_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
@@ -6421,6 +6469,12 @@ pub struct PendingSpellResolution {
     /// stack-resolution path.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub additional_cost_payment_count: u32,
+    /// CR 607.2g + CR 702.157b/702.175b: Carry per-instance non-kicker
+    /// additional-cost payment data through the replacement-choice detour so
+    /// ETB-linked Squad/Offspring triggers read the same facts as the direct
+    /// stack-resolution path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<crate::types::ability::AdditionalCostInstancePayment>,
     /// CR 702.51c: Carry convoked-creature data through the replacement-choice
     /// detour so ETB triggers/replacements see the same cast history as the
     /// direct resolution path.
@@ -7530,6 +7584,8 @@ mod tests {
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
+                deferred_required_additional_cost: None,
+                additional_cost_queue: Vec::new(),
                 additional_cost_source: SpellCostSource::Other,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
@@ -7816,6 +7872,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
@@ -7858,6 +7915,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -8059,6 +8118,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
         let json = serde_json::to_string(&wf).unwrap();
@@ -8088,6 +8148,17 @@ mod tests {
             duration: None,
             track_exiled_by_source: false,
             moved_count: None,
+            // CR 708.2a + CR 708.3: the face-down profile must survive the
+            // pause/resume serde round-trip so a paused face-down return
+            // (Yedora) resumes face down with the same characteristics.
+            face_down_profile: Some(crate::types::ability::FaceDownProfile {
+                power: None,
+                toughness: None,
+                body: crate::types::ability::FaceDownBody::Noncreature,
+                extra_core_types: vec![crate::types::card_type::CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+                ward: None,
+            }),
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -8098,6 +8169,10 @@ mod tests {
         );
         let parsed: PendingChangeZoneIteration = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.enters_under_player, Some(PlayerId(1)));
+        assert_eq!(
+            parsed.face_down_profile, original.face_down_profile,
+            "face_down_profile must survive the pause/resume round-trip"
+        );
         assert_eq!(parsed, original);
     }
 
@@ -8119,6 +8194,16 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            // CR 708.2a + CR 708.3: a face-down `ChangeZone` selection must keep
+            // its profile across the `EffectZoneChoice` round-trip.
+            face_down_profile: Some(crate::types::ability::FaceDownProfile {
+                power: None,
+                toughness: None,
+                body: crate::types::ability::FaceDownBody::Noncreature,
+                extra_core_types: vec![crate::types::card_type::CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+                ward: None,
+            }),
             count_param: 0,
         };
         let json = serde_json::to_string(&wf).expect("serialize");

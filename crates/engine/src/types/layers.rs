@@ -96,6 +96,7 @@ impl ContinuousModification {
             | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
+            | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }

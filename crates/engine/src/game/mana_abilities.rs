@@ -3156,9 +3156,10 @@ mod tests {
                         ManaColor::Green,
                     ],
                 },
-                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                    "Elemental".to_string(),
-                )],
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Elemental".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                }],
                 grants: vec![],
                 expiry: None,
                 target: None,
@@ -3175,9 +3176,10 @@ mod tests {
             assert_eq!(
                 unit.restrictions,
                 vec![
-                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities(
-                        "Elemental".to_string()
-                    )
+                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                        spell_type: "Elemental".to_string(),
+                        ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                    }
                 ],
                 "Flamebraider mana must carry Elemental restriction"
             );

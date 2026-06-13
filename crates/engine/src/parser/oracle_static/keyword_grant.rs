@@ -527,6 +527,30 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
     Some(TargetFilter::Typed(typed))
 }
 
+/// CR 613.1f + CR 113.3: Recognize the exact `ExiledBySource` forms of "all
+/// activated abilities of [source]" and return the provider `source` filter.
+/// Returns `None` for forms not yet supported (typed "creature cards exiled with
+/// it", counter-gated exile, battlefield filters) so they stay a loud gap rather
+/// than over-granting. `lower` is the already-lowercased predicate.
+fn parse_grant_all_activated_abilities_source(
+    lower: &str,
+) -> Option<crate::types::ability::TargetFilter> {
+    let p = lower.trim().trim_end_matches('.').trim();
+    all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("all activated abilities of "),
+        alt((
+            value(TargetFilter::ExiledBySource, tag("the exiled card")),
+            value(
+                TargetFilter::ExiledBySource,
+                (tag("all cards exiled with "), alt((tag("it"), tag("~")))),
+            ),
+        )),
+    ))
+    .parse(p)
+    .ok()
+    .map(|(_, source)| source)
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -543,6 +567,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let unquoted_text = strip_quoted_segments(text_stripped);
     let unquoted_lower = unquoted_text.to_lowercase();
     let unquoted_tp = TextPair::new(&unquoted_text, &unquoted_lower);
+
+    // CR 613.1f + CR 113.3: "all activated abilities of [the exiled card | all
+    // cards exiled with it]" — grant the host all activated abilities of the
+    // cards exiled with it (Myr Welder, Territory Forge). First pass recognizes
+    // only the exact `ExiledBySource` forms; typed ("creature cards exiled with
+    // it"), counter-gated, and battlefield sources stay a gap (follow-ups).
+    if let Some(source) = parse_grant_all_activated_abilities_source(unquoted_tp.lower) {
+        return vec![ContinuousModification::GrantAllActivatedAbilitiesOf { source }];
+    }
+
     let mut modifications = Vec::new();
 
     // CR 205.1a + CR 613.1d/f: "loses all [other] abilities, card types, and

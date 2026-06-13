@@ -139,6 +139,16 @@ function renderPermanent(validTargetObjectIds = new Set<number>()) {
 
 describe("PermanentCard attachments", () => {
   beforeEach(() => {
+    window.matchMedia = ((query: string) => ({
+      matches: query === "(hover: hover)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
     const gameState = makeState();
     useGameStore.setState({
       gameState,

@@ -1081,6 +1081,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
             target,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
+            prevention_duration: None,
         },
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: counter_followup.map(Box::new),
@@ -3056,13 +3057,30 @@ fn try_parse_have_causative(
                 let after_damage = after_count_lower
                     .strip_prefix("damage to ") // allow-noncombinator: structural tail check on classified count remainder
                     .unwrap_or("");
-                let recipient_implicit = after_damage
+                let recipient = after_damage
                     .trim_end_matches('.')
                     .trim_end_matches(',')
-                    .trim()
-                    .eq("them")
-                    || after_damage.trim_end_matches('.').trim().eq("that player");
-                if recipient_implicit {
+                    .trim();
+                // CR 608.2c + CR 115.10a + CR 120.1: "that player" is an untargeted anaphoric
+                // reference to the player named by the trigger condition (the
+                // drawing opponent in "Whenever an opponent draws a card, ... you
+                // may have ~ deal N damage to that player" — Kederekt Parasite).
+                // It binds to the triggering player, not a fresh chooseable
+                // `Player` target. `parse_event_context_ref_with_ctx` resolves
+                // it to `TriggeringPlayer` (rebound to `ScopedPlayer` /
+                // `SourceChosenPlayer` / `ParentTargetController` when the trigger
+                // carries one of those player scopes), matching the non-causative
+                // "deals N damage to that player" path (issue #2893).
+                if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(recipient, ctx) {
+                    if ecr_rem.trim().is_empty() {
+                        return Some(parsed_clause(Effect::DealDamage {
+                            amount,
+                            target,
+                            damage_source: None,
+                        }));
+                    }
+                }
+                if recipient.eq("them") {
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::Player,
@@ -3072,7 +3090,7 @@ fn try_parse_have_causative(
                 // CR 608.2d: "have this artifact deal 1 damage to it" (Requiem
                 // Monolith) — optional self-damage the targeted creature's
                 // controller may cause the source artifact to deal.
-                if after_damage.trim_end_matches('.').trim() == "it" {
+                if recipient == "it" {
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::ParentTarget,
@@ -8560,6 +8578,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_tapped: d.enter_tapped,
                             enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
+                            face_down: d.face_down,
                         },
                         rem,
                     ))
@@ -12380,6 +12399,19 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         .map(|(rest, _)| rest)
         .unwrap_or(lower);
 
+    // CR 401.5 + CR 701.25: Eye of Duskmantle's permission is scoped to
+    // cards in your graveyard that you surveilled this turn. The current cast
+    // permission targets can model graveyard, exile-linked, top-library, and
+    // parent-target pools, but not this tracked surveil graveyard subset. Keep
+    // the line unsupported rather than partially accepting only "play lands"
+    // and swallowing the spell/pay-life half.
+    if nom_primitives::scan_contains(lower, "from among cards in your graveyard")
+        && (nom_primitives::scan_contains(lower, "you've surveilled this turn")
+            || nom_primitives::scan_contains(lower, "you\u{2019}ve surveilled this turn"))
+    {
+        return None;
+    }
+
     // CR 305.1: "play" means cast if spell, play as land if land.
     let (rest, mode) = alt((
         value(CardPlayMode::Cast, tag::<_, _, E>("cast ")),
@@ -12387,6 +12419,17 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     ))
     .parse(lower)
     .ok()?;
+
+    // CR 305.2a: A bare "play lands" fragment is not an effect granting a
+    // zone-scoped play permission. Static permission parsers own sourced forms
+    // such as "play lands from your graveyard" and "play lands and cast spells
+    // from the top of your library"; accepting the bare fragment here lets
+    // conjunction splitting turn a larger unsupported permission into a
+    // misleading land-only `CastFromZone`.
+    let normalized_rest = rest.trim().trim_end_matches('.');
+    if mode == CardPlayMode::Play && normalized_rest == "lands" {
+        return None;
+    }
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Static-shaped "you may [play|cast] X
     // from the top of your library" lines (Realmwalker, Future Sight, Bolas's
@@ -12431,7 +12474,9 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
-            alt_ability_cost: None,
+            // CR 118.9 + CR 701.9a: "cast that card by discarding a card rather
+            // than paying its mana cost" (The Infamous Cruelclaw).
+            alt_ability_cost: parse_alt_ability_cost_rider(lower),
             constraint,
             duration,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
@@ -12624,19 +12669,76 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     Some(CastPermissionConstraint::ManaValue { comparator, value })
 }
 
-/// CR 118.9 + CR 119.4: Recognise an "alternative-cost rider" — text of the
+/// CR 118.9: Parse `<ability-cost> rather than paying its mana cost` from
+/// Oracle text that carries an alternative-casting-cost rider. Shared by
+/// standalone rider clauses and inline `CastFromZone` anaphor arms.
+fn parse_alt_ability_cost_rider(lower: &str) -> Option<crate::types::ability::AbilityCost> {
+    if !nom_primitives::scan_contains(lower, "rather than paying its mana cost")
+        && !nom_primitives::scan_contains(lower, "rather than pay its mana cost")
+    {
+        return None;
+    }
+    // CR 701.9a: "by discarding a card" — The Infamous Cruelclaw class.
+    // Word-scan rather than start-anchored `tag` so inline "cast that card
+    // by discarding ..." arms match too.
+    if nom_primitives::scan_contains(lower, "by discarding a card")
+        || nom_primitives::scan_contains(lower, "by discarding one card")
+    {
+        return Some(crate::types::ability::AbilityCost::Discard {
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    // CR 119.4 + CR 202.3: pay life equal to the spell's mana value (Nashi,
+    // Moon Sage's Scion / Ulamog, the Defiler class).
+    if has_pay_life_equal_to_spell_mana_value_rider(lower) {
+        return Some(crate::types::ability::AbilityCost::PayLife {
+            amount: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::SelfManaValue,
+            },
+        });
+    }
+    None
+}
+
+fn has_pay_life_equal_to_spell_mana_value_rider(lower: &str) -> bool {
+    [
+        "pay life equal to its mana value",
+        "pay life equal to that spell's mana value",
+        "pay life equal to the spell's mana value",
+        "paying life equal to its mana value",
+        "paying life equal to that spell's mana value",
+        "paying life equal to the spell's mana value",
+        "you pay life equal to its mana value",
+        "you pay life equal to that spell's mana value",
+        "you pay life equal to the spell's mana value",
+    ]
+    .iter()
+    .any(|phrase| nom_primitives::scan_contains(lower, phrase))
+}
+
+/// CR 118.9: Recognise an "alternative-cost rider" — text of the
 /// form "[If you cast a spell this way,] pay <ability-cost> rather than
 /// paying its mana cost". The body parses to an `AbilityCost` that the
 /// runtime pays in lieu of the spell's mana cost when casting via a granted
 /// `ExileWithAltAbilityCost` permission. Returns `Some(cost)` when the rider
-/// shape is recognised; `None` otherwise. Currently handles the "pay life
-/// equal to its mana value" form (Nashi, Moon Sage's Scion); the cost
-/// parser will accept other `AbilityCost` shapes naturally as they are
-/// added.
+/// shape is recognised; `None` otherwise.
 pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::ability::AbilityCost> {
     type Vbe<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let trimmed_lower = lower.trim_end_matches('.').trim();
+    // CR 118.9: Combined "you may cast/play that card ... rather than paying"
+    // clauses are a single `CastFromZone` with inline `alt_ability_cost`, not a
+    // standalone rider folded onto a prior `CastFromZone` (The Infamous Cruelclaw).
+    if nom_primitives::scan_contains(trimmed_lower, "cast that card")
+        || nom_primitives::scan_contains(trimmed_lower, "play that card")
+        || nom_primitives::scan_contains(trimmed_lower, "cast it ")
+        || nom_primitives::scan_contains(trimmed_lower, "play it ")
+    {
+        return None;
+    }
     // Accept the rider with or without an "if you cast a spell this way,"
     // conditional prefix (the conditional is folded into the runtime check
     // by the casting pipeline — the permission only fires for spells cast
@@ -12651,26 +12753,7 @@ pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::abili
     } else {
         trimmed_lower
     };
-    // Confirm the rider's tail. Without this guard, "pay life equal to its
-    // mana value" alone (without the "rather than" clause) would also match —
-    // but that form is a normal payment effect, not an alt-cost grant.
-    if !nom_primitives::scan_contains(after_prefix, "rather than paying its mana cost")
-        && !nom_primitives::scan_contains(after_prefix, "rather than pay its mana cost")
-    {
-        return None;
-    }
-    // CR 119.4: "pay life equal to its mana value" — the only currently-
-    // supported rider body. Detect via nom prefix match; emit
-    // `AbilityCost::PayLife { amount: SelfManaValue }` (CR 202.3 — "its mana
-    // value" resolves against the spell-being-cast at cost-payment time).
-    if let Ok((_, _)) = tag::<_, _, Vbe>("pay life equal to its mana value").parse(after_prefix) {
-        return Some(crate::types::ability::AbilityCost::PayLife {
-            amount: crate::types::ability::QuantityExpr::Ref {
-                qty: crate::types::ability::QuantityRef::SelfManaValue,
-            },
-        });
-    }
-    None
+    parse_alt_ability_cost_rider(after_prefix)
 }
 
 /// CR 106.4 + CR 514.2: Recognise mana-retention riders that modify the mana
@@ -14105,6 +14188,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Manifest { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
+        Effect::GoadAll { target } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
         Effect::LoseLife {
             target: Some(target),
@@ -14282,6 +14366,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
+    // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
+    // keep `You` so optional opponent-choice sacrifices ("permanent of their
+    // choice") retain the chooser-as-controller binding (issue #2903).
+    if matches!(def.player_scope, Some(PlayerFilter::All)) {
+        each_target_filter_mut(&mut def.effect, &mut rewrite_filter_controller_to_scoped);
+    }
     if let Some(condition) = def.condition.as_mut() {
         rewrite_condition(condition);
     }
@@ -14797,6 +14888,65 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RepeatStopPredicate {
+    PutToHand,
+    DuplicateExiledNames,
+}
+
+fn parse_repeat_stop_predicate(input: &str) -> OracleResult<'_, RepeatStopPredicate> {
+    alt((
+        value(
+            RepeatStopPredicate::PutToHand,
+            alt((
+                tag("you put a card into your hand"),
+                tag("you put that card into your hand"),
+            )),
+        ),
+        value(
+            RepeatStopPredicate::DuplicateExiledNames,
+            tag("you exile two cards with the same name"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes first."
+fn try_parse_repeat_until_stop_conditions(
+    lower: &str,
+) -> Option<crate::types::ability::RepeatContinuation> {
+    let trimmed = lower.trim().trim_end_matches('.');
+    let (rest, first) = preceded(
+        tag("repeat this process until "),
+        parse_repeat_stop_predicate,
+    )
+    .parse(trimmed)
+    .ok()?;
+    let (rest, second) = opt(preceded(tag(" or "), parse_repeat_stop_predicate))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(", whichever comes first"))
+        .parse(rest)
+        .ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+
+    let mut stop_on_put_to_hand = false;
+    let mut stop_on_duplicate_exiled_names = false;
+    for predicate in [Some(first), second].into_iter().flatten() {
+        match predicate {
+            RepeatStopPredicate::PutToHand => stop_on_put_to_hand = true,
+            RepeatStopPredicate::DuplicateExiledNames => stop_on_duplicate_exiled_names = true,
+        }
+    }
+
+    Some(
+        crate::types::ability::RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand,
+            stop_on_duplicate_exiled_names,
+        },
+    )
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -14869,7 +15019,7 @@ pub(crate) fn parse_effect_chain_with_context(
 /// by the casting-line parser; an optional leading copy of that sentence is
 /// stripped here defensively in case it reaches this entry inline.
 ///
-/// `FilterProp::AttackingController` matches every attacker whose defending
+/// `FilterProp::Attacking { defender: Some(ControllerRef::You) }` matches every attacker whose defending
 /// player is the controller — which the engine records as the controller of an
 /// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
 /// you control" collapse onto the one predicate.
@@ -14931,9 +15081,12 @@ fn try_parse_for_each_attacker_copy_blocker(
         true
     };
 
-    let source_filter = TargetFilter::Typed(
-        TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-    );
+    let source_filter =
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            }]),
+        );
     let mut def = AbilityDefinition::new(
         kind,
         Effect::CopyTokenBlockingAttacker {
@@ -15415,7 +15568,7 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // CR 118.9 + CR 119.4: Alternative-cost rider — "[If you cast a spell
+        // CR 118.9: Alternative-cost rider — "[If you cast a spell
         // this way,] pay <ability-cost> rather than paying its mana cost."
         // This is a *modifier* on the previous chain entry's `CastFromZone`
         // grant rather than its own effect. Fold the cost onto the most
@@ -15658,6 +15811,13 @@ pub(crate) fn parse_effect_chain_ir(
                 });
                 continue;
             }
+        }
+
+        // CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes
+        // first" — auto-repeat loop with game-state stop predicates (Tainted Pact).
+        if let Some(continuation) = try_parse_repeat_until_stop_conditions(&lower_check) {
+            pending_repeat_until = Some(continuation);
+            continue;
         }
 
         // CR 608.2c + CR 107.1c: "Repeat this process" — a loop-continuation
@@ -16264,6 +16424,26 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
+        let (unless_same_name_condition, text) = if is_optional {
+            if let Some((stripped, unless_cond)) =
+                crate::parser::oracle_effect::conditions::strip_unless_shares_name_with_other_exiled_this_way(
+                    &text,
+                )
+            {
+                (Some(unless_cond), stripped)
+            } else {
+                (None, text)
+            }
+        } else {
+            (None, text)
+        };
+        let condition = match (condition, unless_same_name_condition) {
+            (Some(existing), Some(unless_cond)) => Some(AbilityCondition::And {
+                conditions: vec![existing, unless_cond],
+            }),
+            (None, Some(unless_cond)) => Some(unless_cond),
+            (existing, None) => existing,
+        };
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"
         // clause intact so the targeted-proliferate recognizer in
@@ -17145,15 +17325,15 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set flag.
         // This needs to check whether the previous clause publishes an affected
         // object set (zone changes, token creation, counter placement, etc.).
-        let needs_tracked_set = clauses
-            .iter()
-            .rev()
-            .find(|c| !c.absorbed_by_followup)
-            .is_some_and(|previous| {
-                publishes_tracked_set_from_resolution(&previous.parsed.effect)
-                    && (contains_explicit_tracked_set_pronoun(&lower_check)
-                        || contains_implicit_tracked_set_pronoun(&lower_check))
-            });
+        // CR 603.7: Scan ALL prior non-absorbed clauses for a tracked-set
+        // publisher, not just the nearest. An intermediate non-publishing
+        // clause (e.g. Investigate) must not shadow an earlier exile.
+        let any_prior_publishes = clauses.iter().any(|c| {
+            !c.absorbed_by_followup && publishes_tracked_set_from_resolution(&c.parsed.effect)
+        });
+        let needs_tracked_set = any_prior_publishes
+            && (contains_explicit_tracked_set_pronoun(&lower_check)
+                || contains_implicit_tracked_set_pronoun(&lower_check));
 
         // Continuation recognition — store on ClauseIr, application moves to lowering.
         //
@@ -24193,10 +24373,12 @@ mod tests {
                 owner,
             } => {
                 assert_eq!(*owner, TargetFilter::Controller);
-                assert!(tf
-                    .properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::AttackingController)));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                )));
             }
             other => panic!("expected CopyTokenBlockingAttacker, got {other:?}"),
         }
@@ -24655,6 +24837,46 @@ mod tests {
             matches!(&*execute.effect, Effect::Discard { .. }),
             "expected Discard, got {:?}",
             execute.effect
+        );
+    }
+
+    #[test]
+    fn agitator_ant_end_step_counters_and_goad_parsed() {
+        // Issue #2903: optional per-player counter placement on each player's
+        // creature, then goad only creatures that received counters this way.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of your end step, each player may put two +1/+1 counters on a creature they control. Goad each creature that had counters put on it this way.",
+            "Agitator Ant",
+            &[],
+            &["Creature".to_string()],
+            &["Insect".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Agitator Ant trigger execute");
+        assert!(
+            execute.optional,
+            "counter placement must be optional (each player MAY)"
+        );
+        assert_eq!(execute.player_scope, Some(PlayerFilter::All));
+        let Effect::PutCounter { target, .. } = execute.effect.as_ref() else {
+            panic!("expected PutCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer))
+        );
+        let sub = execute.sub_ability.as_ref().expect("goad sub_ability");
+        let Effect::GoadAll { target } = sub.effect.as_ref() else {
+            panic!("expected GoadAll, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }
         );
     }
 
@@ -31216,6 +31438,32 @@ mod tests {
         assert!(*tapped);
     }
 
+    /// CR 603.7: Exile → non-publishing clause → delayed return: uses_tracked_set
+    /// must be true even when the non-publishing clause (Investigate) is nearest.
+    /// Covers Disorder in the Court.
+    #[test]
+    fn exile_then_investigate_then_return_exiled_cards_uses_tracked_set() {
+        let e = parse_effect_chain(
+            "Exile X target creatures, then investigate X times. Return the exiled cards to the battlefield tapped under their owners' control at the beginning of the next end step.",
+            AbilityKind::Spell,
+        );
+        fn find_delayed(def: &AbilityDefinition) -> bool {
+            if let Effect::CreateDelayedTrigger {
+                uses_tracked_set, ..
+            } = &*def.effect
+            {
+                if *uses_tracked_set {
+                    return true;
+                }
+            }
+            def.sub_ability.as_deref().is_some_and(find_delayed)
+        }
+        assert!(
+            find_delayed(&e),
+            "expected CreateDelayedTrigger {{ uses_tracked_set: true }} for 'the exiled cards', got {e:?}"
+        );
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones full chain: an exile that publishes a
     /// tracked set, followed by "create a token that's a copy of that card,
     /// except it's an enchantment and loses all other card types." The copy
@@ -33872,7 +34120,7 @@ mod tests {
             matches!(
                 dur,
                 Some(Duration::ForAsLongAs {
-                    condition: StaticCondition::HasCounters {
+                    condition: StaticCondition::RecipientHasCounters {
                         counters: crate::types::counter::CounterMatch::OfType(
                             crate::types::counter::CounterType::Generic(ref name)
                         ),
@@ -36666,7 +36914,7 @@ mod tests {
         for (input, expected_prop, expected_negated) in [
             (
                 "draw a card if it was attacking",
-                FilterProp::Attacking,
+                FilterProp::Attacking { defender: None },
                 false,
             ),
             (
@@ -36676,7 +36924,7 @@ mod tests {
             ),
             (
                 "draw a card if it wasn't attacking",
-                FilterProp::Attacking,
+                FilterProp::Attacking { defender: None },
                 true,
             ),
             (
@@ -38401,6 +38649,7 @@ mod tests {
                 target,
                 scope,
                 damage_source_filter,
+                ..
             } => {
                 assert_eq!(*amount, PreventionAmount::All);
                 assert!(amount_dynamic.is_none());
@@ -38593,10 +38842,11 @@ mod tests {
                     factor: 3,
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
-                            filter: TargetFilter::Typed(
-                                TypedFilter::creature()
-                                    .properties(vec![FilterProp::AttackingController]),
-                            ),
+                            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                                FilterProp::Attacking {
+                                    defender: Some(ControllerRef::You)
+                                }
+                            ]),),
                         },
                     }),
                 },
@@ -38909,7 +39159,7 @@ mod tests {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::TargetPlayer),
-                            properties: vec![FilterProp::Attacking],
+                            properties: vec![FilterProp::Attacking { defender: None }],
                         }),
                     },
                 },
@@ -40305,7 +40555,7 @@ mod tests {
                         properties,
                         ..
                     }) if type_filters.contains(&TypeFilter::Creature)
-                        && properties.contains(&FilterProp::Attacking)
+                        && properties.contains(&FilterProp::Attacking { defender: None })
                         && properties.contains(&FilterProp::Another)
                 ));
                 assert!(matches!(
@@ -40319,7 +40569,7 @@ mod tests {
                             })
                         }
                     }) if type_filters == &vec![TypeFilter::Creature]
-                        && properties == &vec![FilterProp::Attacking, FilterProp::Another]
+                        && properties == &vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
                 ));
                 assert_eq!(power, toughness);
             }
@@ -42718,6 +42968,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn infamous_cruelclaw_exile_until_chains_discard_alt_cast() {
+        let def = parse_effect_chain(
+            "Exile cards from the top of your library until you exile a nonland card. \
+             You may cast that card by discarding a card rather than paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        let Effect::ExileFromTopUntil { until, .. } = &*def.effect else {
+            panic!("expected ExileFromTopUntil, got {:?}", def.effect);
+        };
+        assert!(matches!(until, UntilCondition::NextMatches { .. }));
+        let cast = def
+            .sub_ability
+            .as_ref()
+            .expect("cast sub-ability must chain after exile-until");
+        assert!(cast.optional);
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            alt_ability_cost,
+            ..
+        } = &*cast.effect
+        else {
+            panic!("expected CastFromZone sub-ability, got {:?}", cast.effect);
+        };
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert!(!*without_paying_mana_cost);
+        assert!(
+            matches!(
+                alt_ability_cost,
+                Some(AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                })
+            ),
+            "expected discard alt cost, got {alt_ability_cost:?}"
+        );
+    }
+
+    #[test]
+    fn exile_until_chains_pay_life_alt_cast_for_spell_mana_value_wording() {
+        let def = parse_effect_chain(
+            "Exile cards from the top of your library until you exile a nonland card. \
+             You may cast that card by paying life equal to the spell's mana value \
+             rather than paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        let cast = def
+            .sub_ability
+            .as_ref()
+            .expect("cast sub-ability must chain after exile-until");
+        let Effect::CastFromZone {
+            alt_ability_cost, ..
+        } = &*cast.effect
+        else {
+            panic!("expected CastFromZone sub-ability, got {:?}", cast.effect);
+        };
+        assert!(
+            matches!(
+                alt_ability_cost,
+                Some(AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::SelfManaValue,
+                    },
+                })
+            ),
+            "expected pay-life alt cost, got {alt_ability_cost:?}"
+        );
+    }
+
     /// CR 701.57a + CR 702.85a: `Effect::ExileFromTopUntil` must accept the
     /// second-person possessive form ("your library" / "you exile").
     /// Regression-protection for the pre-existing path Etali's parser
@@ -43600,7 +43920,7 @@ mod tests {
                         ..
                     })
                 }
-            } if properties.as_slice() == [FilterProp::Attacking]
+            } if properties.as_slice() == [FilterProp::Attacking { defender: None }]
         ));
     }
 

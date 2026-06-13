@@ -12424,6 +12424,36 @@ mod tests {
         ));
     }
 
+    /// CR 506.2 + CR 508.6 + CR 603.4 (issue #2924): Suppressor Skyguard's
+    /// attack-trigger intervening-if must hoist to `def.condition` as a
+    /// `PlayerCount(OpponentOfTriggeringPlayerNotAttacked) >= 1` comparison.
+    /// Bug A was the condition being dropped (`None`); this test fails if the
+    /// new combinator/bridge regresses.
+    #[test]
+    fn suppressor_skyguard_attack_trigger_hoists_unattacked_opponent_condition() {
+        let def = parse_trigger_line(
+            "Whenever a player attacks you, if that player has another opponent who isn't being attacked, prevent all combat damage that would be dealt to you this combat.",
+            "Suppressor Skyguard",
+        );
+        let expected = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentOfTriggeringPlayerNotAttacked,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        match def.condition {
+            Some(cond) if cond == expected => {}
+            Some(TriggerCondition::And { conditions }) => assert!(
+                conditions.contains(&expected),
+                "And condition missing the unattacked-opponent comparison: {conditions:?}"
+            ),
+            other => panic!("expected hoisted unattacked-opponent condition, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_intervening_if_no_creatures_attacked_this_turn_attaches_condition() {
         let def = parse_trigger_line(
@@ -15402,7 +15432,9 @@ mod tests {
                     panic!("filter should be typed, got {filter:?}");
                 };
                 assert!(tf.properties.contains(&FilterProp::Another));
-                assert!(tf.properties.contains(&FilterProp::Attacking));
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::Attacking { defender: None }));
                 let shares = tf.properties.iter().find(|p| {
                     matches!(
                         p,
@@ -21307,6 +21339,39 @@ mod tests {
             Some(TargetFilter::LastCreated),
             "the 'It gains haste' grant must apply to the created token, not SelfRef"
         );
+    }
+
+    /// CR 603.2 + CR 608.2c + CR 115.10a: Kederekt Parasite — "Whenever an opponent draws a
+    /// card, ... you may have this creature deal 1 damage to that player." The
+    /// optional "you may have ~ deal N damage to that player" causative frame
+    /// must bind "that player" to the triggering (drawing) player, not to a
+    /// chooseable `Player` target. The damaged player is fixed by the trigger
+    /// event (CR 603.2), so no target selection is offered (issue #2893).
+    #[test]
+    fn opponent_draws_may_have_deal_damage_to_that_player_binds_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent draws a card, if you control a red permanent, you may have this creature deal 1 damage to that player.",
+            "Kederekt Parasite",
+        );
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        // The "you may" wording makes the resolution optional (yes/no), not a
+        // forced effect.
+        assert!(
+            execute.optional,
+            "execute.optional must be true ('you may')"
+        );
+        match execute.effect.as_ref() {
+            Effect::DealDamage { target, amount, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "'that player' must bind to the drawing opponent (TriggeringPlayer), \
+                     not a chooseable Player target",
+                );
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected DealDamage to TriggeringPlayer, got {other:?}"),
+        }
     }
 
     /// CR 613.1 + CR 503.1a: The Rack — "the chosen player's upkeep" must

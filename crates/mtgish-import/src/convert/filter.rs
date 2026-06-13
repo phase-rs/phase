@@ -193,7 +193,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         Permanents::IsUntapped => prop_filter(FilterProp::Untapped),
 
         // CR 508.1k: a creature is "attacking" once declared as an attacker.
-        Permanents::IsAttacking => prop_filter(FilterProp::Attacking),
+        Permanents::IsAttacking => prop_filter(FilterProp::Attacking { defender: None }),
         // CR 509.1g: a creature is "blocking" once declared as a blocker.
         Permanents::IsBlocking => prop_filter(FilterProp::Blocking),
         // CR 509.1h: an attacking creature with no blockers is "unblocked".
@@ -379,7 +379,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         // -------------------------------------------------------------------
         // CR 508.1k: "isn't attacking" — negation of the attacking status.
         Permanents::IsntAttacking => TargetFilter::Not {
-            filter: Box::new(prop_filter(FilterProp::Attacking)),
+            filter: Box::new(prop_filter(FilterProp::Attacking { defender: None })),
         },
         // CR 509.1g: "isn't blocking" — negation of the blocking status.
         Permanents::IsntBlocking => TargetFilter::Not {
@@ -394,15 +394,17 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
             filter: Box::new(prop_filter(FilterProp::EnteredThisTurn)),
         },
 
-        // CR 508.1b: "attacking you" — `FilterProp::AttackingController` matches
-        // attackers whose defending player equals the filter's source controller.
+        // CR 508.1b: "attacking you" — `FilterProp::Attacking { defender: Some(You) }`
+        // matches attackers whose defending player equals the filter's source controller.
         // Only safely expressible when the player axis is `You`; other player
         // axes (specific opponent / chosen player) need source-relative defender
         // resolution we don't have a primitive for, so they strict-fail.
         Permanents::IsAttackingPlayer(player) => match player_to_controller(player)? {
-            ControllerRef::You => TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-            ),
+            ControllerRef::You => TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                },
+            ])),
             other => {
                 return Err(ConversionGap::MalformedIdiom {
                     idiom: "Permanents/convert",
@@ -413,12 +415,14 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         },
         // CR 508.1b: "attacking a player" with a Players axis. Same source-
         // controller restriction as the singular form — we can express
-        // "attacking you" via `AttackingController`, but a free-standing
+        // "attacking you" via `Attacking { defender: Some(You) }`, but a free-standing
         // attacker filter (any defending player) has no engine primitive.
         Permanents::IsAttackingAPlayer(players) => match players_to_controller(players)? {
-            ControllerRef::You => TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-            ),
+            ControllerRef::You => TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                },
+            ])),
             other => {
                 return Err(ConversionGap::MalformedIdiom {
                     idiom: "Permanents/convert",
@@ -428,7 +432,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
             }
         },
         // CR 508.1b + CR 506.3: "attacking you or a planeswalker you control."
-        // `FilterProp::AttackingController` matches any attacker whose recorded
+        // `FilterProp::Attacking { defender: Some(You) }` matches any attacker whose recorded
         // defending side equals the source controller — and the engine records
         // an attacker's defending player as the controller of the attacked
         // planeswalker/battle, so the player- and permanent-defended cases both
@@ -436,9 +440,13 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         // an opponent-relative defended axis needs a primitive we don't have.
         Permanents::IsAttackingAPlayerOrPlaneswalkerTheyControl(players) => {
             match players_to_controller(players)? {
-                ControllerRef::You => TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-                ),
+                ControllerRef::You => {
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Attacking {
+                            defender: Some(ControllerRef::You),
+                        },
+                    ]))
+                }
                 other => {
                     return Err(ConversionGap::MalformedIdiom {
                         idiom: "Permanents/convert",

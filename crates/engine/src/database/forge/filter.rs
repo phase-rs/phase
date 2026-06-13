@@ -94,7 +94,7 @@ fn translate_dotted_filter(segments: &[&str]) -> Result<TargetFilter, ForgeTrans
             // Property predicates
             "tapped" => properties.push(FilterProp::Tapped),
             "untapped" => properties.push(FilterProp::Untapped),
-            "attacking" => properties.push(FilterProp::Attacking),
+            "attacking" => properties.push(FilterProp::Attacking { defender: None }),
             "token" => properties.push(FilterProp::Token),
 
             // Zone predicates

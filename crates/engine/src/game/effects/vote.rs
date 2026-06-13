@@ -286,6 +286,8 @@ pub fn resolve_tally(
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         };
         // CR 608.2c: depth = 1 so the chain entry doesn't clear
         // `state.last_vote_ballots`; see ledger-publication note above.
@@ -353,6 +355,10 @@ fn resolved_from_def(
         repeat_until: None,
         // CR 608.2c: Carry the parent-link kind through to the resolved ability.
         sub_link: def.sub_link,
+        // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode
+        // abilities through (None for vote sub-effects).
+        modal: def.modal.clone(),
+        mode_abilities: def.mode_abilities.clone(),
     }
 }
 
@@ -498,6 +504,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         };
 
         let mut events = Vec::new();
@@ -591,6 +599,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         }
     }
 
@@ -885,6 +895,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -1035,6 +1047,8 @@ mod tests {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            modal: None,
+            mode_abilities: vec![],
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

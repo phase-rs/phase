@@ -583,7 +583,11 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
         ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
-        ContinuousModification::SetName { .. }
+        // GrantAllActivatedAbilitiesOf only holds a source `TargetFilter`; the
+        // granted abilities are pulled live from the provider objects at layer
+        // collection time, not nested here.
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }

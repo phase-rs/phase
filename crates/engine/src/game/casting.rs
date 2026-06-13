@@ -21,8 +21,9 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
-    CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming, ProhibitionScope, StaticMode,
+    ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
+    CastingProhibitionCondition, CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -924,6 +925,38 @@ fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
     }
 }
 
+pub(crate) fn requires_per_instance_resolution(kind: KeywordKind) -> bool {
+    matches!(
+        kind,
+        // CR 702.175b: each Offspring instance is paid and triggers separately.
+        KeywordKind::Offspring
+            // CR 702.56b: each Replicate instance is paid and triggers separately.
+            | KeywordKind::Replicate
+    )
+}
+
+fn requires_per_instance_keyword(keyword: &Keyword) -> bool {
+    if requires_per_instance_resolution(keyword.kind()) {
+        return true;
+    }
+
+    matches!(
+        keyword,
+        // CR 702.153b: each Casualty instance is paid and triggers separately.
+        Keyword::Casualty(_)
+            // CR 702.157b: each Squad instance is paid and triggers separately.
+            | Keyword::Squad(_)
+    )
+}
+
+fn merge_spell_keyword(keywords: &mut Vec<Keyword>, keyword: Keyword, preserve_instances: bool) {
+    if preserve_instances && requires_per_instance_keyword(&keyword) {
+        keywords.push(keyword);
+    } else {
+        upsert_keyword_by_kind(keywords, keyword);
+    }
+}
+
 /// CR 601.2a: Single matcher-side authority for "what zone did this spell get
 /// cast from" at SpellCast-event time. Encapsulates the placeholder vs
 /// ability-context storage split so the trigger matcher (and any future
@@ -1018,15 +1051,57 @@ fn granted_spell_keywords(
             continue;
         }
 
-        upsert_keyword_by_kind(&mut keywords, keyword.clone());
+        merge_spell_keyword(&mut keywords, keyword.clone(), false);
     }
 
     // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
     // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
-    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords);
+    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords, false);
 
     // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
-    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords);
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false);
+
+    keywords
+}
+
+fn granted_spell_keyword_instances(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Vec<Keyword> {
+    let Some(spell_obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+
+    let origin_zone = spell_obj
+        .cast_from_zone
+        .or_else(|| pending_cast_origin_zone_for(state, object_id))
+        .unwrap_or(spell_obj.zone);
+
+    let mut keywords = Vec::new();
+    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
+        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+            continue;
+        };
+
+        let matches = def.affected.as_ref().is_none_or(|filter| {
+            super::filter::spell_object_matches_filter_from_state(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                filter,
+                source_obj.id,
+                &state.all_creature_types,
+            )
+        });
+        if matches {
+            merge_spell_keyword(&mut keywords, keyword.clone(), true);
+        }
+    }
+
+    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords, true);
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, true);
 
     keywords
 }
@@ -1045,6 +1120,7 @@ fn transient_granted_spell_keywords(
     spell_obj: &crate::game::game_object::GameObject,
     origin_zone: Zone,
     keywords: &mut Vec<Keyword>,
+    preserve_instances: bool,
 ) {
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id } = tce.affected else {
@@ -1103,7 +1179,7 @@ fn transient_granted_spell_keywords(
                 )
             });
             if matches {
-                upsert_keyword_by_kind(keywords, keyword.clone());
+                merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
             }
         }
     }
@@ -1189,6 +1265,37 @@ pub(crate) fn effective_spell_keywords(
     // the battlefield. Use the pre-announcement zone so flashback still
     // applies for spells being cast from graveyard even after `finalize_cast`
     // moves them to the stack.
+    let effective_origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
+    if effective_origin_zone != Zone::Battlefield
+        && super::keywords::object_has_effective_keyword_kind(
+            state,
+            object_id,
+            KeywordKind::Flashback,
+        )
+    {
+        upsert_keyword_by_kind(
+            &mut keywords,
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+        );
+    }
+
+    keywords
+}
+
+pub(crate) fn effective_spell_keyword_instances(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Vec<Keyword> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+
+    let mut keywords = obj.keywords.clone();
+    for keyword in granted_spell_keyword_instances(state, caster, object_id) {
+        merge_spell_keyword(&mut keywords, keyword, true);
+    }
+
     let effective_origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
     if effective_origin_zone != Zone::Battlefield
         && super::keywords::object_has_effective_keyword_kind(
@@ -2519,6 +2626,7 @@ fn apply_pending_next_spell_keyword_grants(
     caster: PlayerId,
     spell_id: ObjectId,
     keywords: &mut Vec<Keyword>,
+    preserve_instances: bool,
 ) {
     for entry in &state.pending_next_spell_modifiers {
         if entry.player != caster {
@@ -2529,7 +2637,7 @@ fn apply_pending_next_spell_keyword_grants(
         }
         match &entry.modifier {
             NextSpellModifier::HasKeyword { keyword } => {
-                upsert_keyword_by_kind(keywords, keyword.clone());
+                merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
             }
             NextSpellModifier::CastAsThoughFlash => {
                 upsert_keyword_by_kind(keywords, Keyword::Flash);
@@ -3017,11 +3125,13 @@ fn prepare_spell_cast_with_variant_override_inner(
     let has_graveyard_permission = graveyard_permission_src.is_some();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
-    // CR 608.2g: A free-cast window (Invoke Calamity) may drive a
-    // cast-during-resolution on a card still in the controller's HAND. The
-    // runtime `ExileWithAltCost { resolution_cleanup: Some(_) }` is the
-    // zone-agnostic discriminator for that path; it must zero the mana cost
-    // even when the card is neither in exile nor under a graveyard alt-cost.
+    // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
+    // during-resolution free-cast (Memory Plunder) may drive a cast on a card
+    // still in its real origin zone. The runtime
+    // `ExileWithAltCost { resolution_cleanup: Some(_) }` is the zone-agnostic
+    // discriminator for that path; it must both authorize the cast and zero the
+    // mana cost even when the card is neither in exile nor under a standing
+    // graveyard alt-cost.
     let has_during_resolution_alt_cost =
         has_during_resolution_alt_cost_permission(state, obj, player);
 
@@ -3048,6 +3158,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         && has_alt_cost_permission_for(obj, state, player);
     let castable_zone = has_unowned_exile_permission
         || has_exile_permission
+        || has_during_resolution_alt_cost
         || (obj.owner == player
             && (obj.zone == Zone::Hand
                 || (state.format_config.command_zone
@@ -4409,15 +4520,18 @@ fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
 
 fn target_ref_matches_cost_filter(
     state: &GameState,
+    static_source_id: ObjectId,
     source_controller: PlayerId,
-    ability: &ResolvedAbility,
     target: &TargetRef,
     filter: &TargetFilter,
 ) -> bool {
     match target {
         TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_ability_with_controller(
-                ability,
+            // CR 601.2f: Target-referenced cost filters ("that target this creature")
+            // resolve SelfRef against the static's source permanent, not the spell
+            // being cast.
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                static_source_id,
                 source_controller,
             );
             if super::filter::matches_stack_target_filter(state, *object_id, filter, &ctx) {
@@ -4436,6 +4550,7 @@ fn target_ref_matches_cost_filter(
 
 fn selected_targets_match_filter(
     state: &GameState,
+    static_source_id: ObjectId,
     source_controller: PlayerId,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
@@ -4448,11 +4563,23 @@ fn selected_targets_match_filter(
 
     if require_all {
         targets.iter().all(|target| {
-            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
+            target_ref_matches_cost_filter(
+                state,
+                static_source_id,
+                source_controller,
+                target,
+                filter,
+            )
         })
     } else {
         targets.iter().any(|target| {
-            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
+            target_ref_matches_cost_filter(
+                state,
+                static_source_id,
+                source_controller,
+                target,
+                filter,
+            )
         })
     }
 }
@@ -4494,10 +4621,24 @@ fn spell_matches_cost_filter_with_selected_targets(
 
             tf.properties.iter().all(|prop| match prop {
                 crate::types::ability::FilterProp::Targets { filter } => {
-                    selected_targets_match_filter(state, source_controller, ability, filter, false)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        false,
+                    )
                 }
                 crate::types::ability::FilterProp::TargetsOnly { filter } => {
-                    selected_targets_match_filter(state, source_controller, ability, filter, true)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        true,
+                    )
                 }
                 _ => true,
             })
@@ -4693,6 +4834,77 @@ fn collect_battlefield_cost_modifiers(
     }
 
     collected
+}
+
+/// CR 601.2f + CR 118.8: Collect additional non-mana costs imposed by battlefield
+/// statics once targets are chosen. Terror of the Peaks class.
+pub(super) fn collect_imposed_additional_cast_costs(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> Vec<AbilityCost> {
+    use crate::types::ability::ControllerRef;
+
+    let mut costs = Vec::new();
+    for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let bf_id = src_obj.id;
+        let source_controller = src_obj.controller;
+
+        let StaticMode::ImposeAdditionalCost {
+            cost,
+            spell_filter,
+            action: AdditionalCostTaxAction::Cast,
+        } = &def.mode
+        else {
+            continue;
+        };
+
+        let has_target_filter = spell_filter
+            .as_ref()
+            .is_some_and(cost_filter_has_target_ref);
+        if !has_target_filter {
+            continue;
+        }
+
+        if matches!(def.affected, Some(TargetFilter::SelfRef)) {
+            continue;
+        }
+
+        if def.active_zones.is_empty() {
+            if src_obj.zone != Zone::Battlefield {
+                continue;
+            }
+        } else if !def.active_zones.contains(&src_obj.zone) {
+            continue;
+        }
+
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            match tf.controller {
+                Some(ControllerRef::You) if caster != source_controller => continue,
+                Some(ControllerRef::Opponent) if caster == source_controller => continue,
+                _ => {}
+            }
+        }
+
+        if let Some(ref cond) = def.condition {
+            if !super::layers::evaluate_condition(state, cond, caster, bf_id) {
+                continue;
+            }
+        }
+
+        if let Some(ref filter) = spell_filter {
+            if !spell_matches_cost_filter_with_selected_targets(
+                state, caster, spell_id, filter, bf_id, ability,
+            ) {
+                continue;
+            }
+        }
+
+        costs.push(cost.clone());
+    }
+
+    costs
 }
 
 fn apply_cost_modifications_in_order(mana_cost: &mut ManaCost, collected: &[CostModification]) {
@@ -5088,12 +5300,14 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
         .core_types
         .iter()
         .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery));
-    let front_is_creature = obj
+    let front_is_spell = obj
         .card_types
         .core_types
         .iter()
-        .any(|ct| matches!(ct, CoreType::Creature));
-    if !back_is_spell || !front_is_creature {
+        .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery));
+    // CR 715.3: Adventure permanents (creature or enchantment) may cast their
+    // inset instant/sorcery spell face from hand.
+    if !back_is_spell || front_is_spell {
         return None;
     }
 
@@ -7081,6 +7295,11 @@ pub fn handle_cast_spell_with_payment_mode(
             )));
         }
     }
+
+    // CR 707.10: `resolving_stack_entry` may intentionally persist after a
+    // resolution for deferred self-copy choices, but a fresh normal cast starts
+    // a new stack-object announcement outside that old resolution context.
+    state.resolving_stack_entry = None;
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
     // from the command zone) require choosing the normal creature face or
@@ -10319,6 +10538,53 @@ fn apply_mana_spell_grants(
             vec![ContinuousModification::AddKeyword { keyword }],
             None,
         );
+    }
+
+    // CR 106.6 + CR 603.3b: Reflexive "when you spend this mana to cast a
+    // [filter] spell, [effect]" triggers (Lapis Orb of Dragonkind, Scaled
+    // Nurturer, Gilanra). For each spent unit whose grant matches the spell,
+    // queue the controller's ability for the same post-announcement placement
+    // path used by other cost-payment triggers so same-controller ordering and
+    // target/mode setup stay under the trigger dispatcher.
+    for unit in spent_units {
+        for grant in &unit.grants {
+            let ManaSpellGrant::TriggerOnSpend {
+                restriction,
+                ability,
+            } = grant
+            else {
+                continue;
+            };
+            if restriction.as_ref().is_some_and(|restriction| {
+                !spell_meta
+                    .as_ref()
+                    .is_some_and(|meta| restriction.allows_spell(meta))
+            }) {
+                continue;
+            }
+            let timestamp = state.next_timestamp() as u32;
+            let resolved =
+                super::ability_utils::build_resolved_from_def(ability, unit.source_id, caster);
+            super::triggers::defer_pending_trigger(
+                state,
+                super::triggers::PendingTrigger {
+                    source_id: unit.source_id,
+                    controller: caster,
+                    condition: None,
+                    ability: resolved,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: None,
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: ability.description.clone(),
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            );
+        }
     }
 }
 
@@ -13792,6 +14058,189 @@ mod tests {
             vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Haste
             }]
+        );
+    }
+
+    /// CR 106.6 + CR 603.3: A `TriggerOnSpend` mana grant fires its reflexive
+    /// ability (here, gain 2 life) only when the mana is spent on a spell
+    /// matching the restriction (Lapis Orb of Dragonkind class). Issue #3101-style
+    /// mana-spent trigger.
+    #[test]
+    fn mana_spend_trigger_fires_only_on_matching_spell() {
+        let mut state = setup_game_at_main_phase();
+        let orb = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Lapis Orb of Dragonkind".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&orb)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let dragon_id = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Dragon Whelp".to_string(),
+            Zone::Stack,
+        );
+        {
+            let d = state.objects.get_mut(&dragon_id).unwrap();
+            d.card_types.core_types.push(CoreType::Creature);
+            d.card_types.subtypes.push("Dragon".to_string());
+        }
+        let goblin_id = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Stack,
+        );
+        {
+            let g = state.objects.get_mut(&goblin_id).unwrap();
+            g.card_types.core_types.push(CoreType::Creature);
+            g.card_types.subtypes.push("Goblin".to_string());
+        }
+
+        let trigger_ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let unit = ManaUnit {
+            color: ManaType::Blue,
+            source_id: orb,
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![ManaSpellGrant::TriggerOnSpend {
+                restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                ability: Box::new(trigger_ability),
+            }],
+            expiry: None,
+        };
+
+        let before = state.stack.len();
+        let deferred_before = state.deferred_triggers.len();
+        // Spent on a Dragon creature spell → trigger is queued for the
+        // post-announcement trigger dispatcher.
+        apply_mana_spell_grants(&mut state, dragon_id, std::slice::from_ref(&unit));
+        assert_eq!(
+            state.deferred_triggers.len(),
+            deferred_before + 1,
+            "spending on a Dragon creature spell must queue the reflexive trigger"
+        );
+        // Spent on a non-Dragon creature spell → no trigger.
+        apply_mana_spell_grants(&mut state, goblin_id, &[unit]);
+        assert_eq!(
+            state.stack.len(),
+            before,
+            "the helper must not push directly to the stack during cost payment"
+        );
+        assert_eq!(
+            state.deferred_triggers.len(),
+            deferred_before + 1,
+            "spending on a non-matching spell must not queue another trigger"
+        );
+    }
+
+    /// CR 106.6 + CR 601.2i + CR 603.3b: Mana-spend triggers fire during cost
+    /// payment but are not placed on the stack until the spell is fully cast.
+    #[test]
+    fn mana_spend_trigger_cast_pipeline_places_trigger_after_spell_is_cast() {
+        let mut state = setup_game_at_main_phase();
+        let orb = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Lapis Orb of Dragonkind".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&orb)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let dragon_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Dragon Whelp".to_string(),
+            Zone::Hand,
+        );
+        {
+            let dragon = state.objects.get_mut(&dragon_id).unwrap();
+            dragon.card_types.core_types.push(CoreType::Creature);
+            dragon.card_types.subtypes.push("Dragon".to_string());
+            dragon.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+
+        let trigger_ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        );
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .mana_pool
+            .add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: orb,
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![ManaSpellGrant::TriggerOnSpend {
+                    restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                    ability: Box::new(trigger_ability),
+                }],
+                expiry: None,
+            });
+
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), dragon_id, CardId(301), &mut events)
+                .expect("Dragon spell should cast with Orb mana");
+
+        assert!(matches!(waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 2);
+        assert_eq!(state.stack.front().unwrap().source_id, dragon_id);
+        let trigger_entry = state.stack.back().unwrap();
+        assert!(matches!(
+            trigger_entry.kind,
+            StackEntryKind::TriggeredAbility { .. }
+        ));
+        assert_eq!(trigger_entry.source_id, orb);
+
+        let spell_cast_pos = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == dragon_id))
+            .expect("casting pipeline must emit SpellCast");
+        let trigger_push_pos = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::StackPushed { object_id } if *object_id == trigger_entry.id))
+            .expect("trigger must be pushed after cast completion");
+        assert!(
+            trigger_push_pos > spell_cast_pos,
+            "mana-spend trigger must not be pushed before the spell is cast"
         );
     }
 
@@ -26695,6 +27144,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -28530,6 +28981,91 @@ mod tests {
         });
 
         obj_id
+    }
+
+    /// Enchantment adventure (Virtue of Courage // Embereth Blaze class).
+    fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(72),
+            player,
+            "Virtue of Courage".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 2,
+        };
+
+        obj.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Embereth Blaze".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types: {
+                let mut ct = crate::types::card_type::CardType::default();
+                ct.core_types.push(CoreType::Instant);
+                ct.subtypes.push("Adventure".to_string());
+                ct
+            },
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+            keywords: Vec::new(),
+            abilities: vec![crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: crate::types::ability::TargetFilter::Any,
+                    damage_source: None,
+                },
+            )],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::Red],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Adventure),
+        });
+
+        obj_id
+    }
+
+    #[test]
+    fn issue_2870_enchantment_adventure_offers_cast_choice() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_enchantment_adventure_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Enchantment adventure must be castable via its spell face"
+        );
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(72), &mut events).unwrap();
+
+        assert!(
+            matches!(
+                result,
+                WaitingFor::CastOffer {
+                    player,
+                    kind: CastOfferKind::Adventure { .. }
+                } if player == PlayerId(0)
+            ),
+            "Expected Adventure cast offer for enchantment adventure card, got {:?}",
+            result
+        );
     }
 
     /// Create an Omen card in hand: creature normal face / sorcery Omen face.
@@ -42163,9 +42699,10 @@ mod tests {
                         produced: ManaProduction::Colorless {
                             count: QuantityExpr::Fixed { value: 2 },
                         },
-                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                            "Colorless Eldrazi".to_string(),
-                        )],
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                            spell_type: "Colorless Eldrazi".to_string(),
+                            ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                        }],
                         grants: vec![],
                         expiry: None,
                         target: None,

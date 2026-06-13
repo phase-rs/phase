@@ -309,7 +309,7 @@ fn filter_has_attacking(filter: &TargetFilter) -> bool {
     matches!(
         filter,
         TargetFilter::Typed(tf)
-            if tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking))
+            if tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: None }))
     )
 }
 

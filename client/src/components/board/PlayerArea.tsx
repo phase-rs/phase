@@ -7,6 +7,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
+import { BattlefieldZoneOverflow } from "./BattlefieldZoneOverflow.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommandDock } from "../zone/CommandDock.tsx";
 
@@ -136,9 +137,10 @@ export function PlayerArea({
         style={landStyle}
         data-debug-label="Lands"
       >
-        <BattlefieldRow
+        <BattlefieldZoneOverflow
           groups={partitioned?.lands ?? []}
-          rowType="lands"
+          zone="lands"
+          side="left"
           className="justify-start px-0"
         />
         {landColumnExtra}
@@ -152,9 +154,10 @@ export function PlayerArea({
         style={supportStyle}
         data-debug-label="Support"
       >
-        <BattlefieldRow
+        <BattlefieldZoneOverflow
           groups={supportGroups}
-          rowType="support"
+          zone="support"
+          side="right"
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
         />

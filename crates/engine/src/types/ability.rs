@@ -16,7 +16,7 @@ use super::game_state::{
 };
 use super::identifiers::{ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, ManaType};
+use super::mana::{AbilityActivationScope, ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
@@ -220,6 +220,28 @@ impl ChoiceType {
 
     pub fn color_excluding(excluded: Vec<ManaColor>) -> Self {
         Self::Color { excluded }
+    }
+
+    /// Whether the player supplies the chosen value at runtime rather than the
+    /// engine enumerating a fixed option set.
+    ///
+    /// `CardName` options come from the frontend's local card database (the
+    /// engine sends an empty list to avoid serializing 30k+ names) and are
+    /// wired end-to-end via the free-text name search. `Word` / `Artist` are
+    /// likewise player-supplied free-text in principle, but their free-text
+    /// frontend/legal-action path is not yet implemented (only `CardName` is
+    /// synthesized by `named_choice_actions` and given a text input by
+    /// `NamedChoiceModal`) — a separate known gap. They are kept here so an
+    /// empty engine list for them is treated as a still-to-be-supplied value
+    /// rather than silently skipped as impossible. For every other choice type
+    /// the engine fully enumerates the legal options, so an empty option list
+    /// means there is genuinely nothing to choose.
+    ///
+    /// Used to distinguish a legitimately-empty engine option list (this
+    /// predicate is true) from an impossible choice that must resolve as a
+    /// no-op per CR 609.3 (this predicate is false).
+    pub fn options_supplied_by_player(&self) -> bool {
+        matches!(self, Self::CardName | Self::Word | Self::Artist)
     }
 }
 
@@ -1367,10 +1389,14 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// Resolved at runtime from the source's `chosen_creature_type()`.
     ChosenCreatureType,
-    /// CR 106.12: "Spend this mana only to cast creature spells or activate abilities of creatures."
-    /// Combined restriction with OR semantics: allowed for spells of the type OR ability
-    /// activations on permanents of the type. The `String` is the card type (e.g., "Creature").
-    SpellTypeOrAbilityActivation(String),
+    /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
+    /// Combined restriction with OR semantics: allowed for spells of `spell_type` OR ability
+    /// activations described by `ability` — `OfSpellType` restricts to abilities of permanents
+    /// of `spell_type`, `Any` permits any ability ("… or to activate an ability").
+    SpellTypeOrAbilityActivation {
+        spell_type: String,
+        ability: AbilityActivationScope,
+    },
     /// "Spend this mana only to activate abilities."
     /// Cannot be used to cast spells; only for ability activation costs.
     ActivateOnly,
@@ -2135,7 +2161,12 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
-    Attacking,
+    /// CR 508.1b: Matches attacking creatures, optionally scoped by which player
+    /// the creature is attacking.
+    Attacking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        defender: Option<ControllerRef>,
+    },
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,
     /// CR 509.1g: Matches creatures currently blocking the filter source.
@@ -2531,10 +2562,6 @@ pub enum FilterProp {
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
-    /// CR 508.1b: Matches attacking creatures whose defending player equals the
-    /// filter's source controller ("creatures attacking you"). Distinct from
-    /// `Attacking`, which matches any attacker regardless of defender.
-    AttackingController,
     /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
     /// commander. Reads `GameObject::is_commander`, set during deck construction
     /// per CR 903.3 (the legendary card designated as that deck's commander).
@@ -3751,6 +3778,14 @@ pub enum QuantityRef {
     /// payments made for the source spell. Used by Squad so its payment count
     /// remains distinct from Kicker's CR 702.33 payment model.
     AdditionalCostPaymentCount,
+    /// CR 113.2c + CR 702.153b/702.56b/702.157b/702.175b: Number of
+    /// non-kicker additional-cost payments made for one independently
+    /// functioning keyword origin on the source spell/permanent.
+    AdditionalCostPaymentCountFor {
+        origin: AdditionalCostOrigin,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
+    },
     /// CR 702.51c: Number of creatures that convoked the source spell or the
     /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
     /// ETB replacement contexts resolve against the entering object.
@@ -4006,6 +4041,12 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
+    /// player (resolved from the active AttackersDeclared trigger event) who is NOT
+    /// in that player's attacked-this-combat set. Models "that player has another
+    /// opponent who isn't being attacked" (Suppressor Skyguard); counted via
+    /// QuantityRef::PlayerCount, gated as count >= 1.
+    OpponentOfTriggeringPlayerNotAttacked,
     /// CR 608.2c + CR 701.38: Each player who cast a vote for `choices[choice_index]`
     /// in the most recent vote within the current top-level ability resolution.
     /// Mirrors `PerformedActionThisWay` — backed by a transient ledger
@@ -5757,6 +5798,117 @@ pub enum AdditionalCost {
     Required(AbilityCost),
 }
 
+/// CR 113.2c + CR 601.2b/f: Linked identity for one independently functioning
+/// additional-cost keyword instance. Cast-time copy triggers read their own
+/// Casualty/Replicate payments via CR 702.153b / CR 702.56b; ETB-linked
+/// Squad/Offspring triggers read their own payments via CR 607.2g.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AdditionalCostOrigin {
+    Kicker,
+    Casualty,
+    Offspring,
+    Squad,
+    Replicate,
+    #[default]
+    Other,
+}
+
+impl AdditionalCostOrigin {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_other(value: &Self) -> bool {
+        matches!(value, AdditionalCostOrigin::Other)
+    }
+}
+
+/// CR 601.2b/f + CR 113.2c: One announced instance of an additional cost on a
+/// spell. The queue of these records models multiple independent keyword
+/// instances; `AdditionalCost::Optional { repeatability: Repeatable }` models
+/// the within-instance "any number of times" axis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalCostInstance {
+    #[serde(default, skip_serializing_if = "AdditionalCostOrigin::is_other")]
+    pub origin: AdditionalCostOrigin,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub origin_ordinal: u32,
+    pub cost: AdditionalCost,
+}
+
+impl AdditionalCostInstance {
+    pub fn new(origin: AdditionalCostOrigin, cost: AdditionalCost) -> Self {
+        Self {
+            origin,
+            origin_ordinal: 0,
+            cost,
+        }
+    }
+
+    pub fn new_with_ordinal(
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+        cost: AdditionalCost,
+    ) -> Self {
+        Self {
+            origin,
+            origin_ordinal,
+            cost,
+        }
+    }
+}
+
+/// CR 113.2c: Payment record for one independently functioning non-kicker
+/// additional-cost keyword instance. Repeatable instances record their payment
+/// count; non-repeatable instances record `count == 1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalCostInstancePayment {
+    #[serde(default, skip_serializing_if = "AdditionalCostOrigin::is_other")]
+    pub origin: AdditionalCostOrigin,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub origin_ordinal: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub count: u32,
+}
+
+impl AdditionalCostInstancePayment {
+    pub fn new(origin: AdditionalCostOrigin, count: u32) -> Self {
+        Self {
+            origin,
+            origin_ordinal: 0,
+            count,
+        }
+    }
+
+    pub fn new_with_ordinal(origin: AdditionalCostOrigin, origin_ordinal: u32, count: u32) -> Self {
+        Self {
+            origin,
+            origin_ordinal,
+            count,
+        }
+    }
+}
+
+pub(crate) fn additional_cost_instance_payment_count(
+    payments: &[AdditionalCostInstancePayment],
+    origin: AdditionalCostOrigin,
+) -> u32 {
+    payments
+        .iter()
+        .filter(|payment| payment.origin == origin)
+        .map(|payment| payment.count)
+        .sum()
+}
+
+pub(crate) fn additional_cost_instance_payment_count_for_ordinal(
+    payments: &[AdditionalCostInstancePayment],
+    origin: AdditionalCostOrigin,
+    origin_ordinal: u32,
+) -> u32 {
+    payments
+        .iter()
+        .filter(|payment| payment.origin == origin && payment.origin_ordinal == origin_ordinal)
+        .map(|payment| payment.count)
+        .sum()
+}
+
 /// Which casting-time payment stream an `AdditionalCostPaid` condition reads.
 ///
 /// `Any` preserves legacy optional-additional-cost behavior. `Kicker` reads
@@ -6209,13 +6361,37 @@ impl BounceSelection {
     }
 }
 
+/// CR 708.2a: Whether a face-down permanent is a creature or a non-creature.
+///
+/// CR 708.2a sentence 1 gives the manifest/morph default: a face-down permanent
+/// is a 2/2 *creature*. Sentence 2 ("...unless otherwise specified by the effect
+/// that put it onto the battlefield face down") lets an effect specify a
+/// non-creature body instead — e.g. Yedora, Grave Gardener's "It's a Forest
+/// land." (It has no other types or abilities.)". This typed discriminant
+/// replaces an implicit "Creature is always present" assumption so the same
+/// face-down machinery covers both classes without a raw bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FaceDownBody {
+    /// CR 708.2a (sentence 1): the morph/manifest default — the face-down
+    /// permanent has the Creature core type (always present) and defaults to
+    /// 2/2 power/toughness. Any `extra_core_types` are layered on top of
+    /// Creature (e.g. "artifact creatures").
+    #[default]
+    Creature,
+    /// CR 708.2a (sentence 2): the effect fully specifies the core types and the
+    /// permanent is NOT a creature — so it has no power/toughness (CR 208.1) and
+    /// gains no implicit Creature type. Used for "It's a Forest land." The
+    /// profile's `extra_core_types` are the complete core-type set.
+    Noncreature,
+}
+
 /// CR 708.2a: Characteristics an effect specifies for a permanent it puts onto
 /// the battlefield face down ("...unless otherwise specified by the effect that
 /// put it onto the battlefield face down"). When an effect lists no
 /// characteristics, the permanent defaults to a vanilla 2/2 with no name,
 /// subtypes, or mana cost (CR 708.2a). When the effect *does* specify
-/// characteristics ("They're 2/2 Cyberman artifact creatures."), those override
-/// the defaults. Parts-built — no card-named hardcode.
+/// characteristics ("They're 2/2 Cyberman artifact creatures." / "It's a Forest
+/// land."), those override the defaults. Parts-built — no card-named hardcode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaceDownProfile {
     /// CR 708.2a: Power override. `None` defaults to 2.
@@ -6224,11 +6400,21 @@ pub struct FaceDownProfile {
     /// CR 708.2a: Toughness override. `None` defaults to 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toughness: Option<i32>,
-    /// CR 205.1a: Additional core card types beyond Creature (always present per
-    /// CR 708.2a), e.g. Artifact for "artifact creatures".
+    /// CR 708.2a: Whether the face-down permanent is a creature (the
+    /// morph/manifest default — implicit Creature core type + 2/2 P/T) or a
+    /// non-creature whose core types are fully specified by `extra_core_types`
+    /// (e.g. "It's a Forest land", which has no power/toughness).
+    #[serde(default, skip_serializing_if = "is_creature_body")]
+    pub body: FaceDownBody,
+    /// CR 205.1a: For [`FaceDownBody::Creature`], additional core card types
+    /// beyond Creature (always present per CR 708.2a) — e.g. Artifact for
+    /// "artifact creatures". For [`FaceDownBody::Noncreature`], the complete set
+    /// of core card types the effect specifies (e.g. `[Land]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_core_types: Vec<CoreType>,
-    /// CR 205.1a: Creature subtypes the effect grants ("Cyberman").
+    /// CR 205.1a: Subtypes the effect grants — creature subtypes ("Cyberman")
+    /// for a creature body, or land types ("Forest") for a non-creature land
+    /// body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subtypes: Vec<String>,
     /// CR 701.58a: Ward granted to the face-down permanent. `None` for plain
@@ -6239,6 +6425,12 @@ pub struct FaceDownProfile {
     pub ward: Option<crate::types::keywords::WardCost>,
 }
 
+/// `serde` skip helper: the creature body is the CR 708.2a default and need not
+/// be serialized.
+fn is_creature_body(body: &FaceDownBody) -> bool {
+    matches!(body, FaceDownBody::Creature)
+}
+
 impl FaceDownProfile {
     /// CR 708.2a: The default face-down characteristics — a vanilla 2/2 creature
     /// with no extra types or subtypes. Used when an effect puts a card onto the
@@ -6247,6 +6439,7 @@ impl FaceDownProfile {
         Self {
             power: None,
             toughness: None,
+            body: FaceDownBody::Creature,
             extra_core_types: vec![],
             subtypes: vec![],
             ward: None,
@@ -7708,6 +7901,12 @@ pub enum Effect {
         /// and builds a concrete `HasColor` filter on the shield).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source_filter: Option<TargetFilter>,
+        /// CR 511.2 + CR 615: Window the prevention shield persists. None = no stated
+        /// window (legacy: shield pruned at end of turn via is_shield). Some(UntilEndOfCombat)
+        /// from "this combat" -> pruned at end of combat so it doesn't bleed into a later
+        /// combat the same turn. Some(UntilEndOfTurn) from "this turn".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prevention_duration: Option<Duration>,
     },
     /// CR 614.9 + CR 614.1a + CR 615: Create a one-shot "the next time [source]
     /// would deal [combat] damage [to X] this turn, [modify/redirect] instead"
@@ -9058,6 +9257,18 @@ impl Effect {
         Effect::Unimplemented {
             name: name.into(),
             description: Some(fragment.into()),
+        }
+    }
+
+    /// Returns the description (unparsed Oracle fragment) of an
+    /// `Effect::Unimplemented` gap node, or `None` for any other effect. Lets
+    /// parser post-passes re-parse a gapped clause's text without hand-matching
+    /// the `Effect::Unimplemented` literal (forbidden in parser modules by
+    /// `scripts/check-parser-combinators.sh`).
+    pub fn unimplemented_description(&self) -> Option<&str> {
+        match self {
+            Effect::Unimplemented { description, .. } => description.as_deref(),
+            _ => None,
         }
     }
 
@@ -10499,6 +10710,10 @@ pub enum ModalSelectionCondition {
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<AdditionalCostOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kicker_cost: Option<ManaCost>,
@@ -10525,6 +10740,10 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
                 #[serde(default)]
                 source: AdditionalCostPaymentSource,
                 #[serde(default)]
+                origin: Option<AdditionalCostOrigin>,
+                #[serde(default)]
+                origin_ordinal: Option<u32>,
+                #[serde(default)]
                 variant: Option<KickerVariant>,
                 #[serde(default)]
                 kicker_cost: Option<ManaCost>,
@@ -10546,11 +10765,15 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
             }
             Repr::Tagged(Tagged::AdditionalCostPaid {
                 source,
+                origin,
+                origin_ordinal,
                 variant,
                 kicker_cost,
                 min_count,
             }) => Ok(ModalSelectionCondition::AdditionalCostPaid {
                 source,
+                origin,
+                origin_ordinal,
                 variant,
                 kicker_cost,
                 min_count,
@@ -11169,6 +11392,15 @@ pub enum RepeatContinuation {
     /// each iteration fully resolves, the controller is prompted
     /// (`WaitingFor::RepeatDecision`) to repeat or stop.
     ControllerChoice,
+    /// CR 608.2c + CR 107.1c: "repeat this process until [stop conditions],
+    /// whichever comes first" — after each iteration fully resolves, the engine
+    /// checks the configured stop predicates and auto-repeats when none fired.
+    /// Tainted Pact: stop when the controller puts a card into their hand or
+    /// when two cards exiled this way share a name.
+    UntilStopConditions {
+        stop_on_put_to_hand: bool,
+        stop_on_duplicate_exiled_names: bool,
+    },
 }
 
 /// CR 608.2c + CR 122.1: tags a `ChooseOneOf` branch whose effect must be
@@ -11431,6 +11663,10 @@ pub enum AbilityCondition {
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<AdditionalCostOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kicker_cost: Option<ManaCost>,
@@ -11515,6 +11751,10 @@ pub enum AbilityCondition {
         reference: TargetFilter,
         quality: SharedQuality,
     },
+    /// CR 607.2a + CR 608.2c: "unless it has the same name as another card
+    /// exiled this way" — true when the resolved `target` shares a name with
+    /// any other card linked to this ability's source via `exile_links`.
+    TargetSharesNameWithOtherExiledThisWay { target: TargetFilter },
     /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
     /// "unless ~ entered this turn"), wrap with `AbilityCondition::Not`.
@@ -11754,6 +11994,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Any,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -11765,6 +12007,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: Some(variant),
             kicker_cost: None,
             min_count: 1,
@@ -11777,6 +12021,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: Some(cost),
             min_count: 1,
@@ -11788,6 +12034,8 @@ impl AbilityCondition {
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count,
@@ -11831,6 +12079,12 @@ pub struct SpellContext {
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub additional_cost_payment_count: u32,
+    /// CR 113.2c + CR 601.2b/f: Per-instance non-kicker additional-cost
+    /// payments declared while casting this spell. This is the non-kicker
+    /// analogue to `kickers_paid`: it is a strict superset of the legacy
+    /// `additional_cost_paid` / `additional_cost_payment_count` aggregate facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     /// CR 702.33d + CR 702.33f: The list of kicker payments declared during
     /// casting, in payment order. For "Kicker {A} and/or {B}" cards (CR 702.33b),
     /// each chosen kicker pushes a corresponding `KickerVariant` entry. For
@@ -11879,6 +12133,46 @@ pub struct SpellContext {
 }
 
 impl SpellContext {
+    pub fn record_additional_cost_payment(&mut self, origin: AdditionalCostOrigin, count: u32) {
+        self.record_additional_cost_instance_payment(origin, 0, count);
+    }
+
+    pub fn record_additional_cost_instance_payment(
+        &mut self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+        count: u32,
+    ) {
+        if count == 0 {
+            return;
+        }
+        self.additional_cost_payments
+            .push(AdditionalCostInstancePayment::new_with_ordinal(
+                origin,
+                origin_ordinal,
+                count,
+            ));
+        self.additional_cost_paid = true;
+        self.additional_cost_payment_count =
+            self.additional_cost_payment_count.saturating_add(count);
+    }
+
+    pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
+        additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
+    }
+
+    pub fn instance_payment_count_for_ordinal(
+        &self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+    ) -> u32 {
+        additional_cost_instance_payment_count_for_ordinal(
+            &self.additional_cost_payments,
+            origin,
+            origin_ordinal,
+        )
+    }
+
     pub fn additional_cost_paid_matches(
         &self,
         source: AdditionalCostPaymentSource,
@@ -11892,13 +12186,23 @@ impl SpellContext {
 
         match variant {
             Some(kicker) => self.kickers_paid.contains(&kicker),
-            None => additional_cost_payment_count_matches(
-                source,
-                self.additional_cost_paid,
-                self.kickers_paid.len(),
-                self.additional_cost_payment_count,
-                min_count,
-            ),
+            None => {
+                let non_kicker_count = if self.additional_cost_payments.is_empty() {
+                    self.additional_cost_payment_count
+                } else {
+                    self.additional_cost_payments
+                        .iter()
+                        .map(|payment| payment.count)
+                        .sum()
+                };
+                additional_cost_payment_count_matches(
+                    source,
+                    self.additional_cost_paid || non_kicker_count > 0,
+                    self.kickers_paid.len(),
+                    non_kicker_count,
+                    min_count,
+                )
+            }
         }
     }
 }
@@ -12037,6 +12341,10 @@ pub enum TriggerCondition {
     AdditionalCostPaid {
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<AdditionalCostOrigin>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_ordinal: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -13638,6 +13946,18 @@ pub enum ContinuousModification {
     GrantAbility {
         definition: Box<AbilityDefinition>,
     },
+    /// CR 613.1f + CR 113.3: Grant the affected object **all activated abilities
+    /// of** the objects matching `source` (Myr Welder / Dark Impostor / Patchwork
+    /// Crawler "all [creature] cards exiled with it", Territory Forge "the exiled
+    /// card", Mairsil, Experiment Kraj, …). The set is dynamic — recomputed each
+    /// layer pass — so it is expanded into one `GrantAbility` per matching
+    /// activated ability at continuous-effect collection time
+    /// (`active_continuous_effects_from_static_definitions`); the layer-6 apply of
+    /// this variant itself is therefore a no-op. `source` is resolved relative to
+    /// each recipient of the host static (`FilterContext::from_source(recipient)`).
+    GrantAllActivatedAbilitiesOf {
+        source: TargetFilter,
+    },
     /// CR 604.1: Grant a triggered ability to the affected object.
     /// Unlike GrantAbility (which pushes to obj.abilities), this pushes to
     /// obj.trigger_definitions so the trigger's event/condition metadata is
@@ -14116,6 +14436,15 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
+    /// are gated behind an optional cost (Caesar). Carried from the def so
+    /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
+    /// route to AbilityModeChoice. None for non-modal abilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
+    /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_abilities: Vec<AbilityDefinition>,
 }
 
 impl ResolvedAbility {
@@ -14166,6 +14495,8 @@ impl ResolvedAbility {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             source_incarnation: None,
+            modal: None,
+            mode_abilities: Vec::new(),
         }
     }
 
@@ -15604,8 +15935,13 @@ mod tests {
     fn filter_prop_roundtrip() {
         let props = vec![
             FilterProp::Token,
-            FilterProp::Attacking,
-            FilterProp::AttackingController,
+            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent),
+            },
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
