@@ -220,7 +220,6 @@ function ZoneCard({
             ? "hover:scale-[1.03]"
             : "hover:ring-1 hover:ring-white/20"
       }`}
-      data-card-hover
       title={canCast && !isValidTarget ? castTitle : undefined}
       {...hoverProps(obj.id)}
       onClick={handleClick}
