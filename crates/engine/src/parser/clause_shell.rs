@@ -242,6 +242,13 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         value((), tag("cast those ")),
         value((), tag("cast it")),
         value((), tag("cast one of ")),
+        // CR 400.7i — Escape to the Wilds impulse-set anaphor. The trailing
+        // duration ("until the end of your next turn") must reach
+        // `try_parse_play_from_exile` to disambiguate vs. `Effect::CastFromZone`.
+        value((), tag("play cards exiled this way")),
+        value((), tag("play the cards exiled this way")),
+        value((), tag("cast cards exiled this way")),
+        value((), tag("cast the cards exiled this way")),
         // Full impulse-draw form (when the optional strip didn't fire
         // because we're a recursive sub-clause). Mirrors the alternatives
         // at `oracle_effect/mod.rs:2701`.
@@ -256,9 +263,35 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         // specialized parser at `oracle_effect/mod.rs:571` requires
         // "this turn" to be present in the input.
         value((), tag("the next ")),
+        // CR 305.2 — "play an additional land this turn" / "play <n> additional
+        // lands this turn" (Escape to the Wilds). `try_parse_additional_land_this_turn`
+        // requires the " this turn" suffix to discriminate the turn-scoped
+        // grant from the printed static ("on each of your turns") form.
+        parse_additional_land_head,
     ))
     .parse(text_lower);
     head.is_ok()
+}
+
+/// CR 305.2: Head matcher for the turn-scoped additional-land grant, used by
+/// `is_specialized_duration_carrier` so the trailing duration is deferred to
+/// `try_parse_additional_land_this_turn`.
+fn parse_additional_land_head(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+    alt((
+        value((), tag("play an additional land")),
+        value(
+            (),
+            (
+                tag("play "),
+                crate::parser::oracle_nom::primitives::parse_number,
+                tag(" additional lands"),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 608.2d: Suffixes after "you may " that have specialized parsing elsewhere

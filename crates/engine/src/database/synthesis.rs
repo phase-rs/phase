@@ -8763,6 +8763,29 @@ pub fn synthesize_archenemy(face: &mut CardFace) {
     }
 }
 
+/// CR 905.4: Conspiracy cards exist only in the command zone and their abilities
+/// function from there. CR 113.6b: an ability that states which zones it
+/// functions in functions only from those zones. Parser-emitted
+/// triggers/statics on a conspiracy carry no zone designation, so this stamps
+/// `Zone::Command` onto each — the same precedent as `synthesize_archenemy` for
+/// schemes and `synthesize_planechase` for planes/phenomena. Idempotent: only
+/// stamps when `Zone::Command` is not already present.
+pub fn synthesize_conspiracy(face: &mut CardFace) {
+    if !face.card_type.core_types.contains(&CoreType::Conspiracy) {
+        return;
+    }
+    for trigger in face.triggers.iter_mut() {
+        if !trigger.trigger_zones.contains(&Zone::Command) {
+            trigger.trigger_zones.push(Zone::Command);
+        }
+    }
+    for static_def in face.static_abilities.iter_mut() {
+        if !static_def.active_zones.contains(&Zone::Command) {
+            static_def.active_zones.push(Zone::Command);
+        }
+    }
+}
+
 pub fn synthesize_all(face: &mut CardFace) {
     synthesize_basic_land_mana(face);
     synthesize_equip(face);
@@ -9059,6 +9082,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 314.2 / CR 904.8 / CR 113.6b: stamp Zone::Command onto scheme triggers
     // and statics so the command-zone scans evaluate them.
     synthesize_archenemy(face);
+    // CR 905.4 / CR 113.6b: stamp Zone::Command onto conspiracy triggers and
+    // statics so the command-zone scans evaluate them.
+    synthesize_conspiracy(face);
 }
 
 /// CR 702.176a: Synthesize Impending's battlefield static and end-step trigger.

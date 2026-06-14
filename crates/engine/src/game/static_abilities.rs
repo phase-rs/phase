@@ -1354,6 +1354,56 @@ pub fn additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
         total = total.saturating_add(count);
     }
 
+    // CR 305.2 + CR 611.2c: A turn-scoped grant (Escape to the Wilds: "you may
+    // play an additional land this turn") is a transient continuous effect, not
+    // a battlefield static, so it is invisible to `battlefield_active_statics`.
+    // Sum it from the TCE table here.
+    total = total.saturating_add(transient_additional_land_drops(state, player));
+
+    total
+}
+
+/// CR 305.2 + CR 611.2c: Sum the additional land drops a player is granted by
+/// transient continuous effects (e.g. Escape to the Wilds' "play an additional
+/// land this turn"). The typed-summing twin of
+/// `transient_grants_other_static_to_context`: it mirrors that helper's
+/// player-pin and duration/condition gates but accumulates the land-drop count
+/// from each `AddStaticMode` modification rather than testing a named bool.
+fn transient_additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
+    let mut total: u8 = 0;
+    for tce in &state.transient_continuous_effects {
+        // CR 611.2c: player-scoped registration fans `TargetFilter::Player`
+        // broadcasts into per-player `SpecificPlayer` TCEs; the bare `Player`
+        // variant is matched defensively for any raw all-players registration.
+        let pins_player = match &tce.affected {
+            TargetFilter::SpecificPlayer { id } => *id == player,
+            TargetFilter::Player => true,
+            _ => continue,
+        };
+        if !pins_player {
+            continue;
+        }
+        // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        for m in &tce.modifications {
+            if let ContinuousModification::AddStaticMode { mode } = m {
+                total = total.saturating_add(match mode {
+                    StaticMode::MayPlayAdditionalLand => 1,
+                    StaticMode::AdditionalLandDrop { count } => *count,
+                    _ => 0,
+                });
+            }
+        }
+    }
     total
 }
 
@@ -1777,6 +1827,82 @@ mod tests {
 
         // CR 305.2: Two Explorations = +2 additional land drops
         assert_eq!(additional_land_drops(&state, PlayerId(0)), 2);
+    }
+
+    /// Issue #2879 + CR 305.2 + CR 611.2c: a turn-scoped transient grant (Escape
+    /// to the Wilds: "you may play an additional land this turn") must be summed
+    /// into `additional_land_drops` for the affected player only.
+    #[test]
+    fn transient_additional_land_drops_counted() {
+        use crate::types::ability::{ContinuousModification, Duration};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Escape to the Wilds".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Baseline: no extra land drops.
+        assert_eq!(additional_land_drops(&state, PlayerId(0)), 0);
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayPlayAdditionalLand,
+            }],
+            None,
+        );
+
+        assert_eq!(
+            additional_land_drops(&state, PlayerId(0)),
+            1,
+            "PlayerId(0) must get the transient extra land drop"
+        );
+        assert_eq!(
+            additional_land_drops(&state, PlayerId(1)),
+            0,
+            "PlayerId(1) must not get it — per-player scoping"
+        );
+    }
+
+    /// Issue #2879 (count >= 2 branch): a transient `AdditionalLandDrop { count }`
+    /// sums its full count into `additional_land_drops`.
+    #[test]
+    fn transient_additional_land_drops_counts_multiple() {
+        use crate::types::ability::{ContinuousModification, Duration};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Multi-land Grant".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::AdditionalLandDrop { count: 2 },
+            }],
+            None,
+        );
+
+        assert_eq!(
+            additional_land_drops(&state, PlayerId(0)),
+            2,
+            "AdditionalLandDrop count 2 must sum to 2"
+        );
+        assert_eq!(additional_land_drops(&state, PlayerId(1)), 0);
     }
 
     #[test]

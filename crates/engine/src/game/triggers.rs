@@ -757,10 +757,11 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .filter(|id| {
                 state.objects.get(id).is_some_and(|o| {
                     !o.is_phased_out()
-                        && (o.is_emblem
-                            || o.trigger_definitions
-                                .iter_all()
-                                .any(super::functioning_abilities::trigger_opts_in_to_command_zone))
+                        && (o.is_emblem || o.trigger_definitions.iter_all().any(|def| {
+                            super::functioning_abilities::non_emblem_command_zone_trigger_functions(
+                                o, def,
+                            )
+                        }))
                 })
             })
             .collect(),

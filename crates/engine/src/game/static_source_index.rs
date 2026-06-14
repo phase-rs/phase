@@ -99,10 +99,14 @@ impl StaticSourceIndex {
             }
         }
         for &id in &state.command_zone {
-            // CR 114.3: command-zone emblems carry static abilities. Only emblem
-            // generators are indexed; commanders (is_emblem == false) are not.
+            // CR 114.3: command-zone emblems carry static abilities. CR 905.4 +
+            // CR 113.6b: a face-up conspiracy's abilities function from the
+            // command zone too. Both are indexed; commanders (is_emblem == false,
+            // not a conspiracy) are not.
             if let Some(obj) = state.objects.get(&id) {
-                if obj.is_emblem && object_sources_continuous_effect(obj) {
+                let is_command_zone_source =
+                    obj.is_emblem || super::conspiracy::functions_from_command_zone(obj);
+                if is_command_zone_source && object_sources_continuous_effect(obj) {
                     fresh.command_sources.push_back(id);
                 }
             }

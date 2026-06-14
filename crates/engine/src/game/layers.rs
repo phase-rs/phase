@@ -2219,12 +2219,14 @@ fn for_each_static_effect_source(
                 visit(state, obj);
             }
         }
-        // CR 114.3: command-zone emblems have static abilities that affect the game.
+        // CR 114.3: command-zone emblems have static abilities that affect the
+        // game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
+        // function from the command zone too.
         for &id in &state.command_zone {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem {
+            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -2243,13 +2245,15 @@ fn for_each_static_effect_source(
             visit(state, obj);
         }
         // CR 114.3: Emblems in the command zone have static abilities that affect
-        // the game. The index already filtered to `is_emblem` generators; the
-        // gate is re-asserted here for parity with the fallback path.
+        // the game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
+        // function from the command zone too. The index already filtered to these
+        // command-zone generators; the gate is re-asserted here for parity with
+        // the fallback path.
         for &id in &index.command_sources {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem {
+            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
                 visit(state, obj);
             }
         }

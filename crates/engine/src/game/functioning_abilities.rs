@@ -47,6 +47,30 @@ use crate::types::game_state::GameState;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// CR 905.4a + CR 113.6b: Face-down hidden-agenda conspiracies do not function
+/// even though synthesis stamps their definitions with `Zone::Command`. Other
+/// non-emblem command-zone objects keep the existing explicit opt-in path.
+fn non_emblem_command_zone_static_functions(obj: &GameObject, def: &StaticDefinition) -> bool {
+    if crate::game::conspiracy::is_conspiracy(obj) {
+        return crate::game::conspiracy::functions_from_command_zone(obj)
+            && static_opts_in_to_command_zone(def);
+    }
+    static_opts_in_to_command_zone(def)
+}
+
+/// CR 905.4a + CR 113.6b: Trigger-side mirror of
+/// `non_emblem_command_zone_static_functions`.
+pub(crate) fn non_emblem_command_zone_trigger_functions(
+    obj: &GameObject,
+    def: &TriggerDefinition,
+) -> bool {
+    if crate::game::conspiracy::is_conspiracy(obj) {
+        return crate::game::conspiracy::functions_from_command_zone(obj)
+            && trigger_opts_in_to_command_zone(def);
+    }
+    trigger_opts_in_to_command_zone(def)
+}
+
 /// CR 702.26b + CR 114.4: Shared "does this object function at all?" gate.
 ///
 /// CR 702.26b: Phased-out permanents' abilities don't function.
@@ -107,7 +131,10 @@ pub fn active_static_definitions<'a>(
     let zone = obj.zone;
     let is_emblem = obj.is_emblem;
     Box::new(obj.static_definitions.iter_all().filter(move |def| {
-        if zone == Zone::Command && !is_emblem && !static_opts_in_to_command_zone(def) {
+        if zone == Zone::Command
+            && !is_emblem
+            && !non_emblem_command_zone_static_functions(obj, def)
+        {
             return false;
         }
         // CR 604.1 / CR 613.1: a static's `condition` must hold for the
@@ -172,7 +199,7 @@ pub fn game_functioning_statics(
                     // CR 114.4 + CR 113.6b: command-zone non-emblem objects
                     // only contribute statics that explicitly opt in.
                     if zone == Zone::Command && !is_emblem {
-                        return static_opts_in_to_command_zone(def);
+                        return non_emblem_command_zone_static_functions(obj, def);
                     }
                     true
                 })
@@ -238,7 +265,7 @@ pub fn active_trigger_definitions<'a>(
             .enumerate()
             .filter(move |(_, def)| {
                 if zone == Zone::Command && !is_emblem {
-                    return trigger_opts_in_to_command_zone(def);
+                    return non_emblem_command_zone_trigger_functions(obj, def);
                 }
                 true
             }),
