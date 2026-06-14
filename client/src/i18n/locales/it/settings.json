@@ -32,7 +32,6 @@
       "customUrl": "URL personalizzato",
       "none": "Nessuno"
     },
-    "commandZone": "Zona di comando",
     "commandZoneOptions": {
       "compact": "Compatto",
       "inline": "In linea",
@@ -89,11 +88,10 @@
     "reset": "Reimposta layout",
     "preset": "Preimpostazione",
     "hint": "Trascina un pannello per spostarlo. Trascina le barre luminose per ridimensionare le zone.",
-    "scale": {
-      "stack": "Pila",
-      "tiles": "Riquadri",
-      "smaller": "Riduci dimensione di {{label}}",
-      "larger": "Aumenta dimensione di {{label}}"
+    "align": {
+      "left": "Allinea a sinistra",
+      "center": "Centra",
+      "right": "Allinea a destra"
     },
     "presets": {
       "default": { "label": "Layout 1", "description": "Il layout bilanciato standard." },

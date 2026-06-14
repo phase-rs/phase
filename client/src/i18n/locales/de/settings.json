@@ -32,7 +32,6 @@
       "customUrl": "Eigene URL",
       "none": "Keiner"
     },
-    "commandZone": "Kommandozone",
     "commandZoneOptions": {
       "compact": "Kompakt",
       "inline": "Inline",
@@ -89,11 +88,10 @@
     "reset": "Layout zurücksetzen",
     "preset": "Vorlage",
     "hint": "Ziehe ein Panel, um es zu verschieben. Ziehe die leuchtenden Balken, um Zonen zu skalieren.",
-    "scale": {
-      "stack": "Stapel",
-      "tiles": "Kacheln",
-      "smaller": "{{label}} verkleinern",
-      "larger": "{{label}} vergrößern"
+    "align": {
+      "left": "Linksbündig",
+      "center": "Zentriert",
+      "right": "Rechtsbündig"
     },
     "presets": {
       "default": { "label": "Layout 1", "description": "Das ausgewogene Standardlayout." },

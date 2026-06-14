@@ -32,7 +32,6 @@
       "customUrl": "URL personalizada",
       "none": "Ninguno"
     },
-    "commandZone": "Zona de mando",
     "commandZoneOptions": {
       "compact": "Compacto",
       "inline": "En línea",
@@ -89,11 +88,10 @@
     "reset": "Restablecer diseño",
     "preset": "Preajuste",
     "hint": "Arrastra cualquier panel para moverlo. Arrastra las barras brillantes para redimensionar zonas.",
-    "scale": {
-      "stack": "Pila",
-      "tiles": "Mosaicos",
-      "smaller": "Reducir tamaño de {{label}}",
-      "larger": "Aumentar tamaño de {{label}}"
+    "align": {
+      "left": "Alinear a la izquierda",
+      "center": "Centrar",
+      "right": "Alinear a la derecha"
     },
     "presets": {
       "default": { "label": "Diseño 1", "description": "El diseño equilibrado estándar." },

@@ -756,6 +756,31 @@ fn pay_ability_cost_inner(
                 None,
             );
         }
+        // CR 118.3 + CR 602.2b + CR 601.2h: Self-return costs such as
+        // Recurring Nightmare and Maze's End are automatic once chosen;
+        // non-self returns use the WaitingFor::PayCost detour before payment
+        // begins.
+        AbilityCost::ReturnToHand {
+            count,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone,
+        } => {
+            if *count != 1 {
+                return Ok(payment_failed(
+                    "self return-to-hand cost must return exactly one permanent",
+                ));
+            }
+            let Some(obj) = state.objects.get(&source_id) else {
+                return Ok(payment_failed("source not found for return-to-hand cost"));
+            };
+            let expected_zone = from_zone.unwrap_or(Zone::Battlefield);
+            if obj.zone != expected_zone {
+                return Ok(payment_failed(
+                    "cannot return source to hand: source is not in the required zone",
+                ));
+            }
+            super::zones::move_to_zone(state, source_id, Zone::Hand, events);
+        }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
@@ -1328,6 +1353,44 @@ mod tests {
                 "can_pay==true but pay_cost returned Failed for {cost:?}"
             );
         }
+    }
+
+    #[test]
+    fn self_return_to_hand_cost_honors_explicit_from_zone() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Self Returning Source", 2, 2)
+            .id();
+        let graveyard_cost = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: Some(Zone::Graveyard),
+        };
+
+        let rejected = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &graveyard_cost,
+            &mut Vec::new(),
+        );
+        assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
+        assert_eq!(scenario.state.objects[&src].zone, Zone::Battlefield);
+
+        let battlefield_cost = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: Some(Zone::Battlefield),
+        };
+        pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &battlefield_cost,
+            &mut Vec::new(),
+        )
+        .expect("battlefield self-return cost should be payable");
+        assert_eq!(scenario.state.objects[&src].zone, Zone::Hand);
     }
 
     /// Activation-scope `can_pay` against `state` for `source`.

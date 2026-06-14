@@ -32,7 +32,6 @@
       "customUrl": "Niestandardowy URL",
       "none": "Brak"
     },
-    "commandZone": "Strefa dowodzenia",
     "commandZoneOptions": {
       "compact": "Kompaktowy",
       "inline": "Wbudowany",
@@ -89,11 +88,10 @@
     "reset": "Zresetuj układ",
     "preset": "Ustawienie",
     "hint": "Przeciągnij panel, aby go przesunąć. Przeciągnij świecące paski, aby zmienić rozmiar stref.",
-    "scale": {
-      "stack": "Stos",
-      "tiles": "Kafelki",
-      "smaller": "Zmniejsz rozmiar: {{label}}",
-      "larger": "Zwiększ rozmiar: {{label}}"
+    "align": {
+      "left": "Wyrównaj do lewej",
+      "center": "Wyśrodkuj",
+      "right": "Wyrównaj do prawej"
     },
     "presets": {
       "default": { "label": "Układ 1", "description": "Standardowy, zrównoważony układ." },

@@ -12030,7 +12030,7 @@ mod tests {
         DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration,
         Effect, EffectScope, FilterProp, ManaProduction, ManaSpendPermission, ObjectScope,
         PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+        SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::WaitingFor;
@@ -23470,6 +23470,32 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             })
         );
+    }
+
+    #[test]
+    fn trigger_oversold_cemetery_upkeep_creature_graveyard_gate() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if you have four or more creature cards in your graveyard, you may return target creature card from your graveyard to your hand.",
+            "Oversold Cemetery",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            })
+        );
+        assert!(def.optional);
     }
 
     #[test]

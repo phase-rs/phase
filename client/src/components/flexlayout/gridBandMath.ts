@@ -7,6 +7,8 @@ const MIN_PCT = 6;
 const MAX_PCT = 35;
 const MIN_PX = 40;
 const MAX_FRACTION = 0.4;
+/** Within this many px of the default band height, a resize snaps back to it. */
+const SNAP_BAND_PX = 12;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -22,10 +24,17 @@ export function resizeBand(
   current: CappedTrack,
   deltaPx: number,
   viewportH: number,
+  snapToDefault?: CappedTrack,
 ): CappedTrack {
   const currentPx = Math.min((current.pct / 100) * viewportH, current.pxCap);
   const maxPx = viewportH * MAX_FRACTION;
   const nextPx = clamp(currentPx + deltaPx, MIN_PX, maxPx);
+  // Magnetic snap to the default band height (its effective px at this viewport),
+  // returning the default track verbatim so the home value is restored exactly.
+  if (snapToDefault) {
+    const defaultPx = Math.min((snapToDefault.pct / 100) * viewportH, snapToDefault.pxCap);
+    if (Math.abs(nextPx - defaultPx) < SNAP_BAND_PX) return { ...snapToDefault };
+  }
   const pct = clamp((nextPx / viewportH) * 100, MIN_PCT, MAX_PCT);
   return { pct: Math.round(pct * 10) / 10, pxCap: Math.round(nextPx) };
 }

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-13T00:00:00Z",
+  "updated": "2026-06-14T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -467,145 +467,6 @@
       ]
     },
     {
-      "name": "Ruby Storm",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Flame of Anor"
-        },
-        {
-          "count": 2,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 2,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 4,
-          "name": "Ral, Monsoon Mage"
-        },
-        {
-          "count": 4,
-          "name": "Stormcatch Mentor"
-        },
-        {
-          "count": 3,
-          "name": "Stock Up"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Flow State"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 3,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        },
-        {
-          "count": 4,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 4,
-          "name": "Preordain"
-        },
-        {
-          "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 2,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Baral, Chief of Compliance"
-        },
-        {
-          "count": 2,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 1,
-          "name": "Wooded Foothills"
-        },
-        {
-          "count": 1,
-          "name": "Valakut Awakening"
-        },
-        {
-          "count": 2,
-          "name": "Strike It Rich"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 3,
-          "name": "Vexing Bauble"
-        },
-        {
-          "count": 2,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Fire Magic"
-        },
-        {
-          "count": 3,
-          "name": "Lightning Bolt"
-        },
-        {
-          "count": 2,
-          "name": "Apostle's Blessing"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        }
-      ]
-    },
-    {
       "name": "Grixis Reanimator",
       "author": "MTGGoldfish",
       "colors": [
@@ -1032,48 +893,71 @@
       ]
     },
     {
-      "name": "Belcher",
+      "name": "Ruby Storm",
       "author": "MTGGoldfish",
-      "colors": [],
+      "colors": [
+        "U",
+        "R"
+      ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
           "count": 4,
-          "name": "Orim's Chant"
+          "name": "Flame of Anor"
+        },
+        {
+          "count": 2,
+          "name": "Thundering Falls"
         },
         {
           "count": 1,
-          "name": "Razorgrass Ambush"
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 2,
+          "name": "Sink into Stupor"
         },
         {
           "count": 4,
-          "name": "Witch Enchanter"
+          "name": "Ral, Monsoon Mage"
         },
         {
           "count": 4,
-          "name": "Pinnacle Monk"
+          "name": "Stormcatch Mentor"
+        },
+        {
+          "count": 3,
+          "name": "Stock Up"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
         },
         {
           "count": 4,
-          "name": "Sundering Eruption"
-        },
-        {
-          "count": 4,
-          "name": "Legion Leadership"
-        },
-        {
-          "count": 4,
-          "name": "Stormscale Scion"
+          "name": "Flow State"
         },
         {
           "count": 4,
           "name": "Desperate Ritual"
         },
         {
-          "count": 4,
-          "name": "Pyretic Ritual"
+          "count": 3,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
         },
         {
           "count": 4,
@@ -1081,57 +965,69 @@
         },
         {
           "count": 4,
-          "name": "Goblin Charbelcher"
+          "name": "Scalding Tarn"
         },
         {
           "count": 4,
-          "name": "Talisman of Conviction"
+          "name": "Preordain"
         },
         {
           "count": 4,
-          "name": "Irencrag Feat"
+          "name": "Pyretic Ritual"
         },
         {
-          "count": 4,
-          "name": "Shatterskull Smashing"
+          "count": 2,
+          "name": "Flooded Strand"
         },
         {
-          "count": 4,
+          "count": 1,
+          "name": "Baral, Chief of Compliance"
+        },
+        {
+          "count": 2,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 1,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 2,
           "name": "Strike It Rich"
-        },
-        {
-          "count": 3,
-          "name": "March of Reckless Joy"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Static Prison"
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 3,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 2,
+          "name": "Into the Flood Maw"
         },
         {
           "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Redirect Lightning"
+          "name": "Fire Magic"
         },
         {
           "count": 3,
-          "name": "Blood Moon"
+          "name": "Lightning Bolt"
         },
         {
           "count": 2,
-          "name": "Shattering Spree"
+          "name": "Apostle's Blessing"
         },
         {
           "count": 2,
-          "name": "Silence"
-        },
-        {
-          "count": 3,
-          "name": "Wear // Tear"
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -1255,6 +1151,110 @@
         {
           "count": 2,
           "name": "Eddymurk Crab"
+        }
+      ]
+    },
+    {
+      "name": "Belcher",
+      "author": "MTGGoldfish",
+      "colors": [],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 1,
+          "name": "Razorgrass Ambush"
+        },
+        {
+          "count": 4,
+          "name": "Witch Enchanter"
+        },
+        {
+          "count": 4,
+          "name": "Pinnacle Monk"
+        },
+        {
+          "count": 4,
+          "name": "Sundering Eruption"
+        },
+        {
+          "count": 4,
+          "name": "Legion Leadership"
+        },
+        {
+          "count": 4,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
+          "name": "Goblin Charbelcher"
+        },
+        {
+          "count": 4,
+          "name": "Talisman of Conviction"
+        },
+        {
+          "count": 4,
+          "name": "Irencrag Feat"
+        },
+        {
+          "count": 4,
+          "name": "Shatterskull Smashing"
+        },
+        {
+          "count": 4,
+          "name": "Strike It Rich"
+        },
+        {
+          "count": 3,
+          "name": "March of Reckless Joy"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Static Prison"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Redirect Lightning"
+        },
+        {
+          "count": 3,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 2,
+          "name": "Shattering Spree"
+        },
+        {
+          "count": 2,
+          "name": "Silence"
+        },
+        {
+          "count": 3,
+          "name": "Wear // Tear"
         }
       ]
     },

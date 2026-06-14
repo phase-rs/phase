@@ -1176,8 +1176,23 @@ function GamePageContent({
           <GameBoard oppHud={oppHud} playerHud={playerHud} />
         </div>
 
-        {/* Row 3: Player hand + zones */}
-        <div className="relative min-w-0 overflow-visible" data-flex-zone="player-row">
+        {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so
+            if the row stretched with its (resizable) band track, resizing the
+            band would drag the hand vertically. Instead we give the row a
+            CONSTANT height equal to the DEFAULT band and pin it to the track's
+            bottom (`self-end`, the viewport edge, which never moves). The height
+            mirrors the resolver's default track exactly — `min(18%, 150px)` of
+            the grid's CONTENT box (`100dvh` minus the top-overlay padding) — but
+            computed in viewport units so it ignores the LIVE (resized) track,
+            which a plain `18%` on a grid item would track instead. The hand thus
+            keeps its default resting position and stays put on resize; a grown
+            band opens empty space ABOVE the row (trading with the battlefield)
+            rather than shoving the hand up. */}
+        <div
+          className="relative min-w-0 self-end overflow-visible"
+          style={{ height: "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)" }}
+          data-flex-zone="player-row"
+        >
           <div className="flex items-end justify-center">
             <ZoneHand zone="exile" />
             <PlayerHand />
@@ -1186,8 +1201,10 @@ function GamePageContent({
           <DraggableWidget
             target={{ kind: "widget", key: "playerPiles" }}
             flexZone="playerPiles"
+            scaleKey="playerPiles"
             className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-            style={playerZoneRailStyle}
+            // Anchor box-scale to the bottom-left dock corner.
+            style={{ ...playerZoneRailStyle, transformOrigin: "bottom left" }}
           >
             <div className="flex items-end gap-2">
               <ExilePile
@@ -1220,10 +1237,14 @@ function GamePageContent({
       <DraggableWidget
         target={{ kind: "widget", key: "actionRail" }}
         flexZone="actionRail"
+        scaleKey="actionRail"
+        resizeCorner="bl"
         className="fixed z-30 flex flex-col items-end gap-1.5"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
           right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
+          // Anchor box-scale to the docked corner so it grows inward, not off-screen.
+          transformOrigin: "bottom right",
         }}
       >
         {showFlowHelpNudge && <FlowHelpNudge />}

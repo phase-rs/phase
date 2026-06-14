@@ -114,6 +114,16 @@ pub enum SearchSelectionConstraint {
     MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
+impl SearchSelectionConstraint {
+    /// CR 701.23b vs CR 701.23d: a *stated-quality* search (any constrained
+    /// variant) may find fewer cards than requested — including none. A pure
+    /// *quantity* search (`None`) must find as many as possible. Drives the
+    /// SearchChoice lower bound in the submission guard and AI candidate gen.
+    pub fn permits_partial_find(&self) -> bool {
+        !matches!(self, SearchSelectionConstraint::None)
+    }
+}
+
 /// CR 400.11 + CR 406.3: Candidate pool for outside-game searches. The
 /// baseline pool is the player's sideboard; Karn/Coax-class text widens that
 /// pool to include owned face-up exile cards that match the same filter.
