@@ -41,6 +41,7 @@
 //! anchor for "Target creature's owner … faces a villainous choice".
 
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -200,7 +201,7 @@ fn the_master_prompts_the_chosen_most_life_opponent() {
     // opponent (P2), not by The Master's controller (P0). Pre-fix the chooser
     // lowered to `Controller`, so this prompted P0.
     advance_to_choice(&mut runner);
-    match &runner.state().waiting_for {
+    let lose_life_index = match &runner.state().waiting_for {
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => {
@@ -210,9 +211,33 @@ fn the_master_prompts_the_chosen_most_life_opponent() {
                  not The Master's controller (P0)"
             );
             assert_eq!(branches.len(), 2, "lose-4-life or copy-token");
+            branches
+                .iter()
+                .position(|b| matches!(&*b.effect, Effect::LoseLife { .. }))
+                .expect("a 'They lose 4 life' branch must exist")
         }
         other => panic!("expected the villainous ChooseOneOfBranch scoped to P2, got {other:?}"),
-    }
+    };
+
+    // End-to-end: resolving the "They lose 4 life" branch must drain 4 life from
+    // the chosen opponent (P2: 40 → 36), proving the scoped branch resolves
+    // against the prompted player, not the controller (CR 701.55a).
+    let p2_life_before = runner.life(P2);
+    runner
+        .act(GameAction::ChooseBranch {
+            index: lose_life_index,
+        })
+        .expect("resolving the lose-life branch must succeed");
+    assert_eq!(
+        runner.life(P2),
+        p2_life_before - 4,
+        "the chosen opponent (P2) must lose 4 life, not The Master's controller"
+    );
+    assert_eq!(
+        runner.life(P0),
+        30,
+        "The Master's controller (P0) must not lose life from the villainous choice"
+    );
 }
 
 /// CR 108.3 + CR 701.55a: This Is How It Ends targets a creature; its OWNER
@@ -226,6 +251,8 @@ fn this_is_how_it_ends_prompts_the_target_creatures_owner() {
     for &pid in &[P0, P1] {
         scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D"]);
     }
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
 
     // The sorcery in P0's hand, parsed from the real Oracle text.
     let spell = scenario
@@ -247,7 +274,7 @@ fn this_is_how_it_ends_prompts_the_target_creatures_owner() {
     // The villainous choice MUST be faced by the target creature's owner (P1),
     // not by the spell's caster (P0). Pre-fix the villainous clause was dropped
     // (the parse produced a bare Shuffle), so this branch never surfaced.
-    match &runner.state().waiting_for {
+    let lose_life_index = match &runner.state().waiting_for {
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => {
@@ -257,7 +284,32 @@ fn this_is_how_it_ends_prompts_the_target_creatures_owner() {
                  not the spell's caster (P0)"
             );
             assert_eq!(branches.len(), 2, "lose-5-life or shuffle-another-creature");
+            branches
+                .iter()
+                .position(|b| matches!(&*b.effect, Effect::LoseLife { .. }))
+                .expect("a 'They lose 5 life' branch must exist")
         }
         other => panic!("expected the villainous ChooseOneOfBranch scoped to P1, got {other:?}"),
-    }
+    };
+
+    // End-to-end: resolving the "They lose 5 life" branch must drain 5 life from
+    // the target creature's owner (P1: 20 → 15), proving the scoped branch
+    // resolves against the prompted owner, not the caster (CR 701.55a).
+    let p0_life_before = runner.life(P0);
+    let p1_life_before = runner.life(P1);
+    runner
+        .act(GameAction::ChooseBranch {
+            index: lose_life_index,
+        })
+        .expect("resolving the lose-life branch must succeed");
+    assert_eq!(
+        runner.life(P1),
+        p1_life_before - 5,
+        "the target creature's owner (P1) must lose 5 life"
+    );
+    assert_eq!(
+        runner.life(P0),
+        p0_life_before,
+        "the spell's caster (P0) must not lose life from the villainous choice"
+    );
 }
