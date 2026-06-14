@@ -1354,6 +1354,18 @@
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."
   },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
+  },
   "cardDataMissing": {
     "title": "Faltan los datos de cartas",
     "body": "No se encontró <code>card-data.json</code>. La partida necesita las definiciones de cartas para jugar con cartas reales.",

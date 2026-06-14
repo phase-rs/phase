@@ -1359,6 +1359,18 @@
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
   },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
+  },
   "cardDataMissing": {
     "title": "Card Data Missing",
     "body": "<code>card-data.json</code> was not found. The game needs card definitions to play with real cards.",
