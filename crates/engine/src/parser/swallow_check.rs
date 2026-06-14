@@ -625,6 +625,13 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // may cast …" exile-cast permission — structurally opt-in by
             // the same "you may cast" surface as the graveyard sibling.
             | StaticMode::ExileCastPermission { .. }
+            // CR 601.2a + CR 113.6: Evelyn-class "Once each turn, you may
+            // play a card from exile … if it was exiled by an ability you
+            // controlled" — opt-in "you may play" permission whose "if"
+            // provenance clause is enforced at runtime via the per-card
+            // `PlayFromExile { exiled_by_ability_controller }` grant, not a
+            // dropped condition.
+            | StaticMode::LinkedCollectionCounterPlayPermission
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
@@ -1968,6 +1975,14 @@ fn detect_condition_if(
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
+        // CR 113.6 + CR 601.2a: Evelyn's "you may play a card from exile … if
+        // it was exiled by an ability you controlled" — the "if" provenance
+        // clause is represented structurally by the
+        // LinkedCollectionCounterPlayPermission live-source marker static plus
+        // the per-card `PlayFromExile { exiled_by_ability_controller }` grant
+        // the ETB trigger attaches (set in grant_permission.rs, enforced in
+        // casting.rs / layers.rs), not a swallowed condition.
+        "LinkedCollectionCounterPlayPermission",
         // CR 614.1a: GraveyardCastPermission with this flag carries the "if
         // a spell cast this way would be put into your graveyard, exile it
         // instead" replacement rider.

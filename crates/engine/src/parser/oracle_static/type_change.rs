@@ -211,10 +211,8 @@ pub(crate) fn parse_collection_counter_play_permission_static(
     })?;
 
     Some(
-        StaticDefinition::new(StaticMode::Other(
-            "LinkedCollectionCounterPlayPermission".to_string(),
-        ))
-        .description(description.to_string()),
+        StaticDefinition::new(StaticMode::LinkedCollectionCounterPlayPermission)
+            .description(description.to_string()),
     )
 }
 
