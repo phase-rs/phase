@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} di {{total}} raddrizzate",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Crt",
     "landsAbbr": "Ter",
     "otherAbbr": "Alt",
+    "manaAvailable": "{{untapped}} di {{total}} terre raddrizzate",
     "out": "FUORI",
     "eliminated": "Eliminato",
     "phasedOut": "In dissolvenza",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Segnalini esperienza: {{count}}",
     "speedAriaLabel": "Velocità {{value}}",
     "speedTooltip": "Velocità: {{value}}",
+    "condCantWin": "Non può vincere la partita",
+    "condCantGainLife": "Non può guadagnare punti vita",
+    "condCantLoseLife": "Non può perdere punti vita",
+    "condCantPayLife": "Non può pagare punti vita",
+    "condCantCast": "Non può lanciare magie",
+    "condCantActivate": "Non può attivare abilità",
+    "condCastOnlyFromZones": "Può lanciare solo da zone limitate",
+    "condFromSource": "{{condition}} — da {{name}}",
+    "pendingSpell": "Prossima magia",
+    "pendingCantBeCountered": "La prossima magia non può essere neutralizzata",
+    "pendingHasKeyword": "La prossima magia ha {{keyword}}",
+    "pendingFlash": "La prossima magia può essere lanciata come se avesse lampo",
+    "pendingFree": "La prossima magia senza pagare il suo costo di mana",
+    "pendingCheaper": "La prossima magia costa {{amount}} in meno",
     "companion": "Compagno"
   },
   "avatar": {

@@ -102,11 +102,17 @@ function makeGroups(count: number): GroupedPermanentType[] {
   });
 }
 
+function makeCreature(id: number, power = 2, toughness = 2): GameObject {
+  return { ...makeObject(id, ["Creature"]), power, toughness };
+}
+
 function renderOverflow(options: {
   groups?: GroupedPermanentType[];
   includePreview?: boolean;
   objects?: Record<number, GameObject>;
   validTargetObjectIds?: Set<number>;
+  committedAttackerIds?: Set<number>;
+  zone?: "lands" | "support" | "creatures";
 } = {}) {
   const groups = options.groups ?? makeGroups(9);
   const objects = options.objects ?? Object.fromEntries(
@@ -117,7 +123,7 @@ function renderOverflow(options: {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
-        committedAttackerIds: new Set(),
+        committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
         manaTappableObjectIds: new Set([1]),
         selectableManaCostCreatureIds: new Set(),
@@ -126,7 +132,11 @@ function renderOverflow(options: {
         validTargetObjectIds: options.validTargetObjectIds ?? new Set(),
       }}
     >
-      <BattlefieldZoneOverflow groups={groups} zone="lands" side="left" />
+      <BattlefieldZoneOverflow
+        groups={groups}
+        zone={options.zone ?? "lands"}
+        side="left"
+      />
       {options.includePreview ? <GameCardPreview /> : null}
     </BoardInteractionContext.Provider>,
   );
@@ -134,6 +144,13 @@ function renderOverflow(options: {
 
 describe("BattlefieldZoneOverflow", () => {
   beforeEach(() => {
+    // BattlefieldRow instantiates a ResizeObserver for the creatures row; jsdom
+    // has no implementation, so a no-op stub keeps inline creature renders alive.
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
     window.matchMedia = ((query: string) => ({
@@ -181,9 +198,11 @@ describe("BattlefieldZoneOverflow", () => {
   it("summarizes available land mana with counted pips", () => {
     renderOverflow();
 
-    expect(screen.getByText("9×")).toBeInTheDocument();
+    // Pill shows the untapped count and a "×" multiplier in separate spans.
+    expect(screen.getByText("×")).toBeInTheDocument();
     expect(screen.getAllByAltText("G").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText(/hidden lands can currently produce/i)).toBeInTheDocument();
+    // Tooltip now reports tapped-vs-untapped availability (all 9 untapped here).
+    expect(screen.getByText("9 of 9 untapped")).toBeInTheDocument();
   });
 
   it("opens and closes the drawer from the summary tile", () => {
@@ -254,5 +273,43 @@ describe("BattlefieldZoneOverflow", () => {
 
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
     expect(screen.getAllByAltText("Permanent 1").length).toBeGreaterThan(0);
+  });
+
+  describe("creatures zone", () => {
+    function renderCreatures(count: number, extra: { power?: number; toughness?: number } = {}) {
+      const groups = makeGroups(count);
+      const objects = Object.fromEntries(
+        groups.flatMap((group) => group.ids).map((id) => [id, makeCreature(id, extra.power, extra.toughness)]),
+      );
+      return renderOverflow({ groups, objects, zone: "creatures" });
+    }
+
+    it("collapses to the scrollable overview only past the higher creature threshold", () => {
+      renderCreatures(13);
+      expect(screen.getByRole("button", { name: /open creatures drawer/i })).toBeInTheDocument();
+    });
+
+    it("keeps a moderate creature count inline (does not reuse the lower land threshold)", () => {
+      // 9 groups would collapse a lands zone, but creatures get more room.
+      renderCreatures(9);
+      expect(screen.queryByRole("button", { name: /open creatures drawer/i })).not.toBeInTheDocument();
+    });
+
+    it("summarizes aggregate power/toughness in the overview header", () => {
+      renderCreatures(13, { power: 2, toughness: 3 });
+      expect(screen.getByText("26/39")).toBeInTheDocument();
+    });
+
+    it("floats combat participants to the front for priority visibility", () => {
+      const groups = makeGroups(13);
+      const objects = Object.fromEntries(
+        groups.flatMap((group) => group.ids).map((id) => [id, makeCreature(id)]),
+      );
+      // Commit the last creature as an attacker; it should sort to the front.
+      renderOverflow({ groups, objects, zone: "creatures", committedAttackerIds: new Set([13]) });
+      const renderedIds = Array.from(document.querySelectorAll("[data-object-id]"))
+        .map((el) => el.getAttribute("data-object-id"));
+      expect(renderedIds[0]).toBe("13");
+    });
   });
 });

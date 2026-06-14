@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} de {{total}} desenderezadas",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Crt",
     "landsAbbr": "Trr",
     "otherAbbr": "Otr",
+    "manaAvailable": "{{untapped}} de {{total}} tierras enderezadas",
     "out": "FUERA",
     "eliminated": "Eliminado",
     "phasedOut": "Fuera de fase",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Contadores de experiencia: {{count}}",
     "speedAriaLabel": "Velocidad {{value}}",
     "speedTooltip": "Velocidad: {{value}}",
+    "condCantWin": "No puede ganar la partida",
+    "condCantGainLife": "No puede ganar vidas",
+    "condCantLoseLife": "No puede perder vidas",
+    "condCantPayLife": "No puede pagar vidas",
+    "condCantCast": "No puede lanzar hechizos",
+    "condCantActivate": "No puede activar habilidades",
+    "condCastOnlyFromZones": "Solo puede lanzar desde zonas limitadas",
+    "condFromSource": "{{condition}} — de {{name}}",
+    "pendingSpell": "Próximo hechizo",
+    "pendingCantBeCountered": "El próximo hechizo no puede ser contrarrestado",
+    "pendingHasKeyword": "El próximo hechizo tiene {{keyword}}",
+    "pendingFlash": "El próximo hechizo puede lanzarse como si tuviera destello",
+    "pendingFree": "El próximo hechizo sin pagar su coste de maná",
+    "pendingCheaper": "El próximo hechizo cuesta {{amount}} menos",
     "companion": "Compañero"
   },
   "avatar": {

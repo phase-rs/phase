@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, HashMap};
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{stack_display_groups, StackDisplayGroup};
-use crate::types::ability::{KeywordAction, TargetRef};
+use crate::types::ability::{
+    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionPlayerScope, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
@@ -80,6 +82,54 @@ pub struct StackEntryDisplay {
     pub trigger_context: Vec<TriggerContextDisplay>,
 }
 
+/// A single player-affecting condition the HUD surfaces as a status icon.
+///
+/// **Presentation-only discriminant.** `kind` selects an icon + i18n key; it
+/// deliberately spans multiple CR sections (CR 104.2b, CR 119.7/.8, CR 118.3,
+/// CR 101.2 / CR 702.50b) because the display layer groups "conditions
+/// afflicting a player" regardless of which rules section produced them. The
+/// categorical-boundary rule governs *rules-primitive* enums; this lives in
+/// the `DerivedViews` presentation layer alongside `StackPaidFactView`, so
+/// the cross-section span is correct here, not a sibling-cluster smell. The
+/// authoritative rules state remains in `StaticMode`, `GameRestriction`, and
+/// `EpicEffect` — this enum never feeds game logic, only rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PlayerConditionKind {
+    /// CR 104.2b: effect-based win attempts targeting this player are no-ops.
+    CantWin,
+    /// CR 119.7: life-gain events affecting this player are replaced with nothing.
+    CantGainLife,
+    /// CR 119.8: life-loss events affecting this player are replaced with nothing.
+    CantLoseLife,
+    /// CR 118.3: this player can't pay life as a cost.
+    CantPayLifeAsCost,
+    /// CR 101.2 / CR 702.50b: this player can't cast spells (Epic lock or a
+    /// temporary `ProhibitActivity::CastSpells`, possibly spell-filtered — the
+    /// `source` card identifies the specifics for the tooltip).
+    CantCastSpells,
+    /// CR 101.2 + CR 602.5: this player can't activate abilities (mana abilities
+    /// may still be exempt — the `source` card identifies the specifics).
+    CantActivateAbilities,
+    /// CR 101.2 + CR 601.2a: this player may cast spells only from the listed zones.
+    CastOnlyFromZones { allowed_zones: Vec<Zone> },
+}
+
+/// One rendered row of player status: which `player` is under a `kind` of
+/// condition, and the permanent `source` imposing it (when known).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerStatusView {
+    pub player: PlayerId,
+    pub kind: PlayerConditionKind,
+    /// The permanent imposing the condition, when the engine surfaces it.
+    /// `None` for the statics-scanned life/cost conditions whose authority
+    /// predicate returns a bare `bool` — recovering the granting permanent
+    /// would require a second scan, so the FE tooltip falls back to the
+    /// condition name. `Some` for stored `GameRestriction`/`EpicEffect` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ObjectId>,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -127,6 +177,15 @@ pub struct DerivedViews {
     /// no granting static, or no qualifying card.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub web_slinging_costs: HashMap<ObjectId, ManaCost>,
+
+    /// Player-affecting continuous conditions (CR 104.2b / 119.7 / 119.8 /
+    /// 118.3 / 101.2 / 702.50b) the HUD renders as status icons. Aggregates
+    /// the statics-scanned `player_has_*` authorities and the stored
+    /// `restrictions`/`epic_effects` so the frontend never re-scans static
+    /// abilities to learn that a player "can't gain life" or "can't cast".
+    /// Empty (and omitted) in the dominant case where no player is afflicted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub player_status: Vec<PlayerStatusView>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -229,6 +288,12 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
 
+    // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate
+    // player-affecting conditions so the HUD can render status icons without
+    // re-scanning static abilities. Runs in every format (not gated by the
+    // Commander short-circuit below).
+    views.player_status = player_status_views(state);
+
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
     }
@@ -250,6 +315,138 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// Aggregate player-affecting conditions into render-ready rows.
+///
+/// Two sources, neither of which introduces new game logic:
+/// 1. **Statics-scanned** life/cost conditions — delegate verbatim to the
+///    single-authority `player_has_*` predicates in `static_abilities`
+///    (CR 104.2b / 119.7 / 119.8 / 118.3). `source` is `None` because those
+///    predicates return a bare `bool`.
+/// 2. **Stored state** — read `restrictions` and `epic_effects` as-is
+///    (CR 101.2 / 602.5 / 601.2a / 702.50b); `source` is the imposing card.
+///
+/// Deliberately excluded: `GameRestriction::DamagePreventionDisabled` has no
+/// per-player axis (it scopes by source/target, CR 614.16) so it is not a
+/// player condition; `player_ignores_hexproof` / `player_has_protection_from_everything`
+/// are beneficial capabilities, not afflictions; `player_cant_sacrifice_as_cost`
+/// is an object-parameterized per-payment query, not a player-level status.
+fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
+    use crate::game::static_abilities::{
+        player_cant_pay_life_as_cost, player_has_cant_gain_life, player_has_cant_lose_life,
+        player_has_cant_win,
+    };
+
+    let mut views = Vec::new();
+
+    // Source 1: statics-scanned, player-scoped life/cost conditions. Each
+    // predicate is the sole authority for its CR rule; calling them keeps the
+    // logic single-sourced. Cost is O(players × active statics) — bounded by
+    // the (typically tiny) set of permanents with static abilities.
+    for player in &state.players {
+        let pid = player.id;
+        let conditions = [
+            (
+                player_has_cant_win(state, pid),
+                PlayerConditionKind::CantWin,
+            ),
+            (
+                player_has_cant_gain_life(state, pid),
+                PlayerConditionKind::CantGainLife,
+            ),
+            (
+                player_has_cant_lose_life(state, pid),
+                PlayerConditionKind::CantLoseLife,
+            ),
+            (
+                player_cant_pay_life_as_cost(state, pid),
+                PlayerConditionKind::CantPayLifeAsCost,
+            ),
+        ];
+        for (active, kind) in conditions {
+            if active {
+                views.push(PlayerStatusView {
+                    player: pid,
+                    kind,
+                    source: None,
+                });
+            }
+        }
+    }
+
+    // Source 2a: stored activity prohibitions, read as-is from GameState.
+    for restriction in &state.restrictions {
+        let GameRestriction::ProhibitActivity {
+            source,
+            affected_players,
+            activity,
+            ..
+        } = restriction
+        else {
+            // DamagePreventionDisabled has no per-player axis — see fn docs.
+            continue;
+        };
+        let kind = match activity {
+            ProhibitedActivity::CastSpells { .. } => PlayerConditionKind::CantCastSpells,
+            ProhibitedActivity::ActivateAbilities { .. } => {
+                PlayerConditionKind::CantActivateAbilities
+            }
+            ProhibitedActivity::CastOnlyFromZones { allowed_zones } => {
+                PlayerConditionKind::CastOnlyFromZones {
+                    allowed_zones: allowed_zones.clone(),
+                }
+            }
+        };
+        for pid in restriction_affected_players(state, affected_players, *source) {
+            views.push(PlayerStatusView {
+                player: pid,
+                kind: kind.clone(),
+                source: Some(*source),
+            });
+        }
+    }
+
+    // Source 2b: CR 702.50b — a resolved Epic locks its controller out of casting.
+    for epic in &state.epic_effects {
+        views.push(PlayerStatusView {
+            player: epic.controller,
+            kind: PlayerConditionKind::CantCastSpells,
+            source: Some(epic.prototype_id),
+        });
+    }
+
+    views
+}
+
+/// Resolve a restriction's `RestrictionPlayerScope` to the concrete players it
+/// afflicts at display time. The `TargetedPlayer` / `ParentTargetedPlayer`
+/// placeholders are resolved to `SpecificPlayer` at resolution time
+/// (CR 608.2c); if one survives to the display layer it can't be attributed,
+/// so it contributes no rows.
+fn restriction_affected_players(
+    state: &GameState,
+    scope: &RestrictionPlayerScope,
+    source: ObjectId,
+) -> Vec<PlayerId> {
+    match scope {
+        RestrictionPlayerScope::AllPlayers => state.players.iter().map(|p| p.id).collect(),
+        RestrictionPlayerScope::SpecificPlayer(pid) => vec![*pid],
+        RestrictionPlayerScope::OpponentsOfSourceController => {
+            match state.objects.get(&source).map(|obj| obj.controller) {
+                Some(controller) => state
+                    .players
+                    .iter()
+                    .map(|p| p.id)
+                    .filter(|&pid| pid != controller)
+                    .collect(),
+                None => Vec::new(),
+            }
+        }
+        RestrictionPlayerScope::TargetedPlayer | RestrictionPlayerScope::ParentTargetedPlayer => {
+            Vec::new()
+        }
+    }
 }
 
 fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay> {
@@ -551,12 +748,13 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+    use crate::types::ability::{Effect, ResolvedAbility, RestrictionExpiry, TargetRef};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, ZoneChangeRecord,
     };
     use crate::types::identifiers::CardId;
+    use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
 
     fn setup_commander_game(num_players: u8) -> GameState {
@@ -1017,6 +1215,121 @@ mod tests {
         assert!(
             !views.auras_attached_to_player.contains_key(&PlayerId(0)),
             "P0 has no Aura host — must not get an empty entry",
+        );
+    }
+
+    /// CR 101.2 / CR 614.16 / CR 702.50b: stored restrictions and epic locks
+    /// project into per-player status rows; the scope is resolved to concrete
+    /// players, kinds map correctly, and `DamagePreventionDisabled` (no
+    /// per-player axis) contributes nothing.
+    #[test]
+    fn derive_views_projects_stored_player_conditions() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // A source permanent controlled by P0 (imposes the restrictions).
+        let source = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Restrictor".into(),
+            Zone::Battlefield,
+        );
+
+        // CR 101.2: P1 specifically can't cast spells.
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells { spell_filter: None },
+        });
+        // CR 602.5: all players can't activate non-mana abilities.
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::AllPlayers,
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::ActivateAbilities {
+                exemption: ActivationExemption::ManaAbilities,
+            },
+        });
+        // CR 614.16: no per-player axis — must NOT produce a status row.
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source,
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            });
+
+        let status = derive_views(&state, None).player_status;
+
+        // P1 can't cast (SpecificPlayer), attributed to the source.
+        assert!(
+            status.contains(&PlayerStatusView {
+                player: PlayerId(1),
+                kind: PlayerConditionKind::CantCastSpells,
+                source: Some(source),
+            }),
+            "P1's cast prohibition should project with its source",
+        );
+        // Both players can't activate abilities (AllPlayers).
+        for pid in [PlayerId(0), PlayerId(1)] {
+            assert!(
+                status.contains(&PlayerStatusView {
+                    player: pid,
+                    kind: PlayerConditionKind::CantActivateAbilities,
+                    source: Some(source),
+                }),
+                "AllPlayers scope should project to {pid:?}",
+            );
+        }
+        // P0 is NOT cast-locked (the cast prohibition was P1-specific).
+        assert!(
+            !status
+                .iter()
+                .any(|v| v.player == PlayerId(0) && v.kind == PlayerConditionKind::CantCastSpells),
+            "P0 must not inherit P1's specific cast prohibition",
+        );
+        // DamagePreventionDisabled contributes no rows.
+        assert_eq!(
+            status.len(),
+            3,
+            "exactly 3 rows: P1 can't-cast + both players can't-activate; \
+             DamagePreventionDisabled excluded",
+        );
+    }
+
+    /// CR 101.2: `OpponentsOfSourceController` resolves to every player except
+    /// the source's controller.
+    #[test]
+    fn derive_views_resolves_opponents_of_source_controller() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let source = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(1),
+            "Silence Engine".into(),
+            Zone::Battlefield,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells { spell_filter: None },
+        });
+
+        let afflicted: Vec<PlayerId> = derive_views(&state, None)
+            .player_status
+            .into_iter()
+            .filter(|v| v.kind == PlayerConditionKind::CantCastSpells)
+            .map(|v| v.player)
+            .collect();
+
+        assert!(
+            !afflicted.contains(&PlayerId(1)),
+            "the source's controller (P1) is not their own opponent",
+        );
+        assert!(
+            afflicted.contains(&PlayerId(0)) && afflicted.contains(&PlayerId(2)),
+            "both opponents (P0, P2) should be cast-locked",
         );
     }
 

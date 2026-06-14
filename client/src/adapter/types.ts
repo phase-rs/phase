@@ -727,6 +727,9 @@ export interface GameObject {
   class_level?: number;
   devotion?: number;
   available_mana_pips?: ManaPip[];
+  /** CR 701.15c: players who have goaded this creature (it must attack a
+   *  player other than them, if able). Empty/omitted when not goaded. */
+  goaded_by?: PlayerId[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
   /**
@@ -1726,6 +1729,33 @@ export interface CommanderDamageView {
 }
 
 /**
+ * Presentation-only discriminant for a player-affecting continuous condition.
+ * Mirrors `engine::game::derived_views::PlayerConditionKind` (serde
+ * tag="type", content="data"). The FE maps each kind to an icon + i18n label
+ * and never re-derives the condition from static abilities — the engine
+ * aggregates the authoritative state into `DerivedViews.player_status`.
+ */
+export type PlayerConditionKind =
+  | { type: "CantWin" }
+  | { type: "CantGainLife" }
+  | { type: "CantLoseLife" }
+  | { type: "CantPayLifeAsCost" }
+  | { type: "CantCastSpells" }
+  | { type: "CantActivateAbilities" }
+  | { type: "CastOnlyFromZones"; data: { allowed_zones: Zone[] } };
+
+/**
+ * One player-status row. Mirrors `engine::game::derived_views::PlayerStatusView`.
+ * `source` is the imposing permanent when the engine surfaces it (stored
+ * restrictions / epic locks); absent for statics-scanned life/cost conditions.
+ */
+export interface PlayerStatusView {
+  player: PlayerId;
+  kind: PlayerConditionKind;
+  source?: ObjectId | null;
+}
+
+/**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
  * consume this shape directly and never compute grouping/filtering
@@ -1762,7 +1792,49 @@ export interface DerivedViews {
    *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
    *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
   web_slinging_costs?: Record<string, ManaCost>;
+  /**
+   * Player-affecting continuous conditions (can't gain life, can't cast, etc.)
+   * the HUD renders as status icons. Engine-aggregated from static abilities +
+   * stored restrictions/epic locks so the FE never re-scans statics. Empty/
+   * omitted when no player is afflicted. Mirrors
+   * `engine::game::derived_views::DerivedViews::player_status`.
+   */
+  player_status?: PlayerStatusView[];
 }
+
+/** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
+export type NextSpellModifier =
+  | { type: "CantBeCountered" }
+  | { type: "HasKeyword"; keyword: Keyword }
+  | { type: "CastAsThoughFlash" }
+  | { type: "WithoutPayingManaCost" };
+
+/** CR 601.2f: a one-shot modifier applied to a player's next qualifying spell.
+ *  Mirrors `engine::types::game_state::PendingNextSpellModifier`. */
+export interface PendingNextSpellModifier {
+  player: PlayerId;
+  modifier: NextSpellModifier;
+  spell_filter?: TargetFilter | null;
+}
+
+/** CR 601.2f: a one-shot mana reduction for a player's next qualifying spell.
+ *  Mirrors `engine::types::game_state::PendingSpellCostReduction`. */
+export interface PendingSpellCostReduction {
+  player: PlayerId;
+  amount: number;
+  spell_filter?: TargetFilter | null;
+}
+
+/** CR 702.50a: a rest-of-game Epic effect locking its controller out of
+ *  casting. Mirrors `engine::types::game_state::EpicEffect` (`spell` omitted —
+ *  the FE only needs the controller + prototype for display). */
+export interface EpicEffect {
+  controller: PlayerId;
+  prototype_id: ObjectId;
+}
+
+/** CR 731: the day/night designation, absent when neither is in effect. */
+export type DayNight = "Day" | "Night";
 
 export interface GameState {
   turn_number: number;
@@ -1859,6 +1931,17 @@ export interface GameState {
   /** CR 701.20e: the player to whom `private_look_ids` is visible (the looker). */
   private_look_player?: PlayerId;
   restrictions?: GameRestriction[];
+  /** CR 601.2f: pending one-shot modifiers for each player's next qualifying
+   *  spell (copy, flash, can't-be-countered, free cast). Surfaced as a HUD
+   *  "next spell" badge. Empty/omitted when none pending. */
+  pending_next_spell_modifiers?: PendingNextSpellModifier[];
+  /** CR 601.2f: pending one-shot cost reductions for each player's next
+   *  qualifying spell. */
+  pending_next_spell_cost_reductions?: PendingSpellCostReduction[];
+  /** CR 702.50a: active rest-of-game Epic locks (controller can't cast). */
+  epic_effects?: EpicEffect[];
+  /** CR 731: current day/night designation, absent when neither is in effect. */
+  day_night?: DayNight | null;
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
   phase_stops?: Record<number, Phase[]>;

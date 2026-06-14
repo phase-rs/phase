@@ -1,5 +1,5 @@
 import type { CSSProperties, RefObject } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -15,7 +15,7 @@ import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
 
-type OverflowZone = "lands" | "support";
+type OverflowZone = "lands" | "support" | "creatures";
 type DrawerSide = "left" | "right";
 
 interface BattlefieldZoneOverflowProps {
@@ -28,6 +28,12 @@ interface BattlefieldZoneOverflowProps {
 
 const MOBILE_COLLAPSE_GROUPS = 4;
 const DESKTOP_COLLAPSE_GROUPS = 8;
+// Creatures own the full board width (lands/support each share a half-row), so
+// they tolerate more cards before crowding. Identical tokens already stack into
+// one group, so the creature threshold counts GROUPS (distinct stacks), not
+// bodies — a lone 20-token Saproling swarm shouldn't trip the overflow.
+const MOBILE_COLLAPSE_CREATURE_GROUPS = 6;
+const DESKTOP_COLLAPSE_CREATURE_GROUPS = 12;
 const MANA_COLOR_ORDER: Array<ManaColor | "Colorless"> = [
   "White",
   "Blue",
@@ -57,11 +63,16 @@ export function BattlefieldZoneOverflow({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
-  const threshold = isMobile || isCompactHeight
-    ? MOBILE_COLLAPSE_GROUPS
-    : DESKTOP_COLLAPSE_GROUPS;
+  const isCreatures = zone === "creatures";
+  const compact = isMobile || isCompactHeight;
+  const threshold = isCreatures
+    ? (compact ? MOBILE_COLLAPSE_CREATURE_GROUPS : DESKTOP_COLLAPSE_CREATURE_GROUPS)
+    : (compact ? MOBILE_COLLAPSE_GROUPS : DESKTOP_COLLAPSE_GROUPS);
   const objectIds = useMemo(() => groups.flatMap((group) => group.ids), [groups]);
-  const collapsed = objectIds.length > threshold;
+  // Creatures collapse by stack count (token swarms already group); lands and
+  // support collapse by body count, preserving their established behaviour.
+  const collapseMetric = isCreatures ? groups.length : objectIds.length;
+  const collapsed = collapseMetric > threshold;
 
   useEffect(() => {
     if (!open) return;
@@ -101,12 +112,23 @@ export function BattlefieldZoneOverflow({
 
   return (
     <>
-      <ZoneSummaryTile
-        groups={groups}
-        objectIds={objectIds}
-        zone={zone}
-        onOpen={() => setOpen(true)}
-      />
+      {isCreatures ? (
+        // Creatures fill the whole band: a scrollable grid of readable cards
+        // (full P/T, keywords, counters, tapped state) rather than a summary
+        // pill — combat-selected creatures float to the top for priority sight.
+        <CreatureOverview
+          groups={groups}
+          objectIds={objectIds}
+          onOpen={() => setOpen(true)}
+        />
+      ) : (
+        <ZoneSummaryTile
+          groups={groups}
+          objectIds={objectIds}
+          zone={zone}
+          onOpen={() => setOpen(true)}
+        />
+      )}
       {open && createPortal(
         <BattlefieldZoneDrawer
           panelRef={panelRef}
@@ -120,6 +142,132 @@ export function BattlefieldZoneOverflow({
         document.body,
       )}
     </>
+  );
+}
+
+// Fixed, readable card size for the scrollable creature grid. Big enough to
+// read P/T, keywords, and counters; the parent scrolls the overflow.
+const CREATURE_GRID_VARS: CSSProperties = {
+  "--art-crop-w": "6.4rem",
+  "--art-crop-h": "4.8rem",
+  "--card-w": "4.4rem",
+  "--card-h": "6.16rem",
+} as CSSProperties;
+
+interface CreatureOverviewProps {
+  groups: GroupedPermanent[];
+  objectIds: ObjectId[];
+  onOpen: () => void;
+}
+
+/**
+ * Crowded-creature view: a scrollable grid of full, readable cards (real board
+ * cards via BattlefieldRow, so attack/block/activate/inspect all work inline).
+ * Two affordances the design calls for:
+ *  - Combat-selected creatures (chosen attackers, committed attackers, assigned
+ *    blockers) sort to the FRONT so they're visible without scrolling.
+ *  - Scrollability is made obvious with top/bottom fades, a bouncing chevron,
+ *    and a header hint whenever there's more below the fold.
+ */
+function CreatureOverview({ groups, objectIds, onOpen }: CreatureOverviewProps) {
+  const { t } = useTranslation("game");
+  const gameState = useGameStore((s) => s.gameState);
+  const selectedAttackers = useUiStore((s) => s.selectedAttackers);
+  const blockerAssignments = useUiStore((s) => s.blockerAssignments);
+  const { committedAttackerIds, incomingAttackerCounts } = useBoardInteractionState();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ top: false, bottom: false });
+
+  const objects = useMemo(
+    () => objectIds
+      .map((id) => gameState?.objects[id])
+      .filter((obj): obj is GameObject => obj != null),
+    [gameState?.objects, objectIds],
+  );
+
+  // Float every combat participant to the front for priority visibility: chosen
+  // and committed attackers, assigned blockers, and creatures with incoming
+  // attacks (so a blocked/attacked creature is visible without scrolling). A
+  // stable sort keeps everything else in its incoming order.
+  const sortedGroups = useMemo(() => {
+    const priority = new Set<ObjectId>([
+      ...selectedAttackers,
+      ...committedAttackerIds,
+      ...blockerAssignments.keys(),
+      ...incomingAttackerCounts.keys(),
+    ]);
+    if (priority.size === 0) return groups;
+    const isPriority = (group: GroupedPermanent) => group.ids.some((id) => priority.has(id));
+    return groups
+      .map((group, index) => ({ group, index, priority: isPriority(group) }))
+      .sort((a, b) => Number(b.priority) - Number(a.priority) || a.index - b.index)
+      .map((entry) => entry.group);
+  }, [groups, selectedAttackers, committedAttackerIds, blockerAssignments, incomingAttackerCounts]);
+
+  const updateEdges = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setEdges({
+      top: el.scrollTop > 4,
+      bottom: el.scrollTop + el.clientHeight < el.scrollHeight - 4,
+    });
+  }, []);
+
+  useEffect(() => {
+    updateEdges();
+    const el = scrollRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(updateEdges);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateEdges, sortedGroups]);
+
+  return (
+    <div className="flex h-full w-full flex-col gap-1">
+      <div className="flex shrink-0 flex-wrap items-center justify-center gap-2 px-2 pt-0.5">
+        <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-200">
+          {t("battlefieldOverflow.creatures.label")}
+        </span>
+        <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-black tabular-nums text-white">
+          {objectIds.length}
+        </span>
+        <CreatureSummary objects={objects} />
+        {edges.bottom && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-cyan-400/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-cyan-200 ring-1 ring-cyan-300/40">
+            <span aria-hidden className="animate-bounce">↓</span>
+            {t("battlefieldOverflow.creatures.scrollHint")}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={t("battlefieldOverflow.creatures.open", { count: objectIds.length })}
+          className="rounded-md bg-white/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-200 transition hover:bg-white/20 hover:text-white"
+        >
+          {t("battlefieldOverflow.creatures.viewAll")}
+        </button>
+      </div>
+      <div className="relative min-h-0 flex-1">
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-5 bg-gradient-to-b from-slate-950 to-transparent transition-opacity ${edges.top ? "opacity-100" : "opacity-0"}`}
+        />
+        <div
+          ref={scrollRef}
+          onScroll={updateEdges}
+          className="thin-scrollbar h-full overflow-y-auto overscroll-contain px-1 pb-1"
+          style={CREATURE_GRID_VARS}
+        >
+          <BattlefieldRow groups={sortedGroups} rowType="creatures" fixedSize />
+        </div>
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 flex h-8 items-end justify-center bg-gradient-to-t from-slate-950 to-transparent text-base text-cyan-200 transition-opacity ${edges.bottom ? "opacity-100" : "opacity-0"}`}
+        >
+          <span className="animate-bounce">⌄</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -206,23 +354,32 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     const commanderIdentityByPlayer = new Map(
       gameState.players.map((player) => [player.id, player.commander_color_identity]),
     );
-    const colorCounts = new Map<ManaColor | "Colorless", number>();
+    // Per-color land counts split by availability. `total` counts every land
+    // that can produce the color; `untapped` counts only those usable now.
+    // CR 106.1: a tapped land can't produce mana, so `!tapped` is the
+    // available-now signal (controller-agnostic — correct for own and
+    // opponent boxes alike, unlike the viewer-scoped manaTappableObjectIds).
+    const total = new Map<ManaColor | "Colorless", number>();
+    const untapped = new Map<ManaColor | "Colorless", number>();
     for (const object of objects) {
       const identity = commanderIdentityByPlayer.get(object.controller);
+      const usableNow = !object.tapped;
       for (const pip of object.available_mana_pips ?? []) {
         for (const color of manaPipToDisplayColors(pip, identity)) {
           const manaColor = color as ManaColor | "Colorless";
-          colorCounts.set(manaColor, (colorCounts.get(manaColor) ?? 0) + 1);
+          total.set(manaColor, (total.get(manaColor) ?? 0) + 1);
+          if (usableNow) untapped.set(manaColor, (untapped.get(manaColor) ?? 0) + 1);
         }
       }
     }
     return MANA_COLOR_ORDER
       .map((color) => ({
         color,
-        count: colorCounts.get(color) ?? 0,
+        total: total.get(color) ?? 0,
+        untapped: untapped.get(color) ?? 0,
         shard: MANA_COLOR_SHARD[color],
       }))
-      .filter((entry) => entry.count > 0);
+      .filter((entry) => entry.total > 0);
   }, [gameState, objects, zone]);
   const hasInteraction =
     interaction.activatable > 0
@@ -256,16 +413,24 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       <span className="mt-1 flex items-center gap-1">
         {zone === "lands" ? (
           manaOptions.length > 0 ? (
-            manaOptions.map(({ color, count, shard }) => (
+            manaOptions.map(({ color, total, untapped, shard }) => (
               <span
                 key={color}
-                className="group relative inline-flex h-5 items-center gap-0.5 rounded-full bg-black/45 px-1.5 text-[10px] font-black tabular-nums text-slate-100 ring-1 ring-white/12"
+                className={`group relative inline-flex h-5 items-center gap-0.5 rounded-full bg-black/45 px-1.5 text-[10px] font-black tabular-nums ring-1 ring-white/12 ${
+                  untapped === 0 ? "text-slate-400 opacity-60" : "text-slate-100"
+                }`}
               >
-                <span>{count}×</span>
+                {/* untapped (available now) bright; tapped remainder as a dim
+                    "/total" so the box reads "available of how many lands". */}
+                <span>{untapped}</span>
+                {untapped !== total ? (
+                  <span className="font-bold text-slate-400">/{total}</span>
+                ) : null}
+                <span>×</span>
                 <ManaSymbol shard={shard} size="xs" className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.65)]" />
                 <GameplayTooltip className="left-0 right-auto w-56">
                   <span className="inline-flex items-center gap-1.5">
-                    <span>{t("battlefieldOverflow.lands.pipTooltip", { count })}</span>
+                    <span>{t("battlefieldOverflow.lands.pipAvailability", { untapped, total })}</span>
                     <ManaSymbol shard={shard} size="sm" className="shrink-0" />
                   </span>
                 </GameplayTooltip>
@@ -374,6 +539,30 @@ function supportTypeCounts(objects: GameObject[]): SupportTypeCounts {
   }
 
   return counts;
+}
+
+/** Aggregate power/toughness across the collapsed creatures, so the tile still
+ *  conveys board presence at a glance. Null P/T (e.g. unset characteristic-
+ *  defining values) counts as 0. */
+function CreatureSummary({ objects }: { objects: GameObject[] }) {
+  const { t } = useTranslation("game");
+  const { power, toughness } = objects.reduce(
+    (totals, object) => ({
+      power: totals.power + (object.power ?? 0),
+      toughness: totals.toughness + (object.toughness ?? 0),
+    }),
+    { power: 0, toughness: 0 },
+  );
+
+  return (
+    <span className="group relative inline-flex h-5 items-center gap-1 rounded-full bg-black/45 px-2 text-[10px] font-black tabular-nums text-slate-100 ring-1 ring-white/12">
+      <span aria-hidden>⚔</span>
+      <span>{`${power}/${toughness}`}</span>
+      <GameplayTooltip className="left-0 right-auto w-52">
+        {t("battlefieldOverflow.creatures.totalPower", { power, toughness })}
+      </GameplayTooltip>
+    </span>
+  );
 }
 
 function SupportCounts({ counts }: { counts: SupportTypeCounts }) {
@@ -489,7 +678,7 @@ function BattlefieldZoneDrawer({
             groups={groups}
             rowType={zone}
             dividerBeforeIndex={dividerBeforeIndex}
-            className={`${zone === "lands" ? "justify-start" : "justify-end"} ${className ?? ""}`}
+            className={`${zone === "lands" ? "justify-start" : zone === "creatures" ? "justify-center" : "justify-end"} ${className ?? ""}`}
           />
         </div>
       </div>

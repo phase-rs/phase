@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} z {{total}} odtapowanych",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Stw",
     "landsAbbr": "Ziem",
     "otherAbbr": "Inne",
+    "manaAvailable": "{{untapped}} z {{total}} ziem odtapowanych",
     "out": "POZA GRĄ",
     "eliminated": "Wyeliminowany",
     "phasedOut": "Przefazowany",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Znaczniki doświadczenia: {{count}}",
     "speedAriaLabel": "Prędkość {{value}}",
     "speedTooltip": "Prędkość: {{value}}",
+    "condCantWin": "Nie może wygrać gry",
+    "condCantGainLife": "Nie może zyskiwać życia",
+    "condCantLoseLife": "Nie może tracić życia",
+    "condCantPayLife": "Nie może płacić życiem",
+    "condCantCast": "Nie może rzucać czarów",
+    "condCantActivate": "Nie może aktywować zdolności",
+    "condCastOnlyFromZones": "Może rzucać tylko z określonych stref",
+    "condFromSource": "{{condition}} — od {{name}}",
+    "pendingSpell": "Następny czar",
+    "pendingCantBeCountered": "Następny czar nie może zostać skontrowany",
+    "pendingHasKeyword": "Następny czar ma {{keyword}}",
+    "pendingFlash": "Następny czar można rzucić tak, jakby miał błysk",
+    "pendingFree": "Następny czar bez płacenia jego kosztu many",
+    "pendingCheaper": "Następny czar kosztuje {{amount}} mniej",
     "companion": "Towarzysz"
   },
   "avatar": {
