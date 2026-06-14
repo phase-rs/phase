@@ -438,6 +438,12 @@ mod tests {
             obj.mana_cost = ManaCost::generic(5);
             obj.keywords.push(Keyword::Cascade);
             obj.keywords.push(Keyword::Cascade);
+            // CR 611.2f: the Cascade seam counts instances from the cast-time
+            // keyword snapshot (`cast_spell_keywords`) stamped by `finalize_cast`
+            // (`effective_spell_keyword_instances` preserves printed duplicates).
+            // This test bypasses finalize, so mirror the two printed instances.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         // Drive the trigger synthesizer with a SpellCast event for spell_id.
