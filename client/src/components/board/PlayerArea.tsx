@@ -252,6 +252,10 @@ export function PlayerArea({
               key={key}
               as="div"
               value={key}
+              // Animate ONLY position (the reorder shuffle), not size — otherwise
+              // a flexGrow (divider) or scale change inside the cell gets sprung
+              // by the layout animation, producing a "stretch".
+              layout="position"
               // Edit mode bounds each cell in a distinct hue with a labelled,
               // grippable badge so it's obvious what's being rearranged.
               className={`${cell.className} relative cursor-grab rounded-lg ${cell.editClass} active:cursor-grabbing`}

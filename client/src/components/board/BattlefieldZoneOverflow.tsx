@@ -398,11 +398,11 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     || interaction.validTargets > 0;
 
   return (
-    <span className="relative inline-flex">
-    <button
-      type="button"
-      onClick={onOpen}
-      data-grouped-ids={objectIds.join(" ")}
+    // Scale the wrapper (not the button) so the resize handle — a sibling of the
+    // button — scales and moves WITH the tile. (transform is visual-only, so a
+    // handle outside the scaled node would stay at the unscaled corner.)
+    <span
+      className="relative inline-flex"
       style={
         summaryScale !== 1
           ? {
@@ -411,6 +411,11 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
             }
           : undefined
       }
+    >
+    <button
+      type="button"
+      onClick={onOpen}
+      data-grouped-ids={objectIds.join(" ")}
       className={`relative flex min-h-[3.25rem] min-w-[7.5rem] max-w-full flex-col justify-center rounded-lg border px-2 py-1.5 text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
         hasInteraction
           ? "border-cyan-300/60 bg-cyan-950/45 ring-1 ring-cyan-300/40"
