@@ -124,10 +124,17 @@ jobs:
           restore-keys: mtgjson-
 
       - name: Download MTGJSON data
-        if: steps.mtgjson-cache.outputs.cache-hit != 'true'
+        # Gate on file existence, not cache-hit: actions/cache restore-keys can
+        # match a poisoned/partial entry (and CACHE_ON_FAILURE saves caches from
+        # failed runs), setting cache-hit=true while AtomicCards.json is absent.
+        # Gating the download on cache-hit then permanently skips it, breaking
+        # oracle-gen with "AtomicCards.json not found". Always run; fetch only
+        # when the file is missing so a poisoned cache self-heals.
         run: |
-          mkdir -p data/mtgjson
-          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          if [ ! -f data/mtgjson/AtomicCards.json ]; then
+            mkdir -p data/mtgjson
+            curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          fi
 
       - name: Cache generated card data
         # Output of `oracle-gen` is deterministic given (MTGJSON input + engine
