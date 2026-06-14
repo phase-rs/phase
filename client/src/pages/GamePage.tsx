@@ -1176,8 +1176,13 @@ function GamePageContent({
           <GameBoard oppHud={oppHud} playerHud={playerHud} />
         </div>
 
-        {/* Row 3: Player hand + zones */}
-        <div className="relative min-w-0 overflow-visible" data-flex-zone="player-row">
+        {/* Row 3: Player hand + zones. `flex-col justify-end` pins the in-flow
+            hand to the band's BOTTOM (= viewport bottom), so resizing the band
+            from its top edge no longer drags the hand vertically. */}
+        <div
+          className="relative flex min-w-0 flex-col justify-end overflow-visible"
+          data-flex-zone="player-row"
+        >
           <div className="flex items-end justify-center">
             <ZoneHand zone="exile" />
             <PlayerHand />
