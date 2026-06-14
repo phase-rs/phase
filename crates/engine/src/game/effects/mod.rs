@@ -337,6 +337,18 @@ pub(crate) fn matches_player_scope(
                     // `speed_effects::players_for_filter` instead, which has
                     // the ability in scope. Unreachable here.
                     PlayerFilter::ParentObjectTargetController => false,
+                    // CR 608.2c + CR 109.4: the chosen-player anchor requires the
+                    // resolving `ResolvedAbility` (for `ability.chosen_players`),
+                    // which this generic scope predicate does not carry.
+                    // `choose_one_of::choosing_players` resolves it directly
+                    // (it has the ability in scope). Unreachable here — fail
+                    // closed, mirroring the `ParentObjectTargetController` arm.
+                    PlayerFilter::ChosenPlayer { .. } => false,
+                    // CR 108.3 + CR 109.4: the parent-object-target OWNER anchor
+                    // likewise requires `ability.targets` to resolve via
+                    // `ability_utils::parent_target_owner`. Resolved in
+                    // `choose_one_of::choosing_players`; unreachable here.
+                    PlayerFilter::ParentObjectTargetOwner => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — the candidate must
                     // satisfy both the `relation` predicate and the
@@ -6305,6 +6317,8 @@ fn scoped_player_matches_filter(
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
     }

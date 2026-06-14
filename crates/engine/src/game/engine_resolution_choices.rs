@@ -2888,7 +2888,7 @@ pub(super) fn handle_resolution_choice(
                                 // or zones (Sewer Nemesis, Skyshroud War Beast) —
                                 // recompute layers immediately.
                                 | ChoiceType::Player
-                                | ChoiceType::Opponent
+                                | ChoiceType::Opponent { .. }
                         ) {
                             crate::game::layers::mark_layers_full(state);
                         }
@@ -2906,7 +2906,10 @@ pub(super) fn handle_resolution_choice(
             // continuation chain carries the list because it is a
             // `ResolvedAbility` — unlike `last_named_choice`, which is a
             // single GameState slot cleared after every drain.
-            if matches!(choice_type, ChoiceType::Player | ChoiceType::Opponent) {
+            if matches!(
+                choice_type,
+                ChoiceType::Player | ChoiceType::Opponent { .. }
+            ) {
                 if let Ok(pid) = choice.parse::<u8>() {
                     if let Some(cont) = state.pending_continuation.as_mut() {
                         let mut chosen = cont.chain.chosen_players.clone();

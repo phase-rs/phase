@@ -4399,6 +4399,40 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             origins: vec![Zone::Hand],
         });
     }
+    // CR 701.24c + CR 400.3: "shuffle <descriptive target> into their/your
+    // library" — the actor-possessive destination form. A card put into a
+    // library always returns to its OWNER's library (CR 400.3), and the target
+    // phrase carries the actor scope (e.g. "another creature they own" →
+    // `Owned { controller: ScopedPlayer }`), which binds the chosen object to
+    // the acting player. Powers the villainous-choice branch "they shuffle
+    // another creature they own into their library" (This Is How It Ends).
+    //
+    // Placed AFTER the whole-zone mass-move paths so that bare zone-possessive
+    // moves with an actor-possessive destination ("shuffle your graveyard into
+    // your library") are still classified as `ChangeZoneAll`, not as a single
+    // descriptive-target shuffle.
+    if let Some(((target_phrase, ()), _)) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(input)?;
+        let (input, target_phrase) = take_until(" into ").parse(input)?;
+        not(take_until::<_, _, OracleError<'_>>(" from ")).parse(target_phrase)?;
+        let (input, _) = tag(" into ").parse(input)?;
+        let (input, ()) = alt((
+            value((), tag("their library")),
+            value((), tag("your library")),
+        ))
+        .parse(input)?;
+        Ok((input, (target_phrase.to_string(), ())))
+    }) {
+        let (target, _) = parse_target(&target_phrase);
+        // Only accept a real typed object target — never a whole-zone phrase
+        // (which the mass-move paths above already handled).
+        if matches!(target, TargetFilter::Typed(_)) {
+            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library: true,
+            });
+        }
+    }
     // CR 701.24c: "shuffle target card from your graveyard into your library" —
     // targeted zone change (origin → library) + implicit shuffle.
     // Placed after possessive checks to avoid matching "shuffle your graveyard into library".
@@ -11229,7 +11263,7 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
+                    choice_type: ChoiceType::Opponent { .. },
                     ..
                 }
             ),

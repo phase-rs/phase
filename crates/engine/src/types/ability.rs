@@ -189,8 +189,19 @@ pub enum ChoiceType {
     },
     /// "Choose a land type" — includes basic + common nonbasic land types.
     LandType,
-    /// "Choose an opponent" — selects one opponent player (CR 800.4a).
-    Opponent,
+    /// "Choose an opponent" — selects one opponent player (CR 102.3 defines an
+    /// opponent as any player not on the choosing player's team).
+    ///
+    /// `restriction`, when present, narrows the eligible opponents to those
+    /// matching the embedded `PlayerFilter` (CR 102.3 + CR 608.2d). This keeps
+    /// "choose an opponent with the most life among your opponents" (The Master,
+    /// Gallifrey's End) a genuine single-pick step — the controller picks ONE of
+    /// the qualifying opponents (CR 608.2d handles ties) — rather than fanning
+    /// the effect out to every tied opponent. Boxed to avoid inflating the
+    /// `ChoiceType` enum with the recursive `PlayerFilter` payload.
+    Opponent {
+        restriction: Option<Box<PlayerFilter>>,
+    },
     /// "Choose a player" — selects any player in the game.
     Player,
     /// "Choose two colors" — selects two distinct mana colors.
@@ -284,7 +295,18 @@ impl Serialize for ChoiceType {
                 variant.end()
             }
             Self::LandType => serializer.serialize_unit_variant("ChoiceType", 8, "LandType"),
-            Self::Opponent => serializer.serialize_unit_variant("ChoiceType", 9, "Opponent"),
+            // Serialize the unrestricted form as the legacy unit variant
+            // "Opponent" so existing card-data JSON stays byte-stable; only emit
+            // the struct form when a restriction is present.
+            Self::Opponent { restriction } => match restriction {
+                None => serializer.serialize_unit_variant("ChoiceType", 9, "Opponent"),
+                Some(restriction) => {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 9, "Opponent", 1)?;
+                    variant.serialize_field("restriction", restriction)?;
+                    variant.end()
+                }
+            },
             Self::Player => serializer.serialize_unit_variant("ChoiceType", 10, "Player"),
             Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
             Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
@@ -324,6 +346,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
             Labeled {
                 options: Vec<String>,
             },
+            Opponent {
+                #[serde(default)]
+                restriction: Option<Box<PlayerFilter>>,
+            },
             Keyword {
                 options: Vec<Keyword>,
             },
@@ -338,7 +364,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 "CardType" => Ok(Self::CardType),
                 "CardName" => Ok(Self::CardName),
                 "LandType" => Ok(Self::LandType),
-                "Opponent" => Ok(Self::Opponent),
+                "Opponent" => Ok(Self::Opponent { restriction: None }),
                 "Player" => Ok(Self::Player),
                 "TwoColors" => Ok(Self::TwoColors),
                 "Word" => Ok(Self::Word),
@@ -365,6 +391,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
+                ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
                 ChoiceTypeData::Keyword { options } => Ok(Self::Keyword { options }),
             },
         }
@@ -765,7 +792,7 @@ impl ChoiceValue {
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::LandType => Some(Self::LandType(value.to_string())),
             // CR 800.4a: Parse player ID from string.
-            ChoiceType::Opponent | ChoiceType::Player => value
+            ChoiceType::Opponent { .. } | ChoiceType::Player => value
                 .parse::<u8>()
                 .ok()
                 .map(|id| Self::Player(PlayerId(id))),
@@ -4195,6 +4222,27 @@ pub enum PlayerFilter {
         comparator: Comparator,
         value: Box<QuantityExpr>,
     },
+    /// CR 608.2c + CR 109.4: The player chosen by the Nth `Effect::Choose`
+    /// (`ChoiceType::Player` / `ChoiceType::Opponent`) earlier in this
+    /// resolving ability chain (`index` is 0-based). The `PlayerFilter`-axis
+    /// analogue of `ControllerRef::ChosenPlayer { index }`: read at resolution
+    /// time from `ResolvedAbility.chosen_players[index]`, the resolution-scoped
+    /// list the `WaitingFor::NamedChoice` answer handler appends to. Powers the
+    /// "choose an opponent. That player faces a villainous choice — …" class
+    /// (The Master, Gallifrey's End) where the player who faces the choice — and
+    /// therefore the chooser of the `ChooseOneOf` branch — is the opponent
+    /// selected mid-resolution rather than the controller.
+    ChosenPlayer { index: u8 },
+    /// CR 108.3 + CR 109.4: The owner of the first object target of the
+    /// resolving ability. The owner-axis sibling of
+    /// `ParentObjectTargetController`, completing the owner/controller pair that
+    /// `PlayerScope` (`ParentObjectTargetController`) and `TargetFilter`
+    /// (`ParentTargetOwner` / `ParentTargetController`) already carry. Resolved
+    /// via `ability_utils::parent_target_owner`. Powers the "[target's owner] …,
+    /// then faces a villainous choice — …" class (This Is How It Ends) where the
+    /// player facing the choice is the owner of the targeted permanent named in
+    /// the prior clause, not the ability controller.
+    ParentObjectTargetOwner,
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -15207,6 +15255,58 @@ mod tests {
                 excluded: vec![ManaColor::White],
             }
         );
+    }
+
+    #[test]
+    fn choice_type_opponent_legacy_unit_deserializes_to_unrestricted() {
+        // Legacy card-data.json emits the bare "Opponent" string for the
+        // unrestricted form; it must round-trip to `restriction: None`.
+        let choice_type: ChoiceType = serde_json::from_str("\"Opponent\"").unwrap();
+
+        assert_eq!(choice_type, ChoiceType::Opponent { restriction: None });
+    }
+
+    #[test]
+    fn choice_type_opponent_unrestricted_serializes_as_legacy_unit() {
+        // The hand-rolled Serialize must keep emitting the bare string for the
+        // unrestricted form so existing card-data.json stays byte-stable.
+        let json = serde_json::to_string(&ChoiceType::Opponent { restriction: None }).unwrap();
+
+        assert_eq!(json, "\"Opponent\"");
+    }
+
+    #[test]
+    fn choice_type_opponent_restricted_serde_round_trips() {
+        // The Master, Gallifrey's End: "choose an opponent with the most life".
+        // The hand-rolled Serialize/Deserialize for the restricted struct form
+        // must be symmetric or card-data.json load corrupts silently.
+        let original = ChoiceType::Opponent {
+            restriction: Some(Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                }),
+            })),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        // Restricted form must use the externally-tagged struct variant so it is
+        // distinguishable from the legacy unit variant.
+        assert!(
+            json.starts_with(r#"{"Opponent":"#),
+            "restricted form should serialize as a struct variant, got: {json}"
+        );
+
+        let round_tripped: ChoiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
     }
 
     #[test]

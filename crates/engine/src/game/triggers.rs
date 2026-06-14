@@ -4799,6 +4799,11 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
+            // CR 108.3 + CR 608.2c: parent-target-owner and resolution-scoped
+            // chosen-player anchors are effect-resolution references, not
+            // turn-binding predicates — no "whose turn" semantic. Fail-closed.
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
             // Fail-closed alongside the other set-valued variants.

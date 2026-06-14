@@ -3690,10 +3690,13 @@ pub(crate) fn resolve_player_count(
                             .last_vote_ballots
                             .iter()
                             .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                        // CR 109.4: the parent-object-target anchor has no
-                        // single-player-count meaning here (no parent object
-                        // target is in scope for a player-count quantity).
-                        PlayerFilter::ParentObjectTargetController => false,
+                        // CR 109.4 + CR 108.3 + CR 608.2c: the parent-object-target
+                        // anchors and the resolution-scoped chosen-player anchor
+                        // have no single-player-count meaning here (these resolve
+                        // to a single anchored player, not a counted set).
+                        PlayerFilter::ParentObjectTargetController
+                        | PlayerFilter::ParentObjectTargetOwner
+                        | PlayerFilter::ChosenPlayer { .. } => false,
                         // CR 109.4 + CR 109.5: "each [player class] who controls
                         // [comparator] [count] [filter]" — count candidates that
                         // satisfy both the `relation` predicate and the

@@ -29,7 +29,7 @@ fn choose_opponent(runner: &mut GameRunner, opponent: engine::types::PlayerId) {
             options,
             ..
         } => {
-            assert_eq!(*choice_type, ChoiceType::Opponent);
+            assert_eq!(*choice_type, ChoiceType::Opponent { restriction: None });
             assert!(
                 options.contains(&opponent.0.to_string()),
                 "opponent must be legal; options={options:?}"

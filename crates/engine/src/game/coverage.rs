@@ -1360,6 +1360,8 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         }
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
+        PlayerFilter::ChosenPlayer { .. } => "the chosen player",
+        PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
         PlayerFilter::ControlsCount {
@@ -1519,7 +1521,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::NumberRange { min, max } => return format!("number ({min}-{max})"),
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
-        ChoiceType::Opponent => "opponent",
+        ChoiceType::Opponent { .. } => "opponent",
         ChoiceType::Player => "player",
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
@@ -5676,6 +5678,10 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         }
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
+        // Resolved by `choose_one_of::choosing_players` (chosen-player / parent
+        // target owner anchors for villainous-choice choosers).
+        PlayerFilter::ChosenPlayer { .. } => ("ChosenPlayer", Handled),
+        PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
     }

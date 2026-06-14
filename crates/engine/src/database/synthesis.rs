@@ -9265,7 +9265,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             && matches!(
                 r.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
+                    choice_type: ChoiceType::Opponent { .. },
                     persist: true,
                 })
             )
@@ -9281,7 +9281,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
-                choice_type: ChoiceType::Opponent,
+                choice_type: ChoiceType::Opponent { restriction: None },
                 persist: true,
             },
         )));
@@ -9384,7 +9384,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
             && matches!(
                 r.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
+                    choice_type: ChoiceType::Opponent { .. },
                     persist: true,
                 }),
             )
@@ -9405,7 +9405,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
-            choice_type: ChoiceType::Opponent,
+            choice_type: ChoiceType::Opponent { restriction: None },
             persist: true,
         },
     )
@@ -16286,7 +16286,7 @@ mod siege_synthesis_tests {
         assert!(matches!(
             protector.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::Choose {
-                choice_type: ChoiceType::Opponent,
+                choice_type: ChoiceType::Opponent { .. },
                 persist: true,
             })
         ));
