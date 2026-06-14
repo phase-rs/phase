@@ -110,6 +110,16 @@ pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: Object
         .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number))
 }
 
+/// CR 120.3 + CR 120.6 + CR 702.11b: True when the source permanent has actually
+/// dealt damage (combat or noncombat) since it entered the battlefield. Backs the
+/// `StaticCondition::SourceHasDealtDamage` predicate; the "hasn't dealt damage yet"
+/// negation wraps this via `StaticCondition::Not`. The flag is set in
+/// `deal_damage` on the first nonzero amount actually dealt and cleared on a
+/// battlefield exit (`apply_zone_exit_cleanup`).
+pub(crate) fn eval_source_has_dealt_damage(state: &GameState, source_id: ObjectId) -> bool {
+    state.objects_that_dealt_damage.contains(&source_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

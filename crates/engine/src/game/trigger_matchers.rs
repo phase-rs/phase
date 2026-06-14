@@ -123,6 +123,11 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 701.31d: planeswalked-away-from / planeswalked-to (encounter) endpoints.
         TriggerMode::PlaneswalkedFrom => match_planeswalked_from,
         TriggerMode::PlaneswalkedTo => match_planeswalked_to,
+        // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
+        // the scheme set in motion.
+        TriggerMode::SetInMotion => match_set_in_motion,
+        // CR 701.33b: "When you abandon this scheme" fires for the abandoned scheme.
+        TriggerMode::Abandoned => match_abandoned,
         TriggerMode::RoomEntered => match_room_entered,
         TriggerMode::UnlockDoor => match_unlock_door,
         TriggerMode::FullyUnlock => match_fully_unlock,
@@ -169,7 +174,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PlanarDice
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
-        | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
         | TriggerMode::Devoured
@@ -178,7 +182,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Mentored
         | TriggerMode::Proliferate
         | TriggerMode::SeekAll
-        | TriggerMode::SetInMotion
         | TriggerMode::Trains
         | TriggerMode::VisitAttraction => match_visit_attraction,
         TriggerMode::Specializes => match_specializes,
@@ -381,6 +384,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::ChaosEnsues, match_chaos_ensues);
     r.insert(TriggerMode::PlaneswalkedFrom, match_planeswalked_from);
     r.insert(TriggerMode::PlaneswalkedTo, match_planeswalked_to);
+    // CR 904.9 / CR 701.32b / CR 701.33b: Archenemy scheme triggers
+    r.insert(TriggerMode::SetInMotion, match_set_in_motion);
+    r.insert(TriggerMode::Abandoned, match_abandoned);
     r.insert(TriggerMode::RoomEntered, match_room_entered);
     r.insert(TriggerMode::UnlockDoor, match_unlock_door);
     r.insert(TriggerMode::FullyUnlock, match_fully_unlock);
@@ -454,7 +460,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         // TriggerMode::ChaosEnsues — moved to real matcher above
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
-        TriggerMode::Abandoned,
+        // TriggerMode::Abandoned — moved to real matcher above
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
         TriggerMode::Devoured,
@@ -463,7 +469,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Mentored,
         // TriggerMode::Mutates — moved to real matcher below
         TriggerMode::SeekAll,
-        TriggerMode::SetInMotion,
+        // TriggerMode::SetInMotion — moved to real matcher above
         // TriggerMode::Specializes — moved to real matcher above
         // TriggerMode::Stationed — moved to real matcher below
         TriggerMode::Trains,
@@ -871,6 +877,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Planeswalked { .. }
         | GameEvent::ChaosEnsued { .. }
         | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
@@ -3687,6 +3695,32 @@ pub(super) fn match_planeswalked_to(
     } else {
         false
     }
+}
+
+/// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
+/// scheme set in motion; "you" resolves to the archenemy via the scheme's
+/// controller (stamped in `archenemy::set_in_motion`).
+pub(super) fn match_set_in_motion(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::SchemeSetInMotion { scheme_id, player_id }
+        if *scheme_id == source_id
+        && valid_player_matches(trigger, state, *player_id, source_id))
+}
+
+/// CR 701.33b: "When you abandon this scheme" — fires for the abandoned scheme.
+pub(super) fn match_abandoned(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::SchemeAbandoned { scheme_id, player_id }
+        if *scheme_id == source_id
+        && valid_player_matches(trigger, state, *player_id, source_id))
 }
 
 /// CR 104.3a: "Whenever a player loses the game" — fires when any player's

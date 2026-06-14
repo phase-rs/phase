@@ -407,6 +407,23 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         }
     }
 
+    // CR 800.4a: If the archenemy leaves the game, the Archenemy subsystem ends.
+    // The archenemy is unique (CR 904.2a), so there is no reassignment — unlike the
+    // planar controller. Scheme cards are owned by the archenemy and are locked to
+    // the command zone (CR 314.2), so they are dropped as bookkeeping here rather
+    // than routed through the normal owner-leaves zone pipeline.
+    if state.archenemy == Some(player) {
+        state.archenemy = None;
+        state.scheme_deck.clear();
+        let scheme_ids: Vec<crate::types::identifiers::ObjectId> = state
+            .command_zone
+            .iter()
+            .copied()
+            .filter(|&id| crate::game::archenemy::is_scheme_object(state, id))
+            .collect();
+        state.command_zone.retain(|id| !scheme_ids.contains(id));
+    }
+
     events.push(GameEvent::PlayerEliminated { player_id: player });
 }
 

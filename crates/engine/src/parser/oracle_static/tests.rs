@@ -12614,10 +12614,7 @@ fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplem
             "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.",
         )
         .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::Other("LinkedCollectionCounterPlayPermission".to_string())
-    );
+    assert_eq!(def.mode, StaticMode::LinkedCollectionCounterPlayPermission);
 }
 
 // --- Group B: Generic activated ability cost reduction ---
@@ -16693,4 +16690,157 @@ fn level_up_enchanted_creature_grant_attack_trigger_parses_multiply_counter() {
         "draw must be gated on power >= 10, got {:?}",
         draw.condition
     );
+}
+
+/// CR 702.11b + CR 613.1f + CR 120.3: "<self> has hexproof if it hasn't dealt
+/// damage yet" (Palladia-Mors, the Ruiner) must lower to a single Continuous
+/// `AddKeyword(Hexproof)` on `SelfRef`, gated on `Not(SourceHasDealtDamage)`.
+/// The card-name self-reference is normalized to `~` before `parse_static_line`
+/// (see `normalize_card_name_refs`), so the AST test feeds the `~` form.
+#[test]
+fn self_has_hexproof_if_it_hasnt_dealt_damage_palladia_mors() {
+    let def =
+        parse_static_line("~ has hexproof if it hasn't dealt damage yet.").expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        }),
+        "hexproof must be gated on Not(SourceHasDealtDamage), got {:?}",
+        def.condition
+    );
+}
+
+/// CR 702.11b + CR 613.1f: Karakyk Guardian's "This creature has hexproof if it
+/// hasn't dealt damage yet" — the "this creature" subject form normalizes the
+/// same as the card-name form and lowers identically.
+#[test]
+fn self_has_hexproof_if_it_hasnt_dealt_damage_karakyk_guardian() {
+    let def = parse_static_line("This creature has hexproof if it hasn't dealt damage yet.")
+        .expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        })
+    );
+}
+
+/// CR 702.11b + CR 613.1f: FULL-CARD flip — Palladia-Mors, the Ruiner and
+/// Karakyk Guardian must parse their conditional-hexproof line into a real
+/// Hexproof grant gated on `Not(SourceHasDealtDamage)`, with NO `Unimplemented`
+/// residual static and no swallowed-clause diagnostic.
+#[test]
+fn palladia_mors_and_karakyk_guardian_conditional_hexproof_full_card_flip() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::Effect;
+
+    let cards = [
+        (
+            "Palladia-Mors, the Ruiner",
+            "Flying, vigilance, trample\nPalladia-Mors, the Ruiner has hexproof if it hasn't dealt damage yet.",
+        ),
+        (
+            "Karakyk Guardian",
+            "Flying, vigilance, trample\nThis creature has hexproof if it hasn't dealt damage yet.",
+        ),
+    ];
+    for (name, text) in cards {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &["Dragon".to_string()],
+        );
+        // The conditional hexproof grant is present and correctly gated.
+        let hexproof = parsed.statics.iter().find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        });
+        let hexproof = hexproof.unwrap_or_else(|| panic!("{name}: missing hexproof static"));
+        assert_eq!(
+            hexproof.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            }),
+            "{name}: hexproof must be gated on Not(SourceHasDealtDamage)"
+        );
+        assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+        // No Unimplemented residual rode into a granted ability on any static.
+        for def in &parsed.statics {
+            for m in &def.modifications {
+                if let ContinuousModification::GrantAbility { definition } = m {
+                    assert!(
+                        !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }),
+                        "{name}: static carries an Unimplemented residual: {def:?}"
+                    );
+                }
+            }
+        }
+        // No clause was silently swallowed.
+        let swallowed: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. }))
+            .collect();
+        assert!(
+            swallowed.is_empty(),
+            "{name}: unexpected swallowed-clause diagnostics: {swallowed:?}"
+        );
+    }
+}
+
+/// CR 611.3a + CR 613.1f + CR 509.1b + CR 702.11b: Ratonhnhaké꞉ton uses the
+/// inverted condition form and gates two sibling statics with the same "hasn't
+/// dealt damage yet" condition. The multi-static path must preserve both the
+/// Hexproof grant and the CantBeBlocked mode under `Not(SourceHasDealtDamage)`.
+#[test]
+fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
+    let defs = parse_static_line_multi(
+        "As long as ~ hasn't dealt damage yet, it has hexproof and can't be blocked.",
+    );
+    assert_eq!(defs.len(), 2, "expected hexproof grant plus evasion static");
+
+    let expected_condition = Some(StaticCondition::Not {
+        condition: Box::new(StaticCondition::SourceHasDealtDamage),
+    });
+
+    let hexproof = defs
+        .iter()
+        .find(|def| {
+            def.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing conditional hexproof grant");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(hexproof.condition, expected_condition);
+
+    let evasion = defs
+        .iter()
+        .find(|def| def.mode == StaticMode::CantBeBlocked)
+        .expect("missing conditional can't-be-blocked static");
+    assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(evasion.condition, expected_condition);
 }

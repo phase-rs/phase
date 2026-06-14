@@ -1189,6 +1189,43 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // --- "<self> has <kw> if <cond>" single-pair conditional keyword grant ---
+    // CR 613.1f + CR 611.3a + CR 702.11b: A self-referential keyword grant gated
+    // on a typed source-state condition (Palladia-Mors, the Ruiner; Karakyk
+    // Guardian: "has hexproof if it hasn't dealt damage yet"). The MULTI-pair list
+    // (Multiclass Baldric) is owned by the attached-grant path
+    // (`parse_conditional_keyword_list`'s `len() > 1` gate); the SELF single-pair
+    // case has no other handler, so it is parsed here. `parse_self_reference`
+    // consumes every self-subject form ("~", "this creature", "this permanent",
+    // "it", ...) uniformly — including the "this creature" forms the generic
+    // `has`/`gets` arm below excludes via its `scan_contains(subject, "creature")`
+    // guard. Full consumption + the mandatory " if " in
+    // `parse_conditional_keyword_list` mean it cannot steal "has flying as long
+    // as", "has base power and toughness X", or "has all activated abilities".
+    // Placed BEFORE the generic `has`/`gets` arm so it owns the `if`-gated form
+    // first. Calls `parse_conditional_keyword_list` DIRECTLY so the multi-pair
+    // gate there is untouched.
+    if let Some((TargetFilter::SelfRef, after_subject)) =
+        nom_on_lower(&text, &lower, nom_target::parse_self_reference)
+    {
+        if let Some(after_has) = nom_tag_lower(after_subject, after_subject, " has ") {
+            let after_has_lower = after_has.to_lowercase();
+            if let Ok((rest, pairs)) = parse_conditional_keyword_list(&after_has_lower) {
+                if rest.trim().trim_end_matches('.').is_empty() && pairs.len() == 1 {
+                    if let Some((keyword, condition)) = pairs.into_iter().next() {
+                        return Some(
+                            StaticDefinition::continuous()
+                                .affected(TargetFilter::SelfRef)
+                                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                                .condition(condition)
+                                .description(text.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // --- "~ has/gets ..." (self-referential) ---
     // Match lines like "CARDNAME has deathtouch" or "CARDNAME gets +1/+1"
     if let Some(pos) = tp

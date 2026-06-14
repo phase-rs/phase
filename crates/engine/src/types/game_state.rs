@@ -5485,6 +5485,16 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub commander_declined_zone_return: HashSet<ObjectId>,
 
+    /// CR 120.3 + CR 120.6 + CR 702.11b: Battlefield objects that have actually
+    /// dealt damage (combat or noncombat) since entering the battlefield. Sticky
+    /// per-object flag backing the `StaticCondition::SourceHasDealtDamage`
+    /// predicate (e.g. "has hexproof if it hasn't dealt damage yet"). Set only
+    /// when a nonzero amount of damage is actually dealt (CR 120.3/120.6, not the
+    /// would-deal amount of CR 120.1a); cleared when the object leaves the
+    /// battlefield so a flickered object starts with a clean slate.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub objects_that_dealt_damage: HashSet<ObjectId>,
+
     /// CR 500.7: Extra turns granted by effects, stored as a LIFO stack.
     /// Most recently created extra turn is taken first (pop from end).
     #[serde(default)]
@@ -6390,6 +6400,15 @@ pub struct GameState {
     /// Planechase game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planar_controller: Option<PlayerId>,
+    /// CR 904.3 / CR 904.4: The archenemy's scheme deck (single-deck Archenemy
+    /// option). Front = top; face-down in the command zone (CR 314.2). Schemes
+    /// that are set in motion turn face up and stay in the command zone, NOT here.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub scheme_deck: im::Vector<ObjectId>,
+    /// CR 904.2a: The archenemy — owner/controller of all scheme cards
+    /// (CR 314.5 / CR 904.7). `None` outside an Archenemy game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy: Option<PlayerId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -6935,11 +6954,14 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             planar_deck: im::Vector::new(),
             planar_controller: None,
+            scheme_deck: im::Vector::new(),
+            archenemy: None,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
+            objects_that_dealt_damage: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
             debug_infinite_mana: BTreeSet::new(),
@@ -7217,6 +7239,7 @@ impl PartialEq for GameState {
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
+            && self.objects_that_dealt_damage == other.objects_that_dealt_damage
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
@@ -7349,6 +7372,8 @@ impl PartialEq for GameState {
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
+            && self.scheme_deck == other.scheme_deck
+            && self.archenemy == other.archenemy
     }
 }
 

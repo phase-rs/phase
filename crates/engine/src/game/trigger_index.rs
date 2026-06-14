@@ -607,6 +607,10 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::Planeswalked { .. }
         | GameEvent::ChaosEnsued { .. }
         | GameEvent::PlanarDieRolled { .. } => {}
+        // Archenemy trigger modes (SetInMotion/Abandoned) route to the
+        // always-checked unclassified bucket in `keys_from_trigger_def`, so these
+        // events need no dedicated index key — their matchers are always consulted.
+        GameEvent::SchemeSetInMotion { .. } | GameEvent::SchemeAbandoned { .. } => {}
         GameEvent::RoomDoorUnlocked { .. } | GameEvent::BecomesPlotted { .. } => {}
         GameEvent::InitiativeTaken { .. } => push(TriggerEventKey::MonarchOrInitiative),
         GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}

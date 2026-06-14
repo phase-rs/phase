@@ -210,6 +210,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Planeswalked { .. }
         | GameEvent::ChaosEnsued { .. }
         | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
@@ -1059,6 +1061,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::ChaosEnsued { .. } => vec![text("Chaos ensues")],
         GameEvent::PlanarDieRolled { face, .. } => {
             vec![text(&format!("Rolled the planar die: {face:?}"))]
+        }
+        GameEvent::SchemeSetInMotion { scheme_id, .. } => {
+            vec![text("Set scheme in motion: "), card_seg(state, *scheme_id)]
+        }
+        GameEvent::SchemeAbandoned { scheme_id, .. } => {
+            vec![text("Abandoned scheme: "), card_seg(state, *scheme_id)]
         }
         GameEvent::InitiativeTaken { .. } => vec![text("Initiative taken")],
         GameEvent::AttractionOpened { object_id, .. } => {

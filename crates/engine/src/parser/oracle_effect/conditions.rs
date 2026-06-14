@@ -2526,6 +2526,11 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 725.1: "there is no monarch" is a trigger-only intervening-if; no
         // `AbilityCondition` monarch variant beyond `IsMonarch` exists.
         | StaticCondition::NoMonarch
+        // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
+        // Layer-6 gate (the conditional hexproof grant) with no effect-resolution
+        // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
+        // the inner Not sub-match's `_ => None` arm above.
+        | StaticCondition::SourceHasDealtDamage
         | StaticCondition::None => None,
     }
 }
