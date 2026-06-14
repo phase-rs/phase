@@ -764,6 +764,7 @@ fn lower_as_enters_anchor_word_modal(
                     options: labels.clone(),
                 },
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         ))
         .valid_card(TargetFilter::SelfRef)
@@ -1638,6 +1639,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Labeled { options },
                 persist,
+                ..
             } => {
                 assert!(*persist);
                 assert_eq!(options, &vec!["Jeskai".to_string(), "Temur".to_string()]);

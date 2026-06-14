@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::types::ability::{
-    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint, EffectKind,
-    OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DamageRecipientRelation,
+    DestinationConstraint, EffectKind, OriginConstraint, TargetFilter, TargetRef,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -635,6 +636,15 @@ fn player_matches_filter(
                 .and_then(|host| host.as_player())
                 == Some(player_id)
         }
+        // CR 120.3 + CR 102.2: A damage-recipient `valid_target` that names an
+        // object card type ("to a creature") can never be satisfied by a
+        // *player* recipient. `is_player_scope_damage_filter` is the single
+        // authority for which `Typed` filters are player-scoped (controller-only
+        // scopes the You/Opponent arms above already handled). Any other `Typed`
+        // filter carries an object type constraint and must reject a player —
+        // otherwise e.g. Strax's "to a creature" trigger mis-fires on combat
+        // damage dealt to a player.
+        TargetFilter::Typed(_) => is_player_scope_damage_filter(filter),
         _ => true,
     }
 }
@@ -1077,6 +1087,19 @@ fn matching_combat_damage_to_player_sources(
                     return false;
                 }
             }
+            // CR 120.3 + CR 108.3: "deals combat damage to its owner" — keep
+            // only sources whose owner is the damaged player. The aggregate
+            // combat path is where The Beast's `valid_source = Typed(Creature)`
+            // trigger actually evaluates combat damage to a player, so the
+            // relation must be enforced here too (not only on the per-event
+            // `DamageDealt` branch).
+            if matches!(
+                trigger.damage_recipient_relation,
+                Some(DamageRecipientRelation::IsSourceOwner)
+            ) && state.objects.get(src).map(|o| o.owner) != Some(player_id)
+            {
+                return false;
+            }
             valid_source_matches(trigger, state, *src, source_id)
         })
         .copied()
@@ -1150,6 +1173,24 @@ pub(super) fn match_damage_done(
                         return false;
                     }
                 }
+            }
+        }
+        // CR 120.3 + CR 108.3: "deals [combat] damage to its owner" — the
+        // damaged player must be the owner of the damage's source object.
+        // `dmg_source` is the damaging object (bound at the event destructure);
+        // `GameObject.owner` is that card's owner. Orthogonal to `valid_target`,
+        // which stays `None` for these triggers since no `TargetFilter` scope
+        // can express a relation to the damaging source.
+        if let Some(DamageRecipientRelation::IsSourceOwner) = trigger.damage_recipient_relation {
+            let TargetRef::Player(pid) = target else {
+                // An owner is a player; an object recipient never matches.
+                return false;
+            };
+            let Some(owner) = state.objects.get(dmg_source).map(|o| o.owner) else {
+                return false;
+            };
+            if *pid != owner {
+                return false;
             }
         }
         true
@@ -9860,6 +9901,218 @@ mod tests {
         assert!(
             match_damage_done(&to_player, &trigger, source_id, &state),
             "combat damage to the opponent player must still fire the trigger"
+        );
+    }
+
+    // ── "deals damage to a creature" object recipient (cluster-02) ──
+    //
+    // CR 120.3 + CR 102.2: a `Typed(Creature)` object `valid_target` must
+    // match damage to a creature and REJECT damage to a player. This is the
+    // Strax "Glory of Battle" fix — the `player_matches_filter` wildcard
+    // previously accepted any object-type filter against a player.
+    #[test]
+    fn damage_done_to_a_creature_rejects_player_recipient() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strax".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+
+        // Damage to a creature — must match.
+        let to_creature = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(victim),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            match_damage_done(&to_creature, &trigger, source_id, &state),
+            "'to a creature' must fire on damage to a creature"
+        );
+
+        // Damage to a player — must NOT match (the regression).
+        let to_player = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_done(&to_player, &trigger, source_id, &state),
+            "'to a creature' must NOT fire on damage to a player"
+        );
+    }
+
+    #[test]
+    fn player_matches_filter_rejects_object_type_filter() {
+        // Building-block: a Typed filter carrying an object type constraint
+        // never matches a player; player-scope filters still do.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Src".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert!(
+            !player_matches_filter(&creature_filter, &state, PlayerId(1), source),
+            "object-type Typed filter must reject a player"
+        );
+        assert!(
+            player_matches_filter(&TargetFilter::Player, &state, PlayerId(1), source),
+            "TargetFilter::Player still matches any player"
+        );
+        // Controller-only Typed (the "you"/"opponent" player scope) still works.
+        let you_scope = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        assert!(
+            player_matches_filter(&you_scope, &state, PlayerId(0), source),
+            "controller-only Typed(You) matches the controller"
+        );
+    }
+
+    // ── "deals combat damage to its owner" relation (cluster-02) ──
+    //
+    // CR 120.3 + CR 108.3: fires only when the damaged player owns the
+    // damaging source object. The Beast, Deathless Prince.
+    //
+    // The Beast's `valid_source = Typed(Creature)` (a non-SelfRef filter) means
+    // combat damage to a player evaluates through the *aggregate*
+    // `CombatDamageDealtToPlayer` path, so the relation is enforced there.
+    #[test]
+    fn combat_damage_to_source_owner_relation_aggregate_path() {
+        let mut state = setup();
+        // The Beast observer (controlled by anyone).
+        let observer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Beast".to_string(),
+            Zone::Battlefield,
+        );
+        // Damaging creature owned by PlayerId(1).
+        let dmg_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&dmg_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_source = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        trigger.damage_recipient_relation = Some(DamageRecipientRelation::IsSourceOwner);
+
+        // Combat damage to the source's owner (PlayerId(1)) — must match.
+        let to_owner = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(dmg_creature, 4)],
+            total_damage: 4,
+        };
+        assert!(
+            match_damage_done(&to_owner, &trigger, observer, &state),
+            "combat damage to the source's owner must fire"
+        );
+
+        // Combat damage to a non-owner player — must NOT match.
+        let to_other = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(0),
+            source_amounts: vec![(dmg_creature, 4)],
+            total_damage: 4,
+        };
+        assert!(
+            !match_damage_done(&to_other, &trigger, observer, &state),
+            "combat damage to a non-owner player must NOT fire"
+        );
+    }
+
+    // Per-event `DamageDealt` path: with a `SelfRef` source filter (or no
+    // aggregate routing) noncombat damage stays on the per-event branch, where
+    // the same relation predicate must hold. Exercises the `DamageDealt`-arm
+    // relation code directly.
+    #[test]
+    fn damage_to_source_owner_relation_per_event_path() {
+        let mut state = setup();
+        let observer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        // SelfRef source so `listens_on_aggregate_combat_damage_done` is false
+        // and the per-event `DamageDealt` branch handles the event.
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.damage_recipient_relation = Some(DamageRecipientRelation::IsSourceOwner);
+
+        // Noncombat damage from the observer to its owner (PlayerId(0)) — match.
+        let to_owner = GameEvent::DamageDealt {
+            source_id: observer,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            match_damage_done(&to_owner, &trigger, observer, &state),
+            "damage to the source's owner must fire on the per-event path"
+        );
+
+        // To a non-owner player — must NOT match.
+        let to_other = GameEvent::DamageDealt {
+            source_id: observer,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_done(&to_other, &trigger, observer, &state),
+            "damage to a non-owner player must NOT fire"
+        );
+
+        // To an object — never an owner; must NOT match.
+        let to_object = GameEvent::DamageDealt {
+            source_id: observer,
+            target: TargetRef::Object(observer),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_done(&to_object, &trigger, observer, &state),
+            "an object recipient can never be the source's owner"
         );
     }
 

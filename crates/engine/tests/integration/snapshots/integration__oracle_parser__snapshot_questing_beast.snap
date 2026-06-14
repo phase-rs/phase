@@ -73,7 +73,14 @@ expression: result
       "optional": false,
       "damage_kind": "CombatOnly",
       "secondary": false,
-      "valid_target": null,
+      "valid_target": {
+        "type": "Typed",
+        "type_filters": [
+          "Planeswalker"
+        ],
+        "controller": null,
+        "properties": []
+      },
       "valid_source": {
         "type": "SelfRef"
       },

@@ -37,10 +37,10 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    DamageRecipientRelation, DestinationConstraint, Effect, FilterProp, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
@@ -704,7 +704,7 @@ fn condition_introduces_damage_source_controller_player(cond_lower: &str) -> boo
     };
 
     matches!(
-        parse_damage_to_qualifier(after_damage),
+        parse_damage_to_qualifier(after_damage).filter,
         Some(TargetFilter::Controller)
     )
 }
@@ -733,7 +733,7 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
     };
 
     matches!(
-        parse_damage_to_qualifier(after_damage),
+        parse_damage_to_qualifier(after_damage).filter,
         Some(TargetFilter::Player)
     )
 }
@@ -5926,21 +5926,64 @@ fn with_triggering_player_controller(filter: TargetFilter) -> TargetFilter {
 // Event verb parsing: matches the event after the subject
 // ---------------------------------------------------------------------------
 
-/// Parse the "to <target>" qualifier that follows a damage verb.
+/// The parsed recipient of a damage trigger's deal-to clause (CR 120.3, CR 108.3).
 ///
-/// Returns a `TargetFilter` for the recognized recipient phrases:
-/// - "to a player"                  → `Player`
-/// - "to an opponent"               → opponent-controlled TypedFilter
-/// - "to another player"            → opponent-controlled TypedFilter
-/// - "to one of your opponents"     → opponent-controlled TypedFilter
-/// - "to you"                       → `Controller`
-/// - "to a player or planeswalker"  → `Or { Player, Planeswalker }`
-fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
-    let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
-        .parse(after_verb.trim_start())
-        .ok()?;
+/// The recipient is either a static `TargetFilter` (a player, an opponent, or
+/// an object recipient) or a relation referencing the damaging source object
+/// (the "its owner" case). A named struct keeps call sites self-documenting via
+/// the `filter` and `relation` fields rather than threading an anonymous tuple.
+#[derive(Debug, Default)]
+struct DamageRecipient {
+    filter: Option<TargetFilter>,
+    relation: Option<DamageRecipientRelation>,
+}
+
+/// Intermediate recipient alternative emitted by the recipient combinator
+/// before it is folded into a `DamageRecipient`. Lets the player / object filter
+/// arms and the source-relational arm share a single `alt()`.
+#[derive(Clone)]
+enum RecipientKind {
+    Filter(TargetFilter),
+    Relation(DamageRecipientRelation),
+}
+
+/// CR 120.3: Object-recipient arm of "deals damage to <recipient>" — "to a
+/// creature", "to another creature", "to a permanent", "to a planeswalker", etc.
+/// Strips an optional article, then delegates the head noun to the shared object
+/// type-phrase combinator so the full object-filter grammar (creature /
+/// permanent / planeswalker / artifact, controller suffixes, …) is reused rather
+/// than re-enumerated here.
+fn parse_damage_object_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("another "),
+        tag("an "),
+        tag("a "),
+    )))
+    .parse(input)?;
+    crate::parser::oracle_nom::target::parse_type_phrase(rest)
+}
+
+/// Parse the "to ..." recipient qualifier that follows a damage verb into a
+/// [`DamageRecipient`]. Recognized phrases (CR 120.3 + CR 108.3):
+///
+/// - "to a player" → `filter: Player`
+/// - "to an opponent" / "to another player" / "to one of your opponents" →
+///   `filter:` opponent-controlled `TypedFilter`
+/// - "to you" → `filter: Controller`
+/// - "to a player or planeswalker" → `filter: Or { Player, Planeswalker }`
+/// - "to a creature" / "to another creature" / "to a permanent" / … →
+///   `filter:` the object `TypedFilter` from the shared object combinator
+/// - "to its owner" / "to their owner" → `relation: IsSourceOwner`
+///
+/// An unrecognized or absent recipient yields an empty `DamageRecipient`.
+fn parse_damage_to_qualifier(after_verb: &str) -> DamageRecipient {
+    let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())
+    else {
+        return DamageRecipient::default();
+    };
     // Use nom alt() to match damage target qualifiers (input already lowercase)
-    fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    fn parse_damage_target(input: &str) -> OracleResult<'_, RecipientKind> {
         fn opponent_player_filter() -> TargetFilter {
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
         }
@@ -5958,28 +6001,54 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
         }
 
         alt((
+            // CR 108.3: "to its owner" / "to their owner" — relational recipient.
+            // No TargetFilter can express "damaged player == damaging source
+            // object's owner"; carry a DamageRecipientRelation instead.
             value(
-                TargetFilter::Or {
-                    filters: vec![
-                        TargetFilter::Player,
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
-                    ],
-                },
-                alt((
-                    tag("a player or planeswalker"),
-                    tag("a player or a planeswalker"),
-                )),
+                RecipientKind::Relation(DamageRecipientRelation::IsSourceOwner),
+                alt((tag("its owner"), tag("their owner"))),
             ),
-            value(TargetFilter::Player, tag("a player")),
-            parse_opponent_player_recipient,
-            value(TargetFilter::Controller, tag("you")),
+            map(
+                value(
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Player,
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                        ],
+                    },
+                    alt((
+                        tag("a player or planeswalker"),
+                        tag("a player or a planeswalker"),
+                    )),
+                ),
+                RecipientKind::Filter,
+            ),
+            map(
+                value(TargetFilter::Player, tag("a player")),
+                RecipientKind::Filter,
+            ),
+            map(parse_opponent_player_recipient, RecipientKind::Filter),
+            map(
+                value(TargetFilter::Controller, tag("you")),
+                RecipientKind::Filter,
+            ),
+            // CR 120.3: object recipient ("to a creature", "to a permanent", …).
+            // Tried last so the player/relational arms above win their phrasings.
+            map(parse_damage_object_recipient, RecipientKind::Filter),
         ))
         .parse(input)
     }
-    parse_damage_target
-        .parse(rest)
-        .ok()
-        .map(|(_, filter)| filter)
+    match parse_damage_target.parse(rest) {
+        Ok((_, RecipientKind::Filter(filter))) => DamageRecipient {
+            filter: Some(filter),
+            relation: None,
+        },
+        Ok((_, RecipientKind::Relation(relation))) => DamageRecipient {
+            filter: None,
+            relation: Some(relation),
+        },
+        Err(_) => DamageRecipient::default(),
+    }
 }
 
 /// CR 603.6a + CR 110.5b: After consuming the `"enter"` prefix in a ChangesZone
@@ -6467,7 +6536,9 @@ fn try_parse_event(
             def.damage_kind = kind;
             def.damage_amount = amount;
             def.valid_source = Some(subject.clone());
-            def.valid_target = parse_damage_to_qualifier(after_damage);
+            let recipient = parse_damage_to_qualifier(after_damage);
+            def.valid_target = recipient.filter;
+            def.damage_recipient_relation = recipient.relation;
             return Some((TriggerMode::DamageDone, def));
         }
     }
@@ -7640,16 +7711,22 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     def.valid_source = Some(source_filter);
     // Optional recipient: "to <recipient>" narrows the damage target; absence
     // means any damage target may satisfy the event. If a "to ..." tail exists
-    // but is not one of this parser's recipient qualifiers, leave the line for
-    // narrower parsers such as "a source deals damage to this creature".
-    let valid_target = parse_damage_to_qualifier(after_damage);
+    // but is neither a recognized recipient filter nor a recognized relation,
+    // leave the line for narrower parsers such as "a source deals damage to this
+    // creature".
+    let recipient = parse_damage_to_qualifier(after_damage);
     let has_recipient_tail = preceded(opt(space1), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_damage)
         .is_ok();
-    if has_recipient_tail && valid_target.is_none() {
+    // CR 603.2: decline only when a recipient tail exists but neither a filter
+    // nor a relation was recognized. A present relation (e.g. "to its owner")
+    // is a recognized recipient and must NOT decline — otherwise The Beast's
+    // whole trigger would be dropped.
+    if has_recipient_tail && recipient.filter.is_none() && recipient.relation.is_none() {
         return None;
     }
-    def.valid_target = valid_target;
+    def.valid_target = recipient.filter;
+    def.damage_recipient_relation = recipient.relation;
     def.damage_amount = threshold;
     Some((TriggerMode::DamageDone, def))
 }
@@ -28266,6 +28343,159 @@ mod tests {
             ),
             other => panic!("expected Discard, got {other:?}"),
         }
+    }
+
+    // ---- Damage-recipient qualifier parsing (cluster-02) ----
+
+    #[test]
+    fn damage_to_object_recipient_creature() {
+        // CR 120.3: "to a creature" / "to another creature" → object filter,
+        // no relation. Building-block test across the article variants.
+        for phrase in ["to a creature", "to another creature"] {
+            let r = parse_damage_to_qualifier(phrase);
+            assert_eq!(
+                r.filter,
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+                "{phrase} should yield a Typed(Creature) recipient filter"
+            );
+            assert_eq!(r.relation, None, "{phrase} should carry no relation");
+        }
+    }
+
+    #[test]
+    fn damage_to_object_recipient_generalizes_beyond_creature() {
+        // CR 120.3: the object-recipient arm delegates to the shared object
+        // filter combinator, so permanent/planeswalker recipients work too.
+        let perm = parse_damage_to_qualifier("to a permanent");
+        assert_eq!(
+            perm.filter,
+            Some(TargetFilter::Typed(TypedFilter::permanent())),
+            "permanent recipient should parse via the object filter combinator"
+        );
+        assert_eq!(perm.relation, None);
+
+        let pw = parse_damage_to_qualifier("to a planeswalker");
+        assert_eq!(
+            pw.filter,
+            Some(TargetFilter::Typed(TypedFilter::new(
+                TypeFilter::Planeswalker
+            ))),
+        );
+    }
+
+    #[test]
+    fn damage_to_source_owner_relation() {
+        // CR 108.3: "to its owner" / "to their owner" → relation, no filter.
+        for phrase in ["to its owner", "to their owner"] {
+            let r = parse_damage_to_qualifier(phrase);
+            assert_eq!(
+                r.relation,
+                Some(DamageRecipientRelation::IsSourceOwner),
+                "{phrase} should yield IsSourceOwner relation"
+            );
+            assert_eq!(r.filter, None, "{phrase} should carry no static filter");
+        }
+    }
+
+    #[test]
+    fn damage_to_player_recipients_unchanged() {
+        // Regression: the existing player recipient arms still win their
+        // phrasings and never produce a relation.
+        let player = parse_damage_to_qualifier("to a player");
+        assert_eq!(player.filter, Some(TargetFilter::Player));
+        assert_eq!(player.relation, None);
+
+        let opp = parse_damage_to_qualifier("to an opponent");
+        assert_eq!(
+            opp.filter,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            )),
+            "to an opponent must remain a controller-only Typed player scope"
+        );
+        assert_eq!(opp.relation, None);
+
+        let you = parse_damage_to_qualifier("to you");
+        assert_eq!(you.filter, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn damage_no_recipient_tail() {
+        // No "to ..." tail → empty recipient.
+        let r = parse_damage_to_qualifier("");
+        assert_eq!(r.filter, None);
+        assert_eq!(r.relation, None);
+    }
+
+    #[test]
+    fn source_deals_damage_to_owner_not_declined() {
+        // CR 603.2: the decline guard must NOT drop a recognized relation
+        // recipient — The Beast's "a creature deals combat damage to its
+        // owner" trigger must survive with the relation set.
+        let (mode, def) = try_parse_source_deals_damage_trigger(
+            "whenever a creature deals combat damage to its owner",
+        )
+        .expect("relation recipient must not be declined");
+        assert_eq!(mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.damage_recipient_relation,
+            Some(DamageRecipientRelation::IsSourceOwner)
+        );
+        assert_eq!(
+            def.valid_target, None,
+            "relation lives outside valid_target"
+        );
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    }
+
+    #[test]
+    fn the_beast_combat_damage_to_owner_full_parse() {
+        // End-to-end: The Beast's DamageDone trigger carries the relation and
+        // a Creature source, with valid_target left None.
+        let defs = parse_oracle_text(
+            "Whenever a creature deals combat damage to its owner, draw a card.",
+            "The Beast",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trig = defs
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::DamageDone)
+            .expect("must produce a DamageDone trigger");
+        assert_eq!(
+            trig.damage_recipient_relation,
+            Some(DamageRecipientRelation::IsSourceOwner)
+        );
+        assert_eq!(trig.valid_target, None);
+        assert_eq!(
+            trig.valid_source,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+        );
+    }
+
+    #[test]
+    fn strax_glory_of_battle_to_a_creature_full_parse() {
+        // End-to-end: "Whenever ~ deals damage to a creature" sets
+        // valid_target = Typed(Creature), no relation.
+        let defs = parse_oracle_text(
+            "Whenever Strax deals damage to a creature, put a +1/+1 counter on Strax.",
+            "Strax",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trig = defs
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::DamageDone)
+            .expect("must produce a DamageDone trigger");
+        assert_eq!(
+            trig.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+        );
+        assert_eq!(trig.damage_recipient_relation, None);
     }
 }
 

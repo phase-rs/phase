@@ -1684,22 +1684,27 @@ fn build_replacement_exec(
         A::ChooseACreatureType => Effect::Choose {
             choice_type: ChoiceType::CreatureType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseAColor(choice) => Effect::Choose {
             choice_type: choice_type_for_choosable_color(choice),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardName(_) => Effect::Choose {
             choice_type: ChoiceType::CardName,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardtype => Effect::Choose {
             choice_type: ChoiceType::CardType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseABasicLandType => Effect::Choose {
             choice_type: ChoiceType::BasicLandType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 305.7: "land type" includes basic + nonbasic. Both
         // unparameterized (ChooseALandType) and parameterized
@@ -1709,6 +1714,7 @@ fn build_replacement_exec(
         A::ChooseALandType | A::ChooseLandType(_) => Effect::Choose {
             choice_type: ChoiceType::LandType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 800.4a: opponent-scoped player choice when the schema
         // filter narrows to opponents; broader player choice
@@ -1723,6 +1729,7 @@ fn build_replacement_exec(
             Effect::Choose {
                 choice_type,
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 614.12a: "Choose a number between X and Y" — engine's
@@ -1748,15 +1755,18 @@ fn build_replacement_exec(
                     max: max_u8,
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseEvenOrOdd => Effect::Choose {
             choice_type: ChoiceType::OddOrEven,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseTwoColors => Effect::Choose {
             choice_type: ChoiceType::TwoColors,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 614.12a + CR 701.x voting: enumerated option lists become
         // `ChoiceType::Labeled`. Each variant supplies its own option
@@ -1766,6 +1776,7 @@ fn build_replacement_exec(
                 options: vec!["Left".to_string(), "Right".to_string()],
             },
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACreatureTypeFromList(opts) => {
             if opts.is_empty() {
@@ -1779,6 +1790,7 @@ fn build_replacement_exec(
                     options: opts.iter().map(|c| format!("{c:?}")).collect(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseACardtypeFromList(opts) => {
@@ -1793,6 +1805,7 @@ fn build_replacement_exec(
                     options: opts.iter().map(|c| format!("{c:?}")).collect(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseWord(opts) => {
@@ -1807,6 +1820,7 @@ fn build_replacement_exec(
                     options: opts.clone(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 614.12a strict-fails — each gets its own refined tag so

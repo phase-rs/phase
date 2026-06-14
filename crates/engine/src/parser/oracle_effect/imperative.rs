@@ -29,8 +29,8 @@ use crate::types::ability::{
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
     EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
     PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TypeFilter,
-    TypedFilter, ZoneOwner,
+    SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -2575,7 +2575,20 @@ pub(super) fn parse_choose_ast(
     }
 
     if let Some(choice_type) = super::try_parse_named_choice(lower) {
-        return Some(ChooseImperativeAst::NamedChoice { choice_type });
+        // CR 115.1 + CR 701.9b (analogous): "choose … at random" hands the
+        // selection to the game. `try_parse_named_choice` consumes the choice
+        // phrase itself; "at random" is a trailing modifier on the same choose
+        // clause, so a presence probe over the already-isolated clause is
+        // precise (mirrors the discard "at random" probe at imperative.rs:1206).
+        let selection = if nom_primitives::scan_contains(lower, "at random") {
+            TargetSelectionMode::Random
+        } else {
+            TargetSelectionMode::Chosen
+        };
+        return Some(ChooseImperativeAst::NamedChoice {
+            choice_type,
+            selection,
+        });
     }
 
     if nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input)).is_some()
@@ -3051,7 +3064,10 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     match ast {
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
-        ChooseImperativeAst::NamedChoice { choice_type } => Effect::Choose {
+        ChooseImperativeAst::NamedChoice {
+            choice_type,
+            selection,
+        } => Effect::Choose {
             // CR 201.3 / CR 113.6 / CR 205.2a / CR 614.12c: A chosen attribute
             // must persist on the source whenever a later clause refers back to
             // it. CardName choices persist for "with the chosen name" filters
@@ -3070,6 +3086,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                     | ChoiceType::Labeled { .. }
             ),
             choice_type,
+            selection,
         },
         ChooseImperativeAst::RevealHandFilter {
             card_filter,

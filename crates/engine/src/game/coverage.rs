@@ -2125,10 +2125,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Choose {
             choice_type,
             persist,
+            selection,
         } => {
             d.push(("choice".into(), fmt_choice_type(choice_type)));
             if *persist {
                 d.push(("persist".into(), "yes".into()));
+            }
+            if selection.is_random() {
+                d.push(("selection".into(), "at random".into()));
             }
         }
         Effect::ChooseDamageSource { source_filter } => {

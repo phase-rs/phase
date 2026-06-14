@@ -1,7 +1,10 @@
 use crate::game::players;
-use crate::types::ability::{ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
@@ -16,11 +19,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (choice_type, persist) = match &ability.effect {
+    let (choice_type, persist, selection) = match &ability.effect {
         Effect::Choose {
             choice_type,
             persist,
-        } => (choice_type.clone(), *persist),
+            selection,
+        } => (choice_type.clone(), *persist, *selection),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected Choose effect".to_string(),
@@ -50,9 +54,36 @@ pub fn resolve(
     // is player-supplied, so an empty engine list there is expected, not
     // impossible (only `CardName` has a wired free-text supply path today;
     // `Word` / `Artist` are a separate known frontend gap — see
-    // `options_supplied_by_player`).
+    // `options_supplied_by_player`). This empty-options path is shared by both
+    // the controller-choice and random selection modes.
     if options.is_empty() && !choice_type.options_supplied_by_player() {
         state.cost_payment_failed_flag = true;
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    // CR 115.1 + CR 701.9b (analogous): "choose … at random" hands the selection
+    // to the game. The engine draws uniformly from the legal option set via the
+    // seeded RNG and records the pick immediately — no `WaitingFor::NamedChoice`
+    // round-trip, because there is no controller decision to await. The chain
+    // driver (`resolve_chain_body`) then folds the chosen player into this
+    // ability so the reflexive `WhenYouDo` sub (Strax's fight on "that player")
+    // resolves against the randomly-chosen player.
+    if selection.is_random() {
+        use rand::seq::IndexedRandom; // rand 0.9: `choose` on `[T]` lives here.
+        let pick = options
+            .choose(&mut state.rng)
+            .expect("options non-empty (checked above)")
+            .clone();
+        record_resolution_choice(
+            state,
+            &choice_type,
+            &pick,
+            persist.then_some(ability.source_id),
+        );
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -77,6 +108,58 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2c + CR 613.1: Record a resolution-time named choice on `GameState` —
+/// the persisted source attribute (if any), the layer recompute it gates, and
+/// `last_named_choice`. Single authority shared by the interactive
+/// `ChooseOption` handler (`engine_resolution_choices.rs`) and the random
+/// `Choose` resolver above, so both record an identical value for a given
+/// `(choice_type, pick)`.
+///
+/// Does NOT touch the continuation chain / `chosen_players`: that binding
+/// differs by call path — the interactive handler writes the chosen player into
+/// `state.pending_continuation`, while the random path folds it into the
+/// in-flight ability in `resolve_chain_body`. The caller owns that step.
+///
+/// `persist_source` is `Some(object_id)` when the choice persists on the source
+/// (`Effect::Choose { persist: true }`), mirroring the interactive handler's
+/// `source_id` field on `WaitingFor::NamedChoice`.
+pub(crate) fn record_resolution_choice(
+    state: &mut GameState,
+    choice_type: &ChoiceType,
+    pick: &str,
+    persist_source: Option<ObjectId>,
+) {
+    if let Some(obj_id) = persist_source {
+        if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), pick) {
+            if state.objects.get(&obj_id).is_some() {
+                if let Some(obj) = state.objects.get_mut(&obj_id) {
+                    obj.chosen_attributes.push(attr);
+                }
+                // CR 607.2d + CR 613.1: Persisted choices (card name, creature
+                // type, card type, color, player, …) can gate source-dependent
+                // continuous or rule effects whose layers may have run before
+                // the choice was made — recompute. Mirrors the interactive
+                // handler's recompute set exactly.
+                if matches!(
+                    choice_type,
+                    ChoiceType::CardName
+                        | ChoiceType::CreatureType
+                        | ChoiceType::CardType
+                        | ChoiceType::BasicLandType
+                        | ChoiceType::Color { .. }
+                        | ChoiceType::Keyword { .. }
+                        | ChoiceType::Player
+                        | ChoiceType::Opponent { .. }
+                ) {
+                    crate::game::layers::mark_layers_full(state);
+                }
+            }
+        }
+    }
+
+    state.last_named_choice = ChoiceValue::from_choice(choice_type, pick);
 }
 
 const FALLBACK_CREATURE_TYPES: &[&str] = &[
@@ -263,10 +346,21 @@ mod tests {
     use crate::types::player::PlayerId;
 
     fn make_choose_ability(choice_type: ChoiceType) -> ResolvedAbility {
+        make_choose_ability_with(
+            choice_type,
+            crate::types::ability::TargetSelectionMode::Chosen,
+        )
+    }
+
+    fn make_choose_ability_with(
+        choice_type: ChoiceType,
+        selection: crate::types::ability::TargetSelectionMode,
+    ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Choose {
                 choice_type,
                 persist: false,
+                selection,
             },
             vec![],
             ObjectId(100),
@@ -453,6 +547,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange { min: 0, max: 5 },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -477,6 +572,7 @@ mod tests {
                     options: vec!["Left".to_string(), "Right".to_string()],
                 },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -658,5 +754,102 @@ mod tests {
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
+    }
+
+    // ── random selection mode (cluster-02) ─────────────────────────
+    //
+    // CR 115.1 + CR 701.9b (analogous): "choose a player at random" — the
+    // engine draws from `state.rng` and records the pick without prompting.
+
+    #[test]
+    fn random_choose_player_does_not_wait_and_records_pick() {
+        let mut state = GameState::new_two_player(42);
+        // Non-Priority sentinel so we can prove `resolve` does NOT install a
+        // `NamedChoice` for the random path.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let ability = make_choose_ability_with(
+            ChoiceType::Player,
+            crate::types::ability::TargetSelectionMode::Random,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "random choose must NOT raise a NamedChoice prompt"
+        );
+        match state.last_named_choice {
+            Some(crate::types::ability::ChoiceValue::Player(pid)) => {
+                assert!(
+                    pid == PlayerId(0) || pid == PlayerId(1),
+                    "picked player must be one of the legal options"
+                );
+            }
+            other => panic!("expected a recorded Player choice, got {other:?}"),
+        }
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
+    fn random_choose_player_is_deterministic_under_fixed_seed() {
+        // Same seed → same draw (state.rng is the seeded ChaCha20 source).
+        let pick = |seed: u64| {
+            let mut state = GameState::new_two_player(seed);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            let ability = make_choose_ability_with(
+                ChoiceType::Player,
+                crate::types::ability::TargetSelectionMode::Random,
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            state.last_named_choice
+        };
+        assert_eq!(
+            pick(7),
+            pick(7),
+            "a fixed seed must produce a reproducible random pick"
+        );
+    }
+
+    #[test]
+    fn random_choose_empty_options_is_no_op() {
+        // CR 609.3: the empty-options no-op path is shared by both modes.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut ability = make_choose_ability_with(
+            ChoiceType::Player,
+            crate::types::ability::TargetSelectionMode::Random,
+        );
+        ability.chosen_players = vec![PlayerId(0), PlayerId(1)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "empty options must not wedge in random mode either"
+        );
+        assert_eq!(
+            state.last_named_choice, None,
+            "no pick is recorded when there are no options"
+        );
+    }
+
+    #[test]
+    fn record_resolution_choice_records_player() {
+        // Building-block: the shared recorder sets last_named_choice identically
+        // for a given (choice_type, pick) regardless of call path.
+        let mut state = GameState::new_two_player(42);
+        record_resolution_choice(&mut state, &ChoiceType::Player, "1", None);
+        assert_eq!(
+            state.last_named_choice,
+            Some(crate::types::ability::ChoiceValue::Player(PlayerId(1)))
+        );
     }
 }

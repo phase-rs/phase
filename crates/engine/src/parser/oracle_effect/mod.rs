@@ -3685,6 +3685,15 @@ fn try_parse_choose_player_to_verb(
     let index = ctx.chosen_player_count;
     let chosen_scope = ControllerRef::ChosenPlayer { index };
 
+    // CR 115.1 + CR 701.9b (analogous): "Choose a player at random" — the game
+    // makes the selection (Strax, Sontaran Nurse — "Grenades!"). Detected on the
+    // remainder after the head noun, mirroring the random-discard probe.
+    let selection = if nom_primitives::scan_contains(after_player, "at random") {
+        crate::types::ability::TargetSelectionMode::Random
+    } else {
+        crate::types::ability::TargetSelectionMode::Chosen
+    };
+
     // Optional verb continuation: " to <verb phrase>" — nom `tag()` dispatch
     // on the lowercase remainder.
     let verb_lower = tag::<_, _, OracleError<'_>>(" to ")
@@ -3701,6 +3710,7 @@ fn try_parse_choose_player_to_verb(
     let mut clause = parsed_clause(Effect::Choose {
         choice_type: choice_type.clone(),
         persist: false,
+        selection,
     });
 
     if let Some(verb_lower) = verb_lower {
@@ -3771,6 +3781,7 @@ fn try_parse_an_opponent_to_verb(
     let mut clause = parsed_clause(Effect::Choose {
         choice_type: ChoiceType::Opponent { restriction: None },
         persist: false,
+        selection: crate::types::ability::TargetSelectionMode::Chosen,
     });
     let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
     sub.sub_ability = verb_clause.sub_ability;
@@ -14567,6 +14578,7 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
         Effect::Choose {
             choice_type: ChoiceType::Color { excluded },
             persist: false,
+            ..
         } if excluded.is_empty()
     ) {
         let can_collapse = def.sub_ability.as_ref().is_some_and(|sub| {
@@ -26915,9 +26927,58 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
-                persist: true
+                persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             }
         );
+    }
+
+    #[test]
+    fn choose_a_player_at_random_sets_random_selection() {
+        // CR 115.1 + CR 701.9b (analogous), cluster-02 (Strax "Grenades!").
+        // "Choose a player at random" hands the selection to the game.
+        let def = parse_effect_chain(
+            "Choose a player at random. When you do, ~ fights another target creature that player controls.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                selection,
+                ..
+            } => assert_eq!(
+                *selection,
+                crate::types::ability::TargetSelectionMode::Random,
+                "'at random' must set Random selection"
+            ),
+            other => panic!("expected Choose(Player), got {other:?}"),
+        }
+        // The reflexive "When you do" fight chains as a sub-ability.
+        assert!(
+            def.sub_ability.is_some(),
+            "the reflexive fight must chain as a sub-ability"
+        );
+    }
+
+    #[test]
+    fn choose_a_player_without_at_random_stays_chosen() {
+        // Regression: a plain "choose a player" remains controller-chosen.
+        let def = parse_effect_chain(
+            "Choose a player. When you do, ~ deals 1 damage to that player.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                selection,
+                ..
+            } => assert_eq!(
+                *selection,
+                crate::types::ability::TargetSelectionMode::Chosen,
+                "no 'at random' modifier must stay Chosen"
+            ),
+            other => panic!("expected Choose(Player), got {other:?}"),
+        }
     }
 
     #[test]
@@ -27683,7 +27744,8 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::color(),
-                persist: false
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             }
         );
     }
@@ -34041,6 +34103,7 @@ mod tests {
         let Effect::Choose {
             choice_type: ChoiceType::Labeled { options },
             persist: true,
+            ..
         } = *def.effect
         else {
             panic!("Expected Choose land/nonland, got {:?}", def.effect);
@@ -41969,6 +42032,7 @@ mod tests {
         let Effect::Choose {
             choice_type,
             persist,
+            ..
         } = &*def.effect
         else {
             panic!("expected Choose, got {:?}", def.effect);
@@ -42522,6 +42586,7 @@ mod tests {
                         restriction: Some(restriction),
                     },
                 persist,
+                ..
             } => {
                 assert!(!persist, "The Master does not need persist");
                 match restriction.as_ref() {

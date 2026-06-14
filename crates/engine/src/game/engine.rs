@@ -18316,6 +18316,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             Effect::Choose {
                 choice_type: crate::types::ability::ChoiceType::BasicLandType,
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )
         .sub_ability(AbilityDefinition::new(

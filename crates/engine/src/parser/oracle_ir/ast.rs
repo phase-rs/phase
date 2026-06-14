@@ -996,6 +996,10 @@ pub(crate) enum ChooseImperativeAst {
     },
     NamedChoice {
         choice_type: crate::types::ability::ChoiceType,
+        /// CR 115.1 + CR 701.9b (analogous): `Random` when the choose clause ends
+        /// in "at random" (Strax, Sontaran Nurse — "Choose a player at random"),
+        /// handing the selection to the game rather than the controller.
+        selection: crate::types::ability::TargetSelectionMode,
     },
     RevealHandFilter {
         card_filter: TargetFilter,

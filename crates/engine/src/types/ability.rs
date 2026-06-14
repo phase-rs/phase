@@ -2064,6 +2064,22 @@ pub enum DamageKindFilter {
     NoncombatOnly,
 }
 
+/// CR 120.3 + CR 108.3: Relational recipient predicate for damage triggers whose
+/// damaged player is named relative to the *damage event's source object* rather
+/// than by a static `TargetFilter` ("deals combat damage to its owner").
+///
+/// Orthogonal to `TriggerDefinition::valid_target`: a `TargetFilter` describes a
+/// recipient by its own characteristics, but this references the owner of the
+/// damaging object — a relation no `TargetFilter` scope can express. Enforced
+/// only in `match_damage_done`, where the damaging source object is in scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DamageRecipientRelation {
+    /// CR 108.3: The damaged player is the owner of the damage's source object
+    /// (The Beast, Deathless Prince — "deals combat damage to its owner").
+    IsSourceOwner,
+}
+
 /// Controller reference for filter matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControllerRef {
@@ -2728,6 +2744,12 @@ impl TargetSelectionMode {
     /// preserved exactly.
     pub fn is_chosen(&self) -> bool {
         matches!(self, TargetSelectionMode::Chosen)
+    }
+
+    /// CR 701.9b (analogous): the game makes the selection rather than the
+    /// controller. Mirrors `CardSelectionMode::is_random`.
+    pub fn is_random(self) -> bool {
+        matches!(self, TargetSelectionMode::Random)
     }
 }
 
@@ -7728,6 +7750,13 @@ pub enum Effect {
         /// Used for ETB choices that other abilities reference ("the chosen type/color").
         #[serde(default)]
         persist: bool,
+        /// CR 115.1 + CR 701.9b (analogous): when `Random`, the game selects the
+        /// value via `state.rng` instead of prompting the controller (Strax,
+        /// Sontaran Nurse — "Choose a player at random"). Default `Chosen`.
+        /// Skip-serialized in the `Chosen` case so existing card-data.json
+        /// export shapes are byte-for-byte unchanged.
+        #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+        selection: TargetSelectionMode,
     },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
@@ -13161,6 +13190,15 @@ pub struct TriggerDefinition {
     /// `DamageDealtOnce`); ignored by other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_amount: Option<(Comparator, u32)>,
+    /// CR 120.3 + CR 108.3: Relational damage-recipient predicate for damage
+    /// triggers whose damaged player is named relative to the damaging source
+    /// ("deals combat damage to its owner"). Orthogonal to `valid_target`
+    /// (which stays `None` for such triggers — the relation cannot be expressed
+    /// as a `TargetFilter`). Enforced in `match_damage_done`. `None` means no
+    /// relational restriction. Applies to the damage-event trigger modes;
+    /// ignored by others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_recipient_relation: Option<DamageRecipientRelation>,
     /// CR 119.3: Per-event life-change-amount constraint for life triggers
     /// ("Whenever [a player] loses exactly N life" / "…loses N or more life").
     /// When `Some((cmp, n))`, the matcher requires the `LifeChanged` event's
@@ -13215,6 +13253,7 @@ impl TriggerDefinition {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            damage_recipient_relation: None,
             life_amount: None,
             coin_flip_result: None,
             taps_for_mana_produced: None,
@@ -15694,6 +15733,7 @@ mod tests {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            damage_recipient_relation: None,
             life_amount: None,
             coin_flip_result: None,
             taps_for_mana_produced: None,

@@ -3874,17 +3874,20 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ChooseAColor(choice) => Effect::Choose {
             choice_type: filter_mod::choice_type_for_choosable_color(choice),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 608.2d: choose a creature type — the bounded creature-type
         // registry resolves the option set at runtime.
         Action::ChooseACreatureType => Effect::Choose {
             choice_type: ChoiceType::CreatureType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 205.2: choose a card type from the bounded card-type set.
         Action::ChooseACardtype => Effect::Choose {
             choice_type: ChoiceType::CardType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 201.3 + CR 608.2d: "choose a card name". Engine
         // `ChoiceType::CardName` is a unit variant (no filter slot), so the
@@ -3897,6 +3900,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 C::AnyCard => Effect::Choose {
                     choice_type: ChoiceType::CardName,
                     persist: true,
+                    selection: engine::types::ability::TargetSelectionMode::Chosen,
                 },
                 other => {
                     return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -3932,6 +3936,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                     max: max_u8,
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 608.2d: opponent-scoped player choice when the schema filter
@@ -3945,6 +3950,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             Effect::Choose {
                 choice_type,
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 609.7a + CR 120.7: choose a specific source of damage. The
@@ -4038,6 +4044,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             Effect::Choose {
                 choice_type: ChoiceType::Keyword { options },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 608.2d: "choose colors" without a fixed count — distinct from

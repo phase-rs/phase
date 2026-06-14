@@ -5206,6 +5206,36 @@ fn resolve_chain_body(
         ability
     };
 
+    // CR 115.1 + CR 701.9b (analogous) + CR 109.4: A random `Choose(Player)`
+    // resolves inline (the resolver sets no `WaitingFor`), so unlike the
+    // interactive `ChooseOption` handler there is no continuation chain to fold
+    // the chosen player into. The resolver recorded the pick in
+    // `last_named_choice`; append it to THIS ability's resolution-scoped
+    // `chosen_players` so `apply_parent_chain_context` propagates it to the
+    // reflexive `WhenYouDo` sub (Strax's fight on "that player controls").
+    // Mirrors the `mandatory_rider_owned` rebind idiom above.
+    let random_choice_owned;
+    let ability = if matches!(
+        ability.effect,
+        Effect::Choose {
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ) {
+        if let Some(crate::types::ability::ChoiceValue::Player(pid)) = state.last_named_choice {
+            let mut owned = ability.clone();
+            let mut chosen = owned.chosen_players.clone();
+            chosen.push(pid);
+            owned.set_chosen_players_recursive(&chosen);
+            random_choice_owned = owned;
+            &random_choice_owned
+        } else {
+            ability
+        }
+    } else {
+        ability
+    };
+
     // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
     // same resolution (instructions are followed "in the order written"), so it
     // resolves AFTER the parent's effect and must read the object's CURRENT
@@ -8154,6 +8184,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Keyword { options: vec![] },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -8173,6 +8204,86 @@ mod tests {
             state.players[0].hand.len(),
             1,
             "the chain must continue past an impossible choice and draw the card"
+        );
+    }
+
+    #[test]
+    fn random_choose_player_chain_resolves_sub_against_chosen_player() {
+        // CR 115.1 + CR 701.9b (analogous) + CR 109.4 (cluster-02, Strax
+        // Grenades): a random `Choose(Player)` resolves inline (no
+        // `WaitingFor::NamedChoice`), and the reflexive `WhenYouDo` sub must
+        // resolve against the randomly-chosen player. Verified through a sub
+        // `Draw` whose target reads `ControllerRef::ChosenPlayer { index: 0 }`.
+        use crate::types::ability::ChoiceType;
+
+        let mut state = GameState::new_two_player(42);
+        // A card in each player's library so whichever is chosen can draw.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 Card".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Card".to_string(),
+            Zone::Library,
+        );
+
+        // Sub: "that player draws a card" — target resolves via ChosenPlayer{0}.
+        let chosen_player_filter = TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+        );
+        let mut sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: chosen_player_filter,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        sub.condition = Some(AbilityCondition::WhenYouDo);
+
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Random,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        let mut events = Vec::new();
+
+        let result = resolve_ability_chain(&mut state, &ability, &mut events, 0);
+        assert!(result.is_ok());
+        // No interactive prompt — the player was chosen by the game.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "random choose must not raise a NamedChoice prompt"
+        );
+
+        // Identify the randomly-chosen player and assert THAT player drew.
+        let chosen = match state.last_named_choice {
+            Some(crate::types::ability::ChoiceValue::Player(pid)) => pid,
+            other => panic!("expected a recorded random Player choice, got {other:?}"),
+        };
+        assert_eq!(
+            state.players[chosen.0 as usize].hand.len(),
+            1,
+            "the WhenYouDo sub must draw for the randomly-chosen player"
+        );
+        let other = PlayerId(1 - chosen.0);
+        assert_eq!(
+            state.players[other.0 as usize].hand.len(),
+            0,
+            "the non-chosen player must not draw"
         );
     }
 
