@@ -102,6 +102,7 @@
     },
     "zones": {
       "playerHud": "Twój HUD",
+      "commandZone": "Strefa dowodzenia",
       "opponentHud": "HUD przeciwnika",
       "stackPanel": "Stos",
       "logPanel": "Dziennik",

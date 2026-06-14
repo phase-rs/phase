@@ -107,6 +107,7 @@ export interface WidgetOffset {
  *  {@link FlexTableSize}). */
 export type FlexWidgetKey =
   | "playerHud"
+  | "commandZone"
   | "stackPanel"
   | "logPanel"
   | "actionRail"
@@ -131,10 +132,12 @@ export interface GridBands {
  *  would overclaim. `default` is load-bearing — it is the {@link defaultFlexLayout}
  *  seed and the Reset target — so only the two editorial slots are neutralized. */
 export type FlexPresetId = "default" | "layout2" | "layout3" | "custom";
-/** An aspect-preserving size multiplier over a zone's existing auto-scale.
- *  `stack` scales the stack's cards (over the viewport `responsiveScale`);
- *  `summaryTile` scales the collapsed lands/support overflow pills. Absent ⇒ 1. */
-export type FlexScaleKey = "stack" | "summaryTile";
+/** An aspect-preserving size multiplier. Two flavours share one map:
+ *  content-scales — `stack` (the stack's cards, over the viewport
+ *  `responsiveScale`) and `summaryTile` (the collapsed lands/support overflow
+ *  pills) — and widget box-scales — `actionRail` and `playerPiles` — applied as
+ *  a `transform: scale()` on the whole `DraggableWidget`. Absent ⇒ 1. */
+export type FlexScaleKey = "stack" | "summaryTile" | "actionRail" | "playerPiles";
 /** Persisted board layout. One shared global config; only the opponent HUD is
  *  table-size-keyed. Presets are authoritative — applying one replaces every
  *  field wholesale. Any manual edit flips `activePreset` to "custom".

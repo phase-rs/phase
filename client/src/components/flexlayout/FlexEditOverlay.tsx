@@ -12,6 +12,7 @@ import { ColumnSplitter } from "./ColumnSplitter.tsx";
  *  splitter placement ("opp-row"/"player-row") are intentionally excluded. */
 const LABELLED_ZONES = new Set([
   "playerHud",
+  "commandZone",
   "opponentHud",
   "stackPanel",
   "logPanel",
@@ -104,6 +105,8 @@ function FlexEditOverlayInner() {
   const setFlexScale = usePreferencesStore((s) => s.setFlexScale);
   const stackScale = usePreferencesStore((s) => s.flexLayout.scales?.stack) ?? 1;
   const summaryScale = usePreferencesStore((s) => s.flexLayout.scales?.summaryTile) ?? 1;
+  const actionScale = usePreferencesStore((s) => s.flexLayout.scales?.actionRail) ?? 1;
+  const pilesScale = usePreferencesStore((s) => s.flexLayout.scales?.playerPiles) ?? 1;
 
   const [m, setM] = useState<Measured>(EMPTY);
 
@@ -132,6 +135,41 @@ function FlexEditOverlayInner() {
     <>
       {/* Decorative chrome — never captures pointers. */}
       <div className="pointer-events-none fixed inset-0 z-[70]">
+        {/* Battlefield region — the `1fr` middle that actually grows/shrinks
+            when a row grabber is dragged (the bands themselves are capped; the
+            battlefield absorbs the change). Highlighting it — rather than the
+            bands — connects the grab to its visible effect. Drawn first so
+            widget outlines and the lands/support tints sit on top. */}
+        {m.topBoundary != null && m.bottomBoundary != null && (
+          <div
+            className="absolute inset-x-0 bg-sky-400/[0.06] ring-1 ring-inset ring-sky-300/30"
+            style={{ top: m.topBoundary, height: m.bottomBoundary - m.topBoundary }}
+          />
+        )}
+        {/* Lands vs support halves of the battlefield band, in contrasting hues
+            so the ↔ divider visibly shifts the boundary between them. */}
+        {m.columnBoundary != null && (
+          <>
+            <div
+              className="absolute bg-emerald-400/[0.08] ring-1 ring-inset ring-emerald-300/30"
+              style={{
+                left: m.columnBoundary.left,
+                top: m.columnBoundary.top,
+                width: m.columnBoundary.x - m.columnBoundary.left,
+                height: m.columnBoundary.height,
+              }}
+            />
+            <div
+              className="absolute bg-violet-400/[0.08] ring-1 ring-inset ring-violet-300/30"
+              style={{
+                left: m.columnBoundary.x,
+                top: m.columnBoundary.top,
+                width: m.columnBoundary.right - m.columnBoundary.x,
+                height: m.columnBoundary.height,
+              }}
+            />
+          </>
+        )}
         {m.zones.map((z) => (
           <div
             key={z.key}
@@ -196,7 +234,7 @@ function FlexEditOverlayInner() {
             {t("flexLayout.done")}
           </button>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
           <ScaleStepper
             label={t("flexLayout.scale.stack")}
             value={stackScale}
@@ -206,6 +244,16 @@ function FlexEditOverlayInner() {
             label={t("flexLayout.scale.tiles")}
             value={summaryScale}
             onChange={(v) => setFlexScale("summaryTile", v)}
+          />
+          <ScaleStepper
+            label={t("flexLayout.zones.actionRail")}
+            value={actionScale}
+            onChange={(v) => setFlexScale("actionRail", v)}
+          />
+          <ScaleStepper
+            label={t("flexLayout.zones.playerPiles")}
+            value={pilesScale}
+            onChange={(v) => setFlexScale("playerPiles", v)}
           />
         </div>
         <span className="text-[11px] text-slate-400">{t("flexLayout.hint")}</span>

@@ -102,6 +102,7 @@
     },
     "zones": {
       "playerHud": "Your HUD",
+      "commandZone": "Command Zone",
       "opponentHud": "Opponent HUD",
       "stackPanel": "Stack",
       "logPanel": "Game Log",

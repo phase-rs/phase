@@ -188,7 +188,16 @@ export function PlayerArea({
         className="z-10 flex shrink-0 items-center self-center pr-2"
         data-debug-label="Command"
       >
-        <CommandDock playerId={playerId} isMirrored={isMirrored} />
+        {/* The viewer's own command zone is drag-repositionable (a shared-global
+            widget); opponents' command zones stay docked. CommandDock renders
+            null when the command zone is empty, so the wrapper collapses too. */}
+        {isOwnArea ? (
+          <DraggableWidget target={{ kind: "widget", key: "commandZone" }} flexZone="commandZone">
+            <CommandDock playerId={playerId} isMirrored={isMirrored} />
+          </DraggableWidget>
+        ) : (
+          <CommandDock playerId={playerId} isMirrored={isMirrored} />
+        )}
       </div>
     </div>
   );

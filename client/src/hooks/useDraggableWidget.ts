@@ -42,6 +42,18 @@ function useTargetOffset(target: DraggableTarget): WidgetOffset | undefined {
   );
 }
 
+/** Widgets that support a whole-box `transform: scale()` (the ones with a scale
+ *  stepper in the edit toolbar). Their keys are both `FlexWidgetKey` and
+ *  `FlexScaleKey`, so the lookup below narrows safely. */
+const BOX_SCALABLE_WIDGETS = new Set<FlexWidgetKey>(["actionRail", "playerPiles"]);
+
+function useTargetScale(target: DraggableTarget): number {
+  return usePreferencesStore((s) => {
+    if (target.kind !== "widget" || !BOX_SCALABLE_WIDGETS.has(target.key)) return 1;
+    return s.flexLayout.scales?.[target.key as "actionRail" | "playerPiles"] ?? 1;
+  });
+}
+
 /**
  * Makes a board widget drag-repositionable in Flex Layout edit mode, persisting
  * its offset to `preferencesStore`. Net-new infrastructure built directly on
@@ -53,6 +65,7 @@ function useTargetOffset(target: DraggableTarget): WidgetOffset | undefined {
 export function useDraggableWidget(target: DraggableTarget): DraggableWidgetProps {
   const flexEditMode = useUiStore((s) => s.flexEditMode);
   const offset = useTargetOffset(target);
+  const scale = useTargetScale(target);
   const ref = useRef<HTMLDivElement>(null);
   const x = useMotionValue(offset?.dx ?? 0);
   const y = useMotionValue(offset?.dy ?? 0);
@@ -109,7 +122,10 @@ export function useDraggableWidget(target: DraggableTarget): DraggableWidgetProp
 
   return {
     ref,
-    style: { x, y },
+    // `scale` composes with the drag translate; only emitted when non-default so
+    // an unscaled widget's transform is untouched. transform-origin is set at the
+    // call site (each widget anchors its scale to its docked corner).
+    style: scale !== 1 ? { x, y, scale } : { x, y },
     drag: flexEditMode,
     dragMomentum: false,
     dragElastic: 0,
