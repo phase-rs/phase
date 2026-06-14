@@ -3361,6 +3361,15 @@ pub enum ObjectScope {
     /// Drain class (issue #511): a reveal/counter/reanimate earlier in the same
     /// ability binds "that <type>'s" to the referenced object.
     Demonstrative,
+    /// CR 603.2 + CR 120.1: The object that **received** the damage referenced
+    /// by the current trigger event — the recipient counterpart to
+    /// [`ObjectScope::EventSource`]. This is "that creature" in "deals
+    /// noncombat damage to a creature equal to that creature's toughness":
+    /// the antecedent is the damaged object carried by the `DamageDealt` event,
+    /// not the ability source or a target. Resolved at both trigger detection
+    /// and resolution (CR 603.4 intervening-if) via
+    /// `extract_target_object_from_event`.
+    EventTarget,
 }
 
 /// Source set for counting distinct card types.
@@ -13851,6 +13860,16 @@ pub struct ReplacementDefinition {
     /// control (the default for every existing replacement).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_under: Option<ControllerRef>,
+    /// CR 109.4 + CR 614.1a: Installing player anchor for global pending damage
+    /// replacements whose source filter is controller-relative ("a source you
+    /// control"). Global replacements live in `pending_damage_replacements` under
+    /// the sentinel `ObjectId(0)`, which has no controller in `state.objects`, so
+    /// `ControllerRef::You` cannot otherwise resolve. Set at install time to the
+    /// activating ability's controller (I Call for Slaughter, Rankle and Torbran,
+    /// Taii Wakeen's +X boost). `None` = resolve controller from the source object
+    /// as before (every object-attached replacement; unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_controller: Option<crate::types::player::PlayerId>,
 }
 
 impl ReplacementDefinition {
@@ -13884,6 +13903,7 @@ impl ReplacementDefinition {
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         }
     }
 

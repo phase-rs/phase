@@ -953,6 +953,25 @@ pub(crate) fn extract_source_from_event(
     }
 }
 
+/// CR 603.2 + CR 120.1: Extract the object that *received* the damage referenced
+/// by the current trigger event — the recipient counterpart to
+/// [`extract_source_from_event`]. Resolves `ObjectScope::EventTarget` ("that
+/// creature" in "deals damage to a creature equal to that creature's
+/// toughness"). Only `DamageDealt` with an object recipient yields a value;
+/// player recipients and non-damage events have no object recipient.
+pub(crate) fn extract_target_object_from_event(
+    event: &crate::types::events::GameEvent,
+) -> Option<ObjectId> {
+    use crate::types::events::GameEvent;
+    match event {
+        GameEvent::DamageDealt {
+            target: TargetRef::Object(id),
+            ..
+        } => Some(*id),
+        _ => None,
+    }
+}
+
 /// Extract the relevant player from a trigger event.
 pub(crate) fn extract_player_from_event(
     event: &crate::types::events::GameEvent,

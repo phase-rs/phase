@@ -1759,6 +1759,18 @@ fn resolve_ref(
                     .as_ref()
                     .and_then(crate::game::targeting::extract_amount_from_event)
             })
+            // CR 603.4: An intervening-`if` condition is checked at trigger
+            // *detection* (when `current_trigger_event` is still `None`) and
+            // re-checked at resolution. `EventContextAmount` must resolve at
+            // both times, so fall back to the detection-time event the same way
+            // `object_id_for_scope`'s `EventSource` arm does — otherwise the
+            // damage==toughness gate (Taii Wakeen) reads 0 at detection and
+            // never triggers.
+            .or_else(|| {
+                detection_trigger_event()
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -2657,6 +2669,16 @@ fn object_for_scope<'a>(
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
+        // CR 603.2 + CR 603.4: the object that received the triggering damage
+        // ("that creature"). Same dual-time (detection + resolution) fallback as
+        // `EventSource`, calling the recipient extractor.
+        ObjectScope::EventTarget => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
+            .and_then(|id| state.objects.get(&id)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to a live `GameObject` here — both are snapshot
@@ -2696,6 +2718,15 @@ fn object_id_for_scope(
             .cloned()
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_source_from_event(&e)),
+        // CR 603.2 + CR 603.4: the object that received the triggering damage
+        // ("that creature"). Same dual-time (detection + resolution) fallback as
+        // `EventSource`, calling the recipient extractor.
+        ObjectScope::EventTarget => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e)),
         // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to an `ObjectId` here — both are snapshot
@@ -2995,6 +3026,22 @@ where
                 .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
                 .unwrap_or(0)
         }
+        // CR 603.2 + CR 208.1: the power/toughness of the object that received
+        // the triggering damage ("that creature's toughness"). Same live-then-LKI
+        // resolution as `EventSource`, keyed on the recipient object.
+        ObjectScope::EventTarget => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .and_then(&obj_extract)
+                .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
+                .unwrap_or(0)
+        }
         // CR 608.2k: An ability's effect referring to a specific untargeted
         // object previously referred to by that ability's cost OR trigger
         // condition still affects it. Resolved (first match wins) via:
@@ -3113,6 +3160,30 @@ fn resolve_object_mana_value(
         ObjectScope::EventSource => {
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .or_else(|| {
+                    state
+                        .lki_cache
+                        .get(&object_id)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
+        }
+        // CR 603.2 + CR 202.3: mana value of the object that received the
+        // triggering damage. Same live-then-LKI resolution as `EventSource`.
+        ObjectScope::EventTarget => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
             else {
                 return 0;
             };

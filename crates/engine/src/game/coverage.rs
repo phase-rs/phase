@@ -999,6 +999,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
+                ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
             };
             match counter_type {
@@ -1022,6 +1023,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "target's power".into(),
             ObjectScope::Recipient => "recipient's power".into(),
             ObjectScope::EventSource => "event source's power".into(),
+            ObjectScope::EventTarget => "event target's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
@@ -1031,6 +1033,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "target's toughness".into(),
             ObjectScope::Recipient => "recipient's toughness".into(),
             ObjectScope::EventSource => "event source's toughness".into(),
+            ObjectScope::EventTarget => "event target's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
@@ -1040,6 +1043,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "target's mana value".into(),
             ObjectScope::Recipient => "recipient's mana value".into(),
             ObjectScope::EventSource => "event source's mana value".into(),
+            ObjectScope::EventTarget => "event target's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1049,6 +1053,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "target's colors".into(),
             ObjectScope::Recipient => "recipient's colors".into(),
             ObjectScope::EventSource => "event source's colors".into(),
+            ObjectScope::EventTarget => "event target's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
@@ -1058,6 +1063,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "typeline components on target".into(),
             ObjectScope::Recipient => "typeline components on recipient".into(),
             ObjectScope::EventSource => "typeline components on event source".into(),
+            ObjectScope::EventTarget => "typeline components on event target".into(),
             ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
@@ -1067,6 +1073,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "words in target's name".into(),
             ObjectScope::Recipient => "words in recipient's name".into(),
             ObjectScope::EventSource => "words in event source's name".into(),
+            ObjectScope::EventTarget => "words in event target's name".into(),
             ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
@@ -1075,6 +1082,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
+                ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
             };
             format!("{color:?} mana symbols in {scope_str}'s mana cost")
@@ -5537,6 +5545,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetPower", Handled),
             ObjectScope::Recipient => ("RecipientPower", Handled),
             ObjectScope::EventSource => ("EventSourcePower", Handled),
+            ObjectScope::EventTarget => ("EventTargetPower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
@@ -5546,6 +5555,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetToughness", Handled),
             ObjectScope::Recipient => ("RecipientToughness", Handled),
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
+            ObjectScope::EventTarget => ("EventTargetToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
@@ -5555,6 +5565,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetManaValue", Handled),
             ObjectScope::Recipient => ("RecipientManaValue", Handled),
             ObjectScope::EventSource => ("EventSourceManaValue", Handled),
+            ObjectScope::EventTarget => ("EventTargetManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -5564,6 +5575,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
+            ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
@@ -5573,6 +5585,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectNameWordCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectNameWordCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
+            ObjectScope::EventTarget => ("EventTargetObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
@@ -5582,6 +5595,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectTypelineComponentCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectTypelineComponentCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectTypelineComponentCount", Handled),
+            ObjectScope::EventTarget => ("EventTargetObjectTypelineComponentCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
@@ -5591,6 +5605,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetManaSymbolsInManaCost", Handled),
             ObjectScope::Recipient => ("RecipientManaSymbolsInManaCost", Handled),
             ObjectScope::EventSource => ("EventSourceManaSymbolsInManaCost", Handled),
+            ObjectScope::EventTarget => ("EventTargetManaSymbolsInManaCost", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
