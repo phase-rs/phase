@@ -938,6 +938,12 @@
       "title": "Ringträger wählen",
       "subtitle": "Wähle eine Kreatur, die du kontrollierst"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Zum Umsortieren ziehen · die oberste Karte wird zuerst gezogen",
     "scry": {
       "title": "Hellsicht",

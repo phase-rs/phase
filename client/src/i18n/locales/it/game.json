@@ -938,6 +938,12 @@
       "title": "Scegli il Portatore dell'Anello",
       "subtitle": "Scegli una creatura che controlli"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Trascina per riordinare · la prima carta è pescata per prima",
     "scry": {
       "title": "Profetizzare",

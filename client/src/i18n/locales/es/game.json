@@ -938,6 +938,12 @@
       "title": "Elegir Portador del Anillo",
       "subtitle": "Elige una criatura que controles"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Arrastra para reordenar · la primera carta se roba antes",
     "scry": {
       "title": "Adivinar",

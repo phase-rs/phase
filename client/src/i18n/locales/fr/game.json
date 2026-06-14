@@ -938,6 +938,12 @@
       "title": "Choisir le porteur de l'Anneau",
       "subtitle": "Choisissez une créature que vous contrôlez"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Glissez pour réorganiser · la première carte est piochée en premier",
     "scry": {
       "title": "Cartomancie",

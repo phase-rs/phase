@@ -938,6 +938,12 @@
       "title": "Wybierz Nosiciela Pierścienia",
       "subtitle": "Wybierz stwora, którego kontrolujesz"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Przeciągnij, aby zmienić kolejność · karta na wierzchu jest dobierana pierwsza",
     "scry": {
       "title": "Scry",

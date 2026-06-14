@@ -943,6 +943,12 @@
       "title": "Choose Ring-bearer",
       "subtitle": "Choose a creature you control"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Drag to reorder · the top card is drawn first",
     "scry": {
       "title": "Scry",

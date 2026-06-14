@@ -938,6 +938,12 @@
       "title": "Escolher Portador do Anel",
       "subtitle": "Escolha uma criatura que você controla"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Arraste para reordenar · a primeira carta é comprada primeiro",
     "scry": {
       "title": "Vidência",
