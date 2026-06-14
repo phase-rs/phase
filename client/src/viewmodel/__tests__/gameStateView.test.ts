@@ -87,6 +87,19 @@ describe("getWaitingForObjectChoiceIds", () => {
       }),
     ).toEqual([10, 11]);
   });
+
+  // PairChoice is modal-resolved (PairChoiceModal dispatches ChoosePair), so it
+  // must NOT seed board-clickable object glow. The engine rejects ChooseTarget
+  // for PairChoice, so a board click would dead-end. Mirrors CrewVehicle /
+  // StationTarget / SaddleMount, which are likewise absent here.
+  it("returns [] for PairChoice (modal-only, not board-clickable)", () => {
+    expect(
+      getWaitingForObjectChoiceIds({
+        type: "PairChoice",
+        data: { player: 0, source_id: 1, choices: [20, 21, 22] },
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe("getCastableZoneViewerTarget", () => {

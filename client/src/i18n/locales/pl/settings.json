@@ -81,6 +81,35 @@
       "minimal": "Minimalna"
     }
   },
+  "flexLayout": {
+    "title": "Elastyczny układ",
+    "description": "Przeciągaj panele i HUD w dowolne miejsce i zmieniaj rozmiar stref planszy.",
+    "edit": "Dostosuj układ…",
+    "done": "Gotowe",
+    "reset": "Zresetuj układ",
+    "preset": "Ustawienie",
+    "hint": "Przeciągnij panel, aby go przesunąć. Przeciągnij świecące paski, aby zmienić rozmiar stref.",
+    "scale": {
+      "stack": "Stos",
+      "tiles": "Kafelki",
+      "smaller": "Zmniejsz rozmiar: {{label}}",
+      "larger": "Zwiększ rozmiar: {{label}}"
+    },
+    "presets": {
+      "default": { "label": "Układ 1", "description": "Standardowy, zrównoważony układ." },
+      "layout2": { "label": "Układ 2", "description": "Większe pole bitwy ze schowanymi rękami." },
+      "layout3": { "label": "Układ 3", "description": "Wyższa dolna część." }
+    },
+    "zones": {
+      "playerHud": "Twój HUD",
+      "opponentHud": "HUD przeciwnika",
+      "stackPanel": "Stos",
+      "logPanel": "Dziennik",
+      "actionRail": "Akcje",
+      "playerPiles": "Twoje strefy",
+      "opponentPiles": "Strefy przeciwnika"
+    }
+  },
   "audio": {
     "title": "Dźwięk",
     "muteAll": "Wycisz wszystko",

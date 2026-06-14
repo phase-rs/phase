@@ -15,8 +15,10 @@ import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } fr
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
-import { useIsCompactHeight } from "../hooks/useIsCompactHeight.ts";
+import { useResolvedGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
+import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
 import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
@@ -47,6 +49,7 @@ import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
+import { AssistPaymentUI } from "../components/mana/AssistPaymentUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { RichLabel } from "../components/mana/RichLabel.tsx";
@@ -72,6 +75,7 @@ import { PeekTab } from "../components/modal/DialogShell.tsx";
 import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
 import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
+import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
@@ -716,7 +720,7 @@ function GamePageContent({
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
-  const isCompactHeight = useIsCompactHeight();
+  const gridTemplateRows = useResolvedGridRows();
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
@@ -1129,18 +1133,21 @@ function GamePageContent({
         className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
-          gridTemplateRows: isCompactHeight
-            ? "minmax(0,12%) 1fr minmax(0,18%)"
-            : "minmax(0,min(12%,100px)) 1fr minmax(0,min(18%,150px))",
+          gridTemplateRows,
           gridTemplateColumns: "1fr",
         }}
       >
         {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
-        <div className="relative z-20 min-w-0 flex w-full overflow-visible">
+        <div
+          className="relative z-20 min-w-0 flex w-full overflow-visible"
+          data-flex-zone="opp-row"
+        >
           <div className="min-w-0 flex-1">
             <OpponentHand showCards={showAiHand} />
           </div>
-          <div
+          <DraggableWidget
+            target={{ kind: "widget", key: "opponentPiles" }}
+            flexZone="opponentPiles"
             className="flex shrink-0 items-start gap-1.5 px-1 py-1"
             style={playerZoneRailStyle}
           >
@@ -1161,7 +1168,7 @@ function GamePageContent({
                 setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
               }
             />
-          </div>
+          </DraggableWidget>
         </div>
 
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
@@ -1170,13 +1177,15 @@ function GamePageContent({
         </div>
 
         {/* Row 3: Player hand + zones */}
-        <div className="relative min-w-0 overflow-visible">
+        <div className="relative min-w-0 overflow-visible" data-flex-zone="player-row">
           <div className="flex items-end justify-center">
             <ZoneHand zone="exile" />
             <PlayerHand />
             <ZoneHand zone="graveyard" />
           </div>
-          <div
+          <DraggableWidget
+            target={{ kind: "widget", key: "playerPiles" }}
+            flexZone="playerPiles"
             className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             style={playerZoneRailStyle}
           >
@@ -1197,7 +1206,7 @@ function GamePageContent({
                 onView={() => setViewingZone({ zone: "library", playerId: perspectivePlayerId })}
               />
             </div>
-          </div>
+          </DraggableWidget>
           <div
             className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
             style={playerZoneRailStyle}
@@ -1208,7 +1217,9 @@ function GamePageContent({
       </div>
 
       {/* Right-side fixed UI stack: combat phases → full control → action buttons → log */}
-      <div
+      <DraggableWidget
+        target={{ kind: "widget", key: "actionRail" }}
+        flexZone="actionRail"
         className="fixed z-30 flex flex-col items-end gap-1.5"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
@@ -1227,10 +1238,11 @@ function GamePageContent({
             <ActionButton />
           </>
         )}
-      </div>
+      </DraggableWidget>
 
       <GameLogPanel />
       <MobileHandDrawer />
+      <FlexEditOverlay />
 
       {/* Game menu — top-left hamburger */}
       <GameMenu
@@ -1390,6 +1402,7 @@ function GamePageContent({
           onChangeBackground={() =>
             setPreferencesOpen({ tab: "gameplay", highlight: "board-background" })
           }
+          onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
           onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
           onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
         />
@@ -1432,11 +1445,14 @@ function GamePageContent({
           canActForWaitingState && <ChooseXValueUI />}
         {waitingFor?.type === "PayAmountChoice" &&
           canActForWaitingState && <PayAmountChoiceUI />}
+        {waitingFor?.type === "AssistPayment" &&
+          canActForWaitingState && <AssistPaymentUI />}
         {waitingFor?.type === "ReplacementChoice" &&
           canActForWaitingState && <ReplacementModal />}
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
         <BattleProtectorModal />
+        <AssistChoosePlayerModal />
         <ClashOpponentModal />
         <TributeModal />
         <CombatTaxModal />

@@ -13,6 +13,7 @@ import {
   usePreferencesStore,
 } from "../../stores/preferencesStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import {
   ANIMATION_SPEED_DEFAULT,
   ANIMATION_SPEED_MAX,
@@ -127,6 +128,7 @@ export function PreferencesModal({
   highlight,
 }: PreferencesModalProps) {
   const { t } = useTranslation("settings");
+  const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
   const boardBackgroundRef = useRef<HTMLDivElement | null>(null);
   const [highlightFlash, setHighlightFlash] = useState(highlight === "board-background");
 
@@ -470,6 +472,24 @@ export function PreferencesModal({
                         {t("visual.clearArtOverrides", { count: artOverrideCount })}
                       </button>
                     )}
+                  </SettingGroup>
+
+                  <SettingGroup label={t("flexLayout.title")}>
+                    <p className="mb-2 text-xs text-slate-400">
+                      {t("flexLayout.description")}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Launch edit mode and close settings so the board is
+                        // visible; the overlay toolbar owns presets/reset/done.
+                        setFlexEditMode(true);
+                        onClose();
+                      }}
+                      className="rounded-[14px] border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10"
+                    >
+                      {t("flexLayout.edit")}
+                    </button>
                   </SettingGroup>
                 </SettingsSection>
               )}

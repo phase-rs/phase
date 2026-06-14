@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
     "changeBackground": "Zmień tło…",
+    "customizeLayout": "Dostosuj układ…",
     "gameLog": "Dziennik gry",
     "debugLog": "Dziennik debugowania",
     "waitingForGame": "Oczekiwanie na grę...",
@@ -938,6 +939,12 @@
       "title": "Wybierz Nosiciela Pierścienia",
       "subtitle": "Wybierz stwora, którego kontrolujesz"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Przeciągnij, aby zmienić kolejność · karta na wierzchu jest dobierana pierwsza",
     "scry": {
       "title": "Scry",
@@ -1353,6 +1360,18 @@
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Brak danych kart",
