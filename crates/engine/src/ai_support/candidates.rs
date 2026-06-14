@@ -941,9 +941,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             constraint,
             ..
         } => {
-            // CR 107.1c + CR 701.23d: "any number of" / "up to N" searches enumerate
-            // combination sizes 0..=count; exact-count searches enumerate only `count`.
-            let sizes: Vec<usize> = if *up_to {
+            // CR 701.23b/d: constrained (stated-quality) searches enumerate 0..=count
+            // so the legal-action set always contains the empty fail-to-find plus
+            // valid partials; pure-quantity exact-count searches enumerate only
+            // `count`. `combinations(_, 0)` returns `vec![vec![]]`, so the empty
+            // decline survives the constraint filter below.
+            let sizes: Vec<usize> = if *up_to || constraint.permits_partial_find() {
                 (0..=*count).collect()
             } else {
                 vec![*count]

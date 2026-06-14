@@ -1651,8 +1651,13 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 107.1c + CR 701.23d: "up to N" / "any number of" accept 0..=count picks.
-            let valid = if up_to {
+            // CR 701.23b/d: "up to N" OR a stated-quality constraint accepts a
+            // short/empty pick (fail-to-find); a pure quantity search needs
+            // exactly `count`. The subsequent `selection_satisfies_constraint`
+            // re-check validates the distinct-slot consistency of whatever was
+            // chosen, so widening the count bound here is safe.
+            let lower_bounded = up_to || constraint.permits_partial_find();
+            let valid = if lower_bounded {
                 chosen.len() <= count
             } else {
                 chosen.len() == count
@@ -1660,7 +1665,7 @@ pub(super) fn handle_resolution_choice(
             if !valid {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select {}{} card(s), got {}",
-                    if up_to { "up to " } else { "exactly " },
+                    if lower_bounded { "up to " } else { "exactly " },
                     count,
                     chosen.len()
                 )));
