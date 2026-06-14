@@ -3834,12 +3834,20 @@ pub fn find_applicable_replacements(
                 // against the filter (e.g., "sources of the chosen color").
                 if let Some(ref sf) = repl_def.damage_source_filter {
                     if let ProposedEvent::Damage { source_id, .. } = event {
-                        if !matches_target_filter(
-                            state,
-                            *source_id,
-                            sf,
-                            &FilterContext::from_source(state, ObjectId(0)),
-                        ) {
+                        // CR 109.4 + CR 614.1a: The pending replacement lives under
+                        // the sentinel `ObjectId(0)`, which has no entry in
+                        // `state.objects`, so `from_source` cannot derive a
+                        // controller. When the installing player was anchored at
+                        // install time (`source_controller`), use it so a
+                        // controller-relative source filter ("a source you control")
+                        // resolves; otherwise fall back to the bare source context.
+                        let ctx = match repl_def.source_controller {
+                            Some(pid) => {
+                                FilterContext::from_source_with_controller(ObjectId(0), pid)
+                            }
+                            None => FilterContext::from_source(state, ObjectId(0)),
+                        };
+                        if !matches_target_filter(state, *source_id, sf, &ctx) {
                             continue;
                         }
                     }
