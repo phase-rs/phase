@@ -5,7 +5,7 @@ use engine::types::ability::{Effect, TargetFilter};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -270,6 +270,89 @@ pub(crate) fn count_counterspells_in_hand(state: &GameState, player: PlayerId) -
             })
         })
         .count()
+}
+
+/// Heuristic upper bound on the mana the AI could spend on a ward cost *after*
+/// paying for the spell it is currently casting. Counts untapped mana sources
+/// (lands, non-sick mana dorks, mana rocks) plus any floating mana, then
+/// subtracts the spell's own mana value. Colour requirements are approximated by
+/// total mana value, matching the engine's auto-tap heuristics used elsewhere in
+/// the AI (CR 302.6: a summoning-sick creature can't tap for mana).
+pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
+    let player = &ctx.state.players[ctx.ai_player.0 as usize];
+    let mut sources = player.mana_pool.total() as u32;
+    for &id in &ctx.state.battlefield {
+        let Some(obj) = ctx.state.objects.get(&id) else {
+            continue;
+        };
+        if obj.controller != ctx.ai_player || obj.tapped {
+            continue;
+        }
+        let is_creature = obj.card_types.core_types.contains(&CoreType::Creature);
+        // Untapped pure land counts unconditionally (auto-tap tier 0); other mana
+        // sources count only if they have a mana ability and — for creatures —
+        // aren't summoning-sick (CR 302.6).
+        let is_pure_land = obj.card_types.core_types.contains(&CoreType::Land) && !is_creature;
+        let is_usable_dork = obj
+            .abilities
+            .iter()
+            .any(engine::game::mana_abilities::is_mana_ability)
+            && !(is_creature && engine::game::combat::has_summoning_sickness(obj));
+        if is_pure_land || is_usable_dork {
+            sources += 1;
+        }
+    }
+    let spell_cost = ctx
+        .source_object()
+        .map_or(0, |source| source.mana_cost.mana_value());
+    sources.saturating_sub(spell_cost)
+}
+
+/// CR 702.21a: Whether the AI can pay `ward` after committing to the spell it is
+/// casting. Mana / Waterbend costs use the post-spell mana estimate; non-mana
+/// costs check the corresponding resource (life, a spare card, sacrificeable
+/// permanents). Conservative on the unknown: a cost we can't analyse returns
+/// `true` so the AI is never blocked from a cast we can't prove is wasted.
+pub(crate) fn can_pay_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> bool {
+    match ward {
+        WardCost::Mana(cost) | WardCost::Waterbend(cost) => {
+            available_mana_after_spell(ctx) >= cost.mana_value()
+        }
+        // CR 119.4: life may be paid only if the life total is at least the
+        // amount. CR 704.5a: a player at 0 life loses, so the AI treats a payment
+        // that would drop it to 0 as unaffordable — it leaves at least 1 life.
+        WardCost::PayLife(amount) => ctx.state.players[ctx.ai_player.0 as usize].life > *amount,
+        WardCost::DiscardCard => {
+            let source_id = ctx.source_object().map(|source| source.id);
+            ctx.state.players[ctx.ai_player.0 as usize]
+                .hand
+                .iter()
+                .any(|&id| Some(id) != source_id)
+        }
+        WardCost::Sacrifice { count, filter } => {
+            let Some(source) = ctx.source_object() else {
+                return true;
+            };
+            let fctx = FilterContext::from_source(ctx.state, source.id);
+            let matching = ctx
+                .state
+                .battlefield
+                .iter()
+                .filter(|&&id| {
+                    ctx.state
+                        .objects
+                        .get(&id)
+                        .is_some_and(|obj| obj.controller == ctx.ai_player)
+                        && matches_target_filter(ctx.state, id, filter, &fctx)
+                })
+                .count();
+            matching as u32 >= *count
+        }
+        // CR 702.21a: every conjoined sub-cost must be payable. Mana contention
+        // between multiple mana sub-costs is approximated (each checked against
+        // the full post-spell pool) — rare enough not to warrant exact tracking.
+        WardCost::Compound(costs) => costs.iter().all(|cost| can_pay_ward_cost(ctx, cost)),
+    }
 }
 
 fn keyword_pressure(object: &GameObject) -> f64 {

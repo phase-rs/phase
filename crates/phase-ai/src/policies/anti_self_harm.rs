@@ -31,12 +31,13 @@ use super::context::PolicyContext;
 use super::copy_value::{copy_target_penalties, score_legend_rule_keep};
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
-    extract_target_filter, is_spell_beneficial, targeted_object_impact, targeted_player_impact,
-    targets_creatures, targets_creatures_only, EffectPolarity,
+    extract_target_filter, is_spell_beneficial, lethal_to_creature, targeted_object_impact,
+    targeted_player_impact, targets_creatures, targets_creatures_only, EffectPolarity,
 };
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
 };
+use super::strategy_helpers::can_pay_ward_cost;
 use crate::features::DeckFeatures;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
@@ -529,7 +530,29 @@ fn harmful_effect_has_opponent_creature_target(ctx: &PolicyContext<'_>, effect: 
     let Some(source) = ctx.source_object() else {
         return true;
     };
-    ctx.has_legal_opponent_creature_target(filter, source.id, |_| true)
+    let effects = ctx.effects();
+    ctx.has_legal_opponent_creature_target(filter, source.id, |id| {
+        is_useful_removal_target(ctx, id, &effects)
+    })
+}
+
+/// Whether a removal target is worth casting at: the AI can pay any ward cost
+/// (CR 702.21a — otherwise the spell is merely countered) and the spell can
+/// actually kill it. Provably non-lethal damage / shrink (CR 704.5f/g) is a
+/// wasted cast. Variable-X effects and non-damage removal (Destroy, Exile,
+/// Bounce) stay useful, since `lethal_to_creature` returns `None` for them.
+fn is_useful_removal_target(ctx: &PolicyContext<'_>, id: ObjectId, effects: &[&Effect]) -> bool {
+    if let Some(object) = ctx.state.objects.get(&id) {
+        for keyword in &object.keywords {
+            if let Keyword::Ward(ward) = keyword {
+                if !can_pay_ward_cost(ctx, ward) {
+                    return false;
+                }
+                break;
+            }
+        }
+    }
+    lethal_to_creature(ctx.state, id, effects) != Some(false)
 }
 
 fn is_hostile_or_neutral_bounce(effect: &&Effect) -> bool {
@@ -696,6 +719,13 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         score += controller_delta * evaluate_creature(ctx.state, object_id);
 
         if !beneficial {
+            // CR 704.5f/g: penalize removal that provably won't kill its target.
+            // `lethal_to_creature` unifies the three shrink/burn modalities (damage,
+            // -X/-X, -1/-1 counters); variable-X and non-damage removal return
+            // `None` (no penalty). The penalty is a discouragement, not a veto, so
+            // a genuine multi-spell kill can still emerge from search lookahead.
+            let lethal = lethal_to_creature(ctx.state, object_id, &effects);
+
             if let Some(damage) = extract_damage_amount(&effects) {
                 score += opponent_creature_reflection_penalty(
                     ctx.state,
@@ -706,13 +736,14 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
                 if let Some(toughness) = object.toughness {
                     let remaining = toughness - object.damage_marked as i32;
-                    // Penalize targeting creatures that won't die to this damage.
-                    // Graduated: almost-lethal burn (leaves 1 toughness) is less
-                    // wasteful than burn that barely scratches a large creature.
-                    if damage < remaining {
-                        let survival_ratio = (remaining - damage) as f64 / remaining as f64;
-                        // Full penalty (-8.0) when damage is negligible relative to toughness,
-                        // reduced penalty (-4.0) when damage is almost lethal.
+                    // Graduated non-lethal penalty: almost-lethal burn (leaves 1
+                    // toughness) is less wasteful than burn that barely scratches a
+                    // large creature.
+                    if lethal == Some(false) && remaining > 0 {
+                        let survival_ratio =
+                            ((remaining - damage).max(0)) as f64 / remaining as f64;
+                        // Full penalty (-8.0) when damage is negligible relative to
+                        // toughness, reduced penalty (-4.0) when damage is almost lethal.
                         score -= 4.0 + 4.0 * survival_ratio;
                     }
                     // Penalize massive overkill (wasting damage capacity)
@@ -722,6 +753,10 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                         score += ctx.penalties().overkill_base_penalty * waste_ratio.sqrt();
                     }
                 }
+            } else if lethal == Some(false) {
+                // Non-damage shrink (-X/-X, -0/-X, -1/-1 counters) that won't kill
+                // the target wastes the spell, mirroring the burn-whiff penalty.
+                score -= 8.0;
             }
 
             // CR 702.16b + CR 702.16e: Protection prevents targeting and damage
@@ -733,9 +768,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 }
             }
 
-            // Penalize targeting creatures with ward (must pay additional cost)
+            // Price the cost of an *affordable* ward (must pay an extra cost).
+            // An unaffordable ward is hard-rejected upstream by `tactical_gate`
+            // (CR 702.21a — the spell would just be countered), so this judgment
+            // layer never double-scores that case.
             for keyword in &object.keywords {
                 if let Keyword::Ward(ward_cost) = keyword {
+                    if !can_pay_ward_cost(ctx, ward_cost) {
+                        break;
+                    }
                     let severity = match ward_cost {
                         WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
