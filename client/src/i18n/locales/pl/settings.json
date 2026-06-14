@@ -32,7 +32,6 @@
       "customUrl": "Niestandardowy URL",
       "none": "Brak"
     },
-    "commandZone": "Strefa dowodzenia",
     "commandZoneOptions": {
       "compact": "Kompaktowy",
       "inline": "Wbudowany",
@@ -102,7 +101,6 @@
     },
     "zones": {
       "playerHud": "Twój HUD",
-      "commandZone": "Strefa dowodzenia",
       "opponentHud": "HUD przeciwnika",
       "stackPanel": "Stos",
       "logPanel": "Dziennik",

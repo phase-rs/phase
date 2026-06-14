@@ -12,7 +12,6 @@ import { ColumnSplitter } from "./ColumnSplitter.tsx";
  *  splitter placement ("opp-row"/"player-row") are intentionally excluded. */
 const LABELLED_ZONES = new Set([
   "playerHud",
-  "commandZone",
   "opponentHud",
   "stackPanel",
   "logPanel",
@@ -145,30 +144,6 @@ function FlexEditOverlayInner() {
             className="absolute inset-x-0 bg-sky-400/[0.06] ring-1 ring-inset ring-sky-300/30"
             style={{ top: m.topBoundary, height: m.bottomBoundary - m.topBoundary }}
           />
-        )}
-        {/* Lands vs support halves of the battlefield band, in contrasting hues
-            so the ↔ divider visibly shifts the boundary between them. */}
-        {m.columnBoundary != null && (
-          <>
-            <div
-              className="absolute bg-emerald-400/[0.08] ring-1 ring-inset ring-emerald-300/30"
-              style={{
-                left: m.columnBoundary.left,
-                top: m.columnBoundary.top,
-                width: m.columnBoundary.x - m.columnBoundary.left,
-                height: m.columnBoundary.height,
-              }}
-            />
-            <div
-              className="absolute bg-violet-400/[0.08] ring-1 ring-inset ring-violet-300/30"
-              style={{
-                left: m.columnBoundary.x,
-                top: m.columnBoundary.top,
-                width: m.columnBoundary.right - m.columnBoundary.x,
-                height: m.columnBoundary.height,
-              }}
-            />
-          </>
         )}
         {m.zones.map((z) => (
           <div

@@ -107,12 +107,16 @@ export interface WidgetOffset {
  *  {@link FlexTableSize}). */
 export type FlexWidgetKey =
   | "playerHud"
-  | "commandZone"
   | "stackPanel"
   | "logPanel"
   | "actionRail"
   | "playerPiles"
   | "opponentPiles";
+/** The three reorderable cells of the battlefield middle row. Stored as an
+ *  order so the user can permute them (drag-to-reorder); flexbox reflows. */
+export type MiddleCell = "lands" | "support" | "command";
+/** Default left-to-right order — reproduces today's lands · support · command. */
+export const DEFAULT_MIDDLE_ROW_ORDER: readonly MiddleCell[] = ["lands", "support", "command"];
 /** Table sizes the opponent HUD position is keyed by: 1v1 renders a single pill,
  *  multiplayer a tab strip, so a shared offset wouldn't fit both. */
 export type FlexTableSize = "oneVsOne" | "multiplayer";
@@ -150,6 +154,9 @@ export interface FlexLayoutConfig {
   /** Lands' share of the lands↔support middle row, 0..1. Support takes the
    *  remainder (`1 - ratio`). Absent ⇒ 0.5 (the prior equal `flex-1` split). */
   landSupportRatio?: number;
+  /** Left-to-right order of the middle-row cells. Absent ⇒
+   *  {@link DEFAULT_MIDDLE_ROW_ORDER} (lands · support · command). */
+  middleRowOrder?: MiddleCell[];
   /** Per-zone aspect-preserving size multipliers. Absent key ⇒ 1.0. */
   scales?: Partial<Record<FlexScaleKey, number>>;
   widgets: Partial<Record<FlexWidgetKey, WidgetOffset>>;
@@ -170,6 +177,7 @@ export function defaultFlexLayout(): FlexLayoutConfig {
   return {
     gridBands: { top: { pct: 12, pxCap: 100 }, bottom: { pct: 18, pxCap: 150 } },
     landSupportRatio: DEFAULT_LAND_SUPPORT_RATIO,
+    middleRowOrder: [...DEFAULT_MIDDLE_ROW_ORDER],
     scales: {},
     widgets: {},
     opponentHudByTableSize: {},
@@ -186,6 +194,7 @@ function cloneFlexLayout(config: FlexLayoutConfig): FlexLayoutConfig {
       bottom: { ...config.gridBands.bottom },
     },
     landSupportRatio: config.landSupportRatio,
+    middleRowOrder: config.middleRowOrder ? [...config.middleRowOrder] : undefined,
     scales: { ...config.scales },
     widgets: Object.fromEntries(
       Object.entries(config.widgets).map(([k, v]) => [k, { ...v }]),
@@ -417,6 +426,9 @@ interface PreferencesActions {
   /** Set the lands↔support split (lands' share, clamped 0..1). The support
    *  column takes the remainder. Flips `activePreset` to "custom". */
   setFlexLandSupportRatio: (ratio: number) => void;
+  /** Set the left-to-right order of the middle-row cells (drag-to-reorder).
+   *  Flips `activePreset` to "custom". */
+  setFlexMiddleRowOrder: (order: MiddleCell[]) => void;
   /** Set a zone's aspect-preserving size multiplier. Flips `activePreset` to
    *  "custom". */
   setFlexScale: (key: FlexScaleKey, scale: number) => void;
@@ -637,6 +649,14 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
             ...state.flexLayout,
             // Clamp so neither column starves (each keeps ≥20% of the row).
             landSupportRatio: Math.min(0.8, Math.max(0.2, ratio)),
+            activePreset: "custom",
+          },
+        })),
+      setFlexMiddleRowOrder: (order) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            middleRowOrder: order,
             activePreset: "custom",
           },
         })),

@@ -1,9 +1,16 @@
-import { useMemo } from "react";
+import { useMemo, type CSSProperties, type ReactNode } from "react";
+import { Reorder } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { usePreferencesStore, DEFAULT_LAND_SUPPORT_RATIO } from "../../stores/preferencesStore.ts";
+import {
+  usePreferencesStore,
+  DEFAULT_LAND_SUPPORT_RATIO,
+  DEFAULT_MIDDLE_ROW_ORDER,
+  type MiddleCell,
+} from "../../stores/preferencesStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
@@ -76,6 +83,11 @@ export function PlayerArea({
   // applied symmetrically to every player area; absent ⇒ even halves.
   const landSupportRatio =
     usePreferencesStore((s) => s.flexLayout.landSupportRatio) ?? DEFAULT_LAND_SUPPORT_RATIO;
+  // Middle-row cell order (drag-to-reorder); a global preference applied to
+  // every area. Reordering is enabled only in the viewer's own area in edit mode.
+  const storedMiddleOrder = usePreferencesStore((s) => s.flexLayout.middleRowOrder);
+  const setFlexMiddleRowOrder = usePreferencesStore((s) => s.setFlexMiddleRowOrder);
+  const flexEditMode = useUiStore((s) => s.flexEditMode);
   // Combined support cluster: artifacts/enchantments then planeswalkers, in ONE
   // wrapping row (like the lands column) so it stays a single line until crowded.
   // Keeping it one row keeps the middle-row band ~one card tall so the flex-1
@@ -137,38 +149,61 @@ export function PlayerArea({
   const landStyle = zoneStyle(zoneScale(landBase, landCount));
   const supportStyle = zoneStyle(zoneScale(supportBase, supportCount));
 
-  // Two-column middle row: lands (left, justify-start) and support (right,
-  // justify-end) each take a flex-1 half and meet in the center. The HUD is no
-  // longer wedged between them — it gets its own band (`hudBand`) adjacent to
-  // this row — so the two card tracks reclaim the central corridor.
-  const middleRow = (
-    <div className="flex min-h-0 min-w-0 items-stretch justify-between gap-2" data-debug-label="Middle Row">
-      <div
-        className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
-        // `flexGrow` overrides `flex-1`'s grow so the lands/support boundary
-        // sits at the stored ratio; shrink/basis from `flex-1` are unchanged.
-        style={{ ...landStyle, flexGrow: landSupportRatio }}
-        data-debug-label="Lands"
-        data-flex-zone={isOwnArea ? "lands-col" : undefined}
-      >
-        <BattlefieldZoneOverflow
-          groups={partitioned?.lands ?? []}
-          zone="lands"
-          side="left"
-          className="justify-start px-0"
-        />
-        {landColumnExtra}
-      </div>
-      {/* Support column: artifacts/enchantments + planeswalkers in ONE wrapping
-          row (mirrors the lands column) so the band stays ~one card tall and the
-          creature row keeps its height. A thin divider (`supportDividerIndex`)
-          separates the two sub-clusters without stacking them onto a second row. */}
-      <div
-        className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 ${supportAlignClass}`}
-        style={{ ...supportStyle, flexGrow: 1 - landSupportRatio }}
-        data-debug-label="Support"
-        data-flex-zone={isOwnArea ? "support-col" : undefined}
-      >
+  // Middle row of three reorderable cells — lands, support, command. The lands
+  // and support tracks split the row by `landSupportRatio` (flexGrow); command
+  // is `shrink-0`. The HUD gets its own band (`hudBand`) adjacent to this row.
+  // Each cell is described once and rendered either plain or wrapped in a
+  // Reorder.Item, so reordering never duplicates the cell markup.
+  const middleCells: Record<
+    MiddleCell,
+    {
+      className: string;
+      style?: CSSProperties;
+      debugLabel: string;
+      flexZone?: string;
+      /** i18n key (game namespace) for the edit-mode cell label. */
+      labelKey: string;
+      /** Edit-mode ring + fill that bounds the cell in a distinct hue. */
+      editClass: string;
+      /** Edit-mode label-badge background (matches `editClass`'s hue). */
+      badgeClass: string;
+      content: ReactNode;
+    }
+  > = {
+    lands: {
+      // `flexGrow` overrides `flex-1`'s grow so the lands/support boundary sits
+      // at the stored ratio; shrink/basis from `flex-1` are unchanged.
+      className: `z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`,
+      style: { ...landStyle, flexGrow: landSupportRatio },
+      debugLabel: "Lands",
+      flexZone: isOwnArea ? "lands-col" : undefined,
+      labelKey: "battlefieldOverflow.lands.label",
+      editClass: "ring-2 ring-emerald-400/70 bg-emerald-400/10",
+      badgeClass: "bg-emerald-400",
+      content: (
+        <>
+          <BattlefieldZoneOverflow
+            groups={partitioned?.lands ?? []}
+            zone="lands"
+            side="left"
+            className="justify-start px-0"
+          />
+          {landColumnExtra}
+        </>
+      ),
+    },
+    // Support cluster: artifacts/enchantments + planeswalkers in ONE wrapping row
+    // (mirrors the lands column). A thin divider (`supportDividerIndex`) separates
+    // the two sub-clusters without stacking them onto a second row.
+    support: {
+      className: `z-10 flex min-w-0 basis-0 flex-1 gap-2 ${supportAlignClass}`,
+      style: { ...supportStyle, flexGrow: 1 - landSupportRatio },
+      debugLabel: "Support",
+      flexZone: isOwnArea ? "support-col" : undefined,
+      labelKey: "battlefieldOverflow.support.label",
+      editClass: "ring-2 ring-violet-400/70 bg-violet-400/10",
+      badgeClass: "bg-violet-400",
+      content: (
         <BattlefieldZoneOverflow
           groups={supportGroups}
           zone="support"
@@ -176,31 +211,83 @@ export function PlayerArea({
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
         />
-      </div>
-      {/* Command zone (CR 408) as an in-flow column on the far edge so it reserves
-          real horizontal space — support cards (`justify-end`) no longer slide
-          under it. `self-center` + `shrink-0` lets it claim width without forcing
-          the band taller than its own content: compact mode is a ~48px button
-          (shorter than a land card → zero band growth); inline grows the band
-          only when the user opts into it on a roomy screen. CommandDock renders
-          null when the command zone is empty, collapsing this column to nothing. */}
-      <div
-        className="z-10 flex shrink-0 items-center self-center pr-2"
-        data-debug-label="Command"
+      ),
+    },
+    // Command zone (CR 408) — `shrink-0` so it claims only its content width.
+    // CommandDock renders null when empty, collapsing the cell to nothing.
+    command: {
+      className: "z-10 flex shrink-0 items-center self-center pr-2",
+      debugLabel: "Command",
+      labelKey: "zone.commandZone",
+      editClass: "ring-2 ring-amber-400/70 bg-amber-400/10",
+      badgeClass: "bg-amber-400",
+      content: <CommandDock playerId={playerId} isMirrored={isMirrored} />,
+    },
+  };
+
+  // Resolve the stored order, guarding against a corrupt/partial value.
+  const middleOrder: MiddleCell[] =
+    storedMiddleOrder && storedMiddleOrder.length === 3
+      ? storedMiddleOrder
+      : [...DEFAULT_MIDDLE_ROW_ORDER];
+  const middleRowClass = "flex min-h-0 min-w-0 items-stretch justify-between gap-2";
+  // Drag-to-reorder is enabled only in the viewer's own area while editing; the
+  // resulting order persists globally and applies to every area (incl. plain
+  // render below). Framer's Reorder distinguishes a drag from a tap, so cards
+  // stay tappable.
+  const middleRow =
+    isOwnArea && flexEditMode ? (
+      <Reorder.Group
+        as="div"
+        axis="x"
+        values={middleOrder}
+        onReorder={setFlexMiddleRowOrder}
+        className={middleRowClass}
+        data-debug-label="Middle Row"
       >
-        {/* The viewer's own command zone is drag-repositionable (a shared-global
-            widget); opponents' command zones stay docked. CommandDock renders
-            null when the command zone is empty, so the wrapper collapses too. */}
-        {isOwnArea ? (
-          <DraggableWidget target={{ kind: "widget", key: "commandZone" }} flexZone="commandZone">
-            <CommandDock playerId={playerId} isMirrored={isMirrored} />
-          </DraggableWidget>
-        ) : (
-          <CommandDock playerId={playerId} isMirrored={isMirrored} />
-        )}
+        {middleOrder.map((key) => {
+          const cell = middleCells[key];
+          return (
+            <Reorder.Item
+              key={key}
+              as="div"
+              value={key}
+              // Edit mode bounds each cell in a distinct hue with a labelled,
+              // grippable badge so it's obvious what's being rearranged.
+              className={`${cell.className} relative cursor-grab rounded-lg ${cell.editClass} active:cursor-grabbing`}
+              style={cell.style}
+              data-debug-label={cell.debugLabel}
+              data-flex-zone={cell.flexZone}
+            >
+              <span
+                className={`pointer-events-none absolute -top-2.5 left-1 z-20 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-950 shadow ${cell.badgeClass}`}
+              >
+                <span aria-hidden>⠿</span>
+                {t(cell.labelKey)}
+              </span>
+              {cell.content}
+            </Reorder.Item>
+          );
+        })}
+      </Reorder.Group>
+    ) : (
+      <div className={middleRowClass} data-debug-label="Middle Row">
+        {middleOrder.map((key) => {
+          const cell = middleCells[key];
+          return (
+            <div
+              key={key}
+              className={cell.className}
+              style={cell.style}
+              data-debug-label={cell.debugLabel}
+              data-flex-zone={cell.flexZone}
+            >
+              {cell.content}
+            </div>
+          );
+        })}
       </div>
-    </div>
-  );
+    );
 
   // Player HUD (life, mana, phase arrows) overlaid below the middle row rather
   // than wedged into its own column or lane. As a content-width absolute overlay

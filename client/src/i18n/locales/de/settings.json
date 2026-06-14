@@ -32,7 +32,6 @@
       "customUrl": "Eigene URL",
       "none": "Keiner"
     },
-    "commandZone": "Kommandozone",
     "commandZoneOptions": {
       "compact": "Kompakt",
       "inline": "Inline",
@@ -102,7 +101,6 @@
     },
     "zones": {
       "playerHud": "Dein HUD",
-      "commandZone": "Kommandozone",
       "opponentHud": "Gegner-HUD",
       "stackPanel": "Stapel",
       "logPanel": "Spielprotokoll",
