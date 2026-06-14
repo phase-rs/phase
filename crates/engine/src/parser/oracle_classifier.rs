@@ -562,6 +562,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     // `parse_replacement_line` even when its suffix carries a static keyword
     // pattern like "has haste" that would otherwise classify it as static.
     "become a copy of",
+    // CR 110.2a + CR 614.1d: "[self] enters under the control of an opponent of
+    // your choice" (Xantcha, Sleeper Agent; Pendant of Prosperity; Abby,
+    // Merciless Soldier). A self-ETB controller-override replacement — route the
+    // line to `parse_replacement_line`/`parse_self_enters_under_opponent`, whose
+    // self-subject gate rejects external-subject false positives. Without this,
+    // the line falls through to the effect parser and emits Unimplemented.
+    "enters under the control of",
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {

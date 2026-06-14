@@ -6198,6 +6198,49 @@ mod tests {
     }
 
     #[test]
+    fn cant_attack_owner_or_planeswalker_blocks_owner_side_targets() {
+        let mut state = setup_multiplayer_combat(3);
+        let attacker = create_creature(&mut state, PlayerId(1), "Xantcha", 5, 5);
+        let owner_walker = create_planeswalker(&mut state, PlayerId(1), "Owner Walker");
+        let other_walker = create_planeswalker(&mut state, PlayerId(2), "Other Walker");
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.controller = PlayerId(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(
+                        crate::types::triggers::AttackTargetFilter::OwnerOrPlaneswalker,
+                    )),
+            );
+        }
+
+        let attacks_owner_walker = declare_attackers(
+            &mut state.clone(),
+            &[(attacker, AttackTarget::Planeswalker(owner_walker))],
+            &mut vec![],
+        );
+        assert!(attacks_owner_walker.is_err());
+        assert!(attacks_owner_walker
+            .unwrap_err()
+            .contains("can't attack Planeswalker"));
+
+        let attacks_owner_player = declare_attackers(
+            &mut state.clone(),
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(attacks_owner_player.is_err());
+
+        let attacks_other_walker = declare_attackers(
+            &mut state,
+            &[(attacker, AttackTarget::Planeswalker(other_walker))],
+            &mut vec![],
+        );
+        assert!(attacks_other_walker.is_ok());
+    }
+
+    #[test]
     fn must_attack_player_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let attacker = create_creature(&mut state, PlayerId(0), "Lured Bear", 2, 2);

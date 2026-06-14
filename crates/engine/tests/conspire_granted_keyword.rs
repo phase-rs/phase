@@ -54,8 +54,8 @@ fn add_mana(runner: &mut GameRunner, ty: ManaType, count: usize) {
 
 /// Force `id`'s color to red so it (a) matches Wort's "red ... spell you cast"
 /// static and (b) shares a color with the red creatures for the conspire tap
-/// cost (CR 702.78a). The scenario builder leaves `colors` empty and does not
-/// run the load-time color derivation, so set it explicitly.
+/// cost (CR 702.78a). This fixture uses generic mana costs, so set the color
+/// explicitly.
 fn make_red(runner: &mut GameRunner, id: ObjectId) {
     runner.state_mut().objects.get_mut(&id).unwrap().color = vec![ManaColor::Red];
 }

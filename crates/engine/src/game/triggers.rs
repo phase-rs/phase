@@ -12305,6 +12305,7 @@ pub mod tests {
             &[],   // effect_enter_with_counters
             None,  // face_down_profile
             false, // track_exiled_by_source
+            None,  // library_placement
             &mut events,
         );
 
@@ -18638,6 +18639,8 @@ pub mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             Vec::new(),
             ObjectId(9002),
@@ -19021,6 +19024,8 @@ pub mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             Vec::new(),
             ObjectId(9100),

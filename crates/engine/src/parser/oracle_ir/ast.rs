@@ -1086,6 +1086,15 @@ pub(crate) enum PutImperativeAst {
         target: TargetFilter,
         enters_under: Option<ControllerRef>,
         enter_tapped: bool,
+        /// CR 401.4: Specific library placement for mass library moves.
+        /// `Some` suppresses the default library shuffle and places each moved
+        /// object at that position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_position: Option<LibraryPosition>,
+        /// CR 401.4: The owner may randomize/arrange simultaneous library
+        /// placement for mass moves.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        random_order: bool,
         /// CR 608.2c: "and the rest into <zone>" complement for a tracked-set
         /// partition ("Put all <filter> revealed this way into your hand and
         /// the rest into your graveyard" — Winding Way). The primary move sends

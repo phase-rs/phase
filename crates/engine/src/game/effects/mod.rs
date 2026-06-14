@@ -619,6 +619,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             track_exiled_by_source,
             mut moved_count,
             face_down_profile,
+            library_placement,
             effect_kind,
         } = pending;
         let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
@@ -640,6 +641,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             // instead of exposing the real object face up. Mirrors the
             // `enter_tapped`/`enter_transformed`/`enters_under_player` carry-through.
             face_down_profile,
+            library_placement,
         };
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in THIS resume can be stamped as a co-departed group and
@@ -696,6 +698,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
+                            library_placement: ctx.library_placement.clone(),
                             effect_kind,
                         });
                     paused = true;
@@ -720,6 +723,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
+                            library_placement: ctx.library_placement.clone(),
                             effect_kind,
                         });
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
@@ -9831,6 +9835,8 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_with_counters: vec![],
                     face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
                 },
                 vec![],
                 ObjectId(900),
@@ -10521,6 +10527,8 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_with_counters: vec![],
                     face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
                 },
                 vec![],
                 ObjectId(900),
@@ -10615,6 +10623,8 @@ mod tests {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_with_counters: vec![],
                     face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
                 },
                 vec![],
                 ObjectId(901),
@@ -10683,6 +10693,8 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             vec![],
             ObjectId(902),
@@ -12488,6 +12500,8 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             vec![],
             source,
@@ -12551,6 +12565,8 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             vec![],
             source,
@@ -12629,6 +12645,8 @@ mod tests {
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             },
             vec![],
             source,

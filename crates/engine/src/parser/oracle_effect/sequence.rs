@@ -2358,6 +2358,8 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                                 enter_with_counters: vec![],
                                 face_down_profile,
+                                library_position: None,
+                                random_order: false,
                             },
                         ));
                     }
@@ -2415,6 +2417,8 @@ pub(super) fn apply_clause_continuation(
                 match &mut *def.effect {
                     Effect::ChangeZoneAll {
                         face_down_profile: fdp @ Some(_),
+                        library_position: None,
+                        random_order: false,
                         ..
                     }
                     | Effect::ChangeZone {

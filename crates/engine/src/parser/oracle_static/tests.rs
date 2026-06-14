@@ -4657,6 +4657,23 @@ fn static_comma_rule_statics_share_subject() {
 }
 
 #[test]
+fn static_owner_or_planeswalker_rule_static_shares_subject() {
+    let defs = parse_static_line_multi(
+        "This creature attacks each combat if able and can't attack its owner or planeswalkers its owner controls.",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_eq!(defs[0].mode, StaticMode::MustAttack);
+    assert_eq!(defs[1].mode, StaticMode::CantAttack);
+    assert_eq!(
+        defs[1].attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::OwnerOrPlaneswalker)
+    );
+    assert!(defs
+        .iter()
+        .all(|def| def.affected == Some(TargetFilter::SelfRef)));
+}
+
+#[test]
 fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
     let defs =
         parse_static_line_multi("Enchanted creature gets +3/+3 and must be blocked if able.");

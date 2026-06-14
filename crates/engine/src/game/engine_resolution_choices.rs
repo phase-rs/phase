@@ -2536,6 +2536,7 @@ pub(super) fn handle_resolution_choice(
                         // DOWN with the specified characteristics instead of
                         // resuming face up and exposing the real object.
                         face_down_profile: face_down_profile.clone(),
+                        library_placement: None,
                     };
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
@@ -2562,6 +2563,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        library_placement: ctx.library_placement.clone(),
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -2593,6 +2595,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        library_placement: ctx.library_placement.clone(),
                                         effect_kind,
                                     });
                                 state.waiting_for =
