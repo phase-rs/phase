@@ -11498,6 +11498,36 @@ fn try_parse_discard_trigger(
         return Some((TriggerMode::DiscardedAll, def));
     }
 
+    // CR 109.5 + CR 603.2: "a spell or ability an opponent controls causes you to
+    // discard this card" — the self-discard caused by an opponent's spell/ability
+    // (Guerrilla Tactics, Sand Golem, Quagnoth, Mangara's Blessing). The
+    // `EventSourceControlledBy { Opponent }` constraint gates on the discard
+    // event's cause; mirrors the replacement form in `oracle_replacement.rs`.
+    if tag::<_, _, OracleError<'_>>(
+        "a spell or ability an opponent controls causes you to discard this card",
+    )
+    .parse(event)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Discarded;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        def.valid_target = Some(TargetFilter::Controller);
+        def.constraint = Some(
+            crate::types::ability::TriggerConstraint::EventSourceControlledBy {
+                controller: ControllerRef::Opponent,
+            },
+        );
+        // CR 113.6 + CR 113.6k: the source is the discarded card itself. By the time
+        // process_triggers scans the Discarded event, complete_discard_to_graveyard has
+        // already moved the card hand->graveyard (CR 701.9a), so the trigger must
+        // function from the graveyard it lands in (the same off-zone seam Necropotence-
+        // style self-discard triggers use). Exile keeps it live under a madness/RIP-class
+        // redirect (a redirected discard is still a discard).
+        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
+        return Some((TriggerMode::Discarded, def));
+    }
+
     // Determine subject and find "discards"/"discard" verb using nom alt()
     fn parse_discard_subject(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
         alt((
@@ -21288,6 +21318,33 @@ mod tests {
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    /// CR 109.5 + CR 603.2: "When a spell or ability an opponent controls causes
+    /// you to discard this card, [effect]" (Guerrilla Tactics, Sand Golem) — a
+    /// self-discard trigger gated by the `EventSourceControlledBy { Opponent }`
+    /// constraint. Issue #3109-style. (issue67)
+    #[test]
+    fn trigger_opponent_causes_you_to_discard_this_card() {
+        let def = parse_trigger_line(
+            "When a spell or ability an opponent controls causes you to discard this card, this card deals 4 damage to any target.",
+            "Guerrilla Tactics",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.constraint,
+            Some(
+                crate::types::ability::TriggerConstraint::EventSourceControlledBy {
+                    controller: ControllerRef::Opponent
+                }
+            )
+        );
+        // The discarded card has already moved hand->graveyard (or exile under a
+        // madness/RIP redirect) by the time the Discarded event is scanned, so the
+        // trigger must function off the battlefield to fire at all.
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard, Zone::Exile]);
     }
 
     /// CR 701.9 + CR 603.7c + CR 406.1: Necropotence's on-discard trigger

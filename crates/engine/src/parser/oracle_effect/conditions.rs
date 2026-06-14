@@ -1643,6 +1643,15 @@ pub(super) fn strip_suffix_conditional(
     let (condition_core, copy_retarget_tail) =
         peel_copy_retarget_tail_from_condition_text(condition_text);
     let effect_prefix = text[..if_pos].trim();
+    let effect_prefix_lower = lower[..if_pos].trim();
+    // CR 601.2f + CR 602.2b: do NOT peel the trailing "if [condition]" off a self
+    // cost-reduction sentence; the whole sentence must reach try_parse_cost_reduction
+    // (via strip_cost_reduction_node), whose own "if" arm re-homes the condition into
+    // CostReduction.condition (a ParsedCondition) and applies the coverage-honesty
+    // gate (unmodeled conditions stay a loud gap). #3223.
+    if crate::parser::oracle_cost::is_self_cost_reduction_prefix(effect_prefix_lower) {
+        return (None, text.to_string());
+    }
     let effect_text = if let Some(tail) = copy_retarget_tail {
         format!("{effect_prefix}, and {tail}")
     } else {

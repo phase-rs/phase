@@ -1512,7 +1512,15 @@ fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
 /// canonical source phrasing (`~`, `this creature`, `this permanent`, …,
 /// `enchanted creature`, `equipped creature`) composes identically.
 fn parse_subject_has_property(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_source_subject(input)?;
+    let (rest, _) = alt((
+        parse_source_subject,
+        // CR 201.5: Pronouns in self-referential granted abilities refer to
+        // the object that has the ability. Keep this scoped to the property
+        // grammar so it does not steal recipient-bound "it has a counter"
+        // duration clauses from `parse_recipient_has_counters`.
+        tag("it "),
+    ))
+    .parse(input)?;
     let (rest, _) = tag("has ").parse(rest)?;
     alt((
         value(
@@ -9250,6 +9258,27 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 7 },
             } => {}
             other => panic!("expected SelfPower GE 7, got {other:?}"),
+        }
+    }
+
+    /// Level Up: granted attack trigger uses the pronoun "it" in the draw gate.
+    #[test]
+    fn test_it_has_power_ge() {
+        let (rest, c) = parse_inner_condition("it has power 10 or greater").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            } => {}
+            other => panic!("expected SelfPower GE 10, got {other:?}"),
         }
     }
 

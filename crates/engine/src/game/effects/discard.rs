@@ -114,6 +114,7 @@ pub(crate) fn complete_discard_to_graveyard(
     events.push(GameEvent::Discarded {
         player_id,
         object_id,
+        source_id,
     });
     DiscardOutcome::Complete
 }
@@ -236,6 +237,7 @@ pub fn resolve(
                             events.push(GameEvent::Discarded {
                                 player_id,
                                 object_id: oid,
+                                source_id: Some(ability.source_id),
                             });
                         }
                         _ => {}
@@ -431,6 +433,7 @@ fn route_discard(
                 events.push(GameEvent::Discarded {
                     player_id: player,
                     object_id: oid,
+                    source_id,
                 });
             }
             _ => {}

@@ -13031,6 +13031,13 @@ pub enum TriggerConstraint {
     /// per opponent per turn. Used by Valgavoth, Harrower of Souls: "Whenever
     /// an opponent loses life for the first time during each of their turns, ..."
     OncePerOpponentPerTurn,
+    /// CR 109.5 + CR 603.2: Fires only when the triggering event was caused by a
+    /// spell or ability controlled by `controller` relative to the trigger's
+    /// controller. Mirrors [`ReplacementCondition::EventSourceControlledBy`] for
+    /// the trigger side — used by "when a spell or ability an opponent controls
+    /// causes you to discard this card, …" (Guerrilla Tactics, Sand Golem). The
+    /// event must carry the cause's source id (e.g. `GameEvent::Discarded.source_id`).
+    EventSourceControlledBy { controller: ControllerRef },
 }
 
 /// CR 603.6c: source-zone constraint for one clause of a zone-change trigger.
