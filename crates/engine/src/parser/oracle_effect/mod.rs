@@ -42436,6 +42436,7 @@ mod tests {
                             "branch {name} types {types:?} must include Artifact + {expected}"
                         );
                         assert!(
+                            // allow-noncombinator: test assertion on parsed output, not parsing dispatch
                             !name.contains("your choice of"),
                             "branch name must not leak list lead-in: {name}"
                         );
