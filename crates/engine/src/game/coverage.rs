@@ -10859,4 +10859,51 @@ mod tests {
             gaps
         );
     }
+
+    /// Building-block: a static whose modification tree carries an
+    /// `Effect::Unimplemented` (the dropped-conjunct residual emitted for the
+    /// "must be blocked by <filter> if able" lure) is NOT supported, so the card
+    /// is flagged as a coverage gap. This is the honest signal that survives the
+    /// swallow-check's whole-card `"condition":{` suppression. CR 509.1c.
+    #[test]
+    fn grant_ability_unimplemented_residual_is_unsupported_static() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+
+        let residual = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+            ))
+            .modifications(vec![ContinuousModification::GrantAbility {
+                definition: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Unimplemented {
+                        name: "must be blocked by a Dalek if able".to_string(),
+                        description: Some("must be blocked by a Dalek if able".to_string()),
+                    },
+                )),
+            }])
+            .description("must be blocked by a Dalek if able".to_string());
+
+        assert!(
+            !is_static_supported(&residual, &trigger_registry, &static_registry),
+            "an Unimplemented-carrying GrantAbility residual must be unsupported"
+        );
+
+        // Sanity: the same static with a real (supported) granted keyword IS
+        // supported — proving the gap signal comes from the Unimplemented effect,
+        // not from the GrantAbility wrapper itself.
+        let supported = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::FirstStrike,
+            }])
+            .description("first strike".to_string());
+        assert!(
+            is_static_supported(&supported, &trigger_registry, &static_registry),
+            "a plain keyword-grant continuous static must be supported"
+        );
+    }
 }
