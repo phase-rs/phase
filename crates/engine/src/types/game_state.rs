@@ -5485,6 +5485,16 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub commander_declined_zone_return: HashSet<ObjectId>,
 
+    /// CR 120.3 + CR 120.6 + CR 702.11b: Battlefield objects that have actually
+    /// dealt damage (combat or noncombat) since entering the battlefield. Sticky
+    /// per-object flag backing the `StaticCondition::SourceHasDealtDamage`
+    /// predicate (e.g. "has hexproof if it hasn't dealt damage yet"). Set only
+    /// when a nonzero amount of damage is actually dealt (CR 120.3/120.6, not the
+    /// would-deal amount of CR 120.1a); cleared when the object leaves the
+    /// battlefield so a flickered object starts with a clean slate.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub objects_that_dealt_damage: HashSet<ObjectId>,
+
     /// CR 500.7: Extra turns granted by effects, stored as a LIFO stack.
     /// Most recently created extra turn is taken first (pop from end).
     #[serde(default)]
@@ -6951,6 +6961,7 @@ impl GameState {
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
+            objects_that_dealt_damage: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
             debug_infinite_mana: BTreeSet::new(),
@@ -7228,6 +7239,7 @@ impl PartialEq for GameState {
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
+            && self.objects_that_dealt_damage == other.objects_that_dealt_damage
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip

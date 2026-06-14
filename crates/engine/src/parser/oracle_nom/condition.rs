@@ -1129,6 +1129,30 @@ fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCond
     .parse(rest)
 }
 
+/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
+/// `Not(SourceHasDealtDamage)` — the negated form of the sticky "has dealt
+/// damage since entering" gate (Palladia-Mors, the Ruiner; Karakyk Guardian:
+/// "has hexproof if it hasn't dealt damage yet"). Accepts the self-referential
+/// subjects the conditional-keyword templates use ("it", "~", "this creature",
+/// "this permanent"). Only the negated "hasn't" idiom appears in Oracle text, so
+/// no affirmative form is produced here.
+fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        tag("it "),
+        tag("~ "),
+        tag("this creature "),
+        tag("this permanent "),
+    ))
+    .parse(input)?;
+    value(
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        },
+        tag("hasn't dealt damage yet"),
+    )
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
@@ -1158,6 +1182,10 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Must precede `parse_source_is_type` so "has … counters on it" wins over
         // any other interpretation.
         parse_source_has_counters,
+        // CR 120.3 + CR 702.11b: "<subject> hasn't dealt damage yet" →
+        // Not(SourceHasDealtDamage). Specific full-phrase tag; placed before the
+        // generic predicates so it is not shadowed.
+        parse_source_hasnt_dealt_damage,
         // CR 400.7: Entered this turn.
         // Accept both the long "entered the battlefield this turn" and the abbreviated
         // "entered this turn" forms — Oracle templates vary between them for the same
@@ -4614,7 +4642,20 @@ fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<Target
         .parse(type_text)
         .ok()?;
     let (props, consumed) = parse_spell_history_origin_props(suffix)?;
-    if !suffix[consumed..].trim().is_empty() {
+    // CR 601.2a + CR 400.1: The cast-origin qualifier ("from anywhere other than
+    // your hand") and the timing qualifier ("this turn") are independent axes and
+    // may appear in either order. The `SpellsCastThisTurn` ref already encodes the
+    // "this turn" window, so a trailing time qualifier after the cast-origin zone
+    // suffix carries no extra filter information — accept and discard it. This is
+    // the qualifier-then-time word order (Impending Flux: "spells you've cast from
+    // anywhere other than your hand this turn") versus the time-then-qualifier
+    // order ("spells you've cast this turn from anywhere other than your hand"),
+    // which strips "this turn" before the cast-origin suffix ever reaches here.
+    let remainder = suffix[consumed..].trim();
+    let remainder = opt(tag::<_, _, OracleError<'_>>("this turn"))
+        .parse(remainder)
+        .map_or(remainder, |(rest, _)| rest);
+    if !remainder.trim().is_empty() {
         return None;
     }
 
@@ -7218,6 +7259,21 @@ mod tests {
             parse_inner_condition("this aura entered the battlefield this turn").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
+    }
+
+    // CR 120.3 + CR 702.11b: "it hasn't dealt damage yet" (Palladia-Mors,
+    // Karakyk Guardian conditional hexproof) → Not(SourceHasDealtDamage),
+    // fully consumed.
+    #[test]
+    fn test_it_hasnt_dealt_damage_yet() {
+        let (rest, c) = parse_inner_condition("it hasn't dealt damage yet").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            }
+        );
     }
 
     // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").

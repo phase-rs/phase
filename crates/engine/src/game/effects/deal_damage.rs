@@ -584,6 +584,24 @@ pub(crate) fn apply_damage_after_replacement(
             record.source_zone = obj.zone;
         }
         state.damage_dealt_this_turn.push_back(record);
+        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
+        // actually dealt damage (this branch is gated on `actual_amount > 0`, i.e.
+        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
+        // amount of CR 120.1a). Only battlefield-resident sources carry this
+        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
+        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
+        // so `flush_layers` recomputes the materialized keyword set that
+        // `has_hexproof` reads — otherwise the conditional hexproof grant for
+        // "has hexproof if it hasn't dealt damage yet" would never drop at the
+        // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
+        if state
+            .objects
+            .get(&ctx.source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+            && state.objects_that_dealt_damage.insert(ctx.source_id)
+        {
+            state.layers_dirty.mark_full();
+        }
     }
 
     // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
@@ -1415,6 +1433,196 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
             "a DamagePrevented event is emitted"
+        );
+    }
+
+    /// CR 702.11b + CR 613.1f + CR 120.3: DISCRIMINATING runtime test for
+    /// "has hexproof if it hasn't dealt damage yet" (Palladia-Mors, the Ruiner;
+    /// Karakyk Guardian). Proves the gate is read AT THE TARGETING CHECK:
+    ///   1. Before dealing damage, an opponent's bolt CANNOT target the creature
+    ///      (hexproof active → not in `target_slots[0].legal_targets`).
+    ///   2. After the creature deals combat damage, the same bolt CAN target it
+    ///      (hexproof gone) — this passes only because the `mark_full()` in the
+    ///      damage chokepoint forces `flush_layers` to recompute the materialized
+    ///      keyword set `has_hexproof` reads. Reverting that `mark_full()` leaves
+    ///      `layers_dirty == Clean`, the keyword set stale, and this step FAILS.
+    ///   3. A noncombat-damage source separately sets the same sticky flag.
+    ///   4. After the creature leaves and re-enters the battlefield (flicker), the
+    ///      flag is cleared and hexproof is restored (illegal target again).
+    #[test]
+    fn hexproof_if_hasnt_dealt_damage_drops_at_targeting_after_damage_restored_on_flicker() {
+        use crate::game::keywords::has_hexproof;
+        use crate::game::layers::flush_layers;
+        use crate::game::scenario::GameScenario;
+        use crate::game::zones::move_to_zone;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::phase::Phase;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        // P1 controls the conditional-hexproof creature; P0 is the opponent.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let guardian = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Karakyk Guardian",
+                3,
+                3,
+                "Flying, vigilance, trample\nThis creature has hexproof if it hasn't dealt damage yet.",
+            )
+            .id();
+        // A vanilla P1 creature for the guardian to deal noncombat-style damage to.
+        let victim = scenario.add_creature(P1, "Bear", 2, 2).id();
+        let bolt1 = scenario.add_bolt_to_hand(P0);
+        let bolt2 = scenario.add_bolt_to_hand(P0);
+        let mut runner = scenario.build();
+
+        // Layer 6 (CR 613.1f): the conditional grant is active while the gate
+        // (Not(SourceHasDealtDamage)) holds — i.e. before any damage is dealt.
+        flush_layers(runner.state_mut());
+        assert!(
+            has_hexproof(&runner.state().objects[&guardian]),
+            "guardian must have hexproof before it has dealt damage"
+        );
+
+        // STEP 1 — at the targeting check, an opponent's bolt cannot target it.
+        let bolt1_card = runner.state().objects[&bolt1].card_id;
+        let before = runner
+            .act(GameAction::CastSpell {
+                object_id: bolt1,
+                card_id: bolt1_card,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast bolt 1 (players are still legal targets)");
+        if let WaitingFor::TargetSelection { target_slots, .. } = &before.waiting_for {
+            assert!(
+                !target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(guardian)),
+                "hexproof creature must NOT be a legal target before dealing damage"
+            );
+        } else {
+            panic!("expected TargetSelection, got {:?}", before.waiting_for);
+        }
+        // Resolve bolt 1 harmlessly at a player so it leaves the stack.
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("retarget bolt 1 at a player");
+
+        // STEP 2 — the guardian deals COMBAT damage. Drive the production
+        // chokepoint (`apply_damage_after_replacement`) so the BLOCKER-1
+        // `mark_full()` path executes.
+        {
+            let state = runner.state_mut();
+            let ctx = DamageContext::from_source(state, guardian).expect("guardian source ctx");
+            let event = ProposedEvent::Damage {
+                source_id: guardian,
+                target: TargetRef::Object(victim),
+                amount: 1,
+                is_combat: true,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            apply_damage_after_replacement(state, &ctx, event, true, &mut events);
+            assert!(
+                state.objects_that_dealt_damage.contains(&guardian),
+                "sticky flag set after combat damage actually dealt"
+            );
+            // BLOCKER 1: the chokepoint marked layers fully dirty on first insert.
+            assert!(
+                state.layers_dirty.is_dirty(),
+                "deal_damage must mark layers dirty so the keyword set recomputes"
+            );
+        }
+
+        // The next action flushes layers; hexproof must now be gone AT the
+        // targeting check (the bolt can now target the guardian).
+        let bolt2_card = runner.state().objects[&bolt2].card_id;
+        let after = runner
+            .act(GameAction::CastSpell {
+                object_id: bolt2,
+                card_id: bolt2_card,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast bolt 2");
+        if let WaitingFor::TargetSelection { target_slots, .. } = &after.waiting_for {
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(guardian)),
+                "hexproof must be GONE at the targeting check after the creature dealt damage"
+            );
+        } else {
+            panic!("expected TargetSelection, got {:?}", after.waiting_for);
+        }
+        assert!(
+            !has_hexproof(&runner.state().objects[&guardian]),
+            "materialized keywords must no longer include hexproof after damage"
+        );
+        // Clear the in-flight bolt 2 selection by retargeting at a player.
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("retarget bolt 2 at a player");
+
+        // STEP 3 — a NONCOMBAT-damage source also sets the sticky flag. Use a
+        // fresh creature so combat vs. noncombat is isolated.
+        {
+            let state = runner.state_mut();
+            let id = create_object(
+                state,
+                CardId(9001),
+                P1,
+                "Noncombat Pinger".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let ctx = DamageContext::from_source(state, id).expect("pinger source ctx");
+            let event = ProposedEvent::Damage {
+                source_id: id,
+                target: TargetRef::Player(P0),
+                amount: 1,
+                is_combat: false,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            apply_damage_after_replacement(state, &ctx, event, false, &mut events);
+            assert!(
+                state.objects_that_dealt_damage.contains(&id),
+                "noncombat damage also sets the sticky flag"
+            );
+        }
+
+        // STEP 4 — flicker the guardian (battlefield → exile → battlefield). The
+        // sticky flag is cleared on the battlefield exit, restoring hexproof.
+        {
+            let state = runner.state_mut();
+            let mut events = Vec::new();
+            move_to_zone(state, guardian, Zone::Exile, &mut events);
+            assert!(
+                !state.objects_that_dealt_damage.contains(&guardian),
+                "flag cleared when the guardian leaves the battlefield"
+            );
+            move_to_zone(state, guardian, Zone::Battlefield, &mut events);
+            flush_layers(state);
+        }
+        assert!(
+            has_hexproof(&runner.state().objects[&guardian]),
+            "hexproof restored after flicker (clean slate, no damage dealt yet)"
         );
     }
 

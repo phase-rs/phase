@@ -323,6 +323,12 @@ pub(crate) fn apply_zone_exit_cleanup(
     if from == Zone::Battlefield {
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
+        // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
+        // belongs to the old object. ObjectId persists across this zone change, so
+        // clear it on a battlefield exit (death/bounce/exile/flicker) — otherwise a
+        // flickered "has hexproof if it hasn't dealt damage yet" creature would
+        // re-enter still treated as having dealt damage and never regain hexproof.
+        state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
         // CR 613.1 + CR 400.7: Copy effects are pruned above, but layer-derived

@@ -6016,6 +6016,32 @@ mod tests {
     }
 
     #[test]
+    fn cda_spells_cast_this_turn_cast_origin_qualifier_before_time() {
+        // CR 601.2a + CR 400.1: the cast-origin qualifier and the "this turn"
+        // timing window are independent axes and may appear in either order.
+        // Impending Flux uses qualifier-then-time ("…cast from anywhere other than
+        // your hand this turn"); the count must bind identically to the
+        // time-then-qualifier order above.
+        let expr = parse_cda_quantity(
+            "the number of spells you've cast from anywhere other than your hand this turn",
+        )
+        .expect("qualifier-then-time cast-origin clause must parse");
+        match expr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+            } => {
+                assert_eq!(scope, CountScope::Controller);
+                let filter = filter.expect("cast-origin clause must carry a filter");
+                assert_eq!(
+                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
+                    &cast_capable_zones_except(Zone::Hand),
+                );
+            }
+            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn cda_spells_cast_this_turn_bare_no_filter() {
         assert_eq!(
             parse_cda_quantity("the number of spells you've cast this turn"),
