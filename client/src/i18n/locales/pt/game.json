@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
     "changeBackground": "Alterar plano de fundo…",
+    "customizeLayout": "Personalizar layout…",
     "gameLog": "Registro do jogo",
     "debugLog": "Registro de depuração",
     "waitingForGame": "Aguardando o jogo...",

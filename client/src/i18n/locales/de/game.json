@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Doppelte Kreaturengruppen neu gruppieren",
     "changeBackground": "Hintergrund ändern…",
+    "customizeLayout": "Layout anpassen…",
     "gameLog": "Spielprotokoll",
     "debugLog": "Debug-Protokoll",
     "waitingForGame": "Warten auf Spiel...",

@@ -81,6 +81,35 @@
       "minimal": "Minimale"
     }
   },
+  "flexLayout": {
+    "title": "Disposition flexible",
+    "description": "Déplacez les panneaux et HUD où vous voulez et redimensionnez les zones du plateau.",
+    "edit": "Personnaliser la disposition…",
+    "done": "Terminé",
+    "reset": "Réinitialiser la disposition",
+    "preset": "Préréglage",
+    "hint": "Faites glisser un panneau pour le déplacer. Faites glisser les barres lumineuses pour redimensionner les zones.",
+    "scale": {
+      "stack": "Pile",
+      "tiles": "Tuiles",
+      "smaller": "Réduire la taille de {{label}}",
+      "larger": "Augmenter la taille de {{label}}"
+    },
+    "presets": {
+      "default": { "label": "Disposition 1", "description": "La disposition équilibrée standard." },
+      "layout2": { "label": "Disposition 2", "description": "Un champ de bataille plus grand avec les mains repliées." },
+      "layout3": { "label": "Disposition 3", "description": "Un tiers inférieur plus haut." }
+    },
+    "zones": {
+      "playerHud": "Votre HUD",
+      "opponentHud": "HUD de l'adversaire",
+      "stackPanel": "Pile",
+      "logPanel": "Journal",
+      "actionRail": "Actions",
+      "playerPiles": "Vos zones",
+      "opponentPiles": "Zones de l'adversaire"
+    }
+  },
   "audio": {
     "title": "Audio",
     "muteAll": "Tout couper",

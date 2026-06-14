@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Regrouper les groupes de créatures en double",
     "changeBackground": "Changer l'arrière-plan…",
+    "customizeLayout": "Personnaliser la disposition…",
     "gameLog": "Journal de partie",
     "debugLog": "Journal de débogage",
     "waitingForGame": "En attente de la partie...",

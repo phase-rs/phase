@@ -23,6 +23,8 @@ import {
  * - D: Copy game state JSON to clipboard (debug)
  * - Ctrl+D: Export game state JSON as a compressed ZIP (debug)
  * - `: Toggle debug panel
+ * - Ctrl+Shift+L: Toggle Flex Layout edit mode
+ * - Escape (in Flex Layout): Exit edit mode
  * - Triple-tap (touch): Toggle debug panel (iPad/mobile)
  */
 export function useKeyboardShortcuts(): void {
@@ -71,6 +73,14 @@ export function useKeyboardShortcuts(): void {
       const { gameState, waitingFor, dispatch, undo, stateHistory, gameMode } =
         useGameStore.getState();
       const uiState = useUiStore.getState();
+
+      // Flex Layout edit mode owns Escape while active so it can't fall through
+      // to game-action cancellation.
+      if (uiState.flexEditMode && e.key === "Escape") {
+        e.preventDefault();
+        uiState.setFlexEditMode(false);
+        return;
+      }
 
       if (uiState.helpSheetOpen) {
         if (e.key === "Escape") {
@@ -188,6 +198,14 @@ export function useKeyboardShortcuts(): void {
         case "`":
           e.preventDefault();
           uiState.toggleDebugPanel();
+          break;
+
+        case "l":
+        case "L":
+          if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
+            e.preventDefault();
+            uiState.toggleFlexEditMode();
+          }
           break;
       }
     };

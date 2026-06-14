@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Regroup duplicate creature groups",
     "changeBackground": "Change background…",
+    "customizeLayout": "Customize layout…",
     "gameLog": "Game log",
     "debugLog": "Debug log",
     "waitingForGame": "Waiting for game...",

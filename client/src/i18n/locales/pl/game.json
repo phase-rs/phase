@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
     "changeBackground": "Zmień tło…",
+    "customizeLayout": "Dostosuj układ…",
     "gameLog": "Dziennik gry",
     "debugLog": "Dziennik debugowania",
     "waitingForGame": "Oczekiwanie na grę...",

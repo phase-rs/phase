@@ -9,6 +9,7 @@ import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
@@ -281,6 +282,10 @@ interface ZoneSummaryTileProps {
 function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTileProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
+  // Aspect-preserving size multiplier for the collapsed overflow pill (absent ⇒
+  // 1). Anchored to the column's outer edge so it grows toward the central
+  // corridor rather than off-screen: lands hug the left, support the right.
+  const summaryScale = usePreferencesStore((s) => s.flexLayout.scales?.summaryTile) ?? 1;
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
@@ -395,6 +400,14 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       type="button"
       onClick={onOpen}
       data-grouped-ids={objectIds.join(" ")}
+      style={
+        summaryScale !== 1
+          ? {
+              transform: `scale(${summaryScale})`,
+              transformOrigin: zone === "support" ? "right center" : "left center",
+            }
+          : undefined
+      }
       className={`relative flex min-h-[3.25rem] min-w-[7.5rem] max-w-full flex-col justify-center rounded-lg border px-2 py-1.5 text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
         hasInteraction
           ? "border-cyan-300/60 bg-cyan-950/45 ring-1 ring-cyan-300/40"

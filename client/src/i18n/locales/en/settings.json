@@ -81,6 +81,35 @@
       "minimal": "Minimal"
     }
   },
+  "flexLayout": {
+    "title": "Flex Layout",
+    "description": "Drag panels and HUDs anywhere, and resize the board zones.",
+    "edit": "Customize layout…",
+    "done": "Done",
+    "reset": "Reset layout",
+    "preset": "Preset",
+    "hint": "Drag any panel to move it. Drag the glowing bars to resize zones.",
+    "scale": {
+      "stack": "Stack",
+      "tiles": "Tiles",
+      "smaller": "Decrease {{label}} size",
+      "larger": "Increase {{label}} size"
+    },
+    "presets": {
+      "default": { "label": "Layout 1", "description": "The standard balanced layout." },
+      "layout2": { "label": "Layout 2", "description": "A larger battlefield with tucked-away hands." },
+      "layout3": { "label": "Layout 3", "description": "A taller lower third." }
+    },
+    "zones": {
+      "playerHud": "Your HUD",
+      "opponentHud": "Opponent HUD",
+      "stackPanel": "Stack",
+      "logPanel": "Game Log",
+      "actionRail": "Actions",
+      "playerPiles": "Your Zones",
+      "opponentPiles": "Opponent Zones"
+    }
+  },
   "audio": {
     "title": "Audio",
     "muteAll": "Mute All",

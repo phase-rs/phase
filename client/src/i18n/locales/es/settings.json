@@ -81,6 +81,35 @@
       "minimal": "Mínima"
     }
   },
+  "flexLayout": {
+    "title": "Diseño flexible",
+    "description": "Arrastra los paneles y HUD a cualquier lugar y cambia el tamaño de las zonas del tablero.",
+    "edit": "Personalizar diseño…",
+    "done": "Listo",
+    "reset": "Restablecer diseño",
+    "preset": "Preajuste",
+    "hint": "Arrastra cualquier panel para moverlo. Arrastra las barras brillantes para redimensionar zonas.",
+    "scale": {
+      "stack": "Pila",
+      "tiles": "Mosaicos",
+      "smaller": "Reducir tamaño de {{label}}",
+      "larger": "Aumentar tamaño de {{label}}"
+    },
+    "presets": {
+      "default": { "label": "Diseño 1", "description": "El diseño equilibrado estándar." },
+      "layout2": { "label": "Diseño 2", "description": "Un campo de batalla más grande con las manos recogidas." },
+      "layout3": { "label": "Diseño 3", "description": "Un tercio inferior más alto." }
+    },
+    "zones": {
+      "playerHud": "Tu HUD",
+      "opponentHud": "HUD del rival",
+      "stackPanel": "Pila",
+      "logPanel": "Registro",
+      "actionRail": "Acciones",
+      "playerPiles": "Tus zonas",
+      "opponentPiles": "Zonas del rival"
+    }
+  },
   "audio": {
     "title": "Audio",
     "muteAll": "Silenciar todo",

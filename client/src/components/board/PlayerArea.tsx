@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore, DEFAULT_LAND_SUPPORT_RATIO } from "../../stores/preferencesStore.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
@@ -10,6 +11,8 @@ import { BattlefieldRow } from "./BattlefieldRow.tsx";
 import { BattlefieldZoneOverflow } from "./BattlefieldZoneOverflow.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommandDock } from "../zone/CommandDock.tsx";
+import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
+import type { DraggableTarget } from "../../hooks/useDraggableWidget.ts";
 
 /** Base scales — used when few cards; shrinks as more are added.
  *  On compact-height (landscape phones), lands shrink hard so creatures
@@ -69,6 +72,10 @@ export function PlayerArea({
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const isCompactHeight = useIsCompactHeight();
+  // Lands↔support split (lands' share of the middle row). One global ratio,
+  // applied symmetrically to every player area; absent ⇒ even halves.
+  const landSupportRatio =
+    usePreferencesStore((s) => s.flexLayout.landSupportRatio) ?? DEFAULT_LAND_SUPPORT_RATIO;
   // Combined support cluster: artifacts/enchantments then planeswalkers, in ONE
   // wrapping row (like the lands column) so it stays a single line until crowded.
   // Keeping it one row keeps the middle-row band ~one card tall so the flex-1
@@ -99,6 +106,10 @@ export function PlayerArea({
   // the same visual treatment as elimination for consistency.
   const isPhasedOut = player?.status?.type === "PhasedOut";
   const isMirrored = mode === "focused";
+  // The viewer's own area (mode "full"). Only this area exposes the lands↔support
+  // boundary markers so the editor grabs a single, predictable divider — the
+  // ratio it sets is global, so every area reflows in step.
+  const isOwnArea = mode === "full";
   const partitioned = battlefieldView;
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];
@@ -134,8 +145,11 @@ export function PlayerArea({
     <div className="flex min-h-0 min-w-0 items-stretch justify-between gap-2" data-debug-label="Middle Row">
       <div
         className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
-        style={landStyle}
+        // `flexGrow` overrides `flex-1`'s grow so the lands/support boundary
+        // sits at the stored ratio; shrink/basis from `flex-1` are unchanged.
+        style={{ ...landStyle, flexGrow: landSupportRatio }}
         data-debug-label="Lands"
+        data-flex-zone={isOwnArea ? "lands-col" : undefined}
       >
         <BattlefieldZoneOverflow
           groups={partitioned?.lands ?? []}
@@ -151,8 +165,9 @@ export function PlayerArea({
           separates the two sub-clusters without stacking them onto a second row. */}
       <div
         className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 ${supportAlignClass}`}
-        style={supportStyle}
+        style={{ ...supportStyle, flexGrow: 1 - landSupportRatio }}
         data-debug-label="Support"
+        data-flex-zone={isOwnArea ? "support-col" : undefined}
       >
         <BattlefieldZoneOverflow
           groups={supportGroups}
@@ -188,12 +203,26 @@ export function PlayerArea({
   // just above its middle row. z-20 keeps it
   // above resting cards (lands/support are z-10) but below a hovered card
   // (PermanentCard lifts to z-60), so a card slides over the HUD on hover.
+  // The player's own HUD is a shared-global widget; a HUD in `focused` mode is
+  // the 1v1 opponent (multiplayer routes its opponent HUD through GameBoard
+  // instead), keyed by the "oneVsOne" table size.
+  const hudTarget: DraggableTarget =
+    mode === "full"
+      ? { kind: "widget", key: "playerHud" }
+      : { kind: "opponentHud", tableSize: "oneVsOne" };
   const hudBand = hud ? (
     <div
       className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[130%] translate-y-full" : "top-[165%] -translate-y-full"}`}
       data-debug-label="HUD"
     >
-      {hud}
+      {/* Inner node owns the drag offset so the outer `-translate-x-1/2`
+          centering transform is never clobbered. */}
+      <DraggableWidget
+        target={hudTarget}
+        flexZone={mode === "full" ? "playerHud" : "opponentHud"}
+      >
+        {hud}
+      </DraggableWidget>
     </div>
   ) : null;
 
