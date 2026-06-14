@@ -439,11 +439,21 @@ pub(crate) fn grant_lingering_permissions(
                     // durational grants (Rebound's `UntilEndOfTurn` upkeep
                     // recast offer) are pruned at the correct boundary.
                     // `None` (the common case) preserves the standing
-                    // semantics used by Discover, Suspend, Nashi, etc.
-                    // Emry-class graveyard grants default to UntilEndOfTurn
-                    // when the parser did not carry an explicit duration.
+                    // semantics used by Discover, Suspend, Nashi, etc., whose
+                    // cards are exiled and stay castable until they leave exile
+                    // (cleared by `zones::apply_zone_exit_cleanup`).
+                    // CR 611.2a: An *in-place* grant on a card left in the hand
+                    // or graveyard (Emry, Sunforger searching to hand,
+                    // Electrodominance) is a continuous effect from this
+                    // ability's resolution; it must expire at cleanup if the
+                    // cast is declined, since the card never leaves a zone that
+                    // would trigger permission cleanup.
+                    // Default both in-place origins to UntilEndOfTurn when the
+                    // parser carried no explicit duration. (Exile-origin grants
+                    // keep `None` — they are pruned on leaving exile instead.)
                     duration: duration.clone().or_else(|| {
-                        (current_zone == Some(Zone::Graveyard)).then_some(Duration::UntilEndOfTurn)
+                        matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
+                            .then_some(Duration::UntilEndOfTurn)
                     }),
                     exile_instead_of_graveyard_on_resolve,
                 }
@@ -1098,6 +1108,42 @@ mod tests {
                     ..
                 } if *cost == ManaCost::zero()
             )));
+    }
+
+    /// CR 611.2a: A hand-origin in-place "you may cast it without paying its
+    /// mana cost" grant (Sunforger searches a card to hand, then casts it from
+    /// there) is a one-resolution offer. It must default to `UntilEndOfTurn` so
+    /// that if the cast is *declined* the grant is pruned at cleanup — otherwise
+    /// a `duration: None` grant lingers on the hand card and
+    /// `has_hand_alt_cost_permission` re-offers the free cast forever. Mirrors
+    /// the graveyard-origin (Emry) default.
+    #[test]
+    fn hand_in_place_grant_defaults_to_until_end_of_turn() {
+        let mut state = make_test_state();
+        let cheap = add_card_to_hand(&mut state, PlayerId(0), CardId(515));
+        let ability = electrodominance_hand_ability(3);
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
+
+        assert_eq!(state.objects[&cheap].zone, Zone::Hand);
+        assert!(
+            state.objects[&cheap]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost {
+                        duration: Some(Duration::UntilEndOfTurn),
+                        granted_to: Some(PlayerId(0)),
+                        ..
+                    }
+                )),
+            "hand-origin in-place grant must default to UntilEndOfTurn so a \
+             declined offer expires at cleanup; got {:?}",
+            state.objects[&cheap].casting_permissions
+        );
     }
 
     #[test]
