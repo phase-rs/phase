@@ -19,6 +19,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2c + CR 613.1: A resolution-time named choice is scoped to the
+    // Choose instruction that produces it. Clear any prior `last_named_choice`
+    // up front — before any early return, prompt, or random draw — so a stale
+    // value from an earlier ability cannot leak into a later continuation when
+    // this Choose resolves as a no-op (empty options) or pauses for UI input
+    // (interactive prompt). Each successful path below re-establishes it.
+    state.last_named_choice = None;
+
     let (choice_type, persist, selection) = match &ability.effect {
         Effect::Choose {
             choice_type,
@@ -74,10 +82,28 @@ pub fn resolve(
     // resolves against the randomly-chosen player.
     if selection.is_random() {
         use rand::seq::IndexedRandom; // rand 0.9: `choose` on `[T]` lives here.
-        let pick = options
-            .choose(&mut state.rng)
-            .expect("options non-empty (checked above)")
-            .clone();
+
+        // CR 609.3: A random draw can only pick from the legal option set. For a
+        // *random* selection the game makes the choice, so there is no
+        // controller decision and no free-text supply path — unlike the
+        // interactive prompt below, a player cannot fill in a `CardName` /
+        // `Word` / `Artist` value. The empty-options short-circuit above
+        // deliberately lets player-supplied types reach the prompt, which means
+        // they also reach this random branch with an empty engine option list
+        // (`options_supplied_by_player` is true). Drawing from an
+        // empty set is impossible: resolve as a no-op (do as much as possible —
+        // i.e. nothing) instead of panicking on `expect`. Any other choice type
+        // with an empty enumerated set was already short-circuited above, so in
+        // practice this guard fires for the player-supplied types; it is written
+        // defensively so no random draw can ever panic.
+        let Some(pick) = options.choose(&mut state.rng).cloned() else {
+            state.cost_payment_failed_flag = true;
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        };
         record_resolution_choice(
             state,
             &choice_type,
@@ -838,6 +864,66 @@ mod tests {
         assert_eq!(
             state.last_named_choice, None,
             "no pick is recorded when there are no options"
+        );
+    }
+
+    #[test]
+    fn random_choose_player_supplied_empty_options_is_no_op_not_panic() {
+        // Regression (PR #3203 review): a random selection over a
+        // *player-supplied* choice type (`CardName` / `Word` / `Artist`) reaches
+        // the random branch with an empty engine option list — the empty-options
+        // no-op short-circuit deliberately excludes player-supplied types so the
+        // interactive prompt can go up, but a random draw has no free-text supply
+        // path. Drawing from an empty set must resolve as a no-op (CR 609.3),
+        // never panic on `.expect`. This exercises each player-supplied variant.
+        for choice_type in [ChoiceType::CardName, ChoiceType::Word, ChoiceType::Artist] {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            let ability = make_choose_ability_with(
+                choice_type.clone(),
+                crate::types::ability::TargetSelectionMode::Random,
+            );
+            let mut events = Vec::new();
+            // Must not panic.
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(
+                !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+                "random {choice_type:?} with empty options must not raise a prompt"
+            );
+            assert_eq!(
+                state.last_named_choice, None,
+                "no pick is recorded when a random draw has no options ({choice_type:?})"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::EffectResolved { .. })),
+                "the effect still resolves (as a no-op) for {choice_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_clears_stale_last_named_choice_on_no_op() {
+        // Regression (PR #3203 review): `last_named_choice` is cleared at the
+        // start of `resolve` so a value left over from an earlier ability can't
+        // leak into a later continuation when this Choose resolves as a no-op.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // Stale value from a prior resolution.
+        state.last_named_choice = Some(crate::types::ability::ChoiceValue::Player(PlayerId(0)));
+        // An impossible engine-enumerated choice (all players already chosen).
+        let mut ability = make_choose_ability(ChoiceType::Player);
+        ability.chosen_players = vec![PlayerId(0), PlayerId(1)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.last_named_choice, None,
+            "a no-op Choose must not leave a stale last_named_choice behind"
         );
     }
 
