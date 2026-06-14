@@ -16656,3 +16656,41 @@ fn continuous_gets_for_each_counter_on_source_equipment() {
         "expected AddDynamicToughness(CountersOn{{Source, None}}), got {mods:?}"
     );
 }
+
+#[test]
+fn level_up_enchanted_creature_grant_attack_trigger_parses_multiply_counter() {
+    use crate::types::ability::{AbilityCondition, Comparator, Effect, QuantityExpr};
+
+    let def = parse_static_line(
+        "Enchanted creature has \"Whenever this creature attacks, double the number of +1/+1 counters on it. Then if it has power 10 or greater, draw a card.\"",
+    )
+    .expect("Level Up granted trigger should parse");
+
+    let grant = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::GrantTrigger { trigger } => Some(trigger.as_ref()),
+            _ => None,
+        })
+        .expect("expected GrantTrigger");
+    let execute = grant.execute.as_ref().expect("execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::MultiplyCounter { .. }
+    ));
+    let draw = execute.sub_ability.as_ref().expect("draw sibling");
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    assert!(
+        matches!(
+            draw.condition.as_ref(),
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+                ..
+            })
+        ),
+        "draw must be gated on power >= 10, got {:?}",
+        draw.condition
+    );
+}

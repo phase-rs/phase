@@ -268,6 +268,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::Discarded {
                 player_id,
                 object_id,
+                ..
             }
             | GameEvent::Cycled {
                 player_id,

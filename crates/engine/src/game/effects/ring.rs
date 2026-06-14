@@ -389,4 +389,45 @@ mod tests {
         ));
         assert_eq!(ability.player_scope, Some(PlayerFilter::Opponent));
     }
+
+    const RING_TRIGGER_ORACLE: &str = "Whenever the Ring tempts you, draw a card.";
+
+    #[test]
+    fn ring_tempts_you_observer_trigger_is_collected_and_draws() {
+        use crate::game::trigger_index;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let watcher = make_creature(&mut state, 10, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&watcher).unwrap();
+            obj.trigger_definitions
+                .push(parse_trigger_line(RING_TRIGGER_ORACLE, "Ring Watcher"));
+        }
+        trigger_index::reindex_object_triggers(&mut state, watcher);
+
+        let mut events = Vec::new();
+        let ability =
+            ResolvedAbility::new(Effect::RingTemptsYou, vec![], ObjectId(99), PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        triggers::process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Whenever the Ring tempts you must place a triggered ability on the stack"
+        );
+        let draw = state.stack.last().unwrap().ability().unwrap();
+        assert!(matches!(
+            draw.effect,
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+    }
 }

@@ -1627,7 +1627,37 @@ fn of_short_name_collides_with_possessive_zone_phrase(text: &str, short_name: &s
 /// ("Haliya, Guided by Light" → "Haliya"), "of"-based short names
 /// ("Rosie Cotton of South Lane" → "Rosie Cotton"), and first-word short names
 /// ("Sharuum the Hegemon" → "Sharuum"), plus generic phrases like "this creature".
+const RING_TEMPTS_YOU_PLACEHOLDER: &str = "\u{E0000}";
+
+// CR 701.54d: "Whenever the Ring tempts you" abilities trigger from the
+// temptation event, so this rules phrase must survive self-reference
+// normalization even on cards whose names contain "Ring".
+fn mask_ring_tempts_you_phrase(text: &str) -> String {
+    const PHRASE: &str = "the ring tempts you";
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains(PHRASE) {
+        return text.to_string();
+    }
+
+    let mut masked = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut lower_rest = lower.as_str();
+    while let Some(idx) = lower_rest.find(PHRASE) {
+        masked.push_str(&rest[..idx]);
+        masked.push_str(RING_TEMPTS_YOU_PLACEHOLDER);
+        rest = &rest[idx + PHRASE.len()..];
+        lower_rest = &lower_rest[idx + PHRASE.len()..];
+    }
+    masked.push_str(rest);
+    masked
+}
+
+fn unmask_ring_tempts_you_phrase(text: String) -> String {
+    text.replace(RING_TEMPTS_YOU_PLACEHOLDER, "the ring tempts you")
+}
+
 pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
+    let text = mask_ring_tempts_you_phrase(text);
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = card_name.strip_prefix("A-").unwrap_or(card_name);
 
@@ -1832,7 +1862,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     let effective_name_str = effective_name;
     result = result.replace("named ~", &format!("named {effective_name_str}"));
 
-    result
+    unmask_ring_tempts_you_phrase(result)
 }
 
 /// Strip a comparator prefix from a comparison clause, returning (Comparator, remainder).
@@ -1940,6 +1970,14 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_ring_watcher_preserves_ring_tempts_you_trigger() {
+        assert_eq!(
+            normalize_card_name_refs("Whenever the Ring tempts you, draw a card.", "Ring Watcher"),
+            "Whenever the ring tempts you, draw a card."
         );
     }
 

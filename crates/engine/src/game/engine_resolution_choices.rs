@@ -3044,7 +3044,15 @@ pub(super) fn handle_resolution_choice(
             }
             state.ring_bearer.insert(player, Some(target));
             crate::game::layers::mark_layers_full(state);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let waiting_for = finish_with_continuation(state, player, events);
+            // CR 603.2 + CR 701.54: RingTemptsYou observer triggers are batched
+            // while ChooseRingBearer pauses spell resolution (issue #1017).
+            if let Some(outcome) =
+                batch_or_drain_observer_triggers(state, events, events.len(), events.len())
+            {
+                return Ok(outcome);
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
             if !options.contains(&dungeon) {

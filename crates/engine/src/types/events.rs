@@ -333,6 +333,13 @@ pub enum GameEvent {
     Discarded {
         player_id: PlayerId,
         object_id: ObjectId,
+        /// CR 603.2 + CR 109.5: The spell/ability that caused this discard, if any
+        /// (effect- or cost-driven discards). `None` for a player's own
+        /// turn-based / hand-size discards. Carried from `ProposedEvent::Discard`
+        /// so triggers like "when a spell or ability an opponent controls causes
+        /// you to discard this card" can resolve the cause's controller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
     },
     DamageCleared {
         object_id: ObjectId,

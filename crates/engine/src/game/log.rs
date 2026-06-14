@@ -426,6 +426,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::Discarded {
             player_id,
             object_id,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" discards "),

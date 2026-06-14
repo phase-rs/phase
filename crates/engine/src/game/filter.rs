@@ -6076,6 +6076,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::Discarded {
             player_id: PlayerId(0),
             object_id: discarded,
+            source_id: None,
         });
 
         let filter =
@@ -6154,15 +6155,18 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::Discarded {
             player_id: PlayerId(0),
             object_id: discarded_creature,
+            source_id: None,
         });
         state.current_trigger_events = vec![
             GameEvent::Discarded {
                 player_id: PlayerId(0),
                 object_id: discarded_creature,
+                source_id: None,
             },
             GameEvent::Discarded {
                 player_id: PlayerId(0),
                 object_id: discarded_instant,
+                source_id: None,
             },
         ];
 
