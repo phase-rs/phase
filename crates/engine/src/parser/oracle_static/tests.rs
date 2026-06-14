@@ -12614,10 +12614,7 @@ fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplem
             "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.",
         )
         .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::Other("LinkedCollectionCounterPlayPermission".to_string())
-    );
+    assert_eq!(def.mode, StaticMode::LinkedCollectionCounterPlayPermission);
 }
 
 // --- Group B: Generic activated ability cost reduction ---

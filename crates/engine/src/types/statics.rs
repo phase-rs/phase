@@ -965,6 +965,29 @@ pub enum StaticMode {
         #[serde(default)]
         timing: ExileCastTiming,
     },
+    /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
+    /// "play a card from exile with a collection counter on it" permission is
+    /// live (Evelyn, the Covetous). Per CR 113.6, that play permission is a
+    /// static ability of the source and functions only while the source is on
+    /// the battlefield under the player's control; this marker is what
+    /// `casting.rs::source_has_collection_counter_play_permission` consults so
+    /// the per-card `CastingPermission::PlayFromExile` (collection-counter +
+    /// controller provenance) is honored only while a live source remains.
+    /// CR 601.2a: the permission authorizes moving a matching exiled card to
+    /// the stack / battlefield (playing it).
+    ///
+    /// Distinct from `ExileCastPermission`: that static is self-contained and
+    /// grants the cast itself, keyed on a source-identity exile pool. This is a
+    /// nullary marker; the actual permission lives on each exiled card as a
+    /// `CastingPermission::PlayFromExile`, linked by the collection counter
+    /// (not source identity), so the authority winks out if every source
+    /// leaves but the counter persists.
+    ///
+    /// RUNTIME: handled by direct match in
+    /// `casting.rs::source_has_collection_counter_play_permission`; coverage
+    /// support is via `is_data_carrying_static()` (mirrors the cast-permission
+    /// cluster, which is also runtime-by-direct-match, not registry-keyed).
+    LinkedCollectionCounterPlayPermission,
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -1578,6 +1601,7 @@ impl StaticMode {
             | StaticMode::AssignNoCombatDamage
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
             | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::Other(_) => None,
         }
     }
@@ -1870,6 +1894,9 @@ impl fmt::Display for StaticMode {
             } => {
                 write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
             }
+            StaticMode::LinkedCollectionCounterPlayPermission => {
+                write!(f, "LinkedCollectionCounterPlayPermission")
+            }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -1885,6 +1912,9 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
+            "LinkedCollectionCounterPlayPermission" => {
+                StaticMode::LinkedCollectionCounterPlayPermission
+            }
             s if parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").is_some() => {
                 StaticMode::MaxAttackersEachCombat {
                     max: parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").unwrap(),
