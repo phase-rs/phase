@@ -101,11 +101,6 @@ function FlexEditOverlayInner() {
   const applyFlexPreset = usePreferencesStore((s) => s.applyFlexPreset);
   const resetFlexLayout = usePreferencesStore((s) => s.resetFlexLayout);
   const activePreset = usePreferencesStore((s) => s.flexLayout.activePreset);
-  const setFlexScale = usePreferencesStore((s) => s.setFlexScale);
-  const stackScale = usePreferencesStore((s) => s.flexLayout.scales?.stack) ?? 1;
-  const summaryScale = usePreferencesStore((s) => s.flexLayout.scales?.summaryTile) ?? 1;
-  const actionScale = usePreferencesStore((s) => s.flexLayout.scales?.actionRail) ?? 1;
-  const pilesScale = usePreferencesStore((s) => s.flexLayout.scales?.playerPiles) ?? 1;
 
   const [m, setM] = useState<Measured>(EMPTY);
 
@@ -151,7 +146,12 @@ function FlexEditOverlayInner() {
             className="absolute rounded-lg ring-2 ring-sky-400/70 shadow-[0_0_12px_rgba(56,189,248,0.35)]"
             style={{ left: z.left, top: z.top, width: z.width, height: z.height }}
           >
-            <span className="absolute left-0 top-0 -translate-y-full rounded-t-md bg-sky-400 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-950">
+            {/* Grip + label sits ON the panel's top-left corner (not floating
+                above it) so a press falls through this pointer-events-none chrome
+                to the draggable panel beneath — matching the reorder cells, where
+                the grip rides the draggable element. */}
+            <span className="absolute left-0 top-0 flex items-center gap-1 rounded-tl-lg rounded-br-md bg-sky-400 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-950">
+              <span aria-hidden>⠿</span>
               {t(`flexLayout.zones.${z.key}`)}
             </span>
           </div>
@@ -209,73 +209,9 @@ function FlexEditOverlayInner() {
             {t("flexLayout.done")}
           </button>
         </div>
-        <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
-          <ScaleStepper
-            label={t("flexLayout.scale.stack")}
-            value={stackScale}
-            onChange={(v) => setFlexScale("stack", v)}
-          />
-          <ScaleStepper
-            label={t("flexLayout.scale.tiles")}
-            value={summaryScale}
-            onChange={(v) => setFlexScale("summaryTile", v)}
-          />
-          <ScaleStepper
-            label={t("flexLayout.zones.actionRail")}
-            value={actionScale}
-            onChange={(v) => setFlexScale("actionRail", v)}
-          />
-          <ScaleStepper
-            label={t("flexLayout.zones.playerPiles")}
-            value={pilesScale}
-            onChange={(v) => setFlexScale("playerPiles", v)}
-          />
-        </div>
         <span className="text-[11px] text-slate-400">{t("flexLayout.hint")}</span>
       </div>
     </>
-  );
-}
-
-/** Step size for the scale steppers — one tenth, matching the store's clamp
- *  granularity (0.5–2.0). */
-const SCALE_STEP = 0.1;
-
-/** A compact −/value/+ control for an aspect-preserving zone scale. The store
- *  clamps the committed value, so the buttons can overshoot freely. */
-function ScaleStepper({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (next: number) => void;
-}) {
-  const { t } = useTranslation("settings");
-  return (
-    <span className="flex items-center gap-1">
-      <span className="text-[11px] text-slate-300">{label}</span>
-      <button
-        type="button"
-        onClick={() => onChange(value - SCALE_STEP)}
-        aria-label={t("flexLayout.scale.smaller", { label })}
-        className="flex h-5 w-5 items-center justify-center rounded bg-slate-800 text-sm font-bold text-slate-200 hover:bg-slate-700"
-      >
-        −
-      </button>
-      <span className="w-9 text-center text-[11px] tabular-nums text-slate-200">
-        {Math.round(value * 100)}%
-      </span>
-      <button
-        type="button"
-        onClick={() => onChange(value + SCALE_STEP)}
-        aria-label={t("flexLayout.scale.larger", { label })}
-        className="flex h-5 w-5 items-center justify-center rounded bg-slate-800 text-sm font-bold text-slate-200 hover:bg-slate-700"
-      >
-        +
-      </button>
-    </span>
   );
 }
 

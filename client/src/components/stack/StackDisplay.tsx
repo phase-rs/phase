@@ -228,6 +228,8 @@ export function StackDisplay() {
       flexZone="stackPanel"
       className="pointer-events-none fixed z-[35]"
       style={panelAnchorStyle}
+      scaleKey="stack"
+      resizeCorner={dockedLeft ? "br" : "bl"}
     >
       <AnimatePresence>
         <motion.div

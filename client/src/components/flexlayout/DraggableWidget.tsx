@@ -4,6 +4,8 @@ import {
   useDraggableWidget,
   type DraggableTarget,
 } from "../../hooks/useDraggableWidget.ts";
+import { type FlexScaleKey } from "../../stores/preferencesStore.ts";
+import { ResizeHandle } from "./ResizeHandle.tsx";
 
 interface DraggableWidgetProps {
   /** What this wrapper repositions (a shared widget, or the table-size-keyed
@@ -15,6 +17,11 @@ interface DraggableWidgetProps {
   /** Positioning style carried from the original node (e.g. a zone rail's
    *  CSS-var style). Merged under the motion `x`/`y` so the drag offset wins. */
   style?: React.CSSProperties;
+  /** If set, the widget shows a corner resize grip in edit mode that scales
+   *  `scales[scaleKey]`. */
+  scaleKey?: FlexScaleKey;
+  /** Corner the resize grip sits at (default bottom-right). */
+  resizeCorner?: "br" | "bl";
   children: React.ReactNode;
 }
 
@@ -30,6 +37,8 @@ export function DraggableWidget({
   flexZone,
   className,
   style,
+  scaleKey,
+  resizeCorner,
   children,
 }: DraggableWidgetProps) {
   const {
@@ -54,9 +63,11 @@ export function DraggableWidget({
       // `pointer-events-none` (e.g. a zone rail whose dead space must not block
       // the board during play). Outside edit mode, defer to the className.
       style={{ ...style, ...motionStyle, pointerEvents: drag ? "auto" : undefined }}
-      className={className}
+      // Grab cursor in edit mode signals the whole widget is draggable.
+      className={drag ? `${className ?? ""} cursor-grab active:cursor-grabbing` : className}
     >
       {children}
+      {drag && scaleKey && <ResizeHandle scaleKey={scaleKey} corner={resizeCorner} />}
     </motion.div>
   );
 }

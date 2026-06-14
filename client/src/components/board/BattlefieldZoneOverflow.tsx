@@ -15,6 +15,7 @@ import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
+import { ResizeHandle } from "../flexlayout/ResizeHandle.tsx";
 
 type OverflowZone = "lands" | "support" | "creatures";
 type DrawerSide = "left" | "right";
@@ -286,6 +287,7 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
   // 1). Anchored to the column's outer edge so it grows toward the central
   // corridor rather than off-screen: lands hug the left, support the right.
   const summaryScale = usePreferencesStore((s) => s.flexLayout.scales?.summaryTile) ?? 1;
+  const flexEditMode = useUiStore((s) => s.flexEditMode);
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
@@ -396,6 +398,7 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
     || interaction.validTargets > 0;
 
   return (
+    <span className="relative inline-flex">
     <button
       type="button"
       onClick={onOpen}
@@ -465,6 +468,11 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
         </span>
       )}
     </button>
+      {/* Edit-mode corner grip scales the pill (anchored to its column edge). */}
+      {flexEditMode && (
+        <ResizeHandle scaleKey="summaryTile" corner={zone === "support" ? "bl" : "br"} />
+      )}
+    </span>
   );
 }
 

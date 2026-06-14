@@ -1186,6 +1186,7 @@ function GamePageContent({
           <DraggableWidget
             target={{ kind: "widget", key: "playerPiles" }}
             flexZone="playerPiles"
+            scaleKey="playerPiles"
             className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             // Anchor box-scale to the bottom-left dock corner.
             style={{ ...playerZoneRailStyle, transformOrigin: "bottom left" }}
@@ -1221,6 +1222,8 @@ function GamePageContent({
       <DraggableWidget
         target={{ kind: "widget", key: "actionRail" }}
         flexZone="actionRail"
+        scaleKey="actionRail"
+        resizeCorner="bl"
         className="fixed z-30 flex flex-col items-end gap-1.5"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",

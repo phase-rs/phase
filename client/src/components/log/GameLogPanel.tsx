@@ -170,7 +170,9 @@ export function GameLogPanel() {
             dragElastic={logDrag.dragElastic}
             onDragEnd={logDrag.onDragEnd}
             onClickCapture={logDrag.onClickCapture}
-            className="fixed bottom-0 right-0 top-0 z-[60] flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
+            className={`fixed bottom-0 right-0 top-0 z-[60] flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl ${
+              logDrag.drag ? "cursor-grab active:cursor-grabbing" : ""
+            }`}
             // Opacity (not an x-slide) so the Flex Layout drag offset, which
             // owns the x/y transform on this same fixed node, isn't fought by
             // the open/close animation.
