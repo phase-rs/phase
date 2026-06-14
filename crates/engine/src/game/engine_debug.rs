@@ -47,7 +47,7 @@ pub fn apply_debug_action(
             }
             crate::game::zone_pipeline::move_object(state, req, events);
             if simulate {
-                super::sba::check_state_based_actions(state, events);
+                super::sba::try_check_state_based_actions(state, events)?;
                 super::triggers::process_triggers(state, events);
             }
             crate::game::layers::mark_layers_full(state);
@@ -98,7 +98,7 @@ pub fn apply_debug_action(
             {
                 super::sacrifice::SacrificeOutcome::Complete => {
                     super::triggers::process_triggers(state, events); // CR 603: dies/LTB triggers
-                    super::sba::check_state_based_actions(state, events); // CR 704
+                    super::sba::try_check_state_based_actions(state, events)?; // CR 704
                 }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
                     state.waiting_for =
@@ -396,7 +396,7 @@ pub fn apply_debug_action(
         }
 
         DebugAction::RunStateBasedActions => {
-            super::sba::check_state_based_actions(state, events);
+            super::sba::try_check_state_based_actions(state, events)?;
             super::triggers::process_triggers(state, events);
         }
 
@@ -473,7 +473,8 @@ pub fn apply_debug_action(
                     // `MoveToZone { simulate: false }`.
                     if run_etb {
                         super::triggers::process_triggers(state, events); // CR 603: Process triggers
-                        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+                        super::sba::try_check_state_based_actions(state, events)?;
+                        // CR 704: Check SBAs
                     }
                 }
                 super::replacement::ReplacementResult::Prevented => {}
@@ -505,7 +506,7 @@ pub fn apply_debug_action(
             super::effects::token_copy::resolve(state, &ability, events)
                 .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             super::triggers::process_triggers(state, events);
-            super::sba::check_state_based_actions(state, events);
+            super::sba::try_check_state_based_actions(state, events)?;
         }
     }
 

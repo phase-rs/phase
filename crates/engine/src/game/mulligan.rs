@@ -12,6 +12,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::engine::EngineError;
 use super::turns;
 
 /// CR 103.5: A player's starting hand size is normally seven cards.
@@ -177,20 +178,27 @@ pub fn handle_mulligan_decision(
     player: PlayerId,
     choice: MulliganChoice,
     events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, String> {
+) -> Result<WaitingFor, EngineError> {
     let free_first = free_first_mulligan(state);
 
     // Snapshot the current pending list (we own a clone because the engine
     // borrows `state.waiting_for` immutably during match dispatch).
     let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for else {
-        return Err("handle_mulligan_decision called outside MulliganDecision".to_string());
+        return Err(EngineError::InvalidAction(
+            "handle_mulligan_decision called outside MulliganDecision".to_string(),
+        ));
     };
     let mut pending = pending.clone();
 
     let idx = pending
         .iter()
         .position(|e| e.player == player)
-        .ok_or_else(|| format!("Player {:?} is not in the mulligan pending set", player))?;
+        .ok_or_else(|| {
+            EngineError::InvalidAction(format!(
+                "Player {:?} is not in the mulligan pending set",
+                player
+            ))
+        })?;
     let current_count = pending[idx].mulligan_count;
 
     match choice {
@@ -223,12 +231,13 @@ pub fn handle_mulligan_decision(
             // object is in the actor's hand and is named "Serum Powder"
             // (CR 201.2 — name match is exact), then exile the entire hand
             // and redraw the same number of cards. Mulligan count unchanged.
-            handle_serum_powder(state, player, object_id, events)?;
+            handle_serum_powder(state, player, object_id, events)
+                .map_err(EngineError::InvalidAction)?;
             // Player remains in `pending` with the same mulligan_count.
         }
     }
 
-    Ok(advance_after_decision(state, pending, free_first, events))
+    advance_after_decision(state, pending, free_first, events)
 }
 
 /// CR 103.5b + Serum Powder Oracle text: "Any time you could mulligan and this
@@ -316,23 +325,23 @@ fn advance_after_decision(
     pending: Vec<MulliganDecisionEntry>,
     free_first: bool,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
     if !pending.is_empty() {
-        return WaitingFor::MulliganDecision {
+        return Ok(WaitingFor::MulliganDecision {
             pending,
             free_first_mulligan: free_first,
-        };
+        });
     }
 
     // All players have locked in their hands. Build the bottoms-phase pending
     // list from each player's final mulligan count.
-    enter_bottom_phase(state, events)
+    try_enter_bottom_phase(state, events)
 }
 
-/// CR 103.5: Enter the bottoms phase. Each player who took at least one
-/// counted mulligan (after free-first discount) must put N cards on the
-/// bottom of their library. Players choose simultaneously.
-fn enter_bottom_phase(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+fn try_enter_bottom_phase(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let free_first = free_first_mulligan(state);
     let pending: Vec<MulliganBottomEntry> = state
         .seat_order
@@ -366,9 +375,9 @@ fn enter_bottom_phase(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     if pending.is_empty() {
         state.final_mulligan_counts.clear();
         state.prepaid_mulligan_bottoms.clear();
-        finish_mulligans(state, events)
+        try_finish_mulligans(state, events)
     } else {
-        WaitingFor::MulliganBottomCards { pending }
+        Ok(WaitingFor::MulliganBottomCards { pending })
     }
 }
 
@@ -428,19 +437,27 @@ pub fn handle_mulligan_bottom(
     player: PlayerId,
     cards: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, String> {
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::MulliganBottomCards { pending } = &state.waiting_for else {
-        return Err("handle_mulligan_bottom called outside MulliganBottomCards".to_string());
+        return Err(EngineError::InvalidAction(
+            "handle_mulligan_bottom called outside MulliganBottomCards".to_string(),
+        ));
     };
     let mut pending = pending.clone();
 
     let idx = pending
         .iter()
         .position(|e| e.player == player)
-        .ok_or_else(|| format!("Player {:?} is not in the bottoms pending set", player))?;
+        .ok_or_else(|| {
+            EngineError::InvalidAction(format!(
+                "Player {:?} is not in the bottoms pending set",
+                player
+            ))
+        })?;
     let expected_count = pending[idx].count;
 
-    validate_bottom_selection(state, player, &cards, expected_count)?;
+    validate_bottom_selection(state, player, &cards, expected_count)
+        .map_err(EngineError::InvalidAction)?;
 
     // CR 103.5: pregame bottoming — route to the library bottom through the
     // pipeline's library-placement arm under the `PregameProcedure` exempt
@@ -456,7 +473,7 @@ pub fn handle_mulligan_bottom(
     if pending.is_empty() {
         state.final_mulligan_counts.clear();
         state.prepaid_mulligan_bottoms.clear();
-        Ok(finish_mulligans(state, events))
+        try_finish_mulligans(state, events)
     } else {
         Ok(WaitingFor::MulliganBottomCards { pending })
     }
@@ -528,24 +545,32 @@ pub fn resume_begin_game_abilities(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
+    try_resume_begin_game_abilities(state, events)
+        .expect("begin-game ability resume phase trigger prompt construction failed")
+}
+
+pub(super) fn try_resume_begin_game_abilities(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     while let Some(pending) = state.pending_begin_game_abilities.pop() {
-        let _ = resolve_ability_chain(state, &pending.ability, events, 0);
+        resolve_ability_chain(state, &pending.ability, events, 0).map_err(|err| {
+            EngineError::InvalidAction(format!("begin-game ability resolution failed: {err}"))
+        })?;
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return state.waiting_for.clone();
+            return Ok(state.waiting_for.clone());
         }
     }
 
     state.resolving_begin_game_abilities = false;
-    turns::auto_advance(state, events)
+    turns::try_auto_advance(state, events)
 }
 
-/// CR 103.5 + CR 800.4a: Re-entry point for elimination cleanup — drives the
-/// flow to the bottoms phase as if the decision phase had ended naturally.
-pub(crate) fn enter_bottom_phase_public(
+pub(crate) fn try_enter_bottom_phase_public(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
-    enter_bottom_phase(state, events)
+) -> Result<WaitingFor, EngineError> {
+    try_enter_bottom_phase(state, events)
 }
 
 /// TL:R 906.6a: Re-entry point after pruning an opening-hand bottom prompt.
@@ -553,20 +578,20 @@ pub(crate) fn enter_normal_mulligan_public(state: &GameState) -> WaitingFor {
     normal_mulligan_decision(state)
 }
 
-/// CR 103.5 + CR 800.4a: Re-entry point for elimination cleanup — drives the
-/// flow to game start as if all bottoms had been submitted.
-pub(crate) fn finish_mulligans_public(
+pub(crate) fn try_finish_mulligans_public(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
-    finish_mulligans(state, events)
+) -> Result<WaitingFor, EngineError> {
+    try_finish_mulligans(state, events)
 }
 
-/// All players have kept. Start the game properly.
-fn finish_mulligans(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+fn try_finish_mulligans(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     queue_begin_game_abilities(state);
     state.resolving_begin_game_abilities = true;
-    resume_begin_game_abilities(state, events)
+    try_resume_begin_game_abilities(state, events)
 }
 
 fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
@@ -670,7 +695,7 @@ mod tests {
         player: PlayerId,
         object_id: ObjectId,
         events: &mut Vec<GameEvent>,
-    ) -> Result<WaitingFor, String> {
+    ) -> Result<WaitingFor, EngineError> {
         let wf = handle_mulligan_decision(
             state,
             player,
@@ -686,7 +711,7 @@ mod tests {
         player: PlayerId,
         cards: Vec<ObjectId>,
         events: &mut Vec<GameEvent>,
-    ) -> Result<WaitingFor, String> {
+    ) -> Result<WaitingFor, EngineError> {
         let wf = handle_mulligan_bottom(state, player, cards, events)?;
         state.waiting_for = wf.clone();
         Ok(wf)

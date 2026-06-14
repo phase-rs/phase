@@ -18,6 +18,7 @@ use crate::types::zones::Zone;
 use super::combat;
 use super::combat_damage;
 use super::day_night;
+use super::engine::EngineError;
 use super::turn_control;
 use super::zones;
 
@@ -1417,7 +1418,9 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   - an active trigger prompt (`TriggerTargetSelection`, etc.) when
 ///     `pending_trigger` / `deferred_triggers` still hold unresolved work (CR
 ///     603.3). The caller MUST surface this prompt instead of granting priority.
-fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
+fn process_phase_triggers(
+    state: &mut GameState,
+) -> Result<(bool, Option<WaitingFor>), EngineError> {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
     let waiting_before = state.waiting_for.clone();
@@ -1433,9 +1436,28 @@ fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
     // the prior `.then(|| clone)` idiom was unsafe.
     let order_triggers_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
-    let active_trigger_prompt = (order_triggers_prompt.is_none()
-        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
-    .then(|| state.waiting_for.clone());
+    let active_trigger_prompt = if order_triggers_prompt.is_none()
+        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty())
+    {
+        if state.pending_trigger.is_some()
+            && !matches!(
+                state.waiting_for,
+                WaitingFor::TriggerTargetSelection { .. } | WaitingFor::DistributeAmong { .. }
+            )
+        {
+            match super::engine::begin_pending_trigger_target_selection(state)? {
+                Some(wf) => {
+                    state.waiting_for = wf.clone();
+                    Some(wf)
+                }
+                None => None,
+            }
+        } else {
+            Some(state.waiting_for.clone())
+        }
+    } else {
+        None
+    };
     // CR 117.5 + CR 118.12a: Unless-pay and other inline resolution prompts arm
     // `waiting_for` without `pending_trigger` after the trigger has reached the
     // stack and begun resolving. Surface any non-priority prompt
@@ -1458,13 +1480,20 @@ fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
         || state.pending_trigger.is_some()
         || !state.deferred_triggers.is_empty()
         || prompt.is_some();
-    (fired, prompt)
+    Ok((fired, prompt))
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+    try_auto_advance(state, events).expect("auto-advance phase trigger prompt construction failed")
+}
+
+pub(super) fn try_auto_advance(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     loop {
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return state.waiting_for.clone();
+            return Ok(state.waiting_for.clone());
         }
         // CR 703.4q + CR 616.1: A step-end empty-mana drain paused on a
         // player's CR 616.1 choice. Surface the prompt so the engine round-
@@ -1472,7 +1501,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
         // via the `EmptyManaPool` arm of `handle_replacement_choice`.
         if state.pending_phase_transition_progress.is_some() {
             state.deferred_step_trigger_resume = Some(state.phase);
-            return state.waiting_for.clone();
+            return Ok(state.waiting_for.clone());
         }
 
         // CR 800.4: If the active player has been eliminated, skip their
@@ -1490,11 +1519,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if !should_skip_step_now(state, Phase::Untap) {
                     let candidates = untap_choice_candidates(state, state.active_player);
                     if !candidates.is_empty() {
-                        return WaitingFor::UntapChoice {
+                        return Ok(WaitingFor::UntapChoice {
                             player: state.active_player,
                             candidates,
                             chosen_not_to_untap: Vec::new(),
-                        };
+                        });
                     }
                     execute_untap(state, events);
                 }
@@ -1511,18 +1540,18 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // applied before trigger conditions like "if you have the city's blessing"
                 // are evaluated (Twilight Prophet #1375).
                 let waiting_before_sba = state.waiting_for.clone();
-                super::sba::check_state_based_actions(state, events);
+                super::sba::try_check_state_based_actions(state, events)?;
                 if state.waiting_for != waiting_before_sba
                     && !matches!(state.waiting_for, WaitingFor::Priority { .. })
                 {
-                    return state.waiting_for.clone();
+                    return Ok(state.waiting_for.clone());
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
                 // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
                 // cards, two Howling Mines) require an ordering choice that must be
                 // surfaced before priority — see `process_phase_triggers`.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
-                    return prompt;
+                if let (_, Some(prompt)) = process_phase_triggers(state)? {
+                    return Ok(prompt);
                 }
                 // CR 503.2 + CR 117.1c: The active player ALWAYS receives priority
                 // during the upkeep step, regardless of whether triggers fired.
@@ -1530,9 +1559,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // user's `phase_stops` / full-control preferences) is decided by
                 // `run_auto_pass_loop` and the frontend, not by skipping the step
                 // here. Mirrors the pattern in PreCombatMain and DeclareBlockers.
-                return WaitingFor::Priority {
+                return Ok(WaitingFor::Priority {
                     player: state.active_player,
-                };
+                });
             }
             Phase::Draw => {
                 // CR 103.8: The starting player skips their first-turn draw
@@ -1549,26 +1578,26 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     continue;
                 }
                 if let Some(wf) = execute_draw(state, events) {
-                    return wf;
+                    return Ok(wf);
                 }
                 // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
-                    return prompt;
+                if let (_, Some(prompt)) = process_phase_triggers(state)? {
+                    return Ok(prompt);
                 }
                 // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
                 // during the draw step (after the turn-based draw and any triggers).
                 // See the Upkeep arm above for the rationale — same pattern.
-                return WaitingFor::Priority {
+                return Ok(WaitingFor::Priority {
                     player: state.active_player,
-                };
+                });
             }
             Phase::PreCombatMain | Phase::PostCombatMain => {
                 // CR 714.3b: As the precombat main phase begins, add a lore counter
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
                     if !add_lore_counters_to_sagas(state, events) {
-                        return state.waiting_for.clone();
+                        return Ok(state.waiting_for.clone());
                     }
                     super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                     // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
@@ -1580,37 +1609,37 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     // publishes SOS CR update.
                     let active = state.active_player;
                     if super::effects::paradigm::enqueue_offer_if_any(state, active) {
-                        return state.waiting_for.clone();
+                        return Ok(state.waiting_for.clone());
                     }
                 }
                 // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are
                 // put on the stack before the active player receives priority.
                 // CR 603.3b: surface a same-controller ordering prompt first.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
-                    return prompt;
+                if let (_, Some(prompt)) = process_phase_triggers(state)? {
+                    return Ok(prompt);
                 }
                 // CR 505.6: The active player receives priority during a main phase.
-                return WaitingFor::Priority {
+                return Ok(WaitingFor::Priority {
                     player: state.active_player,
-                };
+                });
             }
             Phase::BeginCombat => {
                 // CR 507.1: "At the beginning of combat" triggers fire here.
                 // Process triggers regardless of attackers — CR 507.1 says the step
                 // happens unconditionally; trigger conditions (e.g., ControlCount)
                 // are checked by the trigger system, not by skipping the step.
-                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
+                let (triggers_fired, ordering_prompt) = process_phase_triggers(state)?;
                 if triggers_fired {
                     state.combat = Some(crate::game::combat::CombatState::default());
                     // CR 603.3b: surface a same-controller ordering prompt before
                     // priority; combat state is set first so it exists when the
                     // ordered begin-combat triggers later resolve.
                     if let Some(prompt) = ordering_prompt {
-                        return prompt;
+                        return Ok(prompt);
                     }
-                    return WaitingFor::Priority {
+                    return Ok(WaitingFor::Priority {
                         player: state.active_player,
-                    };
+                    });
                 }
                 if combat::has_potential_attackers(state) {
                     state.combat = Some(crate::game::combat::CombatState::default());
@@ -1629,11 +1658,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 508.1: Active player declares attackers as a turn-based action.
                 let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
                 let valid_attack_targets = super::combat::get_valid_attack_targets(state);
-                return WaitingFor::DeclareAttackers {
+                return Ok(WaitingFor::DeclareAttackers {
                     player: state.active_player,
                     valid_attacker_ids,
                     valid_attack_targets,
-                };
+                });
             }
             Phase::DeclareBlockers => {
                 // CR 509.1: Defending player declares blockers as a turn-based action.
@@ -1657,12 +1686,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
                     let block_requirements =
                         super::combat::block_requirements_for_player(state, defending);
-                    return WaitingFor::DeclareBlockers {
+                    return Ok(WaitingFor::DeclareBlockers {
                         player: defending,
                         valid_blocker_ids,
                         valid_block_targets,
                         block_requirements,
-                    };
+                    });
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
                     state.phase = Phase::EndCombat;
@@ -1681,9 +1710,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 super::layers::flush_layers(state);
                 // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
                 // resolve_combat_damage may pause for interactive assignment (2+ blockers).
-                if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
+                if let Some(waiting) = combat_damage::try_resolve_combat_damage(state, events)? {
                     state.waiting_for = waiting.clone();
-                    return waiting;
+                    return Ok(waiting);
                 }
                 // CR 603.3b: combat-damage triggers ran inside resolve_combat_damage
                 // (process_combat_damage_triggers -> process_triggers). If 2+ triggers
@@ -1700,25 +1729,25 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // regular-step case, where resolve_combat_damage returns None but set
                 // `waiting_for` to the OrderTriggers prompt internally.
                 if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-                    return state.waiting_for.clone();
+                    return Ok(state.waiting_for.clone());
                 }
                 // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                    return state.waiting_for.clone();
+                    return Ok(state.waiting_for.clone());
                 }
                 // If triggers were placed on the stack (DamageReceived, dies, etc.),
                 // grant priority so they can resolve before advancing.
                 if !state.stack.is_empty() {
-                    return WaitingFor::Priority {
+                    return Ok(WaitingFor::Priority {
                         player: state.active_player,
-                    };
+                    });
                 }
                 advance_phase(state, events);
                 // Continue to EndCombat
             }
             Phase::EndCombat => {
                 // CR 511.1: "At end of combat" triggers fire here.
-                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
+                let (triggers_fired, ordering_prompt) = process_phase_triggers(state)?;
                 // CR 511.3: At end of combat, all creatures are removed from combat.
                 state.combat = None;
                 super::layers::prune_end_of_combat_effects(state);
@@ -1732,11 +1761,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if triggers_fired {
                     // CR 603.3b: surface a same-controller ordering prompt before priority.
                     if let Some(prompt) = ordering_prompt {
-                        return prompt;
+                        return Ok(prompt);
                     }
-                    return WaitingFor::Priority {
+                    return Ok(WaitingFor::Priority {
                         player: state.active_player,
-                    };
+                    });
                 }
                 advance_phase(state, events);
                 // Continue to PostCombatMain
@@ -1758,17 +1787,17 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
-                if let (_, Some(prompt)) = process_phase_triggers(state) {
-                    return prompt;
+                if let (_, Some(prompt)) = process_phase_triggers(state)? {
+                    return Ok(prompt);
                 }
-                return WaitingFor::Priority {
+                return Ok(WaitingFor::Priority {
                     player: state.active_player,
-                };
+                });
             }
             Phase::Cleanup => {
                 // CR 514: Cleanup step — discard to hand size (CR 514.1), remove damage and expire effects (CR 514.2).
                 if let Some(waiting) = execute_cleanup(state, events) {
-                    return waiting;
+                    return Ok(waiting);
                 }
                 advance_phase(state, events);
                 // advance_phase handles start_next_turn when wrapping Cleanup -> Untap
@@ -1782,6 +1811,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -1791,6 +1821,72 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 1;
         state
+    }
+
+    #[test]
+    fn process_phase_triggers_clears_pending_trigger_without_returning_stale_priority_prompt() {
+        let mut state = setup();
+        state.phase = Phase::Upkeep;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let source_id = ObjectId(99);
+        let pending = crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: Vec::new(),
+            description: Some("No target upkeep trigger".to_string()),
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let pending_for_state = pending.clone();
+        let stack_before = state.stack.len();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
+
+        let (fired, prompt) =
+            process_phase_triggers(&mut state).expect("phase trigger processing must succeed");
+
+        assert!(
+            !fired,
+            "a cleaned-up pending trigger with no prompt must not count as active trigger work"
+        );
+        assert!(
+            prompt.is_none(),
+            "stale priority must not be returned as an active phase-trigger prompt"
+        );
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_entry.is_none());
+        assert_eq!(
+            state.stack.len(),
+            stack_before,
+            "defensive cleanup must pop the in-construction stack entry"
+        );
     }
 
     #[test]

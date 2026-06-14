@@ -521,7 +521,7 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_batch_deliveries.is_some()
             {
-                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events)?;
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
                 }
@@ -545,7 +545,7 @@ pub(super) fn handle_replacement_choice(
                 // paused on this replacement choice (issue #535). The drain
                 // helper covers both: it runs the continuation chain (if any)
                 // then the ChangeZone iteration drain hook.
-                effects::drain_pending_continuation(state, events);
+                effects::try_drain_pending_continuation(state, events)?;
                 // CR 616.1e: The continuation may itself pause on another replacement
                 // (e.g., the second direction of fight damage hitting the same shield),
                 // in which case it sets `state.waiting_for` to the next ReplacementChoice.
@@ -577,7 +577,7 @@ pub(super) fn handle_replacement_choice(
                     // is set). Resume only when that bail happened — not when
                     // `advance_phase` alone paused the drain (unit tests).
                     state.deferred_step_trigger_resume = None;
-                    waiting_for = super::turns::auto_advance(state, events);
+                    waiting_for = super::turns::try_auto_advance(state, events)?;
                 } else {
                     state.deferred_step_trigger_resume = None;
                 }
@@ -629,7 +629,7 @@ pub(super) fn handle_replacement_choice(
                 };
                 effects::counters::drain_pending_counter_moves(state, events);
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    effects::drain_pending_continuation(state, events);
+                    effects::try_drain_pending_continuation(state, events)?;
                 }
                 return Ok(state.waiting_for.clone());
             }
@@ -646,7 +646,7 @@ pub(super) fn handle_replacement_choice(
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
-                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events)?;
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
@@ -816,7 +816,7 @@ pub(super) fn replay_deferred_entry_events(
         let delayed_events = super::triggers::check_delayed_triggers(state, &deferred);
         events.extend(delayed_events);
     }
-    effects::drain_pending_continuation(state, events);
+    effects::try_drain_pending_continuation(state, events)?;
     // CR 113.2c + CR 603.3b + CR 707.10: `process_triggers` above may have
     // paused on an interactive replayed ETB trigger fired by the realized
     // entry. When it pauses it sets `state.pending_trigger` for the active

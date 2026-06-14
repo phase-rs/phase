@@ -6,6 +6,7 @@ use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::engine::EngineError;
 use super::players;
 
 /// Eliminate a player from the game per CR 800.4.
@@ -17,7 +18,15 @@ use super::players;
 /// - For team-based formats (2HG): also eliminates all teammates
 /// - Checks if the game is over (1 or fewer living players/teams remain)
 pub fn eliminate_player(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
-    eliminate_players_simultaneously(state, &[player], events);
+    try_eliminate_player(state, player, events).expect("player elimination cleanup failed");
+}
+
+pub fn try_eliminate_player(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    try_eliminate_players_simultaneously(state, &[player], events)
 }
 
 /// CR 704.3 + CR 104.4a: Eliminate a set of players who lost in the SAME
@@ -34,6 +43,15 @@ pub fn eliminate_players_simultaneously(
     players_to_eliminate: &[PlayerId],
     events: &mut Vec<GameEvent>,
 ) {
+    try_eliminate_players_simultaneously(state, players_to_eliminate, events)
+        .expect("simultaneous player elimination cleanup failed");
+}
+
+pub fn try_eliminate_players_simultaneously(
+    state: &mut GameState,
+    players_to_eliminate: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     let mut eliminated_any = false;
 
     for &player in players_to_eliminate {
@@ -56,7 +74,7 @@ pub fn eliminate_players_simultaneously(
     }
 
     if !eliminated_any {
-        return;
+        return Ok(());
     }
 
     // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
@@ -73,7 +91,7 @@ pub fn eliminate_players_simultaneously(
         // CR 103.5: For simultaneous mulligan states, prune eliminated players
         // from the pending list. If the list becomes empty, advance the flow
         // by emitting MulliganStarted-equivalent transition state.
-        prune_mulligan_pending(state, events);
+        prune_mulligan_pending(state, events)?;
 
         // CR 603.3b + CR 800.4a: Resolve any in-flight trigger-ordering pass
         // around the elimination — drop triggers controlled by eliminated
@@ -88,13 +106,18 @@ pub fn eliminate_players_simultaneously(
             }
         }
     }
+
+    Ok(())
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from in-flight mulligan
 /// pending lists. If pruning empties the decision phase, transition to the
 /// bottoms phase (or finish mulligans). If it empties the bottoms phase,
 /// finish mulligans directly.
-fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn prune_mulligan_pending(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     // CR 800.4a: Drop any final-mulligan-count entries for players who have
     // been eliminated. Symmetric with the pending-list pruning below so
     // enter_bottom_phase never sees stale entries for dead players.
@@ -122,7 +145,7 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .filter(|e| players::is_alive(state, e.player))
                 .collect();
             if alive.is_empty() {
-                state.waiting_for = super::mulligan::enter_bottom_phase_public(state, events);
+                state.waiting_for = super::mulligan::try_enter_bottom_phase_public(state, events)?;
             } else {
                 state.waiting_for = WaitingFor::MulliganDecision {
                     pending: alive,
@@ -138,7 +161,7 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if alive.is_empty() {
                 state.final_mulligan_counts.clear();
                 state.prepaid_mulligan_bottoms.clear();
-                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
+                state.waiting_for = super::mulligan::try_finish_mulligans_public(state, events)?;
             } else {
                 state.waiting_for = WaitingFor::MulliganBottomCards { pending: alive };
             }
@@ -159,6 +182,8 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
         _ => {}
     }
+
+    Ok(())
 }
 
 /// CR 603.3b + CR 800.4a: Resolve an in-flight trigger-ordering pass when one

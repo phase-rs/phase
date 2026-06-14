@@ -153,11 +153,11 @@ pub fn apply(
     state.die_result_this_resolution = None;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
-    reconcile_terminal_result(state, &mut result);
+    reconcile_terminal_result(state, &mut result)?;
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
-    reconcile_terminal_result(state, &mut result);
+    reconcile_terminal_result(state, &mut result)?;
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
     // finalized and the next affordability probe runs. No-op when none flagged.
@@ -173,7 +173,10 @@ pub fn apply(
     Ok(result)
 }
 
-fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+fn reconcile_terminal_result(
+    state: &mut GameState,
+    result: &mut ActionResult,
+) -> Result<(), EngineError> {
     // Safety net (fixes #962): If a player-loss SBA would eliminate a player,
     // run SBAs now. CR 704.3 normally checks SBAs when a player would receive
     // priority, but skipping them here can leave the engine waiting on a dead
@@ -183,7 +186,7 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // exception as the real player-loss SBA checks, and stays narrower than the
     // full SBA loop to avoid unrelated mid-resolution SBA prompts.
     if sba::has_pending_player_loss_sba(state) {
-        sba::check_state_based_actions(state, &mut result.events);
+        sba::try_check_state_based_actions(state, &mut result.events)?;
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
         result.waiting_for = state.waiting_for.clone();
@@ -194,6 +197,7 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
     }
+    Ok(())
 }
 
 fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
@@ -285,7 +289,7 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
+        effects::try_drain_pending_continuation(state, events)?;
     }
     Ok(())
 }
@@ -369,7 +373,7 @@ fn pass_priority_once_with_pipeline(
     // submitter (the controller), which would mis-count consecutive passes and
     // soft-lock the game.
     let current_seat = turn_control::priority_seat(state);
-    let wf = priority::handle_priority_pass(current_seat, state, events);
+    let wf = priority::handle_priority_pass(current_seat, state, events)?;
     sync_waiting_for(state, &wf);
 
     // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
@@ -379,7 +383,7 @@ fn pass_priority_once_with_pipeline(
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
+        effects::try_drain_pending_continuation(state, events)?;
     }
 
     let skip_triggers =
@@ -1284,16 +1288,16 @@ fn finalize_copy_retarget(
     // CR 707.10c + CR 603.2: Copy observers (Magecraft) must drain only after
     // the copy's targets are finalized, not while `CopyRetarget` is still open.
     if let Some(wf) =
-        triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+        triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)?
     {
         state.waiting_for = wf;
         state.priority_player = player;
-        effects::drain_pending_continuation(state, events);
+        effects::try_drain_pending_continuation(state, events)?;
         return Ok(());
     }
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    effects::try_drain_pending_continuation(state, events)?;
     Ok(())
 }
 
@@ -1418,7 +1422,7 @@ fn apply_action(
     // owned it (see `eliminate_player`).
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        super::elimination::eliminate_player(state, player_id, &mut events);
+        super::elimination::try_eliminate_player(state, player_id, &mut events)?;
         return Ok(ActionResult {
             events,
             waiting_for: state.waiting_for.clone(),
@@ -2604,7 +2608,7 @@ fn apply_action(
             });
             state.waiting_for = WaitingFor::Priority { player: *player };
             state.priority_player = *player;
-            effects::drain_pending_continuation(state, &mut events);
+            effects::try_drain_pending_continuation(state, &mut events)?;
             state.waiting_for.clone()
         }
         (
@@ -3356,13 +3360,11 @@ fn apply_action(
             // with bumped count if they mulliganed, or retained with the
             // same count if they used Serum Powder) or advances to the next
             // phase when the pending set is empty.
-            mulligan::handle_mulligan_decision(state, actor, choice, &mut events)
-                .map_err(EngineError::InvalidAction)?
+            mulligan::handle_mulligan_decision(state, actor, choice, &mut events)?
         }
         (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
             // CR 103.5: `actor` is already authorized as a member of `pending`.
-            mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)
-                .map_err(EngineError::InvalidAction)?
+            mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)?
         }
         (WaitingFor::OpeningHandBottomCards { .. }, GameAction::SelectCards { cards }) => {
             // TL:R 906.6a/e: `actor` is already authorized as a member of
@@ -3423,7 +3425,7 @@ fn apply_action(
                 let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
                 turns::execute_untap_with_choices(state, &mut events, &skipped);
                 turns::advance_phase(state, &mut events);
-                turns::auto_advance(state, &mut events)
+                turns::try_auto_advance(state, &mut events)?
             }
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
@@ -3613,9 +3615,12 @@ fn apply_action(
                     // CR 616.1 case, but the aura-host resume is the ONLY drain
                     // site for an `NeedsAuraAttachmentChoice` pause.
                     if state.pending_batch_deliveries.is_some() {
-                        super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+                        super::zone_pipeline::drain_pending_batch_deliveries(
+                            state,
+                            &mut events,
+                        )?;
                     }
-                    effects::drain_pending_continuation(state, &mut events);
+                    effects::try_drain_pending_continuation(state, &mut events)?;
                     return Ok(ActionResult {
                         events,
                         waiting_for: state.waiting_for.clone(),
@@ -3651,9 +3656,9 @@ fn apply_action(
             // CR 603.10a + CR 616.1: drain a deferred batch completion parked
             // behind this aura-attachment pause (see the sibling path above).
             if state.pending_batch_deliveries.is_some() {
-                super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+                super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events)?;
             }
-            effects::drain_pending_continuation(state, &mut events);
+            effects::try_drain_pending_continuation(state, &mut events)?;
             state.waiting_for.clone()
         }
         (
@@ -4317,7 +4322,7 @@ fn apply_action(
             });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
+            effects::try_drain_pending_continuation(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 701.56a: Time travel — player selected objects for the current phase
@@ -4365,7 +4370,7 @@ fn apply_action(
                     });
                     state.waiting_for = WaitingFor::Priority { player: p };
                     state.priority_player = p;
-                    effects::drain_pending_continuation(state, &mut events);
+                    effects::try_drain_pending_continuation(state, &mut events)?;
                     state.waiting_for.clone()
                 }
             } else {
@@ -4375,7 +4380,7 @@ fn apply_action(
                 });
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                effects::try_drain_pending_continuation(state, &mut events)?;
                 state.waiting_for.clone()
             }
         }
@@ -4433,7 +4438,7 @@ fn apply_action(
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
             state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
-            effects::drain_pending_continuation(state, &mut events);
+            effects::try_drain_pending_continuation(state, &mut events)?;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;
             state.waiting_for.clone()
@@ -4673,7 +4678,7 @@ fn apply_action(
                     "deferred-trigger drain entered with construction still active",
                 );
                 if let Some(waiting_for) =
-                    triggers::drain_deferred_trigger_queue(state, &mut events)
+                    triggers::drain_deferred_trigger_queue(state, &mut events)?
                 {
                     waiting_for
                 } else {
@@ -4683,7 +4688,7 @@ fn apply_action(
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                effects::try_drain_pending_continuation(state, &mut events)?;
                 state.waiting_for.clone()
             }
         }
@@ -4712,7 +4717,7 @@ fn apply_action(
             state.priority_player = p;
             effects::counters::drain_pending_counter_moves(state, &mut events);
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                effects::drain_pending_continuation(state, &mut events);
+                effects::try_drain_pending_continuation(state, &mut events)?;
             }
             state.waiting_for.clone()
         }
@@ -4909,7 +4914,7 @@ fn apply_retarget(
     });
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    effects::try_drain_pending_continuation(state, events)?;
     Ok(state.waiting_for.clone())
 }
 
@@ -6600,7 +6605,15 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
 
 /// CR 607.2a + CR 406.6: Check if any exile-return sources have left the battlefield.
 /// If so, move the exiled cards back — linked abilities track which cards were exiled by the source.
+#[cfg(test)]
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    try_check_exile_returns(state, events).expect("exile return check cannot fail")
+}
+
+pub(super) fn try_check_exile_returns(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
 
     for event in events.iter() {
@@ -6626,7 +6639,7 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
     }
 
     if to_return.is_empty() {
-        return;
+        return Ok(());
     }
 
     // CR 610.3 + CR 614.6: Return each exiled card to its previous zone through
@@ -6705,7 +6718,7 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
                 reqs,
                 Some(completion),
                 events,
-            ),
+            )?,
             super::zone_pipeline::BatchMoveResult::NeedsChoice
         ) {
             // CR 616.1 / CR 303.4f: this group paused; its tail + cleanup are
@@ -6714,9 +6727,10 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
             // links of any unprocessed group remain in `exile_links` until their
             // (now-gone) source re-checks — acceptable, as multi-destination
             // returns from one source-leaves event do not occur in the pool.
-            return;
+            return Ok(());
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6886,7 +6900,7 @@ mod tests {
             log_entries: Vec::new(),
         };
 
-        reconcile_terminal_result(&mut state, &mut result);
+        reconcile_terminal_result(&mut state, &mut result).expect("terminal reconcile");
 
         assert_eq!(state.waiting_for, original_waiting_for);
         assert_eq!(result.waiting_for, original_waiting_for);
@@ -6913,7 +6927,7 @@ mod tests {
             log_entries: Vec::new(),
         };
 
-        reconcile_terminal_result(&mut state, &mut result);
+        reconcile_terminal_result(&mut state, &mut result).expect("terminal reconcile");
 
         // CR 704.5a: An unprotected player at 0 life loses before the engine
         // keeps waiting for that player's non-priority discard choice.

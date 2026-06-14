@@ -195,6 +195,7 @@ fn drain_spell_copied_observer_triggers(
             crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
                 state, events,
             )
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?
         {
             state.waiting_for = wf;
         }

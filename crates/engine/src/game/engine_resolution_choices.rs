@@ -42,7 +42,7 @@ fn batch_or_drain_observer_triggers(
     events: &mut Vec<GameEvent>,
     event_slice_start: usize,
     event_slice_end: usize,
-) -> Option<ResolutionChoiceOutcome> {
+) -> Result<Option<ResolutionChoiceOutcome>, EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // B1: this action settled. Merge this slice's observer triggers into
         // the parked queue before draining — otherwise the last segment's
@@ -54,12 +54,12 @@ fn batch_or_drain_observer_triggers(
             .cloned()
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
-        if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
-            return Some(ResolutionChoiceOutcome::WaitingFor(wf));
+        if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events)? {
+            return Ok(Some(ResolutionChoiceOutcome::WaitingFor(wf)));
         }
-        Some(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+        Ok(Some(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
             state.waiting_for.clone(),
-        ))
+        )))
     } else {
         // B2: paused — `run_post_action_pipeline` will not scan this action.
         // Park this move's observer triggers for a later settle.
@@ -69,7 +69,7 @@ fn batch_or_drain_observer_triggers(
             .cloned()
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
-        None
+        Ok(None)
     }
 }
 
@@ -343,7 +343,9 @@ pub(super) fn handle_resolution_choice(
             for &card_id in &bottom_cards {
                 player_state.library.push_back(card_id);
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::CoinFlipKeepChoice {
@@ -385,7 +387,7 @@ pub(super) fn handle_resolution_choice(
             // whole flip effect completed — drain back to Priority.
             let wf = match next {
                 Some(wf) => wf,
-                None => finish_with_continuation(state, player, events),
+                None => try_finish_with_continuation(state, player, events)?,
             };
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
@@ -449,10 +451,10 @@ pub(super) fn handle_resolution_choice(
                 reqs,
                 Some(completion),
                 events,
-            ) {
+            )? {
                 crate::game::zone_pipeline::BatchMoveResult::Done => {
                     // `move_objects_simultaneously_then` already ran the
-                    // completion (reveal-marker cleanup + `finish_with_continuation`).
+                    // completion (reveal-marker cleanup + `try_finish_with_continuation`).
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
                 crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -515,7 +517,9 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
 
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                    state, player, events,
+                )?)
             }
         }
         // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
@@ -653,9 +657,9 @@ pub(super) fn handle_resolution_choice(
                     emit_reveal_until_resolved: None,
                 }),
                 events,
-            ) {
+            )? {
                 crate::game::zone_pipeline::BatchMoveResult::Done => {
-                    // The completion ran inline (`finish_with_continuation`), so
+                    // The completion ran inline (`try_finish_with_continuation`), so
                     // `state.waiting_for` is the post-drain priority/continuation
                     // state.
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -686,7 +690,9 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
                 // CR 107.1c: declining ends the loop; drain any trailing chain.
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                    state, player, events,
+                )?)
             }
         }
         (
@@ -737,7 +743,9 @@ pub(super) fn handle_resolution_choice(
                 all_to_bottom.push(hit_card);
                 crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
 
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                    state, player, events,
+                )?)
             }
         }
         (
@@ -778,7 +786,9 @@ pub(super) fn handle_resolution_choice(
                 all_to_bottom.push(hit_card);
                 crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
 
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                    state, player, events,
+                )?)
             }
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
@@ -807,7 +817,7 @@ pub(super) fn handle_resolution_choice(
                 // CR 601.2: "Up to N" — the controller may stop early. Finish the
                 // window and run the continuation (Exile ~).
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    finish_with_continuation(state, player, events),
+                    try_finish_with_continuation(state, player, events)?,
                 ));
             };
             // CR 608.2c: Validate the choice against the offered candidate set.
@@ -910,14 +920,18 @@ pub(super) fn handle_resolution_choice(
                 kind: EffectKind::Learn,
                 source_id: ObjectId(0),
             });
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::TopOrBottomChoice { player, object_id },
             GameAction::ChooseTopOrBottom { top },
         ) => {
             zones::move_to_library_position(state, object_id, top, events);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         // CR 107.1c + CR 107.14: Commit the chosen amount for a "pay any amount
         // of X" prompt. Deducts the resource, emits the matching resource event,
@@ -1001,7 +1015,7 @@ pub(super) fn handle_resolution_choice(
                     cont.chain.set_chosen_x_recursive(total);
                 }
             }
-            let mut waiting_for = finish_with_continuation(state, player, events);
+            let mut waiting_for = try_finish_with_continuation(state, player, events)?;
             if let WaitingFor::PayAmountChoice {
                 accumulated: next_accumulated,
                 ..
@@ -1034,7 +1048,9 @@ pub(super) fn handle_resolution_choice(
                 player,
             );
             let _ = effects::populate::create_token_copy(state, token_id, &dummy_ability, events);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::ClashChooseOpponent {
@@ -1059,7 +1075,7 @@ pub(super) fn handle_resolution_choice(
             // sub_ability here and hand priority back to the clashing player.
             if !matches!(state.waiting_for, WaitingFor::ClashCardPlacement { .. }) {
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                effects::try_drain_pending_continuation(state, events)?;
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -1080,7 +1096,9 @@ pub(super) fn handle_resolution_choice(
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                    state, player, events,
+                )?)
             }
         }
         // CR 701.38: Tally a vote, then either advance to the same voter's
@@ -1184,9 +1202,9 @@ pub(super) fn handle_resolution_choice(
                     &new_ballots,
                     events,
                 );
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
                     state, controller, events,
-                ))
+                )?)
             }
         }
         // CR 700.3 + CR 700.3a + CR 101.4: Subject submits their partition;
@@ -1299,7 +1317,9 @@ pub(super) fn handle_resolution_choice(
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                    state, player, events,
+                )?)
             }
         }
         (
@@ -1382,7 +1402,7 @@ pub(super) fn handle_resolution_choice(
                     // On a mid-pile CR 616.1 ordering pause, defer the
                     // priority/continuation drain (a cleanup-only `RevealRestPile`
                     // completion: empty pile, no markers/publish, just
-                    // `finish_with_continuation`) so it runs once the pile lands,
+                    // `try_finish_with_continuation`) so it runs once the pile lands,
                     // and surface the parked prompt instead of draining over it.
                     let reqs: Vec<_> = unkept
                         .iter()
@@ -1415,7 +1435,7 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    finish_with_continuation(state, player, events),
+                    try_finish_with_continuation(state, player, events)?,
                 ));
             }
             if let Some(kept_zone) = kept_destination {
@@ -1512,7 +1532,9 @@ pub(super) fn handle_resolution_choice(
                 cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
                 cont.chain.context.optional_effect_performed = !kept.is_empty();
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::SurveilChoice { player, cards },
@@ -1562,7 +1584,7 @@ pub(super) fn handle_resolution_choice(
                 reqs,
                 Some(completion),
                 events,
-            );
+            )?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1585,7 +1607,7 @@ pub(super) fn handle_resolution_choice(
                 }
                 set_priority(state, player);
                 if decline_runs_continuation {
-                    effects::drain_pending_continuation(state, events);
+                    effects::try_drain_pending_continuation(state, events)?;
                 } else {
                     state.pending_continuation = None;
                 }
@@ -1636,7 +1658,7 @@ pub(super) fn handle_resolution_choice(
                     cont.chain.context.optional_effect_performed = true;
                 }
             }
-            effects::drain_pending_continuation(state, events);
+            effects::try_drain_pending_continuation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1737,7 +1759,7 @@ pub(super) fn handle_resolution_choice(
                 // the primary destination and the rest is empty. No second prompt.
                 apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                effects::try_drain_pending_continuation(state, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
@@ -1759,7 +1781,7 @@ pub(super) fn handle_resolution_choice(
                 cont.chain.targets = continuation_targets.clone();
                 propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
             }
-            effects::drain_pending_continuation(state, events);
+            effects::try_drain_pending_continuation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1814,7 +1836,7 @@ pub(super) fn handle_resolution_choice(
                 events,
             )?;
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            effects::try_drain_pending_continuation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1963,7 +1985,9 @@ pub(super) fn handle_resolution_choice(
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen_ids.iter().map(|&id| TargetRef::Object(id)).collect();
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::ChooseFromZoneChoice {
@@ -2039,7 +2063,7 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
             }
-            effects::drain_pending_continuation(state, events);
+            effects::try_drain_pending_continuation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2105,7 +2129,7 @@ pub(super) fn handle_resolution_choice(
             // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
             // paused on `ChooseOneOfBranch` advances past the first counter kind to
             // prompt for each remaining kind (Bribe Taker).
-            effects::drain_pending_continuation(state, events);
+            effects::try_drain_pending_continuation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2136,9 +2160,9 @@ pub(super) fn handle_resolution_choice(
             }
 
             turns::advance_phase(state, events);
-            return Ok(ResolutionChoiceOutcome::WaitingFor(turns::auto_advance(
-                state, events,
-            )));
+            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                turns::try_auto_advance(state, events)?,
+            ));
         }
         (
             WaitingFor::ConniveDiscard {
@@ -2189,7 +2213,9 @@ pub(super) fn handle_resolution_choice(
                 kind: EffectKind::Connive,
                 source_id,
             });
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::DiscardChoice {
@@ -2342,13 +2368,13 @@ pub(super) fn handle_resolution_choice(
                     events,
                     events_before_effect,
                     events_after_move,
-                ) {
+                )? {
                     return Ok(outcome);
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
 
-            let waiting_for = finish_with_continuation(state, player, events);
+            let waiting_for = try_finish_with_continuation(state, player, events)?;
 
             // CR 603.2c: each opponent's discard is a separate occurrence of a
             // `Discarded`-mode trigger event. The resolution-choice dispatch
@@ -2361,7 +2387,7 @@ pub(super) fn handle_resolution_choice(
                 events,
                 events_before_effect,
                 events_after_move,
-            ) {
+            )? {
                 return Ok(outcome);
             }
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
@@ -2798,7 +2824,7 @@ pub(super) fn handle_resolution_choice(
                     events,
                     events_before_effect,
                     events_after_move,
-                ) {
+                )? {
                     return Ok(outcome);
                 }
             }
@@ -2979,7 +3005,7 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             } else {
-                effects::drain_pending_continuation(state, events);
+                effects::try_drain_pending_continuation(state, events)?;
             }
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -3007,7 +3033,9 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::DamageSourceChoice {
@@ -3028,7 +3056,7 @@ pub(super) fn handle_resolution_choice(
                 source_filter,
             });
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            effects::try_drain_pending_continuation(state, events)?;
             state.last_chosen_damage_source = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -3043,7 +3071,9 @@ pub(super) fn handle_resolution_choice(
             }
             state.ring_bearer.insert(player, Some(target));
             crate::game::layers::mark_layers_full(state);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
             if !options.contains(&dungeon) {
@@ -3060,9 +3090,12 @@ pub(super) fn handle_resolution_choice(
             // CR 603.2 + CR 309.4c: RoomEntered from the chosen dungeon must dispatch
             // card triggers such as "Whenever you venture into the dungeon" (issue #1297).
             // The resolution-choice path does not run `run_post_action_pipeline`.
-            if let Some(outcome) =
-                batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
-            {
+            if let Some(outcome) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_venture,
+                events.len(),
+            )? {
                 return Ok(outcome);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -3070,7 +3103,9 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::ChooseDungeonRoom {
@@ -3092,9 +3127,12 @@ pub(super) fn handle_resolution_choice(
             {
                 state.waiting_for = waiting_for.clone();
             }
-            if let Some(outcome) =
-                batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
-            {
+            if let Some(outcome) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_venture,
+                events.len(),
+            )? {
                 return Ok(outcome);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -3102,7 +3140,9 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (
             WaitingFor::SpecializeColor {
@@ -3120,7 +3160,9 @@ pub(super) fn handle_resolution_choice(
             effects::specialize::handle_choose_specialize_color(
                 state, player, object_id, &options, color, events,
             )?;
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            ResolutionChoiceOutcome::WaitingFor(try_finish_with_continuation(
+                state, player, events,
+            )?)
         }
         (WaitingFor::ChooseLegend { candidates, .. }, GameAction::ChooseLegend { keep }) => {
             if !candidates.contains(&keep) {
@@ -3369,7 +3411,8 @@ pub(super) fn handle_resolution_choice(
                 // B2 (paused) batches this action's sacrifice events for a
                 // later drain.
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events)?
+                    {
                         return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                     }
                 } else {
@@ -3502,14 +3545,14 @@ fn pop_first_pile_result(
     (first, completed)
 }
 
-fn finish_with_continuation(
+fn try_finish_with_continuation(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
     set_priority(state, player);
-    effects::drain_pending_continuation(state, events);
-    state.waiting_for.clone()
+    effects::try_drain_pending_continuation(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 701.25a / manifest dread: run the post-loop cleanup a rest-pile batch
@@ -3522,18 +3565,18 @@ pub(crate) fn run_batch_completion(
     state: &mut GameState,
     completion: crate::types::game_state::BatchCompletion,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EngineError> {
     use crate::types::game_state::BatchCompletion;
     match completion {
         BatchCompletion::SurveilKeepOnTop { player, top_cards } => {
             surveil_keep_on_top(state, player, &top_cards);
-            finish_with_continuation(state, player, events);
+            try_finish_with_continuation(state, player, events)?;
         }
         BatchCompletion::ManifestDreadCleanup { player, revealed } => {
             for card_id in &revealed {
                 state.revealed_cards.remove(card_id);
             }
-            finish_with_continuation(state, player, events);
+            try_finish_with_continuation(state, player, events)?;
         }
         // CR 701.20b: The kept card's battlefield entry paused (aura host pick /
         // replacement ordering). Now that it has resolved, move the unkept rest
@@ -3575,9 +3618,9 @@ pub(crate) fn run_batch_completion(
                     rest_destination,
                     Some(cleanup),
                     events,
-                ) {
+                )? {
                     crate::game::zone_pipeline::BatchMoveResult::Done
-                    | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => return,
+                    | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => return Ok(()),
                 }
             }
             for card_id in &clear_markers {
@@ -3596,7 +3639,7 @@ pub(crate) fn run_batch_completion(
                     source_id,
                 });
             }
-            finish_with_continuation(state, player, events);
+            try_finish_with_continuation(state, player, events)?;
         }
         // CR 610.3: the exile-until-leaves return pile has fully landed (after a
         // returned creature's as-enters / aura-host pause resolved). Drop the
@@ -3649,6 +3692,7 @@ pub(crate) fn run_batch_completion(
             }
         }
     }
+    Ok(())
 }
 
 /// CR 701.25a: place the kept surveil cards on top of the player's library in

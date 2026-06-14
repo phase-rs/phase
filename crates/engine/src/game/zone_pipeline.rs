@@ -35,6 +35,7 @@ use crate::types::proposed_event::{ProposedEvent, ReplacementId};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
+use crate::game::engine::EngineError;
 use crate::game::game_object::AttachTarget;
 use crate::types::ability::FaceDownProfile;
 
@@ -832,6 +833,7 @@ pub(crate) fn move_objects_simultaneously(
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     move_objects_simultaneously_then(state, reqs, None, events)
+        .expect("batch move without completion cannot fail")
 }
 
 /// CR 603.10a + CR 616.1: As [`move_objects_simultaneously`], but runs a typed
@@ -848,7 +850,7 @@ pub(crate) fn move_objects_simultaneously_then(
     reqs: Vec<ZoneMoveRequest>,
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
-) -> BatchMoveResult {
+) -> Result<BatchMoveResult, EngineError> {
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
     let destination = reqs.first().map(|r| r.to);
     match deliver_batch(state, reqs, &ids, events) {
@@ -856,9 +858,9 @@ pub(crate) fn move_objects_simultaneously_then(
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now.
             if let Some(completion) = completion {
-                run_batch_completion(state, completion, events);
+                run_batch_completion(state, completion, events)?;
             }
-            BatchMoveResult::Done
+            Ok(BatchMoveResult::Done)
         }
         BatchMoveResult::NeedsChoice => {
             // Paused mid-pile. `deliver_batch` stashed the undelivered tail when
@@ -872,7 +874,7 @@ pub(crate) fn move_objects_simultaneously_then(
                 ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard)).completion =
                     Some(completion);
             }
-            BatchMoveResult::NeedsChoice
+            Ok(BatchMoveResult::NeedsChoice)
         }
     }
 }
@@ -885,8 +887,8 @@ fn run_batch_completion(
     state: &mut GameState,
     completion: BatchCompletion,
     events: &mut Vec<GameEvent>,
-) {
-    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events);
+) -> Result<(), EngineError> {
+    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events)
 }
 
 /// CR 303.4f / CR 616.1 + CR 603.10a: Hang a [`BatchCompletion`] off the current
@@ -1045,7 +1047,10 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
-pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
+pub(crate) fn drain_pending_batch_deliveries(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     if let Some(pending) = state.pending_batch_deliveries.take() {
         let completion = pending.completion;
         let ids = pending.remaining.clone();
@@ -1075,7 +1080,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // when `deliver_batch` did NOT re-park, so the completion fires at
                 // most once per batch.
                 if let Some(completion) = completion {
-                    run_batch_completion(state, completion, events);
+                    run_batch_completion(state, completion, events)?;
                 }
             }
             BatchMoveResult::NeedsChoice => {
@@ -1090,6 +1095,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             }
         }
     }
+    Ok(())
 }
 
 /// Deliver an event that already passed the replacement consult. Only callable

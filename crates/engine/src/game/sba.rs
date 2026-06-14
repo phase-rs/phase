@@ -16,6 +16,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+use super::engine::EngineError;
 use super::speed::{controls_start_your_engines, set_speed};
 use super::zones;
 
@@ -24,6 +25,13 @@ const MAX_SBA_ITERATIONS: u32 = 9;
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    try_check_state_based_actions(state, events).expect("state-based action check failed");
+}
+
+pub fn try_check_state_based_actions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -82,11 +90,11 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            super::elimination::eliminate_players_simultaneously(state, &losers, events);
+            super::elimination::try_eliminate_players_simultaneously(state, &losers, events)?;
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                return;
+                return Ok(());
             }
         }
 
@@ -95,7 +103,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // ask the player, similar to the legend rule.
         check_commander_zone_return(state);
         if matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }) {
-            return;
+            return Ok(());
         }
 
         // CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
@@ -106,7 +114,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
         if state.pending_replacement.is_some() {
-            return;
+            return Ok(());
         }
 
         // CR 704.5j: If a player controls two or more legendary permanents with the same name,
@@ -177,6 +185,8 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             break;
         }
     }
+
+    Ok(())
 }
 
 /// CR 704.5z + CR 702.179a: If a player controls a permanent with start your engines!

@@ -301,7 +301,7 @@ pub(super) fn finish_declare_attackers(
         state.combat = None;
         super::layers::prune_end_of_combat_effects(state);
         turns::advance_phase(state, events);
-        Ok(turns::auto_advance(state, events))
+        turns::try_auto_advance(state, events)
     } else {
         priority::reset_priority(state);
         Ok(WaitingFor::Priority {
@@ -553,7 +553,7 @@ pub(super) fn handle_assign_combat_damage(
             combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
         }
 
-        if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
+        if let Some(waiting_for) = super::combat_damage::try_resolve_combat_damage(state, events)? {
             return Ok(waiting_for);
         }
 
@@ -697,7 +697,7 @@ pub(super) fn handle_assign_combat_damage(
         combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
     }
 
-    if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
+    if let Some(waiting_for) = super::combat_damage::try_resolve_combat_damage(state, events)? {
         return Ok(waiting_for);
     }
 
@@ -767,7 +767,7 @@ pub(super) fn handle_assign_blocker_damage(
         combat.damage_assignments.insert(blocker_id, recorded);
     }
 
-    if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
+    if let Some(waiting_for) = super::combat_damage::try_resolve_combat_damage(state, events)? {
         return Ok(waiting_for);
     }
 
@@ -812,7 +812,7 @@ pub(super) fn handle_empty_attackers(
     state.combat = None;
     super::layers::prune_end_of_combat_effects(state);
     turns::advance_phase(state, events);
-    Ok(turns::auto_advance(state, events))
+    turns::try_auto_advance(state, events)
 }
 
 pub(super) fn handle_empty_blockers(

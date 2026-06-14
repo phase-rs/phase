@@ -25,7 +25,8 @@ pub fn resolve(
 
     // CR 724.1c: Check state-based actions. No player gets priority and no
     // triggered abilities are put on the stack as part of this step.
-    crate::game::sba::check_state_based_actions(state, events);
+    crate::game::sba::try_check_state_based_actions(state, events)
+        .map_err(|err| EffectError::InvalidParam(err.to_string()))?;
 
     // CR 724.1d: Remove all creatures and planeswalkers from combat. Clearing
     // the combat state is the engine's idiom for ending combat (see the

@@ -1,7 +1,7 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-use super::engine::{begin_pending_trigger_target_selection, check_exile_returns, EngineError};
+use super::engine::{begin_pending_trigger_target_selection, try_check_exile_returns, EngineError};
 use super::match_flow;
 use super::players;
 use super::sba;
@@ -80,7 +80,7 @@ pub(super) fn run_post_action_pipeline_from(
     // in those states would clobber the open prompt (same failure mode as #2420).
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
-        sba::check_state_based_actions(state, events);
+        sba::try_check_state_based_actions(state, events)?;
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
@@ -112,7 +112,7 @@ pub(super) fn run_post_action_pipeline_from(
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
     {
-        if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
+        if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events)? {
             state.waiting_for = wf;
         }
     }
@@ -132,7 +132,7 @@ pub(super) fn run_post_action_pipeline_from(
         }
     }
 
-    check_exile_returns(state, events);
+    try_check_exile_returns(state, events)?;
 
     let delayed_events = triggers::check_delayed_triggers(state, events);
     events.extend(delayed_events);

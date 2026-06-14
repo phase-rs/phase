@@ -20,7 +20,7 @@ pub(super) fn finalize_trigger_target_selection(
     trigger: PendingTrigger,
     ability: ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
     let assigned_targets = flatten_targets_in_chain(&ability);
     casting::emit_targeting_events(
         state,
@@ -53,12 +53,12 @@ pub(super) fn finalize_trigger_target_selection(
                 state.pending_trigger = Some(trigger);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
-                return WaitingFor::DistributeAmong {
+                return Ok(WaitingFor::DistributeAmong {
                     player: controller,
                     total,
                     targets: assigned_targets,
                     unit,
-                };
+                });
             }
         }
     }
@@ -81,11 +81,11 @@ pub(super) fn finalize_trigger_target_selection(
         "deferred-trigger drain entered with construction still active",
     );
     if let Some(waiting_for) =
-        triggers::drain_deferred_triggers_after_trigger_construction(state, events)
+        triggers::drain_deferred_triggers_after_trigger_construction(state, events)?
     {
-        return waiting_for;
+        return Ok(waiting_for);
     }
-    WaitingFor::Priority { player: controller }
+    Ok(WaitingFor::Priority { player: controller })
 }
 
 /// CR 706.2 + CR 603.12: Re-stamp the pending trigger's carried die-roll
@@ -150,9 +150,7 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
-    Ok(finalize_trigger_target_selection(
-        state, trigger, ability, events,
-    ))
+    finalize_trigger_target_selection(state, trigger, ability, events)
 }
 
 pub(super) fn handle_trigger_target_selection_choose_target(
@@ -271,9 +269,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
-            Ok(finalize_trigger_target_selection(
-                state, trigger, ability, events,
-            ))
+            finalize_trigger_target_selection(state, trigger, ability, events)
         }
     }
 }

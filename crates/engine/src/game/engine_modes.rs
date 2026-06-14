@@ -417,9 +417,9 @@ fn handle_triggered_mode_choice(
             // already drains the deferred-trigger queue and surfaces the next
             // WaitingFor if a sibling trigger needs input; use that result
             // instead of falling through to Priority below.
-            return Ok(engine_stack::finalize_trigger_target_selection(
+            return engine_stack::finalize_trigger_target_selection(
                 state, trigger, resolved, events,
-            ));
+            );
         } else {
             // CR 601.2c + CR 603.3d: Mode chosen but target choice still
             // outstanding. The entry is already on the stack (pushed at modal
@@ -481,7 +481,7 @@ fn handle_triggered_mode_choice(
             "deferred-trigger drain entered with construction still active",
         );
         if let Some(waiting_for) =
-            triggers::drain_deferred_triggers_after_trigger_construction(state, events)
+            triggers::drain_deferred_triggers_after_trigger_construction(state, events)?
         {
             return Ok(waiting_for);
         }

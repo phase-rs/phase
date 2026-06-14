@@ -14,7 +14,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     DelayedTrigger, DistributionUnit, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
-    TargetSelectionConstraint,
+    TargetSelectionConstraint, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::WardCost;
@@ -31,6 +31,7 @@ use super::conditions::{
     eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
     eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped,
 };
+use super::engine::EngineError;
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
     spell_record_matches_filter, FilterContext,
@@ -3700,9 +3701,9 @@ pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
 pub(crate) fn drain_deferred_trigger_queue(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
-) -> Option<crate::types::game_state::WaitingFor> {
+) -> Result<Option<WaitingFor>, EngineError> {
     if !should_drain_deferred_triggers_now(state) {
-        return None;
+        return Ok(None);
     }
 
     drain_deferred_trigger_queue_unchecked(state, events_out)
@@ -3717,9 +3718,9 @@ pub(crate) fn drain_deferred_trigger_queue(
 pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
-) -> Option<crate::types::game_state::WaitingFor> {
+) -> Result<Option<WaitingFor>, EngineError> {
     if !can_drain_deferred_triggers(state, true) {
-        return None;
+        return Ok(None);
     }
 
     drain_deferred_trigger_queue_unchecked(state, events_out)
@@ -3735,7 +3736,7 @@ pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
 pub(crate) fn drain_deferred_triggers_after_trigger_construction(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
-) -> Option<crate::types::game_state::WaitingFor> {
+) -> Result<Option<WaitingFor>, EngineError> {
     if state.resolving_stack_entry.is_some() {
         drain_deferred_trigger_queue(state, events_out)
     } else {
@@ -3746,13 +3747,13 @@ pub(crate) fn drain_deferred_triggers_after_trigger_construction(
 fn drain_deferred_trigger_queue_unchecked(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
-) -> Option<crate::types::game_state::WaitingFor> {
+) -> Result<Option<WaitingFor>, EngineError> {
     let pending = std::mem::take(&mut state.deferred_triggers);
     match begin_trigger_ordering(state, pending) {
         TriggerOrderingDisposition::PromptForChoice(wf) => {
             let wf = *wf;
             state.waiting_for = wf.clone();
-            Some(wf)
+            Ok(Some(wf))
         }
         TriggerOrderingDisposition::NoChoiceNeeded(pending) => {
             dispatch_deferred_triggers_in_order(state, pending, events_out)
@@ -3766,7 +3767,7 @@ fn dispatch_deferred_triggers_in_order(
     state: &mut GameState,
     pending: Vec<PendingTriggerContext>,
     events_out: &mut Vec<GameEvent>,
-) -> Option<crate::types::game_state::WaitingFor> {
+) -> Result<Option<WaitingFor>, EngineError> {
     let mut iter = pending.into_iter();
     while let Some(trigger_context) = iter.next() {
         if dispatch_pending_trigger_context(state, trigger_context, events_out) {
@@ -3775,14 +3776,12 @@ fn dispatch_deferred_triggers_in_order(
                 state.waiting_for,
                 crate::types::game_state::WaitingFor::DistributeAmong { .. }
             ) {
-                return Some(state.waiting_for.clone());
+                return Ok(Some(state.waiting_for.clone()));
             }
-            return super::engine::begin_pending_trigger_target_selection(state)
-                .ok()
-                .flatten();
+            return super::engine::begin_pending_trigger_target_selection(state);
         }
     }
-    None
+    Ok(None)
 }
 
 /// CR 603.2d: Apply trigger doubling from `StaticMode::DoubleTriggers`
@@ -15716,7 +15715,9 @@ pub mod tests {
             "continuation in flight — must not drain deferred triggers yet"
         );
         assert!(
-            drain_deferred_trigger_queue(&mut state, &mut events).is_none(),
+            drain_deferred_trigger_queue(&mut state, &mut events)
+                .expect("guarded deferred drain should not fail")
+                .is_none(),
             "drain must be a no-op while pending_continuation is set"
         );
         assert_eq!(state.deferred_triggers.len(), 2);
@@ -15734,6 +15735,7 @@ pub mod tests {
         let mut events = Vec::new();
 
         let wf = drain_deferred_trigger_queue(&mut state, &mut events)
+            .expect("deferred trigger drain should not fail")
             .expect("two same-controller deferred triggers require ordering");
         assert!(
             matches!(wf, WaitingFor::OrderTriggers { .. }),

@@ -2,6 +2,7 @@ use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTar
 use crate::game::effects::deal_damage::{
     apply_damage_after_replacement, pre_replacement_damage_gate, DamageContext, DamageResult,
 };
+use crate::game::engine::EngineError;
 use crate::game::game_object::GameObject;
 use crate::game::replacement;
 use crate::game::sba;
@@ -38,11 +39,11 @@ fn combat_damage_amount(obj: &GameObject) -> u32 {
 /// 2. Run SBAs (destroy lethal-damage creatures → ZoneChanged events).
 /// 3. Process triggers from SBA-generated events (e.g., dies triggers from graveyard scan).
 /// 4. Repeat SBA/trigger cycle until stable (no new SBAs, no new triggers).
-fn process_combat_damage_triggers(
+fn try_process_combat_damage_triggers(
     state: &mut GameState,
     damage_events: &[GameEvent],
     all_events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EngineError> {
     // Step 1: Collect triggers from damage events while creatures are still alive.
     // CR 603.2: Triggers fire at the moment the event occurs — process_triggers
     // scans state.battlefield, so this must run before SBAs remove dying objects.
@@ -53,7 +54,7 @@ fn process_combat_damage_triggers(
     // processing (dies triggers). Repeat until no new SBAs and no new triggers.
     loop {
         let events_before = all_events.len();
-        sba::check_state_based_actions(state, all_events);
+        sba::try_check_state_based_actions(state, all_events)?;
 
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {
@@ -63,6 +64,7 @@ fn process_combat_damage_triggers(
             break;
         }
     }
+    Ok(())
 }
 
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
@@ -76,11 +78,20 @@ pub fn resolve_combat_damage(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let combat = state.combat.as_ref()?.clone();
+    try_resolve_combat_damage(state, events).expect("combat damage resolution failed")
+}
+
+pub fn try_resolve_combat_damage(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(combat) = state.combat.as_ref().cloned() else {
+        return Ok(None);
+    };
 
     // Guard: regular damage already applied (re-entry from triggers during regular step).
     if combat.regular_damage_done {
-        return None;
+        return Ok(None);
     }
 
     let has_first_or_double = combat.attackers.iter().any(|a| {
@@ -100,7 +111,7 @@ pub fn resolve_combat_damage(
     // --- First strike sub-step ---
     if has_first_or_double && !combat.first_strike_done {
         if let Some(waiting) = collect_damage_assignments(state, SubStep::FirstStrike) {
-            return Some(waiting);
+            return Ok(Some(waiting));
         }
         // All first-strike assignments collected — apply simultaneously (CR 510.2).
         let pending = take_pending_damage(state);
@@ -119,7 +130,7 @@ pub fn resolve_combat_damage(
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
-        process_combat_damage_triggers(state, &damage_events, events);
+        try_process_combat_damage_triggers(state, &damage_events, events)?;
 
         // CR 510.4 + CR 603.3b: if the first-strike sub-step produced a same-
         // controller trigger-ordering prompt, surface it now — before the regular
@@ -129,7 +140,7 @@ pub fn resolve_combat_damage(
         // in priority.rs, which re-enters this function once the order is submitted
         // and the resulting triggers resolve.
         if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-            return Some(state.waiting_for.clone());
+            return Ok(Some(state.waiting_for.clone()));
         }
 
         // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
@@ -149,15 +160,15 @@ pub fn resolve_combat_damage(
             // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
             // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
             crate::game::priority::reset_priority(state);
-            return Some(WaitingFor::Priority {
+            return Ok(Some(WaitingFor::Priority {
                 player: state.active_player,
-            });
+            }));
         }
     }
 
     // --- Regular damage sub-step ---
     if let Some(waiting) = collect_damage_assignments(state, SubStep::Regular) {
-        return Some(waiting);
+        return Ok(Some(waiting));
     }
     // All regular assignments collected — apply simultaneously (CR 510.2).
     let pending = take_pending_damage(state);
@@ -169,8 +180,8 @@ pub fn resolve_combat_damage(
         c.damage_step_index = None;
     }
 
-    process_combat_damage_triggers(state, &damage_events, events);
-    None
+    try_process_combat_damage_triggers(state, &damage_events, events)?;
+    Ok(None)
 }
 
 /// Which sub-step of combat damage we're collecting assignments for.

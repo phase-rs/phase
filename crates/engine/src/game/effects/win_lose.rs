@@ -3,7 +3,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 use super::resolve_player_for_context_ref;
-use crate::game::elimination::eliminate_player;
+use crate::game::elimination::try_eliminate_player;
 use crate::game::players;
 use crate::game::static_abilities::player_has_cant_win;
 
@@ -65,7 +65,8 @@ pub fn resolve_lose(
 
     for pid in players_to_eliminate {
         // CR 104.3e: A player who loses the game leaves the game.
-        eliminate_player(state, pid, events);
+        try_eliminate_player(state, pid, events)
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
     }
 
     events.push(GameEvent::EffectResolved {
@@ -129,7 +130,8 @@ pub fn resolve_win(
         .collect();
 
     for pid in opponents {
-        eliminate_player(state, pid, events);
+        try_eliminate_player(state, pid, events)
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
     }
 
     events.push(GameEvent::EffectResolved {

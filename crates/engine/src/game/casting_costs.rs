@@ -872,11 +872,7 @@ fn finish_pending_cost_or_cast(
             pending.activation_cost.as_ref(),
             events,
         )?;
-        return Ok(drain_deferred_triggers_after_stack_object_announcement(
-            state,
-            events,
-            waiting_for,
-        ));
+        return drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for);
     }
 
     let base_cost = pending.base_cost.clone();
@@ -908,23 +904,21 @@ fn finish_pending_cost_or_cast(
         pending.payment_mode,
         events,
     )?;
-    Ok(drain_deferred_triggers_after_stack_object_announcement(
-        state,
-        events,
-        waiting_for,
-    ))
+    drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for)
 }
 
 pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     waiting_for: WaitingFor,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
-        return waiting_for;
+        return Ok(waiting_for);
     }
-    crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
-        .unwrap_or(waiting_for)
+    let drained = crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
+        state, events,
+    )?;
+    Ok(drained.unwrap_or(waiting_for))
 }
 
 pub(crate) fn begin_deferred_target_selection(
@@ -3247,11 +3241,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         payment_mode,
         events,
     )?;
-    Ok(drain_deferred_triggers_after_stack_object_announcement(
-        state,
-        events,
-        waiting_for,
-    ))
+    drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for)
 }
 
 fn flash_timing_non_mana_additional_cost(
@@ -7018,11 +7008,11 @@ pub fn finalize_mana_payment(
                 pending.origin_zone,
                 events,
             )?;
-            return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            return drain_deferred_triggers_after_stack_object_announcement(
                 state,
                 events,
                 waiting_for,
-            ));
+            );
         }
 
         state.pending_cast = Some(Box::new(pending_resumed));
@@ -7047,11 +7037,7 @@ pub fn finalize_mana_payment(
         pending.origin_zone,
         events,
     )?;
-    Ok(drain_deferred_triggers_after_stack_object_announcement(
-        state,
-        events,
-        waiting_for,
-    ))
+    drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for)
 }
 
 fn stamp_convoked_creatures(
@@ -7183,11 +7169,11 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.origin_zone,
                 events,
             )?;
-            return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            return drain_deferred_triggers_after_stack_object_announcement(
                 state,
                 events,
                 waiting_for,
-            ));
+            );
         }
 
         state.pending_cast = Some(Box::new(pending_resumed));
@@ -7213,11 +7199,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         Some(phyrexian_choices),
         events,
     )?;
-    Ok(drain_deferred_triggers_after_stack_object_announcement(
-        state,
-        events,
-        waiting_for,
-    ))
+    drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for)
 }
 
 /// CR 107.4f + CR 601.2f: Determine whether this cast needs to pause for per-shard

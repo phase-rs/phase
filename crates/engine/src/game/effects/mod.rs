@@ -5,6 +5,7 @@ use crate::game::conditions::{
     eval_has_city_blessing, eval_is_initiative, eval_is_monarch, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
+use crate::game::engine::EngineError;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
@@ -468,16 +469,25 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
+#[cfg(test)]
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    try_drain_pending_continuation(state, events)
+        .expect("pending continuation drain target selection failed");
+}
+
+pub(crate) fn try_drain_pending_continuation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_additions(state, events);
     if waits_for_resolution_choice(&state.waiting_for) {
-        return;
+        return Ok(());
     }
     if let Some(cont) = state.pending_continuation.take() {
         let PendingContinuation { chain, parent_kind } = cont;
         let source_id = chain.source_id;
-        let _ = resolve_ability_chain(state, &chain, events, 1);
+        resolve_ability_chain(state, &chain, events, 1).map_err(effect_error_to_engine)?;
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved { kind, source_id });
         }
@@ -489,14 +499,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // the outer loop must not advance until the inner ChangeZone completes
     // and emits its `EffectResolved` event.
     if !waits_for_resolution_choice(&state.waiting_for) {
-        drain_pending_change_zone_iteration(state, events);
+        drain_pending_change_zone_iteration(state, events)?;
     }
     // CR 609.3 + CR 109.5: After the per-iteration chain drains, drive any
     // remaining `repeat_for` iterations. Each resumed iteration may itself
     // pause and re-stash via the loop in `resolve_ability_chain`, producing a
     // chain of resumed iterations until the loop completes.
     if !waits_for_resolution_choice(&state.waiting_for) {
-        drain_pending_repeat_iteration(state, events);
+        drain_pending_repeat_iteration(state, events)?;
     }
     if !waits_for_resolution_choice(&state.waiting_for) {
         choose_one_of::resume_pending(state, events);
@@ -509,17 +519,23 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         && state.pending_continuation.is_none()
         && state.pending_repeat_iteration.is_none()
     {
-        drain_pending_repeat_until(state);
+        drain_pending_repeat_until(state)?;
     }
+
+    Ok(())
+}
+
+fn effect_error_to_engine(err: EffectError) -> EngineError {
+    EngineError::InvalidAction(format!("ability resolution failed: {err}"))
 }
 
 /// CR 608.2c + CR 107.1c: Resume a "repeat this process" loop that paused when
 /// an iteration's process entered an interactive `WaitingFor` state. Called by
 /// `drain_pending_continuation` once the iteration's choice (and any chained
 /// continuation) has fully drained.
-fn drain_pending_repeat_until(state: &mut GameState) {
+fn drain_pending_repeat_until(state: &mut GameState) -> Result<(), EngineError> {
     let Some(pending) = state.pending_repeat_until.take() else {
-        return;
+        return Ok(());
     };
     let crate::types::game_state::PendingRepeatUntil { ability } = pending;
     match &ability.repeat_until {
@@ -541,13 +557,15 @@ fn drain_pending_repeat_until(state: &mut GameState) {
                 *stop_on_put_to_hand,
                 *stop_on_duplicate_exiled_names,
             ) {
-                return;
+                return Ok(());
             }
             let mut events = Vec::new();
-            let _ = resolve_ability_chain(state, &ability, &mut events, 1);
+            resolve_ability_chain(state, &ability, &mut events, 1)
+                .map_err(effect_error_to_engine)?;
         }
         None => {}
     }
+    Ok(())
 }
 
 /// CR 608.2c + CR 107.1c: Stop predicates for `RepeatContinuation::UntilStopConditions`.
@@ -584,7 +602,10 @@ fn should_stop_repeat_until(
 /// remaining objects through `process_one_zone_move`; re-stashes and breaks on
 /// a further pause; emits the trailing `EffectResolved` event when the loop
 /// completes.
-fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn drain_pending_change_zone_iteration(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     while let Some(pending) = state.pending_change_zone_iteration.take() {
         let crate::types::game_state::PendingChangeZoneIteration {
             remaining,
@@ -763,11 +784,17 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             .collect();
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
-            crate::game::triggers::drain_deferred_trigger_queue(state, events);
+            if let Some(waiting_for) =
+                crate::game::triggers::drain_deferred_trigger_queue(state, events)?
+            {
+                state.waiting_for = waiting_for;
+                return Ok(());
+            }
         } else {
             crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
         }
     }
+    Ok(())
 }
 
 /// CR 609.3 + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
@@ -777,7 +804,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
 /// iteration also completes synchronously, this function drives them all
 /// in-line so the loop only pauses again when an inner effect actually
 /// transitions to a player-choice state.
-fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn drain_pending_repeat_iteration(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     while let Some(pending) = state.pending_repeat_iteration.take() {
         let crate::types::game_state::PendingRepeatIteration {
             ability,
@@ -822,7 +852,8 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             // that the depth==0 prelude in `resolve_ability_chain` would
             // otherwise reset. The resumed iteration is logically continuing the
             // outer chain, not starting a fresh top-level resolution.
-            let _ = resolve_ability_chain(state, iter_effective, events, 1);
+            resolve_ability_chain(state, iter_effective, events, 1)
+                .map_err(effect_error_to_engine)?;
             // CR 609.3: Iteration may transition to a player-choice state OR
             // synchronously install a `pending_continuation` (e.g. when the
             // sub_ability chain wires itself for later drain). Either signals
@@ -858,6 +889,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             break;
         }
     }
+    Ok(())
 }
 
 pub(crate) fn append_to_pending_continuation(
@@ -1298,7 +1330,9 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
+            | WaitingFor::OrderTriggers { .. }
             | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::AbilityModeChoice { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::MultiTargetSelection { .. }
@@ -4973,9 +5007,9 @@ fn resolve_chain_body(
                     // (chain-local state clearing, resolution counter) does not
                     // re-run mid-loop — this iteration continues the current
                     // resolution, mirroring the drain-path resume at depth 1.
-                    let _ = resolve_ability_chain(state, iter_effective, events, depth.max(1));
+                    resolve_ability_chain(state, iter_effective, events, depth.max(1))?;
                 } else {
-                    let _ = resolve_effect(state, iter_effective, events);
+                    resolve_effect(state, iter_effective, events)?;
                 }
                 // CR 609.3 + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
@@ -12029,7 +12063,8 @@ mod tests {
         });
 
         let mut events = Vec::new();
-        super::drain_pending_repeat_iteration(&mut state, &mut events);
+        super::drain_pending_repeat_iteration(&mut state, &mut events)
+            .expect("repeat iteration drain");
 
         // Iteration 1 ran: parent Draw fired (1 card), then the
         // ConditionInstead sub stashed its else_ability into

@@ -442,11 +442,11 @@ pub(crate) fn handle_choose_target(
                 );
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
-                return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                return drain_deferred_triggers_after_stack_object_announcement(
                     state,
                     events,
                     WaitingFor::Priority { player },
-                ));
+                );
             }
 
             let cost = pending.cost.clone();

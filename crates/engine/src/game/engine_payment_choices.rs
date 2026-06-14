@@ -63,7 +63,7 @@ pub(super) fn handle_optional_effect_choice(
     if state.resolving_begin_game_abilities
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
-        return Ok(super::mulligan::resume_begin_game_abilities(state, events));
+        return super::mulligan::try_resume_begin_game_abilities(state, events);
     }
     Ok(state.waiting_for.clone())
 }

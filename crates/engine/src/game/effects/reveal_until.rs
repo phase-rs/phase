@@ -1,5 +1,6 @@
 use rand::seq::SliceRandom;
 
+use crate::game::engine::EngineError;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
@@ -269,7 +270,9 @@ pub fn resolve(
     if let Some(hit) = hit_card {
         clear_markers.push(hit);
     }
-    match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
+    match move_rest_then(state, &revealed_misses, rest_destination, None, events)
+        .map_err(|err| EffectError::InvalidParam(err.to_string()))?
+    {
         zone_pipeline::BatchMoveResult::Done => {}
         zone_pipeline::BatchMoveResult::NeedsChoice => {
             zone_pipeline::defer_completion_on_pause(
@@ -357,7 +360,7 @@ pub(crate) fn move_rest_then(
     rest_destination: Zone,
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
-) -> zone_pipeline::BatchMoveResult {
+) -> Result<zone_pipeline::BatchMoveResult, EngineError> {
     match rest_destination {
         Zone::Library => {
             // Random-order bottom placement is the effect instruction; CR 701.20a
