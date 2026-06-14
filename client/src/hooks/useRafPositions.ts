@@ -24,7 +24,7 @@ export function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, L
 
     stableCountRef.current = 0;
     prevRectsRef.current = new Map();
-    let rafId: number;
+    let rafId = 0;
 
     function poll() {
       const currentRects = new Map<string, DOMRect>();
@@ -80,11 +80,32 @@ export function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, L
       // Stop polling after 10 stable frames
       if (stableCountRef.current < 10) {
         rafId = requestAnimationFrame(poll);
+      } else {
+        rafId = 0;
       }
     }
 
-    rafId = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(rafId);
+    const restartPolling = () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      stableCountRef.current = 0;
+      prevRectsRef.current = new Map();
+      rafId = requestAnimationFrame(poll);
+    };
+
+    restartPolling();
+    // Capture-phase `scroll` catches scrolling inside inner containers (e.g. the
+    // crowded-creature overflow grid) where cards move but `resize` never fires;
+    // without it, the stabilized line endpoints freeze and desync from the cards.
+    window.addEventListener("resize", restartPolling);
+    window.visualViewport?.addEventListener("resize", restartPolling);
+    window.addEventListener("scroll", restartPolling, true);
+
+    return () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      window.removeEventListener("resize", restartPolling);
+      window.visualViewport?.removeEventListener("resize", restartPolling);
+      window.removeEventListener("scroll", restartPolling, true);
+    };
   }, [pairs]);
 
   return positions;

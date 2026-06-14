@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} sur {{total}} dégagés",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Cré",
     "landsAbbr": "Ter",
     "otherAbbr": "Aut",
+    "manaAvailable": "{{untapped}} sur {{total}} terrains dégagés",
     "out": "ÉLIM",
     "eliminated": "Éliminé",
     "phasedOut": "Déphasé",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Marqueurs d'expérience : {{count}}",
     "speedAriaLabel": "Vitesse {{value}}",
     "speedTooltip": "Vitesse : {{value}}",
+    "condCantWin": "Ne peut pas gagner la partie",
+    "condCantGainLife": "Ne peut pas gagner de points de vie",
+    "condCantLoseLife": "Ne peut pas perdre de points de vie",
+    "condCantPayLife": "Ne peut pas payer de points de vie",
+    "condCantCast": "Ne peut pas lancer de sorts",
+    "condCantActivate": "Ne peut pas activer de capacités",
+    "condCastOnlyFromZones": "Ne peut lancer que depuis certaines zones",
+    "condFromSource": "{{condition}} — de {{name}}",
+    "pendingSpell": "Prochain sort",
+    "pendingCantBeCountered": "Le prochain sort ne peut pas être contrecarré",
+    "pendingHasKeyword": "Le prochain sort a {{keyword}}",
+    "pendingFlash": "Le prochain sort peut être lancé comme s'il avait la flash",
+    "pendingFree": "Le prochain sort sans payer son coût de mana",
+    "pendingCheaper": "Le prochain sort coûte {{amount}} de moins",
     "companion": "Compagnon"
   },
   "avatar": {

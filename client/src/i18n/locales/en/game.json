@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} of {{total}} untapped",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Crt",
     "landsAbbr": "Lnd",
     "otherAbbr": "Oth",
+    "manaAvailable": "{{untapped}} of {{total}} lands untapped",
     "out": "OUT",
     "eliminated": "Eliminated",
     "phasedOut": "Phased Out",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Experience counters: {{count}}",
     "speedAriaLabel": "Speed {{value}}",
     "speedTooltip": "Speed: {{value}}",
+    "condCantWin": "Can't win the game",
+    "condCantGainLife": "Can't gain life",
+    "condCantLoseLife": "Can't lose life",
+    "condCantPayLife": "Can't pay life",
+    "condCantCast": "Can't cast spells",
+    "condCantActivate": "Can't activate abilities",
+    "condCastOnlyFromZones": "Can cast only from limited zones",
+    "condFromSource": "{{condition}} — from {{name}}",
+    "pendingSpell": "Next spell",
+    "pendingCantBeCountered": "Next spell can't be countered",
+    "pendingHasKeyword": "Next spell has {{keyword}}",
+    "pendingFlash": "Next spell can be cast as though it had flash",
+    "pendingFree": "Next spell without paying its mana cost",
+    "pendingCheaper": "Next spell costs {{amount}} less",
     "companion": "Companion"
   },
   "avatar": {

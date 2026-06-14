@@ -153,11 +153,16 @@ export function useAttackerArrowPositions(
     restartPolling();
     window.addEventListener("resize", restartPolling);
     window.visualViewport?.addEventListener("resize", restartPolling);
+    // Capture-phase `scroll` catches scrolling inside inner containers (e.g. the
+    // crowded-creature overflow grid) where attacker/target cards move but
+    // `resize` never fires; without it, stabilized arrow endpoints desync.
+    window.addEventListener("scroll", restartPolling, true);
 
     return () => {
       if (rafId !== 0) cancelAnimationFrame(rafId);
       window.removeEventListener("resize", restartPolling);
       window.visualViewport?.removeEventListener("resize", restartPolling);
+      window.removeEventListener("scroll", restartPolling, true);
     };
   }, [arrows]);
 
