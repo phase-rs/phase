@@ -4884,6 +4884,51 @@ fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
         .any(|d| is_unimplemented_residual(d, "must be blocked")));
 }
 
+/// CR 509.1c + CR 611.3a: a pure combat-requirement predicate still belongs to
+/// the attached host and must not fall through to the generic source-gated
+/// inverted parser.
+#[test]
+fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it must be blocked if able.",
+    );
+    assert_eq!(defs.len(), 1, "pure requirement, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+}
+
+/// CR 613.1f: residual splitting must recognize already-verbed conjuncts
+/// ("gets", "has", "gains", etc.) and avoid false `Unimplemented` residuals.
+#[test]
+fn static_as_long_as_attacking_gets_and_has_keyword_has_no_false_residual() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it gets +1/+1 and has first strike.",
+    );
+    assert_eq!(defs.len(), 1, "fully modeled grant, got {defs:?}");
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert!(!defs
+        .iter()
+        .any(|d| is_unimplemented_residual(d, "first strike")));
+}
+
 /// CR 509.1c: the un-gated direct attached-subject grant lure (Slayer's Cleaver:
 /// "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.")
 /// surfaces the filtered lure as an Unimplemented residual. The first def carries
@@ -4909,6 +4954,20 @@ fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
     );
     assert_eq!(defs[1].condition, None);
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+}
+
+/// CR 509.1c: a direct attached-subject filtered lure with no continuous grant
+/// sibling is still an explicit unsupported residual, not a silent drop.
+#[test]
+fn attached_subject_pure_filtered_lure_surfaces_as_unimplemented_residual() {
+    let defs = parse_static_line_multi("Equipped creature must be blocked by an Eldrazi if able.");
+    assert_eq!(defs.len(), 1, "pure filtered lure residual, got {defs:?}");
+    assert!(
+        is_unimplemented_residual(&defs[0], "must be blocked by an"),
+        "filtered lure must surface as an Unimplemented residual, got {:?}",
+        defs[0]
+    );
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
 }
 
 /// Building-block: the filtered-lure detector recognizes ONLY the by-filter form,

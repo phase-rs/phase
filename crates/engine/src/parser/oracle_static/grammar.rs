@@ -736,24 +736,25 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // parse. "gets +N/+M and has trample and lifelink" is merged into ONE
     // Continuous def by `parse_continuous_modifications`, so it returns here and
     // is NEVER split. ---
-    match parse_continuous_gets_has(predicate, affected.clone(), description) {
-        Some(def) => {
-            let mut defs = vec![def];
-            // CR 509.1c: "<grant> and must be blocked by <filter> if able"
-            // (Slayer's Cleaver: "Equipped creature gets +3/+1 and must be
-            // blocked by an Eldrazi if able."). `parse_continuous_modifications`
-            // models the P/T/keyword grant but silently drops the filtered lure
-            // conjunct (the bare "must be blocked if able" form is handled by
-            // `try_split_and_must_attack_block`; the typed by-filter requirement
-            // is the deferred /add-engine-variant Stage-2 work). Surface the
-            // dropped conjunct as an `Effect::Unimplemented` residual so it is a
-            // visible coverage gap, not a silent drop.
-            if let Some(residual_text) = extract_must_be_blocked_by_filter_lure(predicate) {
-                defs.push(unimplemented_conjunct_residual(affected, &residual_text));
-            }
-            defs
+    {
+        let mut defs = Vec::new();
+        if let Some(def) = parse_continuous_gets_has(predicate, affected.clone(), description) {
+            defs.push(def);
         }
-        None => vec![],
+        // CR 509.1c: "<grant> and must be blocked by <filter> if able"
+        // (Slayer's Cleaver: "Equipped creature gets +3/+1 and must be blocked
+        // by an Eldrazi if able."). `parse_continuous_modifications` models the
+        // P/T/keyword grant but silently drops the filtered lure conjunct (the
+        // bare "must be blocked if able" form is handled by
+        // `try_split_and_must_attack_block`; the typed by-filter requirement is
+        // the deferred /add-engine-variant Stage-2 work). Surface the dropped
+        // conjunct as an `Effect::Unimplemented` residual so it is a visible
+        // coverage gap, not a silent drop, even when the predicate has no
+        // continuous grant sibling.
+        if let Some(residual_text) = extract_must_be_blocked_by_filter_lure(predicate) {
+            defs.push(unimplemented_conjunct_residual(affected, &residual_text));
+        }
+        defs
     }
 }
 

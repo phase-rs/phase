@@ -341,24 +341,21 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
     // not consume combat-requirement / lure conjuncts ("must be blocked …").
     let modifications = parse_continuous_modifications(predicate_body);
 
-    // No modeled grant → not our case; let the caller fall through to the generic
-    // inverted fallback rather than emitting an empty supported static.
-    if modifications.is_empty() {
-        return Vec::new();
-    }
-
     // CR 611.3a + CR 508.1a: gate the supported grant on the recipient (the
     // equipped/enchanted creature) being in the stated combat state.
     let gate = StaticCondition::RecipientMatchesFilter {
         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![combat_prop])),
     };
-    let supported = StaticDefinition::continuous()
-        .affected(affected.clone())
-        .modifications(modifications)
-        .condition(gate.clone())
-        .description(description.to_string());
-
-    let mut defs = vec![supported];
+    let mut defs = Vec::new();
+    if !modifications.is_empty() {
+        defs.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .condition(gate.clone())
+                .description(description.to_string()),
+        );
+    }
 
     // CR 613.1f: identify conjuncts NOT covered by the grant above — the
     // combat-requirement / lure conjuncts. Strip a leading verb ("has "/"have ")
@@ -371,13 +368,15 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
     let mut residual_conjuncts: Vec<String> = Vec::new();
     for part in split_keyword_list(list_input.trim().trim_end_matches('.')) {
         let conjunct = part.trim();
+        if conjunct.is_empty() {
+            continue;
+        }
         let conjunct_lower = conjunct.to_lowercase();
-        // A P/T conjunct keeps its own "gets " verb; a keyword conjunct is bare
-        // and re-parses as a grant only when re-prefixed with "has ". If neither
-        // form yields a continuous modification, it is a requirement/lure residual.
-        let has_pt_verb = nom_tag_lower(conjunct, &conjunct_lower, "gets ").is_some()
-            || nom_tag_lower(conjunct, &conjunct_lower, "get ").is_some();
-        let grant_probe = if has_pt_verb {
+        // A conjunct that carries its own grant verb keeps that verb; a bare
+        // keyword conjunct is re-parsed as a grant only when re-prefixed with
+        // "has ". If neither form yields a continuous modification, it is a
+        // requirement/lure residual.
+        let grant_probe = if parse_grant_conjunct_verb(&conjunct_lower).is_ok() {
             conjunct.to_string()
         } else {
             format!("has {conjunct}")
@@ -427,6 +426,21 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
     }
 
     defs
+}
+
+fn parse_grant_conjunct_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("gets "),
+            tag("get "),
+            tag("has "),
+            tag("have "),
+            tag("gains "),
+            tag("gain "),
+        )),
+    )
+    .parse(input)
 }
 
 /// Parse the attached-subject qualifier of an inverted grant
