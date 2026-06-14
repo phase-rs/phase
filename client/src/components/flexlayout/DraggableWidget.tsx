@@ -1,4 +1,4 @@
-import { motion } from "framer-motion";
+import { motion, useTransform } from "framer-motion";
 
 import {
   useDraggableWidget,
@@ -47,9 +47,20 @@ export function DraggableWidget({
     drag,
     dragMomentum,
     dragElastic,
+    onDragStart,
     onDragEnd,
     onClickCapture,
+    dragging,
+    x,
+    y,
+    scale,
   } = useDraggableWidget(target);
+  // Counter-translate a ghost outline to the docked home position: the node is
+  // transformed by `translate(x,y) scale(s)`, so the ghost's own translate lands
+  // in scaled space — dividing by `s` cancels it, placing the ghost exactly on
+  // the dock (a live "snap zone" marker shown only mid-drag). s=1 ⇒ plain -x/-y.
+  const ghostX = useTransform(x, (v) => -v / scale);
+  const ghostY = useTransform(y, (v) => -v / scale);
   return (
     <motion.div
       ref={ref}
@@ -57,6 +68,7 @@ export function DraggableWidget({
       drag={drag}
       dragMomentum={dragMomentum}
       dragElastic={dragElastic}
+      onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClickCapture={onClickCapture}
       // In edit mode force the node grabbable even if its normal className is
@@ -66,6 +78,13 @@ export function DraggableWidget({
       // Grab cursor in edit mode signals the whole widget is draggable.
       className={drag ? `${className ?? ""} cursor-grab active:cursor-grabbing` : className}
     >
+      {dragging && (
+        <motion.div
+          aria-hidden
+          style={{ x: ghostX, y: ghostY }}
+          className="pointer-events-none absolute inset-0 z-40 rounded-lg border-2 border-dashed border-sky-300/70 bg-sky-400/10"
+        />
+      )}
       {children}
       {drag && scaleKey && <ResizeHandle scaleKey={scaleKey} corner={resizeCorner} />}
     </motion.div>

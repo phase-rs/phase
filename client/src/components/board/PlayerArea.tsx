@@ -1,5 +1,5 @@
-import { useMemo, type CSSProperties, type ReactNode } from "react";
-import { Reorder } from "framer-motion";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Reorder, useDragControls } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -7,7 +7,9 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import {
   usePreferencesStore,
   DEFAULT_LAND_SUPPORT_RATIO,
+  DEFAULT_CELL_ALIGN,
   DEFAULT_MIDDLE_ROW_ORDER,
+  type CellAlign,
   type MiddleCell,
 } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -20,6 +22,7 @@ import { CompactStrip } from "./CompactStrip.tsx";
 import { CommandDock } from "../zone/CommandDock.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 import { ColumnEdgeHandle } from "../flexlayout/ColumnEdgeHandle.tsx";
+import { CellAlignControl } from "../flexlayout/CellAlignControl.tsx";
 import type { DraggableTarget } from "../../hooks/useDraggableWidget.ts";
 
 /** Base scales — used when few cards; shrinks as more are added.
@@ -48,6 +51,93 @@ function zoneStyle(scale: number): React.CSSProperties {
     "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${scale})`,
     "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${scale} * 1.4)`,
   } as React.CSSProperties;
+}
+
+/** CellAlign → flexbox justify class. Literal strings so Tailwind's JIT keeps
+ *  them (a `justify-${align}` template would not be detected). */
+const JUSTIFY_CLASS: Record<CellAlign, string> = {
+  start: "justify-start",
+  center: "justify-center",
+  end: "justify-end",
+};
+
+/** One reorderable middle-row cell, described once and rendered either plain or
+ *  wrapped in a draggable {@link MiddleRowCell}. */
+interface MiddleCellDescriptor {
+  className: string;
+  style?: CSSProperties;
+  debugLabel: string;
+  flexZone?: string;
+  /** i18n key (game namespace) for the edit-mode cell label. */
+  labelKey: string;
+  /** Edit-mode ring + fill that bounds the cell in a distinct hue. */
+  editClass: string;
+  /** Edit-mode label-badge background (matches `editClass`'s hue). */
+  badgeClass: string;
+  content: ReactNode;
+}
+
+/** A draggable middle-row cell (lands / support / command) in edit mode.
+ *
+ *  Each cell owns its own {@link useDragControls} (a hook, so it can't live in
+ *  the parent's `.map()`), and Framer's drag is started manually from the cell's
+ *  own `onPointerDown` with `dragListener={false}`. That keeps the whole-cell
+ *  drag while letting a child — the {@link ColumnEdgeHandle} — opt out cleanly
+ *  with a plain synthetic `stopPropagation`: both are React events, so the
+ *  child's stop prevents the parent's drag-start. */
+function MiddleRowCell({
+  cellKey,
+  cell,
+  label,
+  isDivider,
+  alignable,
+  columnResizing,
+  onResizeStart,
+  onResizeEnd,
+}: {
+  cellKey: MiddleCell;
+  cell: MiddleCellDescriptor;
+  label: string;
+  isDivider: boolean;
+  /** Whether the cell has free space to justify within (lands/support, not the
+   *  content-width command cell) — gates the alignment control. */
+  alignable: boolean;
+  columnResizing: boolean;
+  onResizeStart: () => void;
+  onResizeEnd: () => void;
+}) {
+  const controls = useDragControls();
+  return (
+    <Reorder.Item
+      as="div"
+      value={cellKey}
+      dragListener={false}
+      dragControls={controls}
+      onPointerDown={(e) => controls.start(e)}
+      // Animate the reorder shuffle by position. Reorder.Item requires a truthy
+      // `layout`, so we can't disable it mid divider-drag; instead we zero ONLY
+      // the layout transition while resizing, so the cell edge snaps to the
+      // pointer each frame instead of spring-chasing it (the laggy "stretch").
+      layout="position"
+      transition={columnResizing ? { layout: { duration: 0 } } : undefined}
+      // Edit mode bounds each cell in a distinct hue with a labelled, grippable
+      // badge so it's obvious what's being rearranged.
+      className={`${cell.className} relative cursor-grab rounded-lg ${cell.editClass} active:cursor-grabbing`}
+      style={cell.style}
+      data-debug-label={cell.debugLabel}
+      data-flex-zone={cell.flexZone}
+    >
+      <span
+        className={`pointer-events-none absolute -top-2.5 left-1 z-20 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-950 shadow ${cell.badgeClass}`}
+      >
+        <span aria-hidden>⠿</span>
+        {label}
+      </span>
+      {alignable && <CellAlignControl cell={cellKey} />}
+      {cell.content}
+      {isDivider && <ColumnEdgeHandle onResizeStart={onResizeStart} onResizeEnd={onResizeEnd} />}
+    </Reorder.Item>
+  );
 }
 
 export type PlayerAreaMode = "full" | "focused" | "compact";
@@ -89,6 +179,16 @@ export function PlayerArea({
   const storedMiddleOrder = usePreferencesStore((s) => s.flexLayout.middleRowOrder);
   const setFlexMiddleRowOrder = usePreferencesStore((s) => s.setFlexMiddleRowOrder);
   const flexEditMode = useUiStore((s) => s.flexEditMode);
+  // While the lands↔support seam is being dragged, the middle-row cells must NOT
+  // run Framer's layout animation: the divider changes `flexGrow`, sliding the
+  // right-of-seam cells' left edge every frame, and `layout="position"` would
+  // spring-chase that moving target (the laggy "stretch"). Suppressing `layout`
+  // during the drag makes the resize track the pointer instantly; restoring it
+  // afterward keeps the reorder shuffle animated.
+  const [columnResizing, setColumnResizing] = useState(false);
+  // User-chosen per-cell content alignment (read here, above any early return,
+  // to satisfy rules-of-hooks; the derived justify classes live further down).
+  const cellAlign = usePreferencesStore((s) => s.flexLayout.cellAlign);
   // Combined support cluster: artifacts/enchantments then planeswalkers, in ONE
   // wrapping row (like the lands column) so it stays a single line until crowded.
   // Keeping it one row keeps the middle-row band ~one card tall so the flex-1
@@ -126,14 +226,20 @@ export function PlayerArea({
   const partitioned = battlefieldView;
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];
+  // User-chosen per-cell content alignment (left/center/right), defaulting to the
+  // prior hardcoded lands-left / support-right. The justify class is the only
+  // part that varies; the wrap/cross-axis classes are fixed. (`cellAlign` is read
+  // above with the other hooks.)
+  const landsJustify = JUSTIFY_CLASS[cellAlign?.lands ?? DEFAULT_CELL_ALIGN.lands];
+  const supportJustify = JUSTIFY_CLASS[cellAlign?.support ?? DEFAULT_CELL_ALIGN.support];
   const landAlignClass = isCompactHeight
-    ? "flex-nowrap items-center justify-start"
-    : "flex-wrap items-center content-center justify-start";
-  // Support cluster mirrors the lands column but right-aligned: one wrapping row
-  // that wraps only when crowded (cards shrink with count via supportStyle).
+    ? `flex-nowrap items-center ${landsJustify}`
+    : `flex-wrap items-center content-center ${landsJustify}`;
+  // Support cluster mirrors the lands column: one wrapping row that wraps only
+  // when crowded (cards shrink with count via supportStyle).
   const supportAlignClass = isCompactHeight
-    ? "flex-nowrap items-center justify-end"
-    : "flex-wrap items-center content-center justify-end";
+    ? `flex-nowrap items-center ${supportJustify}`
+    : `flex-wrap items-center content-center ${supportJustify}`;
 
   const landCount = partitioned?.lands.length ?? 0;
   // Count the full support cluster (enchantments/artifacts + planeswalkers) so
@@ -155,22 +261,7 @@ export function PlayerArea({
   // is `shrink-0`. The HUD gets its own band (`hudBand`) adjacent to this row.
   // Each cell is described once and rendered either plain or wrapped in a
   // Reorder.Item, so reordering never duplicates the cell markup.
-  const middleCells: Record<
-    MiddleCell,
-    {
-      className: string;
-      style?: CSSProperties;
-      debugLabel: string;
-      flexZone?: string;
-      /** i18n key (game namespace) for the edit-mode cell label. */
-      labelKey: string;
-      /** Edit-mode ring + fill that bounds the cell in a distinct hue. */
-      editClass: string;
-      /** Edit-mode label-badge background (matches `editClass`'s hue). */
-      badgeClass: string;
-      content: ReactNode;
-    }
-  > = {
+  const middleCells: Record<MiddleCell, MiddleCellDescriptor> = {
     lands: {
       // `flexGrow` overrides `flex-1`'s grow so the lands/support boundary sits
       // at the stored ratio; shrink/basis from `flex-1` are unchanged.
@@ -252,35 +343,21 @@ export function PlayerArea({
         className={middleRowClass}
         data-debug-label="Middle Row"
       >
-        {middleOrder.map((key) => {
-          const cell = middleCells[key];
-          return (
-            <Reorder.Item
-              key={key}
-              as="div"
-              value={key}
-              // Animate ONLY position (the reorder shuffle), not size — otherwise
-              // a flexGrow (divider) or scale change inside the cell gets sprung
-              // by the layout animation, producing a "stretch".
-              layout="position"
-              // Edit mode bounds each cell in a distinct hue with a labelled,
-              // grippable badge so it's obvious what's being rearranged.
-              className={`${cell.className} relative cursor-grab rounded-lg ${cell.editClass} active:cursor-grabbing`}
-              style={cell.style}
-              data-debug-label={cell.debugLabel}
-              data-flex-zone={cell.flexZone}
-            >
-              <span
-                className={`pointer-events-none absolute -top-2.5 left-1 z-20 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-950 shadow ${cell.badgeClass}`}
-              >
-                <span aria-hidden>⠿</span>
-                {t(cell.labelKey)}
-              </span>
-              {cell.content}
-              {key === dividerCell && <ColumnEdgeHandle />}
-            </Reorder.Item>
-          );
-        })}
+        {middleOrder.map((key) => (
+          <MiddleRowCell
+            key={key}
+            cellKey={key}
+            cell={middleCells[key]}
+            label={t(middleCells[key].labelKey)}
+            isDivider={key === dividerCell}
+            // Command is content-width (shrink-0) — no free space to justify
+            // within — so only lands/support get the alignment control.
+            alignable={key !== "command"}
+            columnResizing={columnResizing}
+            onResizeStart={() => setColumnResizing(true)}
+            onResizeEnd={() => setColumnResizing(false)}
+          />
+        ))}
       </Reorder.Group>
     ) : (
       <div className={middleRowClass} data-debug-label="Middle Row">

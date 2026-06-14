@@ -1176,11 +1176,21 @@ function GamePageContent({
           <GameBoard oppHud={oppHud} playerHud={playerHud} />
         </div>
 
-        {/* Row 3: Player hand + zones. `flex-col justify-end` pins the in-flow
-            hand to the band's BOTTOM (= viewport bottom), so resizing the band
-            from its top edge no longer drags the hand vertically. */}
+        {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so
+            if the row stretched with its (resizable) band track, resizing the
+            band would drag the hand vertically. Instead we give the row a
+            CONSTANT height equal to the DEFAULT band and pin it to the track's
+            bottom (`self-end`, the viewport edge, which never moves). The height
+            mirrors the resolver's default track exactly — `min(18%, 150px)` of
+            the grid's CONTENT box (`100dvh` minus the top-overlay padding) — but
+            computed in viewport units so it ignores the LIVE (resized) track,
+            which a plain `18%` on a grid item would track instead. The hand thus
+            keeps its default resting position and stays put on resize; a grown
+            band opens empty space ABOVE the row (trading with the battlefield)
+            rather than shoving the hand up. */}
         <div
-          className="relative flex min-w-0 flex-col justify-end overflow-visible"
+          className="relative min-w-0 self-end overflow-visible"
+          style={{ height: "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)" }}
           data-flex-zone="player-row"
         >
           <div className="flex items-end justify-center">

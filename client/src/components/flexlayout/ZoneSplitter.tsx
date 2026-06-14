@@ -1,8 +1,11 @@
 import { useRef } from "react";
 
-import { usePreferencesStore, type CappedTrack } from "../../stores/preferencesStore.ts";
+import { defaultFlexLayout, usePreferencesStore, type CappedTrack } from "../../stores/preferencesStore.ts";
 import { resizeBand } from "./gridBandMath.ts";
 import { SplitterHandle } from "./SplitterHandle.tsx";
+
+/** Default band tracks (computed once) — the snap-home target for band resizes. */
+const DEFAULT_BANDS = defaultFlexLayout().gridBands;
 
 interface ZoneSplitterProps {
   /** Which band this grabber resizes. "top" sits on the opponent/battlefield
@@ -37,7 +40,7 @@ export function ZoneSplitter({ side, top }: ZoneSplitterProps) {
     const dragY = e.clientY - start.y;
     // Top boundary grows downward; bottom boundary grows upward.
     const deltaPx = side === "top" ? dragY : -dragY;
-    setFlexBand(side, resizeBand(start.track, deltaPx, window.innerHeight));
+    setFlexBand(side, resizeBand(start.track, deltaPx, window.innerHeight, DEFAULT_BANDS[side]));
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {

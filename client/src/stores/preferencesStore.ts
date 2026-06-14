@@ -142,6 +142,15 @@ export type FlexPresetId = "default" | "layout2" | "layout3" | "custom";
  *  pills) — and widget box-scales — `actionRail` and `playerPiles` — applied as
  *  a `transform: scale()` on the whole `DraggableWidget`. Absent ⇒ 1. */
 export type FlexScaleKey = "stack" | "summaryTile" | "actionRail" | "playerPiles";
+/** Content alignment within a middle-row cell — maps to flexbox `justify-*`. */
+export type CellAlign = "start" | "center" | "end";
+/** Per-cell default alignment, reproducing the prior hardcoded layout: lands hug
+ *  the left, support the right, command centered. Absent key ⇒ this. */
+export const DEFAULT_CELL_ALIGN: Record<MiddleCell, CellAlign> = {
+  lands: "start",
+  support: "end",
+  command: "center",
+};
 /** Persisted board layout. One shared global config; only the opponent HUD is
  *  table-size-keyed. Presets are authoritative — applying one replaces every
  *  field wholesale. Any manual edit flips `activePreset` to "custom".
@@ -159,6 +168,8 @@ export interface FlexLayoutConfig {
   middleRowOrder?: MiddleCell[];
   /** Per-zone aspect-preserving size multipliers. Absent key ⇒ 1.0. */
   scales?: Partial<Record<FlexScaleKey, number>>;
+  /** Per-cell content alignment. Absent key ⇒ {@link DEFAULT_CELL_ALIGN}. */
+  cellAlign?: Partial<Record<MiddleCell, CellAlign>>;
   widgets: Partial<Record<FlexWidgetKey, WidgetOffset>>;
   opponentHudByTableSize: Partial<Record<FlexTableSize, WidgetOffset>>;
   activePreset: FlexPresetId;
@@ -179,6 +190,7 @@ export function defaultFlexLayout(): FlexLayoutConfig {
     landSupportRatio: DEFAULT_LAND_SUPPORT_RATIO,
     middleRowOrder: [...DEFAULT_MIDDLE_ROW_ORDER],
     scales: {},
+    cellAlign: {},
     widgets: {},
     opponentHudByTableSize: {},
     activePreset: "default",
@@ -196,6 +208,7 @@ function cloneFlexLayout(config: FlexLayoutConfig): FlexLayoutConfig {
     landSupportRatio: config.landSupportRatio,
     middleRowOrder: config.middleRowOrder ? [...config.middleRowOrder] : undefined,
     scales: { ...config.scales },
+    cellAlign: { ...config.cellAlign },
     widgets: Object.fromEntries(
       Object.entries(config.widgets).map(([k, v]) => [k, { ...v }]),
     ),
@@ -432,6 +445,9 @@ interface PreferencesActions {
   /** Set a zone's aspect-preserving size multiplier. Flips `activePreset` to
    *  "custom". */
   setFlexScale: (key: FlexScaleKey, scale: number) => void;
+  /** Set a middle-row cell's content alignment. Flips `activePreset` to
+   *  "custom". */
+  setFlexCellAlign: (cell: MiddleCell, align: CellAlign) => void;
   /** Apply a preset wholesale — replaces every field, including the opponent
    *  HUD, and sets `activePreset` to the preset's id. Caller resolves the id to
    *  a config (from `presets.ts`) to keep the store free of a preset import. */
@@ -666,6 +682,14 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
             ...state.flexLayout,
             // Clamp to a sane, readable range (half to double the auto-size).
             scales: { ...state.flexLayout.scales, [key]: Math.min(2, Math.max(0.5, scale)) },
+            activePreset: "custom",
+          },
+        })),
+      setFlexCellAlign: (cell, align) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            cellAlign: { ...state.flexLayout.cellAlign, [cell]: align },
             activePreset: "custom",
           },
         })),

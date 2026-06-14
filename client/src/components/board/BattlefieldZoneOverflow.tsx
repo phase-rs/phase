@@ -288,6 +288,12 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
   // corridor rather than off-screen: lands hug the left, support the right.
   const summaryScale = usePreferencesStore((s) => s.flexLayout.scales?.summaryTile) ?? 1;
   const flexEditMode = useUiStore((s) => s.flexEditMode);
+  const isMobile = useIsMobile();
+  // The collapsed overflow pill is more compact on mobile so it claims less of
+  // the cramped half-row; desktop keeps the roomier footprint.
+  const sizeClass = isMobile
+    ? "min-h-[2.5rem] min-w-[5.5rem] px-1.5 py-1"
+    : "min-h-[3.25rem] min-w-[7.5rem] px-2 py-1.5";
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
@@ -416,7 +422,7 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
       type="button"
       onClick={onOpen}
       data-grouped-ids={objectIds.join(" ")}
-      className={`relative flex min-h-[3.25rem] min-w-[7.5rem] max-w-full flex-col justify-center rounded-lg border px-2 py-1.5 text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
+      className={`relative flex ${sizeClass} max-w-full flex-col justify-center rounded-lg border text-left shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition hover:border-white/30 hover:bg-slate-900/80 ${
         hasInteraction
           ? "border-cyan-300/60 bg-cyan-950/45 ring-1 ring-cyan-300/40"
           : "border-white/12 bg-slate-950/72"

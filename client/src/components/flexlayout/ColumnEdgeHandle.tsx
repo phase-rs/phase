@@ -7,14 +7,29 @@ import { ratioFromPointerX } from "./gridBandMath.ts";
  * cell of the pair), so it travels with reordering and never inverts: it reads
  * the live `lands-col`/`support-col` rects at drag time and maps the pointer to
  * lands' share, flipping when support is the left cell. The store clamps.
+ *
+ * The parent cell starts its reorder drag from its own `onPointerDown` (Framer
+ * `dragListener={false}` + `useDragControls`), so a plain synthetic
+ * `stopPropagation` here is enough to claim the press for resizing — the cell's
+ * drag-start never fires. `onResizeStart`/`onResizeEnd` let the parent zero the
+ * Reorder.Item layout transition for the drag (it would otherwise spring-chase
+ * the cell edge as `flexGrow` changes, producing a laggy "stretch").
  */
-export function ColumnEdgeHandle() {
+export function ColumnEdgeHandle({
+  onResizeStart,
+  onResizeEnd,
+}: {
+  onResizeStart: () => void;
+  onResizeEnd: () => void;
+}) {
   const setFlexLandSupportRatio = usePreferencesStore((s) => s.setFlexLandSupportRatio);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Don't let the press start the cell's reorder drag.
+    // Claim the press: stops the parent cell's onPointerDown → controls.start,
+    // so pressing the grip resizes instead of starting a reorder.
     e.stopPropagation();
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    onResizeStart();
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -28,11 +43,14 @@ export function ColumnEdgeHandle() {
     // only when lands is the left cell — otherwise it's support's share.
     let landsShare = ratioFromPointerX(e.clientX, left, right);
     if (lands.left > support.left) landsShare = 1 - landsShare;
+    // Magnetic snap to the even split (the home/default ratio).
+    if (Math.abs(landsShare - 0.5) < 0.04) landsShare = 0.5;
     setFlexLandSupportRatio(landsShare);
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+    onResizeEnd();
   };
 
   return (
@@ -43,6 +61,9 @@ export function ColumnEdgeHandle() {
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      // A canceled pointer (browser interruption) must still re-enable the
+      // layout animation, else reorder stays frozen after the drag.
+      onPointerCancel={handlePointerUp}
       // Straddles the cell's right edge so it sits on the lands↔support seam.
       className="absolute -right-2 top-0 bottom-0 z-30 flex w-4 cursor-col-resize touch-none items-center justify-center"
     >

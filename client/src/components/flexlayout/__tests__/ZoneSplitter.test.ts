@@ -34,6 +34,19 @@ describe("resizeBand", () => {
     const next = resizeBand({ pct: 18, pxCap: 150 }, 100, VH);
     expect(next.pct).toBeLessThanOrEqual(35);
   });
+
+  it("magnetically snaps back to the default band when released near it", () => {
+    const home = { pct: 18, pxCap: 150 }; // default bottom band (150px @ VH=1000)
+    // Drag a custom 200px band down by ~8px → lands within 12px of home (150).
+    const next = resizeBand({ pct: 20, pxCap: 200 }, -42, VH, home);
+    expect(next).toEqual(home); // restored verbatim
+  });
+
+  it("does not snap when released outside the snap window", () => {
+    const home = { pct: 18, pxCap: 150 };
+    const next = resizeBand({ pct: 20, pxCap: 200 }, -20, VH, home); // 180px, 30px off
+    expect(next.pxCap).toBe(180);
+  });
 });
 
 describe("ratioFromPointerX", () => {
