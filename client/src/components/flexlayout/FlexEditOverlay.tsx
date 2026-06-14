@@ -5,7 +5,6 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { FLEX_PRESETS } from "./presets.ts";
 import { ZoneSplitter } from "./ZoneSplitter.tsx";
-import { ColumnSplitter } from "./ColumnSplitter.tsx";
 
 /** Widget zones the overlay outlines + labels (the `data-flex-zone` values that
  *  map to a `settings:flexLayout.zones.*` key). The two board rows used only for
@@ -28,29 +27,15 @@ interface ZoneRect {
   height: number;
 }
 
-/** The lands↔support boundary the vertical {@link ColumnSplitter} straddles:
- *  `x` is the current boundary, `left`/`right` the fixed outer edges of the
- *  two-column region (lands.left / support.right). Null when the viewer's middle
- *  row isn't measurable (no own-area columns rendered). */
-interface ColumnBoundary {
-  x: number;
-  top: number;
-  height: number;
-  left: number;
-  right: number;
-}
-
 interface Measured {
   topBoundary: number | null;
   bottomBoundary: number | null;
-  columnBoundary: ColumnBoundary | null;
   zones: ZoneRect[];
 }
 
 const EMPTY: Measured = {
   topBoundary: null,
   bottomBoundary: null,
-  columnBoundary: null,
   zones: [],
 };
 
@@ -58,8 +43,6 @@ const EMPTY: Measured = {
 function measure(): Measured {
   const oppRow = document.querySelector('[data-flex-zone="opp-row"]');
   const playerRow = document.querySelector('[data-flex-zone="player-row"]');
-  const landsCol = document.querySelector('[data-flex-zone="lands-col"]');
-  const supportCol = document.querySelector('[data-flex-zone="support-col"]');
   const zones: ZoneRect[] = [];
   for (const el of document.querySelectorAll<HTMLElement>("[data-flex-zone]")) {
     const key = el.dataset.flexZone ?? "";
@@ -68,24 +51,9 @@ function measure(): Measured {
     if (r.width === 0 && r.height === 0) continue; // not currently rendered
     zones.push({ key, left: r.left, top: r.top, width: r.width, height: r.height });
   }
-  let columnBoundary: ColumnBoundary | null = null;
-  if (landsCol && supportCol) {
-    const l = landsCol.getBoundingClientRect();
-    const s = supportCol.getBoundingClientRect();
-    if (l.width > 0 && s.width > 0) {
-      columnBoundary = {
-        x: (l.right + s.left) / 2, // midpoint of the gap between the columns
-        top: l.top,
-        height: l.height,
-        left: l.left,
-        right: s.right,
-      };
-    }
-  }
   return {
     topBoundary: oppRow ? oppRow.getBoundingClientRect().bottom : null,
     bottomBoundary: playerRow ? playerRow.getBoundingClientRect().top : null,
-    columnBoundary,
     zones,
   };
 }
@@ -158,18 +126,11 @@ function FlexEditOverlayInner() {
         ))}
       </div>
 
-      {/* Zone-resize grabbers (own their own pointer capture). */}
+      {/* Row-band resize grabbers (own their own pointer capture). The
+          lands↔support width grip is no longer here — it rides the cell as a
+          ColumnEdgeHandle (order-aware), rendered by PlayerArea. */}
       {m.topBoundary != null && <ZoneSplitter side="top" top={m.topBoundary} />}
       {m.bottomBoundary != null && <ZoneSplitter side="bottom" top={m.bottomBoundary} />}
-      {m.columnBoundary != null && (
-        <ColumnSplitter
-          x={m.columnBoundary.x}
-          top={m.columnBoundary.top}
-          height={m.columnBoundary.height}
-          left={m.columnBoundary.left}
-          right={m.columnBoundary.right}
-        />
-      )}
 
       {/* Toolbar. */}
       <div className="pointer-events-auto fixed left-1/2 top-3 z-[72] flex -translate-x-1/2 flex-col items-center gap-1.5 rounded-xl border border-sky-400/40 bg-slate-950/90 px-3 py-2 shadow-xl backdrop-blur">

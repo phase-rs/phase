@@ -1,8 +1,7 @@
-/** Shared visual for both resize grabbers (the row {@link ZoneSplitter} and the
- *  lands↔support {@link ColumnSplitter}). Renders a faint full-length boundary
- *  line plus a centered grip knob carrying a double-headed resize arrow, so the
- *  bar reads unmistakably as "drag me to resize". Orientation is the only axis
- *  of difference, so the two splitters share this one component. */
+/** Shared visual for the row-band resize grabbers ({@link ZoneSplitter}).
+ *  Renders a faint full-length boundary line plus a centered grip knob carrying
+ *  a double-headed resize arrow, so the bar reads unmistakably as "drag me to
+ *  resize". Orientation is parameterized for future reuse. */
 export function SplitterHandle({ orientation }: { orientation: "horizontal" | "vertical" }) {
   // "horizontal" = a horizontal bar that resizes vertically (row bands) → ↕.
   // "vertical"   = a vertical bar that resizes horizontally (columns)    → ↔.

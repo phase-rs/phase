@@ -19,6 +19,7 @@ import { BattlefieldZoneOverflow } from "./BattlefieldZoneOverflow.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommandDock } from "../zone/CommandDock.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
+import { ColumnEdgeHandle } from "../flexlayout/ColumnEdgeHandle.tsx";
 import type { DraggableTarget } from "../../hooks/useDraggableWidget.ts";
 
 /** Base scales — used when few cards; shrinks as more are added.
@@ -230,6 +231,12 @@ export function PlayerArea({
     storedMiddleOrder && storedMiddleOrder.length === 3
       ? storedMiddleOrder
       : [...DEFAULT_MIDDLE_ROW_ORDER];
+  // The lands↔support width grip lives on the seam between them — only when they
+  // are adjacent (no cell reordered between). It rides the left cell of the pair.
+  const landsIdx = middleOrder.indexOf("lands");
+  const supportIdx = middleOrder.indexOf("support");
+  const dividerCell: MiddleCell | null =
+    Math.abs(landsIdx - supportIdx) === 1 ? (landsIdx < supportIdx ? "lands" : "support") : null;
   const middleRowClass = "flex min-h-0 min-w-0 items-stretch justify-between gap-2";
   // Drag-to-reorder is enabled only in the viewer's own area while editing; the
   // resulting order persists globally and applies to every area (incl. plain
@@ -270,6 +277,7 @@ export function PlayerArea({
                 {t(cell.labelKey)}
               </span>
               {cell.content}
+              {key === dividerCell && <ColumnEdgeHandle />}
             </Reorder.Item>
           );
         })}
