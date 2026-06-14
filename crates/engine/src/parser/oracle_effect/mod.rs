@@ -11151,19 +11151,30 @@ fn player_class_filter_as_scope(filter: &TargetFilter) -> Option<PlayerFilter> {
 /// the inner effect drains/acts on each scoped player (Bloodletting idiom)
 /// rather than falling through to the source controller fallback.
 ///
-/// Only `LoseLife` is lifted today (Genesis of the Daleks chapter IV); the match
-/// is structured so additional non-targeted, optionally-directed player effects
-/// (`Draw`, `Mill`, `Discard`, ...) can join the same idiom when a compound
-/// player-subject conjunct exercises them. Returns `None` (leaving the effect
-/// untouched) for any non-class player reference.
+/// Returns `None` (leaving the effect untouched) for any non-class player
+/// reference.
 fn lift_effect_player_class_to_scope(effect: &mut Effect) -> Option<PlayerFilter> {
-    if let Effect::LoseLife { target, .. } = effect {
-        if let Some(scope) = target.as_ref().and_then(player_class_filter_as_scope) {
-            *target = None;
-            return Some(scope);
-        }
+    fn lift_required_target(target: &mut TargetFilter) -> Option<PlayerFilter> {
+        let scope = player_class_filter_as_scope(target)?;
+        *target = TargetFilter::Controller;
+        Some(scope)
     }
-    None
+
+    match effect {
+        Effect::LoseLife { target, .. } => {
+            let scope = target.as_ref().and_then(player_class_filter_as_scope)?;
+            *target = None;
+            Some(scope)
+        }
+        Effect::GainLife { player, .. } => lift_required_target(player),
+        Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. }
+        | Effect::Connive { target, .. } => lift_required_target(target),
+        _ => None,
+    }
 }
 
 /// CR 701.16a + CR 115.1: Unconditionally set the controller constraint on a
@@ -11669,13 +11680,15 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                 force_controller(target, effective_ctrl);
             }
         }
-        // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains
-        // N life" / "target opponent gains N life" announces a player target;
-        // the chosen player, not the source controller, gains the life.
+        // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "<player> gains
+        // N life" binds the subject player, not the source controller. Targeted
+        // subjects announce a player target; non-targeted player classes
+        // ("each of your opponents") are lifted to `player_scope` by
+        // `lift_effect_player_class_to_scope`.
         Effect::GainLife {
             player: player @ TargetFilter::Controller,
             ..
-        } if subject.target.is_some() && target_filter_can_target_player(&subject_filter) => {
+        } if target_filter_can_target_player(&subject_filter) => {
             *player = subject_filter;
         }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.
@@ -19143,6 +19156,46 @@ mod tests {
 
         // Branch 2: DestroyAll{non-Dalek} unchanged.
         assert!(matches!(&*branches[1].effect, Effect::DestroyAll { .. }));
+    }
+
+    /// CR 109.5 + CR 119.3 + CR 121.1: the compound player-subject reroute is a
+    /// player-effect class helper, not a Genesis-only `LoseLife` special case.
+    /// Controller-only player-class targets such as "each of your opponents" must
+    /// lift to `player_scope: Opponent` and restore the inner effect's target to
+    /// `Controller`, the shape the resolution driver already fans out correctly.
+    #[test]
+    fn compound_player_subject_lifts_draw_and_gain_life_scope() {
+        let mut ctx = ParseContext::default();
+        let draw_clause = try_split_targeted_compound(
+            "destroy target creature and each of your opponents draws a card",
+            &mut ctx,
+        )
+        .expect("compound must split");
+        let draw = draw_clause
+            .sub_ability
+            .as_ref()
+            .expect("draw sub-ability must be present");
+        let Effect::Draw { target, .. } = &*draw.effect else {
+            panic!("expected Draw sub-ability, got {:?}", draw.effect);
+        };
+        assert_eq!(*target, TargetFilter::Controller);
+        assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
+
+        let mut ctx = ParseContext::default();
+        let gain_clause = try_split_targeted_compound(
+            "destroy target creature and each of your opponents gains 2 life",
+            &mut ctx,
+        )
+        .expect("compound must split");
+        let gain = gain_clause
+            .sub_ability
+            .as_ref()
+            .expect("gain-life sub-ability must be present");
+        let Effect::GainLife { player, .. } = &*gain.effect else {
+            panic!("expected GainLife sub-ability, got {:?}", gain.effect);
+        };
+        assert_eq!(*player, TargetFilter::Controller);
+        assert_eq!(gain.player_scope, Some(PlayerFilter::Opponent));
     }
 
     /// CR 608.2c regression guard: the legitimate mass-object verb carry-forward
