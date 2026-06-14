@@ -97,6 +97,7 @@ pub fn convert_as_enters(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -177,6 +178,7 @@ pub fn convert_replace_would_enter(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -240,6 +242,7 @@ pub fn convert_replace_would_deal_damage(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -612,6 +615,7 @@ pub fn convert_replace_would_draw(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -733,6 +737,7 @@ pub fn convert_replace_would_put_into_graveyard(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -979,6 +984,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -1067,6 +1073,7 @@ pub fn convert_replace_would_put_counters(
             ensure_token_specs: None,
             counter_match: counter_match.clone(),
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -1249,6 +1256,7 @@ pub fn convert_replace_would_gain_life(
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
     }
     Ok(out)
@@ -1368,6 +1376,7 @@ fn try_build_may_cost_pair(
         ensure_token_specs: None,
         counter_match: None,
         enters_under: None,
+        source_controller: None,
     }))
 }
 

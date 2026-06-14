@@ -516,6 +516,7 @@ mod tests {
             ensure_token_specs: None,
             counter_match: None,
             enters_under: None,
+            source_controller: None,
         });
         object.replacement_definitions.push(ReplacementDefinition {
             destination_zone: None,
