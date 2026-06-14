@@ -1030,7 +1030,7 @@ pub struct PendingChooseOneOf {
 /// interactive body has not yet been resolved. Created when the first
 /// ballot's ChooseFromZone parks WaitingFor::ChooseFromZoneChoice; drained
 /// after each choice resolves until all voters are processed.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingVoteBallotIteration {
     /// The ability template to instantiate for each remaining voter.
     pub ability_template: Box<AbilityDefinition>,
@@ -7319,8 +7319,7 @@ impl PartialEq for GameState {
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
-                && self.pending_vote_ballot_iteration.is_some()
-                    == other.pending_vote_ballot_iteration.is_some()
+            && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
