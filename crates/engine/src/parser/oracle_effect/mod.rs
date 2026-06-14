@@ -8887,6 +8887,20 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
         .parse(after_player)
         .ok()?;
 
+    // CR 107.3i + CR 608.2c: A trailing ", where X is <expr>" binding defines the
+    // X amount for the whole instruction. Strip it here — identical to the
+    // where-X tolerance every other effect-parser branch carries (counter.rs,
+    // sequence.rs, search.rs) — so the controller-suffix probe and parse_target
+    // below see only the "<type> they control" phrase. The amount stays
+    // QuantityExpr::Variable("X"); the binding is applied at lowering by
+    // apply_where_x_effect_expression (DamageAll arm), which the chain IR feeds
+    // from its own strip_trailing_where_x extraction. Without this strip the
+    // probe's gate_rest is non-empty and the whole compound gate falls through,
+    // dropping player_filter and the Creature restriction (Impending Flux).
+    let (stripped, _binding) =
+        strip_trailing_where_x(TextPair::new(after_and_each, after_and_each));
+    let after_and_each = stripped.original;
+
     // Trim a trailing period so suffix-anchored controller phrases match cleanly.
     let after_and_each = after_and_each.trim_end_matches('.').trim_end();
     if after_and_each.is_empty() {
@@ -21482,6 +21496,146 @@ mod tests {
                 }
             }
             other => panic!("expected unified DamageAll, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_split_damage_compound_player_object_dynamic_x_where_clause() {
+        // CR 120.3 + CR 107.3i: Impending Flux class — "deals X damage to each
+        // opponent and each creature they control, where X is 1 plus …". The
+        // trailing where-X binding must NOT defeat the compound gate: the result
+        // must be a single DamageAll with player_filter = Opponent and a
+        // Creature@Opponent object filter; the amount stays Variable("X") for the
+        // lowering pass to bind. Before the fix, the non-empty post-suffix
+        // remainder caused the gate to fall through, dropping player_filter and
+        // the Creature restriction entirely.
+        let mut ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "deals x damage to each opponent and each creature they control, \
+             where x is 1 plus the number of spells you've cast from anywhere \
+             other than your hand this turn",
+            &mut ctx,
+        )
+        .expect("dynamic-X compound player+object damage should parse");
+        assert!(
+            clause.sub_ability.is_none(),
+            "single simultaneous event, no sub_ability",
+        );
+        match &clause.effect {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+                damage_source: None,
+            } => {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name },
+                        } if name.eq_ignore_ascii_case("x"),
+                    ),
+                    "amount must stay Variable(\"X\") for where-X lowering to bind, got: {amount:?}",
+                );
+                assert_eq!(
+                    *player_filter,
+                    Some(PlayerFilter::Opponent),
+                    "opponent players must take damage",
+                );
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.type_filters.contains(&TypeFilter::Creature),
+                            "object set must be Creature-restricted, got: {:?}",
+                            tf.type_filters,
+                        );
+                        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    }
+                    other => panic!("expected Typed Creature@Opponent, got: {other:?}"),
+                }
+            }
+            other => panic!("expected unified DamageAll, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
+        // CR 107.3i + CR 608.2c: End-to-end Impending Flux — after the full chain
+        // is lowered, the where-X binding must have rewritten the amount into a
+        // concrete, runtime-resolvable shape, and the player_filter + Creature
+        // restriction from the structural parse must survive lowering. This guards
+        // the Step-1 gate fix and the where-X binding wiring together.
+        let def = parse_effect_chain(
+            "Impending Flux deals X damage to each opponent and each creature they \
+             control, where X is 1 plus the number of spells you've cast from \
+             anywhere other than your hand this turn.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+                ..
+            } => {
+                // The amount must lower to "1 + the number of spells cast from any
+                // non-hand cast-capable zone this turn", i.e. an `Offset` wrapping
+                // a `SpellsCastThisTurn` ref whose filter excludes the hand — NOT a
+                // verbatim-English `Variable` that resolves to 0 at runtime. A
+                // mere "not bare Variable(\"X\")" check would pass for the garbage
+                // `Variable { name: "1 plus the number of spells…" }` shape.
+                let QuantityExpr::Offset { inner, offset } = amount else {
+                    panic!("amount must lower to Offset, got: {amount:?}");
+                };
+                assert_eq!(*offset, 1, "where-X \"1 plus …\" must offset by 1");
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                } = inner.as_ref()
+                else {
+                    panic!("Offset inner must be a SpellsCastThisTurn ref, got: {inner:?}");
+                };
+                assert_eq!(
+                    *scope,
+                    CountScope::Controller,
+                    "\"you've cast\" → Controller"
+                );
+                let TargetFilter::Typed(tf) = filter
+                    .as_ref()
+                    .expect("cast-origin clause must carry a filter")
+                else {
+                    panic!("spell-history filter must be Typed, got: {filter:?}");
+                };
+                let zones = tf
+                    .properties
+                    .iter()
+                    .find_map(|prop| match prop {
+                        FilterProp::InAnyZone { zones } => Some(zones),
+                        _ => None,
+                    })
+                    .expect("cast-origin clause must carry an InAnyZone filter");
+                assert_eq!(
+                    zones,
+                    &crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand),
+                    "\"from anywhere other than your hand\" must exclude the hand",
+                );
+                assert_eq!(
+                    *player_filter,
+                    Some(PlayerFilter::Opponent),
+                    "player_filter must survive lowering",
+                );
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.type_filters.contains(&TypeFilter::Creature),
+                            "Creature restriction must survive lowering, got: {:?}",
+                            tf.type_filters,
+                        );
+                        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    }
+                    other => panic!("expected Typed Creature@Opponent, got: {other:?}"),
+                }
+            }
+            other => panic!("full pipeline: expected DamageAll, got: {other:?}"),
         }
     }
 

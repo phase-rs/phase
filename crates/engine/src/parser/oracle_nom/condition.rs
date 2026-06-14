@@ -4614,7 +4614,20 @@ fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<Target
         .parse(type_text)
         .ok()?;
     let (props, consumed) = parse_spell_history_origin_props(suffix)?;
-    if !suffix[consumed..].trim().is_empty() {
+    // CR 601.2a + CR 400.1: The cast-origin qualifier ("from anywhere other than
+    // your hand") and the timing qualifier ("this turn") are independent axes and
+    // may appear in either order. The `SpellsCastThisTurn` ref already encodes the
+    // "this turn" window, so a trailing time qualifier after the cast-origin zone
+    // suffix carries no extra filter information — accept and discard it. This is
+    // the qualifier-then-time word order (Impending Flux: "spells you've cast from
+    // anywhere other than your hand this turn") versus the time-then-qualifier
+    // order ("spells you've cast this turn from anywhere other than your hand"),
+    // which strips "this turn" before the cast-origin suffix ever reaches here.
+    let remainder = suffix[consumed..].trim();
+    let remainder = opt(tag::<_, _, OracleError<'_>>("this turn"))
+        .parse(remainder)
+        .map_or(remainder, |(rest, _)| rest);
+    if !remainder.trim().is_empty() {
         return None;
     }
 
