@@ -491,6 +491,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for) {
         drain_pending_change_zone_iteration(state, events);
     }
+    // CR 701.38d: Resume per-ballot vote iteration after an interactive
+    // choice resolves. Must run after change_zone_iteration (which may be
+    // nested inside a ballot body) and before repeat_iteration.
+    if !waits_for_resolution_choice(&state.waiting_for) {
+        vote::drain_pending_vote_ballot_iteration(state, events);
+    }
     // CR 609.3 + CR 109.5: After the per-iteration chain drains, drive any
     // remaining `repeat_for` iterations. Each resumed iteration may itself
     // pause and re-stash via the loop in `resolve_ability_chain`, producing a
@@ -1428,6 +1434,18 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
         AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_effect_performed)
+        }
+        _ => false,
+    }
+}
+
+fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::HasCityBlessing => true,
+        AbilityCondition::Not { condition } => condition_contains_city_blessing(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_contains_city_blessing(inner),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_contains_city_blessing)
         }
         _ => false,
     }
@@ -5197,6 +5215,20 @@ fn resolve_chain_body(
     // parents pay nothing.
     if ability.sub_ability.is_some() {
         crate::game::layers::flush_layers(state);
+    }
+
+    // CR 702.131b + CR 702.131d: If the sub-ability's condition is gated on
+    // the city's blessing, re-evaluate the blessing now — before checking the
+    // condition — so a permanent created by the parent effect (e.g. Ocelot
+    // Pride's Cat token becoming the 10th permanent) is reflected in
+    // `state.city_blessing`. This mirrors the SBA loop's "any time" semantics
+    // without waiting for the next priority pass.
+    if ability.sub_ability.as_ref().is_some_and(|sub| {
+        sub.condition
+            .as_ref()
+            .is_some_and(condition_contains_city_blessing)
+    }) {
+        crate::game::sba::apply_city_blessing_if_triggered(state, events);
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -17213,6 +17245,128 @@ mod tests {
         assert!(
             !mandatory_parent_effect_performed(&copy, &not_made),
             "a CopySpell that made no copy is NOT 'performed' — the draw rider must run"
+        );
+    }
+
+    /// CR 702.131b + CR 702.131d (#2873): Ocelot Pride's race. The parent
+    /// `Effect::Token` pushes the controller from 9 to 10 permanents *during*
+    /// resolution. The sub-ability is gated on `HasCityBlessing`. Without the
+    /// eager re-evaluation in `resolve_chain_body`, `state.city_blessing` is
+    /// still empty when the sub-ability condition is checked (it would only be
+    /// updated by the SBA loop at the next priority pass), so the sub-ability's
+    /// token would NOT be created. With the fix, the blessing is granted before
+    /// the gate fires, so BOTH tokens exist.
+    ///
+    /// Discriminating assertion: `state.battlefield.len() == 11` (9 + 2 tokens)
+    /// and `state.city_blessing.contains(PlayerId(0))`. Reverting the fix makes
+    /// the sub-ability gate read a false `HasCityBlessing`, dropping the second
+    /// token (battlefield 10, not 11).
+    #[test]
+    fn city_blessing_race_grants_sub_ability_token_same_resolution() {
+        let mut state = GameState::new_two_player(42);
+
+        let mut ascend_permanent = None;
+        for i in 0..9u64 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Permanent {i}"),
+                Zone::Battlefield,
+            );
+            if i == 0 {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+                obj.base_power = Some(1);
+                obj.base_toughness = Some(1);
+                obj.power = Some(1);
+                obj.toughness = Some(1);
+                obj.keywords.push(Keyword::Ascend);
+                obj.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .condition(crate::types::ability::StaticCondition::HasCityBlessing)
+                        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 1 },
+                            ContinuousModification::AddToughness { value: 1 },
+                        ]),
+                );
+                ascend_permanent = Some(id);
+            }
+        }
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !state.city_blessing.contains(&PlayerId(0)),
+            "precondition: no city's blessing at 9 permanents"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&ascend_permanent.unwrap())
+                .and_then(|obj| obj.power),
+            Some(1),
+            "the city's-blessing-gated continuous effect must be inactive before the grant"
+        );
+
+        let make_cat = || Effect::Token {
+            name: "Cat".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Cat".to_string()],
+            colors: vec![ManaColor::White],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        let mut sub = ResolvedAbility::new(make_cat(), vec![], ObjectId(1000), PlayerId(0));
+        sub.condition = Some(AbilityCondition::HasCityBlessing);
+
+        let mut parent = ResolvedAbility::new(make_cat(), vec![], ObjectId(1000), PlayerId(0));
+        parent.sub_ability = Some(Box::new(sub));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &parent, &mut events, 0).unwrap();
+
+        assert!(
+            state.city_blessing.contains(&PlayerId(0)),
+            "the parent token made the 10th permanent, so the blessing must be granted \
+             before the sub-ability gate fires"
+        );
+        assert_eq!(
+            state.battlefield.len(),
+            11,
+            "9 starting permanents + parent Cat + sub-ability Cat = 11; a missing \
+             city's-blessing re-evaluation would drop the sub-ability token (10)"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&ascend_permanent.unwrap())
+                .and_then(|obj| obj.power),
+            Some(2),
+            "CR 702.131d: continuous effects gated on the city's blessing must be \
+             reapplied before the sub-ability condition/effect continues"
+        );
+    }
+
+    #[test]
+    fn condition_contains_city_blessing_recurses_through_condition_instead() {
+        let condition = AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::HasCityBlessing),
+        };
+
+        assert!(
+            condition_contains_city_blessing(&condition),
+            "city's-blessing gated continuations wrapped in ConditionInstead must run the \
+             mid-chain blessing check before the condition is evaluated"
         );
     }
 }

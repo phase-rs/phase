@@ -1570,8 +1570,9 @@ pub(super) fn strip_optional_effect_prefix(
     }
 }
 
-/// CR 609.3: Detect and strip a trailing "a number of times equal to the
-/// difference" repeat suffix. On success returns the suffix-free head; the
+/// CR 107.1: Detect and strip a trailing "a number of times equal to the
+/// difference" repeat suffix — an integer repeat count, not the CR 609.3 "do as
+/// much as possible" rule. On success returns the suffix-free head; the
 /// match itself confirms the difference-repeat pattern.
 ///
 /// `strip_repeat_count_suffix` only recognizes numeric / `twice` / `three
@@ -1586,7 +1587,9 @@ pub(super) fn split_difference_repeat_suffix(text: &str) -> Option<&str> {
         .map(|(_, head)| head)
 }
 
-/// CR 609.3: Strip "for each [X], " prefix from effect text.
+/// CR 107.1: Strip "for each [X], " prefix from effect text. The iteration count
+/// is an integer per-each quantity (plain count templating), not the CR 609.3
+/// "do as much as possible" rule.
 /// Returns the QuantityExpr for the iteration count and the remaining text.
 /// "For as long as" is NOT matched (different construct — duration, not iteration).
 /// CR 606.3: Recognize The Chain Veil's printed second-ability pattern,
@@ -1644,6 +1647,37 @@ pub(super) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
         }
     }
     (None, text.to_string())
+}
+
+/// CR 107.1: Parse an anchored `for each <clause>` multiplier for an effect's
+/// count. The multiplier scales the base count by an integer per-each quantity
+/// (the game uses only integers), so this is plain count templating, not the
+/// CR 609.3 "do as much as possible" rule.
+///
+/// Single authority for "attach trailing for-each multiplier", shared across
+/// quantity-taking verbs whose own quantity parser has already returned the
+/// exact remainder where the multiplier is allowed. The count parser leaves
+/// quantity nouns such as `card`/`cards` in the remainder, so this accepts that
+/// draw-count noun axis before the marker. Returns `None` when the remainder
+/// does not begin with an allowed multiplier shape or the clause does not parse
+/// — never silently substitutes `Fixed(1)`.
+pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExpr> {
+    let lower = text.to_lowercase();
+    let ((), for_each_clause) = nom_on_lower(text, &lower, |input| {
+        let (rest, _) = multispace0.parse(input)?;
+        let (rest, _) = opt(terminated(
+            alt((
+                tag::<_, _, OracleError<'_>>("cards"),
+                tag::<_, _, OracleError<'_>>("card"),
+            )),
+            multispace1,
+        ))
+        .parse(rest)?;
+        let (rest, _) = tag("for each ").parse(rest)?;
+        Ok((rest, ()))
+    })?;
+    let clause_lower = for_each_clause.to_lowercase();
+    parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())
 }
 
 pub(super) fn parse_for_each_opponent_target_fanout_clause(
@@ -1735,8 +1769,10 @@ fn per_opponent_target_fanout_min(text: &str) -> usize {
     }
 }
 
-/// CR 609.3: Strip trailing "for each [quantity]" repeat suffixes whose base
-/// action should be repeated rather than have an embedded amount replaced.
+/// CR 107.1: Strip trailing "for each [quantity]" repeat suffixes whose base
+/// action should be repeated rather than have an embedded amount replaced. The
+/// repeat count is an integer per-each quantity (count templating), not the
+/// CR 609.3 "do as much as possible" rule.
 pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     let parsed = nom_on_lower(text, &lower, |input| {
@@ -1758,9 +1794,11 @@ pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>,
     (None, text.to_string())
 }
 
-/// CR 609.3: Strip "twice" / "three times" / "N times" suffix to produce a
-/// `repeat_for` count. Unified with `strip_for_each_prefix` at the chain level
-/// so the base action is parsed normally and the resolver loops it N times.
+/// CR 107.1: Strip "twice" / "three times" / "N times" suffix to produce a
+/// `repeat_for` count — an integer repeat multiplier (count templating), not the
+/// CR 609.3 "do as much as possible" rule. Unified with `strip_for_each_prefix`
+/// at the chain level so the base action is parsed normally and the resolver
+/// loops it N times.
 pub(super) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     let suffixes: &[(&str, i32)] = &[

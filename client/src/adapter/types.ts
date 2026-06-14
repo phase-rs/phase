@@ -635,6 +635,11 @@ export interface SerializedAbility {
    *  confirmation modal for a lone card-consuming action — see
    *  requiresConfirmation in viewmodel/cardActionChoice.ts. */
   consumes_source?: boolean;
+  /** Derived by the engine (CR 605.1a, mana_abilities::is_mana_ability): true
+   *  when this is a mana ability. Absent / false otherwise. The UI uses this to
+   *  route mana-tap affordances instead of introspecting the effect AST — see
+   *  isManaObjectAction in viewmodel/cardActionChoice.ts. */
+  is_mana_ability?: boolean;
   [key: string]: unknown;
 }
 

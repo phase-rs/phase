@@ -2458,6 +2458,12 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::Token => false,
         FilterProp::NonToken => true,
         FilterProp::InZone { zone: required } => record.from_zone == *required,
+        // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
+        // from_zone (populated when the spell was put on the stack from where it
+        // was, CR 601.2a) is one of the listed cast-capable zones. Mirrors the
+        // InZone arm; used by "spell you've cast this turn from anywhere other
+        // than your hand" (the Paradox cycle).
+        FilterProp::InAnyZone { zones } => zones.contains(&record.from_zone),
         // CR 201.2: Exact name match against the cast-time snapshot — case-
         // insensitive per the same convention used by the live-object path.
         // Approach of the Second Sun's "you've cast another spell named
@@ -2500,7 +2506,6 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Modified
         | FilterProp::ToughnessGTPower
         | FilterProp::DifferentNameFrom { .. }
-        | FilterProp::InAnyZone { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
@@ -8920,6 +8925,39 @@ mod tests {
         assert!(
             matches_target_filter(&state, spell, &filter, source),
             "stack objects have a live controller; stale LKI must not make the spell look opponent-controlled"
+        );
+    }
+
+    // CR 400.1 + CR 601.2a: a spell-cast record's captured `from_zone` must be
+    // honored by `FilterProp::InAnyZone` so "spell you've cast this turn from
+    // anywhere other than your hand" counts non-hand casts (the Paradox cycle).
+    #[test]
+    fn spell_record_in_any_zone_cast_origin() {
+        let zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
+                zones: zones.clone(),
+            }]));
+        let controller = PlayerId(0);
+
+        // A graveyard cast (e.g. flashback) is in the "anywhere other than hand" set.
+        let from_graveyard = SpellCastRecord {
+            from_zone: Zone::Graveyard,
+            ..Default::default()
+        };
+        assert!(
+            spell_record_matches_filter(&from_graveyard, &filter, controller, &[]),
+            "a spell cast from the graveyard must satisfy InAnyZone[everything except hand]"
+        );
+
+        // A normal hand cast is excluded.
+        let from_hand = SpellCastRecord {
+            from_zone: Zone::Hand,
+            ..Default::default()
+        };
+        assert!(
+            !spell_record_matches_filter(&from_hand, &filter, controller, &[]),
+            "a spell cast from hand must NOT satisfy InAnyZone[everything except hand]"
         );
     }
 }

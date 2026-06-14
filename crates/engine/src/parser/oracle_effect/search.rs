@@ -13,8 +13,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
-    parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
-    parse_zone_word,
+    distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
+    parse_target, parse_type_phrase, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -1030,7 +1030,14 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
         .collect();
     (filters.len() >= 2).then(|| {
         let filter = normalize_search_filter(TargetFilter::Or { filters });
-        apply_shared_leading_search_properties(filter_region, filter)
+        let filter = apply_shared_leading_search_properties(filter_region, filter);
+        // CR 701.23a: each comma/or disjunct is parsed independently, so a
+        // trailing "with mana value N" suffix lands only on the final leg
+        // ("creature, instant, or sorcery card with mana value N", #2892).
+        // Distribute that trailing predicate back onto the earlier `Typed`
+        // legs via the shared leg-locality authority, which keeps inherently
+        // leg-local props (keyword/name/adjective) on their originating leg.
+        distribute_properties_to_or(filter)
     })
 }
 
@@ -5019,5 +5026,189 @@ mod tests {
             }
             other => panic!("expected MostPrevalentCreatureTypeIn, got {other:?}"),
         }
+    }
+
+    /// Counts how many `Typed` legs of an `Or` carry a `FilterProp` of the given
+    /// discriminant. Building-block assertion over the leg-locality distribution.
+    fn legs_with_prop(
+        filter: &TargetFilter,
+        predicate: impl Fn(&FilterProp) -> bool,
+    ) -> (usize, usize) {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        let mut typed = 0;
+        let mut matching = 0;
+        for f in filters {
+            if let TargetFilter::Typed(t) = f {
+                typed += 1;
+                if t.properties.iter().any(&predicate) {
+                    matching += 1;
+                }
+            }
+        }
+        (matching, typed)
+    }
+
+    /// #2892 — CR 701.23a + CR 202.3: Bring to Light's "creature, instant, or
+    /// sorcery card with mana value less than or equal to N" parses each comma/or
+    /// disjunct independently, so the trailing mana-value predicate must be
+    /// distributed back across ALL three type legs. Pre-fix only the final
+    /// (Sorcery) leg carried `Cmc`, leaving the Creature/Instant legs
+    /// unconstrained (a MV-6 creature was wrongly findable).
+    #[test]
+    fn search_disjunction_distributes_trailing_mana_value_to_all_legs() {
+        let details = parse_search_library_details(
+            "search your library for a creature, instant, or sorcery card with mana value less than or equal to the number of colors of mana spent to cast this spell",
+            &mut ParseContext::default(),
+        );
+        let (with_cmc, typed) = legs_with_prop(&details.filter, |p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    ..
+                }
+            )
+        });
+        assert_eq!(typed, 3, "expected 3 type legs, got {:?}", details.filter);
+        assert_eq!(
+            with_cmc, 3,
+            "every leg must carry the trailing Cmc<=N predicate, got {:?}",
+            details.filter
+        );
+    }
+
+    /// CR 115.1: anti-regression — adjective/keyword-suffix props that bind to a
+    /// single disjunct ("creature, artifact, or enchantment with flying") must
+    /// stay leg-local. Only the creature leg may carry `WithKeyword(Flying)`.
+    #[test]
+    fn search_disjunction_keeps_with_keyword_leg_local() {
+        let details = parse_search_library_details(
+            "search your library for a creature, artifact, or enchantment with flying",
+            &mut ParseContext::default(),
+        );
+        let (with_flying, _typed) = legs_with_prop(&details.filter, |p| {
+            matches!(
+                p,
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }
+            )
+        });
+        assert_eq!(
+            with_flying, 1,
+            "WithKeyword(Flying) must remain on its originating leg only, got {:?}",
+            details.filter
+        );
+    }
+
+    /// #2892 anti-regression — Clever Combo: "a host card or a card with augment".
+    /// CR 702.1: the augment keyword-kind predicate must stay on its own
+    /// disjunct; distributing it onto the host leg ("host card with augment")
+    /// would empty that leg's match set.
+    #[test]
+    fn search_disjunction_keeps_keyword_kind_leg_local() {
+        let details = parse_search_library_details(
+            "search your library for a host card or a card with augment",
+            &mut ParseContext::default(),
+        );
+        let (with_augment, _typed) = legs_with_prop(&details.filter, |p| {
+            matches!(
+                p,
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Augment
+                }
+            )
+        });
+        assert_eq!(
+            with_augment, 1,
+            "HasKeywordKind(Augment) must remain on the non-host leg only, got {:?}",
+            details.filter
+        );
+    }
+
+    /// #2892 building-block guard — CR 201.2 / CR 201.2a (card name) +
+    /// CR 202.3 (mana value): asserts the leg-locality registry directly on the
+    /// distributor, independent of any card's parse path. `FilterProp::Named` is
+    /// inherently leg-local (a name predicate binds only to its own disjunct,
+    /// same class as `HasKeywordKind`/`WithKeyword`), so it must NOT distribute
+    /// across an `Or`; `FilterProp::Cmc` is a trailing-suffix predicate and MUST.
+    ///
+    /// Constructing the `Or` AST directly is deliberate: no current card routes a
+    /// `Named` leg through a real `" or "`/`" and/or "` disjunction with a
+    /// non-`Named` earlier leg (name-disjunction cards either use bare "and",
+    /// which takes the dual-filter `MatchEachFilter` path and never reaches this
+    /// distributor, or carry `Named` on every leg and are deduped by
+    /// `same_kind`). The exclusion is defense-in-depth; this test guards it.
+    ///
+    /// The `Cmc` positive control is the discriminator: if the `Named` exclusion
+    /// were removed, `Named` would wrongly land on the first leg and the first
+    /// assertion would fail — while the `Cmc` assertions prove the test does not
+    /// merely block all distribution.
+    #[test]
+    fn distribute_or_keeps_named_leg_local_but_distributes_cmc() {
+        // Or { Creature [], Card [Named "jiang yanggu", Cmc<=3] }
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Named {
+                            name: "jiang yanggu".to_string(),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        let out = distribute_properties_to_or(filter);
+        let TargetFilter::Or { filters } = &out else {
+            panic!("expected Or filter, got {out:?}");
+        };
+        let TargetFilter::Typed(first) = &filters[0] else {
+            panic!("expected first leg Typed, got {:?}", filters[0]);
+        };
+        let TargetFilter::Typed(second) = &filters[1] else {
+            panic!("expected second leg Typed, got {:?}", filters[1]);
+        };
+
+        // Named stayed leg-local: the Creature leg did NOT receive it. This is
+        // the assertion that flips if the `Named` exclusion is removed from
+        // `is_adjective_prefix_prop`.
+        assert!(
+            !first
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Named { .. })),
+            "Named must NOT distribute to the earlier (Creature) leg, got {first:?}"
+        );
+        // ...but the originating (Card) leg still carries its own Named.
+        assert!(
+            second
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Named { name } if name == "jiang yanggu")),
+            "Named must remain on its originating (Card) leg, got {second:?}"
+        );
+
+        // Positive control: the trailing Cmc<=N predicate DID distribute back to
+        // the earlier leg, proving the guard doesn't wrongly suppress everything.
+        assert!(
+            first.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    ..
+                }
+            )),
+            "Cmc<=N must distribute to the earlier (Creature) leg, got {first:?}"
+        );
     }
 }

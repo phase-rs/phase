@@ -603,6 +603,7 @@ fn graveyard_spell_objects_available_to_cast(
     let mut keyword_objects = Vec::new();
     let mut permission_objects = Vec::new();
     let mut timed_permission_objects = Vec::new();
+    let mut play_from_exile_objects = Vec::new();
 
     for &obj_id in graveyard {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -610,6 +611,18 @@ fn graveyard_spell_objects_available_to_cast(
         };
         if obj.owner != player {
             continue;
+        }
+
+        // CR 701.17d: A mill effect that grants permission to play "that card"
+        // attaches an object-tagged `PlayFromExile` to the milled card in the
+        // graveyard (Ark of Hunger, Tablet of Discovery). The permission is
+        // consultable from the graveyard exactly as from exile; only non-land
+        // cards reach the cast path (CR 305.1 — milled lands are played via
+        // `graveyard_lands_playable_by_permission`).
+        if play_from_exile_object_in_cast_path(obj)
+            && play_from_exile_permission_source(state, obj, player, state.turn_number).is_some()
+        {
+            play_from_exile_objects.push(obj_id);
         }
 
         // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180:
@@ -654,6 +667,7 @@ fn graveyard_spell_objects_available_to_cast(
     let mut objects = keyword_objects;
     objects.extend(permission_objects);
     objects.extend(timed_permission_objects);
+    objects.extend(play_from_exile_objects);
     objects
 }
 
@@ -1396,8 +1410,37 @@ fn has_exile_cast_permission(
 
 /// CR 305.1 + CR 601.2a: Lands in exile may be played by permissions that say
 /// "play", but they never enter the spell-cast path.
+///
+/// EXILE-ONLY BY RULE: this predicate gates the battlefield-static
+/// `StaticMode::ExileCastPermission` path (Maralen, The Matrix of Time). Those
+/// statics function on cards exiled *with* their source (CR 113.6b), so a card
+/// that has since left exile (e.g. milled into a graveyard by another effect)
+/// must NOT be admitted — see the zone re-check at the static callers. Do not
+/// widen this to other zones; the object-tagged `PlayFromExile` path uses
+/// [`play_from_exile_object_in_cast_path`] instead.
 fn exile_object_can_enter_cast_path(obj: &GameObject) -> bool {
     obj.zone == Zone::Exile
+        && !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+}
+
+/// CR 701.17d + CR 305.1 + CR 601.2a: A card carrying an object-tagged
+/// [`CastingPermission::PlayFromExile`] may enter the spell-cast path from
+/// exile (impulse draw) OR from the graveyard (a mill effect that grants
+/// permission to play "that card" — CR 701.17d — attaches the permission to the
+/// milled card in the graveyard). Lands are excluded from the cast path in both
+/// zones (CR 305.1: lands are *played*, not cast); a milled land flows through
+/// [`graveyard_lands_playable_by_permission`] / [`exile_lands_playable_by_permission`]
+/// instead.
+///
+/// This is the single DRY admission predicate for the three object-tagged
+/// `PlayFromExile` consult sites (legal-actions surface, `prepare_spell_cast`).
+/// It does NOT touch the battlefield-static path, which stays exile-only via
+/// [`exile_object_can_enter_cast_path`].
+fn play_from_exile_object_in_cast_path(obj: &GameObject) -> bool {
+    matches!(obj.zone, Zone::Exile | Zone::Graveyard)
         && !obj
             .card_types
             .core_types
@@ -1409,7 +1452,7 @@ fn exile_object_castable_by_permission(
     obj: &GameObject,
     player: PlayerId,
 ) -> bool {
-    exile_object_can_enter_cast_path(obj)
+    play_from_exile_object_in_cast_path(obj)
         && has_exile_cast_permission(state, obj, player, state.turn_number)
 }
 
@@ -2376,8 +2419,13 @@ pub(crate) fn top_of_library_alt_ability_cost_for_object(
     )
 }
 
-/// CR 604.2 + CR 305.1: Find lands in the player's graveyard that can be played
-/// via a GraveyardCastPermission static with `play_mode: Play`.
+/// CR 604.2 + CR 305.1 + CR 701.17d: Find lands in the player's graveyard that
+/// can be played, via either a `GraveyardCastPermission` static with
+/// `play_mode: Play` (Muldrotha class) OR an object-tagged
+/// [`CastingPermission::PlayFromExile`] (a milled land whose "you may play that
+/// card" mill grant attached the permission to it in the graveyard — CR 701.17d,
+/// Ark of Hunger / Tablet of Discovery milling a land). Returns
+/// `(land_id, source_id)` for once-per-turn tracking by the play-land path.
 pub fn graveyard_lands_playable_by_permission(
     state: &GameState,
     player: PlayerId,
@@ -2387,6 +2435,27 @@ pub fn graveyard_lands_playable_by_permission(
         Some(p) => p,
         None => return results,
     };
+
+    // CR 701.17d: Object-tagged `PlayFromExile` on a milled land in the
+    // graveyard. Mirrors the object-tagged branch of
+    // `exile_lands_playable_by_permission`.
+    for &gy_obj_id in &player_data.graveyard {
+        let Some(obj) = state.objects.get(&gy_obj_id) else {
+            continue;
+        };
+        if !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+        {
+            continue;
+        }
+        if let Some((source, _)) =
+            play_from_exile_permission_source(state, obj, player, state.turn_number)
+        {
+            results.push((gy_obj_id, source));
+        }
+    }
 
     let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Play));
     for source in &sources {
@@ -3096,9 +3165,15 @@ fn prepare_spell_cast_with_variant_override_inner(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-    // CR 715.3d: Cards in exile with AdventureCreature or ExileWithAltCost permission.
-    let has_exile_permission =
-        obj.zone == Zone::Exile && has_exile_cast_permission(state, obj, player, state.turn_number);
+    // CR 715.3d + CR 701.17d: Cards carrying an object-tagged play/cast
+    // permission. Exile sources cover AdventureCreature / ExileWithAltCost /
+    // impulse `PlayFromExile`; the graveyard branch covers a milled card whose
+    // `PlayFromExile` was granted by a "you may play that card" mill effect
+    // (CR 701.17d — the permission lands on the card in the graveyard). Lands
+    // are excluded in both zones (CR 305.1) via
+    // `play_from_exile_object_in_cast_path`.
+    let has_object_tagged_play_permission = play_from_exile_object_in_cast_path(obj)
+        && has_exile_cast_permission(state, obj, player, state.turn_number);
     let has_madness = obj.zone == Zone::Exile
         && matches!(variant_override, Some(CastingVariant::Madness))
         && obj.owner == player
@@ -3157,7 +3232,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         && obj.owner != player
         && has_alt_cost_permission_for(obj, state, player);
     let castable_zone = has_unowned_exile_permission
-        || has_exile_permission
+        || has_object_tagged_play_permission
         || has_during_resolution_alt_cost
         || (obj.owner == player
             && (obj.zone == Zone::Hand

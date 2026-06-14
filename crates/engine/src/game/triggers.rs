@@ -629,6 +629,13 @@ fn collect_matching_triggers(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if super::trigger_matchers::listens_on_aggregate_combat_damage_done(trig_def)
+                && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. })
+            {
+                super::trigger_matchers::matching_damage_done_events(event, trig_def, obj_id, state)
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
             } else {
                 vec![vec![event.clone()]]
             };

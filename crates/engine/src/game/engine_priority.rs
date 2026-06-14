@@ -35,16 +35,25 @@ pub(super) fn run_post_action_pipeline_from(
     // (e.g., a creature that just took lethal damage) are found by the scan.
     // This follows the same pattern as process_combat_damage_triggers in combat_damage.rs.
     //
-    // CR 614.12a + CR 707.9: Mid-entry `CopyTargetChoice` deferral happens at
-    // the producer site (`apply_pending_post_replacement_effect`), which both
-    // emits the entering object's `ZoneChanged` and decides whether to pause
-    // for a copy choice. By the time the pipeline reaches this trigger scan,
-    // events that should be deferred have already been moved into
-    // `state.deferred_entry_events` for replay by `handle_copy_target_choice`.
+    // CR 614.12a + CR 707.9: Mid-entry choice deferral (`CopyTargetChoice`,
+    // `ChooseOneOfBranch` enters-counter, and `NamedChoice` as-enters-choose)
+    // captures the entering object's `ZoneChanged` event into
+    // `state.deferred_entry_events` for replay once the choice resolves. The
+    // original event remains in `events` for the frontend animation, but it
+    // MUST NOT reach `process_triggers` / `collect_triggers_into_deferred`
+    // here — the replay in `replay_deferred_entry_events` owns the single
+    // authoritative trigger scan for those events. Without this exclusion, the
+    // entry ZoneChanged is collected once here (into `deferred_triggers` via
+    // `collect_triggers_into_deferred` when `waiting_for` is `NamedChoice`)
+    // and fired a second time by the replay, causing double-fire for ETB
+    // observers like Soul Warden (issue #830).
     if !skip_trigger_scan {
         let filtered_events: Vec<_> = events[event_start..]
             .iter()
-            .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+            .filter(|event| {
+                !matches!(event, GameEvent::PhaseChanged { .. })
+                    && !state.deferred_entry_events.contains(event)
+            })
             .cloned()
             .collect();
         // CR 603.3b: If the resolution step that just ran paused for a player

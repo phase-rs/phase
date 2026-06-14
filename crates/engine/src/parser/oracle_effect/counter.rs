@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{multispace0, space1};
+use nom::character::complete::space1;
 use nom::combinator::{eof, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
@@ -16,9 +16,9 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
+use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
 use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
@@ -460,14 +460,11 @@ pub(super) fn try_parse_put_counter<'a>(
 }
 
 fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)> {
-    let remainder_lower = remainder.to_lowercase();
-    let ((), for_each_clause) = nom_on_lower(remainder, &remainder_lower, |input| {
-        let (rest, _) = multispace0.parse(input)?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>("for each ").parse(rest)?;
-        Ok((rest, ()))
-    })?;
-    let clause_lower = for_each_clause.to_lowercase();
-    let count = parse_for_each_clause_expr(clause_lower.trim())?;
+    // Delegate to the shared anchored "attach trailing for-each multiplier"
+    // authority (CR 107.1 integer count templating) in oracle_effect::lower.
+    // The multiplier consumes the entire tail; preserve the original contract
+    // of returning an empty post-suffix remainder.
+    let count = parse_for_each_multiplier_prefix(remainder)?;
     Some((count, ""))
 }
 
@@ -1854,6 +1851,26 @@ mod tests {
                 )
             ),
             "two counters per card should multiply the hand-card quantity, got {count:?}"
+        );
+    }
+
+    // Finding-4 regression: the counter for-each suffix must stay anchored — the
+    // remainder must *begin* with `for each ` (whitespace-only head). A remainder
+    // where `for each` is preceded by unrelated text must NOT be treated as a
+    // multiplier (which would silently drop the leading clause).
+    #[test]
+    fn counter_for_each_suffix_requires_anchored_marker() {
+        // Anchored: remainder begins with `for each ` → matches.
+        assert!(
+            parse_counter_for_each_suffix("for each creature you control").is_some(),
+            "an anchored `for each` remainder must parse as a multiplier",
+        );
+        // Mid-clause: `for each` preceded by non-whitespace text → rejected, so the
+        // leading clause is not dropped.
+        assert!(
+            parse_counter_for_each_suffix("until end of turn for each creature you control")
+                .is_none(),
+            "a `for each` preceded by unrelated text must not be treated as a multiplier",
         );
     }
 

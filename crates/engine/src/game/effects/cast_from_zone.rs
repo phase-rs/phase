@@ -141,6 +141,19 @@ pub fn resolve(
             .collect();
     }
 
+    // CR 310.11b + CR 608.2c: "exile it, then you may cast it transformed" —
+    // the SelfRef filter resolves to the source object itself. When
+    // `ability.targets` is empty (no pre-selected target, as is typical for
+    // Siege defeat and Suspend self-cast triggers), fall back to the source
+    // directly so the card can be cast during resolution rather than silently
+    // staying in exile.
+    if target_ids.is_empty()
+        && matches!(target_filter, TargetFilter::SelfRef)
+        && ability.source_is_current(state)
+    {
+        target_ids = vec![ability.source_id];
+    }
+
     if target_ids.is_empty() {
         if let Some(source_zone) = target_filter.extract_in_zone() {
             if source_zone == Zone::Hand {
@@ -724,6 +737,78 @@ mod tests {
         assert!(
             state.players.iter().all(|p| p.mana_pool.total() == 0),
             "the free cast must not require or consume mana"
+        );
+    }
+
+    /// CR 310.11b (#2876): Siege defeat — "exile it, then you may cast it
+    /// transformed". The `CastFromZone { target: SelfRef }` sub-ability fires
+    /// with an EMPTY `ability.targets` (the exile step doesn't pre-select a
+    /// target; the source IS the card to cast). Without the SelfRef fallback in
+    /// `resolve`, `target_ids` stays empty and the function returns early,
+    /// leaving the Siege card in exile forever. With the fix, the source id is
+    /// used directly and the card is cast onto the stack.
+    ///
+    /// Discriminating assertion: stack grows by 1 and the exiled card moves to
+    /// Zone::Stack. Reverting the SelfRef fallback makes target_ids stay empty,
+    /// hitting the early-return path — stack stays 0, card stays in exile.
+    #[test]
+    fn siege_self_ref_cast_with_empty_targets_casts_from_exile() {
+        let mut state = make_test_state();
+        let siege_id = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Invasion of Ikoria".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&siege_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        let captured_incarnation = state.objects[&siege_id].incarnation;
+
+        // The Siege defeat sub-ability has SelfRef target and DuringResolution
+        // driver. Crucially, ability.targets is EMPTY — the Siege card is the
+        // source, not a pre-selected target.
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: true,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+            },
+            vec![], // empty — the bug: source is the card to cast, not a named target
+            siege_id,
+            PlayerId(0),
+        );
+        ability.set_source_incarnation_recursive(Some(captured_incarnation));
+
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, siege_id, Zone::Exile, &mut events);
+        assert_eq!(
+            state.objects[&siege_id].incarnation, captured_incarnation,
+            "the engine's self-reference epoch guard is bumped on battlefield entry, so the \
+             Siege defeat zone exit must not make its same-resolution self-cast stale"
+        );
+        events.clear();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 310.11b: Siege defeat must put the card on the stack (cast it), \
+             not silently return with it still in exile"
+        );
+        assert_eq!(
+            state.objects.get(&siege_id).map(|o| o.zone),
+            Some(Zone::Stack),
+            "the Siege card must move from exile to the stack on defeat"
         );
     }
 

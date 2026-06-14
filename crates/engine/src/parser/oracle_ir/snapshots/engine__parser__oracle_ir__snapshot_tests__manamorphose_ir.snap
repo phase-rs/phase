@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 674
 expression: "&ir"
 ---
 {
@@ -55,7 +54,8 @@ expression: "&ir"
         "condition": null,
         "optional_targeting": false,
         "optional": false,
-        "forward_result": false
+        "forward_result": false,
+        "is_mana_ability": true
       }
     }
   ],

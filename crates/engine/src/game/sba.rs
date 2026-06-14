@@ -229,6 +229,20 @@ fn check_city_blessing(
     }
 }
 
+/// CR 702.131b + CR 702.131d: Eagerly re-evaluate the city's blessing for all
+/// players outside the normal SBA loop. Called from `resolve_chain_body` after
+/// a parent effect resolves and before a `HasCityBlessing`-gated sub-ability
+/// condition is evaluated, so that a token or permanent created by the parent
+/// effect (which may have pushed a player to 10+ permanents) is reflected in
+/// `state.city_blessing` before the sub-ability gate fires.
+pub(crate) fn apply_city_blessing_if_triggered(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let mut any_performed = false;
+    check_city_blessing(state, events, &mut any_performed);
+    if any_performed {
+        crate::game::layers::flush_layers(state);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct AscendStatus {
     permanents_controlled: usize,

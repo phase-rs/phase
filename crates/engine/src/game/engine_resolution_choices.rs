@@ -2942,6 +2942,42 @@ pub(super) fn handle_resolution_choice(
                         events,
                     )?;
                 }
+            } else if let Some(source) =
+                source_id.filter(|_| !state.deferred_entry_events.is_empty())
+            {
+                // CR 603.2 + CR 614.12a (#830): an "As it enters, choose …"
+                // replacement (Valgavoth's Lair, the Thriving lands) paused this
+                // permanent's battlefield entry on a persisted `NamedChoice`, so
+                // the entry's `ZoneChanged` never reached the priority-time
+                // trigger collection (`run_post_action_pipeline`). The capture in
+                // `engine_replacement::capture_deferred_entry_events_if_mid_entry_choice`
+                // stashed that event into `state.deferred_entry_events`; now that
+                // the chosen attribute is folded onto the entering permanent,
+                // replay it through the shared deferred-entry authority so every
+                // ETB observer (constellation like Doomwake Giant, Soul Warden, …)
+                // fires against the realized post-choice object. The helper drains
+                // the pending continuation (so this arm fully replaces the plain
+                // `drain_pending_continuation` below) and surfaces any interactive
+                // trigger pause (OrderTriggers / DistributeAmong / target
+                // selection) raised by simultaneously-fired observers.
+                //
+                // Gated on `deferred_entry_events` being non-empty so a non-entry
+                // persisted `NamedChoice` (Pithing Needle naming, Morophon type
+                // choice) takes the unchanged `else` path below — the no-op
+                // disambiguator that keeps the working path byte-for-byte intact.
+                // `last_named_choice` is left set across the helper's continuation
+                // drain (cleared after, mirroring the plain path) so any dependent
+                // continuation reads the answer.
+                let replay = crate::game::engine_replacement::replay_deferred_entry_events(
+                    state, source, events,
+                )?;
+                state.last_named_choice = None;
+                if let Some(waiting_for) = replay {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
             } else {
                 effects::drain_pending_continuation(state, events);
             }

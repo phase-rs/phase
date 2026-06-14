@@ -100,6 +100,9 @@ const MAX_VISIBLE_CARDS = 200;
 // promise — switching tabs (or remounting a view) reuses the cached result
 // instead of re-fetching and re-parsing megabytes each time.
 let coveragePromise: Promise<CoverageSummary> | null = null;
+// Resolved document, kept once the fetch succeeds so a later view mount (tab
+// switch) can initialize synchronously and skip the loading flash.
+let cachedCoverage: CoverageSummary | null = null;
 
 function loadCoverageData(): Promise<CoverageSummary> {
   if (!coveragePromise) {
@@ -107,6 +110,10 @@ function loadCoverageData(): Promise<CoverageSummary> {
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json() as Promise<CoverageSummary>;
+      })
+      .then((data: CoverageSummary) => {
+        cachedCoverage = data;
+        return data;
       })
       .catch((e) => {
         // Don't cache failures: clear the shared slot so the next view mount
@@ -127,13 +134,17 @@ interface CoverageDataState {
 
 /** Shared loader for the coverage export, consumed by all dashboard views. */
 function useCoverageData(): CoverageDataState {
-  const [state, setState] = useState<CoverageDataState>({
-    coverage: null,
-    loading: true,
-    error: null,
-  });
+  // Initialize from the module cache when the doc is already loaded, so
+  // switching dashboard tabs (which remounts the view) renders data immediately
+  // rather than flashing a spinner before the cached promise re-resolves.
+  const [state, setState] = useState<CoverageDataState>(() =>
+    cachedCoverage
+      ? { coverage: cachedCoverage, loading: false, error: null }
+      : { coverage: null, loading: true, error: null },
+  );
 
   useEffect(() => {
+    if (cachedCoverage) return; // synchronous init already supplied the data
     let cancelled = false;
     loadCoverageData()
       .then((data) => {

@@ -112,7 +112,8 @@ expression: result
                   "condition": null,
                   "optional_targeting": false,
                   "optional": false,
-                  "forward_result": false
+                  "forward_result": false,
+                  "is_mana_ability": true
                 }
               }
             ]

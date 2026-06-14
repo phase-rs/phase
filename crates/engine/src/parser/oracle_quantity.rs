@@ -27,7 +27,7 @@ use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
-use super::oracle_nom::condition::inject_controller_you;
+use super::oracle_nom::condition::{inject_controller_you, parse_spell_history_filter};
 use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -45,6 +45,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -767,40 +768,15 @@ pub(crate) fn parse_cda_quantity_with_context(
 
     // "the number of noncreature spells they've cast this turn"
     // "the number of spells they've cast this turn"
+    // "the number of spells you've cast this turn from anywhere other than your hand"
+    // CR 400.1 + CR 601.2a: the shared helper locates the verb phrase
+    // mid-clause (via take_until) so a trailing cast-origin qualifier survives;
+    // "this turn" may already be stripped by strip_trailing_duration, so the bare
+    // " they've cast" / " that player has cast" forms are also recognized.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(text) {
-        // Note: "this turn" may already be stripped by strip_trailing_duration at the clause
-        // level, so we also match the bare " they've cast" / " that player has cast" suffixes.
-        if let Some(spell_part) = rest
-            .strip_suffix(" they've cast this turn")
-            .or_else(|| rest.strip_suffix(" that player has cast this turn"))
-            .or_else(|| rest.strip_suffix(" you've cast this turn"))
-            .or_else(|| rest.strip_suffix(" you cast this turn"))
-            .or_else(|| rest.strip_suffix(" they've cast"))
-            .or_else(|| rest.strip_suffix(" that player has cast"))
-            .or_else(|| rest.strip_suffix(" you've cast"))
-            .or_else(|| rest.strip_suffix(" you cast"))
-        {
-            let spell_part = spell_part.trim();
-            let filter = if spell_part == "spells" || spell_part == "spell" {
-                None
-            } else {
-                let qualifier = spell_part
-                    .strip_suffix(" spells")
-                    .or_else(|| spell_part.strip_suffix(" spell"))
-                    .unwrap_or(spell_part)
-                    .trim();
-                let (filter, remainder) = parse_type_phrase_with_ctx(qualifier, ctx);
-                if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-                    Some(filter)
-                } else {
-                    None
-                }
-            };
+        if let Some((scope, filter)) = parse_spell_history_clause(rest, CountScope::Controller) {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
-                    scope: CountScope::Controller,
-                    filter,
-                },
+                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
             });
         }
     }
@@ -2057,6 +2033,166 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
 }
 
 /// Parse the clause after "for each" into a QuantityRef.
+/// CR 702.62b: A suspended card is a card in the exile zone with the suspend
+/// keyword and a time counter on it. Counting clauses (`for each suspended card
+/// you own`) compose those observable axes with the ownership qualifier.
+///
+/// Composes existing `FilterProp`s (`InZone`/`HasKeywordKind`/`Owned`/`Counters`)
+/// into a typed card filter — never a one-off `Suspended` tag or a verbatim
+/// string match.
+fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("suspended ")
+        .parse(clause)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("cards"),
+        tag::<_, _, OracleError<'_>>("card"),
+    ))
+    .parse(rest)
+    .ok()?;
+    // CR 108.3: only the "you own" ownership form is exercised by suspended-card
+    // count clauses (the cards are exiled face up under their owner).
+    let (rest, _) = preceded(tag::<_, _, OracleError<'_>>(" "), tag("you own"))
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    use crate::types::counter::{CounterMatch, CounterType};
+    Some(QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+            // CR 400.1: in the exile zone.
+            FilterProp::InZone { zone: Zone::Exile },
+            // CR 702.62b: has suspend.
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            },
+            // CR 108.3: owned by the ability's controller.
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            // CR 702.62b: bears at least one time counter.
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ])),
+    })
+}
+
+/// CR 400.1 + CR 601.2a: Parse a spell-history count clause into its
+/// controller scope and an optional characteristic/cast-origin filter.
+///
+/// Single authority shared by both the `for each <spell> you've cast this turn …`
+/// arm and the `the number of <spell> you've cast this turn …` (CDA) arm. The
+/// verb phrase (`you've cast this turn`, `they've cast`, …) can appear *mid-clause*
+/// when a cast-origin qualifier follows (`spell you've cast this turn from
+/// anywhere other than your hand`), so it is located with `take_until` rather
+/// than `strip_suffix`. The noun before the verb and the `from …` tail after it
+/// are reattached into the verb-phrase-free noun phrase
+/// (`spell from anywhere other than your hand`) that `parse_spell_history_filter`
+/// accepts, which yields the `FilterProp::InAnyZone` cast-origin filter.
+///
+/// Returns `None` only when no verb phrase matches (so callers fall through to
+/// other arms). `default_controller` supplies the scope for the `you`/`you've`
+/// forms; `they`/`that player` forms always resolve to `CountScope::Controller`
+/// per the existing arms' semantics.
+fn parse_spell_history_clause(
+    clause: &str,
+    default_controller: CountScope,
+) -> Option<(CountScope, Option<TargetFilter>)> {
+    // Verb-phrase alternates, longest-first so "… this turn" wins over the bare
+    // form. Each is a typed (tag, scope) separator, not a verbatim whole-clause
+    // match — the noun and `from …` tail around it are captured slices.
+    let verb_phrases: [(&str, CountScope); 8] = [
+        (" they've cast this turn", CountScope::Controller),
+        (" that player has cast this turn", CountScope::Controller),
+        (" you've cast this turn", default_controller.clone()),
+        (" you cast this turn", default_controller.clone()),
+        (" they've cast", CountScope::Controller),
+        (" that player has cast", CountScope::Controller),
+        (" you've cast", default_controller.clone()),
+        (" you cast", default_controller.clone()),
+    ];
+
+    for (verb_phrase, scope) in verb_phrases {
+        let Ok((after, noun)) = take_until::<_, _, OracleError<'_>>(verb_phrase).parse(clause)
+        else {
+            continue;
+        };
+        let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(verb_phrase).parse(after) else {
+            continue;
+        };
+        let noun = noun.trim();
+        let tail = tail.trim();
+
+        // Reconstruct the verb-phrase-free noun phrase: noun + trailing `from …`
+        // qualifier. For "spell" + "from anywhere other than your hand" this is
+        // exactly the string `parse_spell_history_filter` consumes.
+        let noun_phrase = if tail.is_empty() {
+            noun.to_string()
+        } else {
+            format!("{noun} {tail}")
+        };
+
+        // Bare spell/time forms with no qualifier keep the historical
+        // `filter: None` behavior.
+        let bare = matches!(noun, "spells" | "spell" | "time" | "") && tail.is_empty();
+        if bare {
+            return Some((scope, None));
+        }
+
+        // Cast-origin / type / color qualifiers route through the shared
+        // spell-history filter grammar (which emits FilterProp::InAnyZone for
+        // "from anywhere other than …").
+        if let Some(filter) = parse_spell_history_filter(&noun_phrase) {
+            return Some((scope, Some(filter)));
+        }
+
+        // A non-empty `tail` means trailing text followed the verb phrase
+        // (`… you've cast this turn <tail>`). The only `tail` shape this helper
+        // recognizes is the cast-origin qualifier consumed by
+        // `parse_spell_history_filter` above. If that did not match, the tail is
+        // unrelated trailing text (e.g. a compound `… and <something else>`
+        // clause): return `None` so later arms can try, rather than swallowing
+        // the tail and mis-quantifying as `filter: None`. This restores the
+        // suffix-anchored original's behavior — which would not have matched a
+        // mid-clause verb phrase at all — now that the verb phrase is located
+        // with `take_until`.
+        if !tail.is_empty() {
+            return None;
+        }
+
+        // Fallback for type-only phrasings the spell-history grammar may reject
+        // (e.g. "instant", "noncreature spell"): strip the trailing spell noun and
+        // run the context-free type-phrase parser. Cast-origin clauses never
+        // reach here (they parse above), so this only recovers legacy type forms.
+        // Strip the trailing spell noun via nom (mirrors
+        // `strip_spell_history_noun`) before the context-free type-phrase
+        // parse: "noncreature spell" → "noncreature", "instant" unchanged.
+        let qualifier = terminated(
+            take_until::<_, _, OracleError<'_>>(" spell"),
+            alt((tag(" spells"), tag(" spell"))),
+        )
+        .parse(noun)
+        .map(|(_, before)| before.trim())
+        .unwrap_or(noun);
+        let (filter, remainder) = parse_type_phrase(qualifier);
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some((scope, Some(filter)));
+        }
+
+        // Suffix-anchored noun with no recognized qualifier (e.g. an unknown
+        // spell noun that ended the clause): mirror the original arms' contract
+        // of returning the spell-history scope with no filter.
+        return Some((scope, None));
+    }
+
+    None
+}
+
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     parse_for_each_clause_with_they_controller(
         clause,
@@ -2354,38 +2490,17 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    // "spell you've cast this turn" / "spells you've cast this turn"
-    // Direct dispatch before type-phrase fallback to handle spell-casting quantity patterns.
-    if let Some(spell_part) = clause
-        .strip_suffix(" you've cast this turn")
-        .or_else(|| clause.strip_suffix(" you cast this turn"))
-        .or_else(|| clause.strip_suffix(" you've cast"))
-        .or_else(|| clause.strip_suffix(" you cast"))
-    {
-        let spell_part = spell_part.trim();
-        let filter = if spell_part == "spells"
-            || spell_part == "spell"
-            || spell_part == "time"
-            || spell_part.is_empty()
-        {
-            None
-        } else {
-            let qualifier = spell_part
-                .strip_suffix(" spells")
-                .or_else(|| spell_part.strip_suffix(" spell"))
-                .unwrap_or(spell_part)
-                .trim();
-            let (f, remainder) = parse_type_phrase(qualifier);
-            if remainder.trim().is_empty() && !matches!(f, TargetFilter::Any) {
-                Some(f)
-            } else {
-                None
-            }
-        };
-        return Some(QuantityRef::SpellsCastThisTurn {
-            scope: CountScope::Controller,
-            filter,
-        });
+    // "spell you've cast this turn" / "spells you've cast this turn" /
+    // "spell you've cast this turn from anywhere other than your hand".
+    // Direct dispatch before type-phrase fallback to handle spell-casting quantity
+    // patterns; the shared helper locates the verb phrase mid-clause so a trailing
+    // cast-origin qualifier survives. CR 400.1 + CR 601.2a.
+    if let Some((scope, filter)) = parse_spell_history_clause(clause, CountScope::Controller) {
+        return Some(QuantityRef::SpellsCastThisTurn { scope, filter });
+    }
+
+    if let Some(qty) = parse_suspended_card_clause(clause) {
+        return Some(qty);
     }
 
     // CR 603.10a + CR 603.6e: "[Aura|Equipment] you controlled that was attached to it"
@@ -5685,5 +5800,231 @@ mod tests {
             },
         };
         assert_eq!(qty, expected);
+    }
+
+    // ===================================================================
+    // Cluster-01: trailing "for each …" multiplier + spell-history cast-origin
+    // + suspended-card primitive. CR 400.1 / CR 601.2a / CR 702.62b.
+    // ===================================================================
+
+    use crate::parser::oracle_target::cast_capable_zones_except;
+    use crate::types::counter::CounterMatch;
+
+    /// Extract the `InAnyZone` zones from a `Typed` spell-history filter.
+    fn in_any_zone_of(filter: &TargetFilter) -> Option<&Vec<Zone>> {
+        let TargetFilter::Typed(typed) = filter else {
+            return None;
+        };
+        typed.properties.iter().find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones),
+            _ => None,
+        })
+    }
+
+    // BLOCKER 2 proof: the exact noun-phrase string that the spell-history clause
+    // helper reconstructs must yield the cast-origin `InAnyZone` filter.
+    #[test]
+    fn spell_history_filter_cast_origin_noun_phrase() {
+        let filter = parse_spell_history_filter("spell from anywhere other than your hand")
+            .expect("noun-phrase form must parse to a cast-origin filter");
+        let zones = in_any_zone_of(&filter)
+            .expect("filter must carry FilterProp::InAnyZone for the cast-origin restriction");
+        assert_eq!(
+            zones,
+            &cast_capable_zones_except(Zone::Hand),
+            "cast-origin zones must be every cast-capable zone except Hand"
+        );
+    }
+
+    // Shared helper: mid-clause verb-phrase split + noun-phrase reconstruction.
+    #[test]
+    fn spell_history_clause_cast_origin() {
+        let (scope, filter) = parse_spell_history_clause(
+            "spell you've cast this turn from anywhere other than your hand",
+            CountScope::Controller,
+        )
+        .expect("cast-origin spell-history clause must parse");
+        assert_eq!(scope, CountScope::Controller);
+        let filter = filter.expect("cast-origin clause must carry a filter");
+        assert_eq!(
+            in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
+            &cast_capable_zones_except(Zone::Hand),
+        );
+    }
+
+    #[test]
+    fn spell_history_clause_bare_no_filter() {
+        // Regression guard: the bare form keeps filter: None.
+        assert_eq!(
+            parse_spell_history_clause("spells you've cast this turn", CountScope::Controller),
+            Some((CountScope::Controller, None)),
+        );
+    }
+
+    #[test]
+    fn spell_history_clause_type_only_fallback() {
+        let (scope, filter) =
+            parse_spell_history_clause("instant you've cast this turn", CountScope::Controller)
+                .expect("type-qualified spell-history clause must parse");
+        assert_eq!(scope, CountScope::Controller);
+        let filter = filter.expect("type-qualified clause must carry a filter");
+        // Must be a typed Instant filter, not the cast-origin InAnyZone shape.
+        assert!(
+            in_any_zone_of(&filter).is_none(),
+            "type-only clause must not carry a cast-origin filter"
+        );
+        assert!(
+            matches!(&filter, TargetFilter::Typed(t) if t.type_filters.contains(&TypeFilter::Instant)),
+            "expected a typed Instant filter, got {filter:?}"
+        );
+    }
+
+    // Finding-5 regression: a non-empty `tail` that is NOT the cast-origin
+    // qualifier (an unrelated compound clause) must return `None` so later arms
+    // get a chance — not `Some((scope, None))`, which would swallow the trailing
+    // text and mis-quantify as a bare spell count.
+    #[test]
+    fn spell_history_clause_compound_tail_returns_none() {
+        assert_eq!(
+            parse_spell_history_clause(
+                "spell you've cast this turn and each creature you control",
+                CountScope::Controller,
+            ),
+            None,
+            "an unrelated trailing clause must not be swallowed",
+        );
+    }
+
+    // For-each arm: the multiplier clause routes through the shared helper.
+    #[test]
+    fn for_each_spell_cast_origin() {
+        let qty =
+            parse_for_each_clause("spell you've cast this turn from anywhere other than your hand")
+                .expect("cast-origin for-each clause must parse");
+        match qty {
+            QuantityRef::SpellsCastThisTurn { scope, filter } => {
+                assert_eq!(scope, CountScope::Controller);
+                let filter = filter.expect("cast-origin clause must carry a filter");
+                assert_eq!(
+                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
+                    &cast_capable_zones_except(Zone::Hand),
+                );
+            }
+            other => panic!("expected SpellsCastThisTurn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_spell_bare_no_filter() {
+        assert_eq!(
+            parse_for_each_clause("spell you've cast this turn"),
+            Some(QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            }),
+        );
+    }
+
+    // Suspended-card primitive (CR 702.62b): exile + suspend + owned{you} + time counter.
+    #[test]
+    fn for_each_suspended_card_you_own() {
+        let qty = parse_for_each_clause("suspended card you own")
+            .expect("suspended-card clause must parse");
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected ObjectCount, got {qty:?}");
+        };
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed filter, got {filter:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "must require exile zone (CR 702.62b)"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            }),
+            "must require suspend keyword (CR 702.62b)"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::You,
+            }),
+            "must require ownership by the controller"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            "must require at least one time counter (CR 702.62b)"
+        );
+    }
+
+    // Rose Tyler's compound: "suspended card you own and each other permanent you
+    // control with a time counter on it" → Sum of two ObjectCounts.
+    #[test]
+    fn for_each_expr_rose_tyler_compound_sums_two_counts() {
+        let expr = parse_for_each_clause_expr(
+            "suspended card you own and each other permanent you control with a time counter on it",
+        )
+        .expect("compound for-each clause must parse");
+        match expr {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(
+                    exprs.len(),
+                    2,
+                    "expected two summed object counts, got {exprs:?}"
+                );
+                assert!(
+                    exprs.iter().all(|t| matches!(
+                        t,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    )),
+                    "both terms must be ObjectCount, got {exprs:?}"
+                );
+            }
+            other => panic!("expected Sum of two ObjectCounts, got {other:?}"),
+        }
+    }
+
+    // CDA arm (MATERIAL GAP proof): "the number of spells … from …".
+    #[test]
+    fn cda_spells_cast_this_turn_cast_origin() {
+        let expr = parse_cda_quantity(
+            "the number of spells you've cast this turn from anywhere other than your hand",
+        )
+        .expect("cast-origin CDA spell-history clause must parse");
+        match expr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+            } => {
+                assert_eq!(scope, CountScope::Controller);
+                let filter = filter.expect("cast-origin clause must carry a filter");
+                assert_eq!(
+                    in_any_zone_of(&filter).expect("filter must carry InAnyZone"),
+                    &cast_capable_zones_except(Zone::Hand),
+                );
+            }
+            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cda_spells_cast_this_turn_bare_no_filter() {
+        assert_eq!(
+            parse_cda_quantity("the number of spells you've cast this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+        );
     }
 }
