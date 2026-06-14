@@ -314,6 +314,7 @@ mod wedding_ring_etb_token_copy;
 mod well_of_lost_dreams_may_pay_x;
 mod wernog_riders_chaplain_investigate_count;
 mod white_suns_twilight;
+mod who_villainous_choice_scoped_player;
 mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
 mod wrenn_and_six_up_to_one_optout;
