@@ -1768,11 +1768,30 @@ pub enum ManaChoiceContext {
     ResolvingEffect(Box<ResolvedAbility>),
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityActivationSnapshot {
+    pub ability: AbilityDefinition,
+    pub source_could_produce_two_or_more_colors: bool,
+}
+
+impl std::fmt::Debug for ManaAbilityActivationSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManaAbilityActivationSnapshot")
+            .field(
+                "source_could_produce_two_or_more_colors",
+                &self.source_could_produce_two_or_more_colors,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingManaAbility {
     pub player: PlayerId,
     pub source_id: ObjectId,
     pub ability_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_snapshot: Option<ManaAbilityActivationSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
@@ -1819,6 +1838,38 @@ pub struct PendingManaAbility {
     /// every non-batchable activation (the default).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub batch_siblings: Vec<ObjectId>,
+}
+
+impl PendingManaAbility {
+    pub fn new(
+        player: PlayerId,
+        source_id: ObjectId,
+        ability_index: usize,
+        ability: &AbilityDefinition,
+        source_could_produce_two_or_more_colors: bool,
+        resume: ManaAbilityResume,
+        color_override: Option<ProductionOverride>,
+    ) -> Self {
+        Self {
+            player,
+            source_id,
+            ability_index,
+            activation_snapshot: Some(ManaAbilityActivationSnapshot {
+                ability: ability.clone(),
+                source_could_produce_two_or_more_colors,
+            }),
+            color_override,
+            resume,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_counter_count: None,
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8011,21 +8062,26 @@ mod tests {
             count: 1,
             min_count: 0,
             resume: CostResume::ManaAbility {
-                mana_ability: Box::new(PendingManaAbility {
-                    player: PlayerId(0),
-                    source_id: ObjectId(1),
-                    ability_index: 0,
-                    color_override: None,
-                    resume: ManaAbilityResume::Priority,
-                    chosen_tappers: Vec::new(),
-                    chosen_discards: Vec::new(),
-                    chosen_mana_payment: None,
-                    chosen_counter_count: None,
-                    chosen_exiled: Vec::new(),
-                    chosen_sacrificed_battlefield: Vec::new(),
-                    cost_paid_object: None,
-                    batch_siblings: Vec::new(),
-                }),
+                mana_ability: Box::new(PendingManaAbility::new(
+                    PlayerId(0),
+                    ObjectId(1),
+                    0,
+                    &AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Activated,
+                        crate::types::ability::Effect::Mana {
+                            produced: crate::types::ability::ManaProduction::Colorless {
+                                count: QuantityExpr::Fixed { value: 1 },
+                            },
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ),
+                    false,
+                    ManaAbilityResume::Priority,
+                    None,
+                )),
             },
         };
         assert!(!tap_mana.has_pending_cast());

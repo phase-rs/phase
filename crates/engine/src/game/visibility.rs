@@ -764,21 +764,27 @@ mod tests {
         player: PlayerId,
         source_id: ObjectId,
     ) -> Box<PendingManaAbility> {
-        Box::new(PendingManaAbility {
+        let ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Colorless {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        Box::new(PendingManaAbility::new(
             player,
             source_id,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        })
+            0,
+            &ability,
+            false,
+            ManaAbilityResume::Priority,
+            None,
+        ))
     }
 
     #[test]

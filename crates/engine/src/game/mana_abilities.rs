@@ -186,6 +186,9 @@ pub fn resolve_mana_ability(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
 ) -> Result<(), EngineError> {
+    let source_could_produce_two_or_more_colors =
+        mana_sources::source_could_produce_two_or_more_colors(state, source_id, player);
+
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
@@ -200,6 +203,7 @@ pub fn resolve_mana_ability(
         ability_def,
         events,
         color_override,
+        source_could_produce_two_or_more_colors,
         None,
     );
     Ok(())
@@ -219,6 +223,7 @@ fn produce_mana_from_ability(
     ability_def: &AbilityDefinition,
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
+    source_could_produce_two_or_more_colors: bool,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) {
     // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
@@ -262,8 +267,6 @@ fn produce_mana_from_ability(
                     ),
                 };
                 let concrete = resolve_restrictions(restrictions, state, source_id);
-                let source_could_produce_two_or_more_colors =
-                    mana_sources::source_could_produce_two_or_more_colors(state, source_id, player);
                 (
                     mana,
                     concrete,
@@ -393,6 +396,16 @@ pub fn activate_mana_ability(
         .objects
         .get(&source_id)
         .ok_or_else(|| EngineError::InvalidAction("Mana ability source not found".to_string()))?;
+    let activation_ability = source
+        .abilities
+        .get(ability_index)
+        .cloned()
+        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+    if &activation_ability != ability_def {
+        return Err(EngineError::InvalidAction(
+            "Mana ability definition does not match source".to_string(),
+        ));
+    }
     // CR 702.26b: Phased-out permanents are treated as though they do not
     // exist, so they cannot activate abilities.
     if source.is_phased_out_permanent() {
@@ -403,7 +416,9 @@ pub fn activate_mana_ability(
     if source.controller != player {
         return Err(EngineError::NotYourPriority);
     }
-    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
+    let required_zone = activation_ability
+        .activation_zone
+        .unwrap_or(Zone::Battlefield);
     if source.zone != required_zone {
         return Err(EngineError::InvalidAction(format!(
             "Object is not in the correct zone (expected {:?})",
@@ -417,12 +432,17 @@ pub fn activate_mana_ability(
     // applies on the non-mana path, so City of Solitude (CantActivateDuring with
     // exemption: None) and any future CantBeActivated with exemption: None block
     // mana activations as the rules require.
-    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+    if super::casting::is_blocked_by_cant_be_activated(
+        state,
+        player,
+        source_id,
+        &activation_ability,
+    ) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
         ));
     }
-    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+    if super::casting::is_blocked_by_cant_activate_during(state, player, &activation_ability) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities can't be activated during this turn (CR 602.5 + CR 117.1b)"
                 .to_string(),
@@ -433,26 +453,26 @@ pub fn activate_mana_ability(
         player,
         source_id,
         ability_index,
-        &ability_def.activation_restrictions,
+        &activation_ability.activation_restrictions,
     )?;
+
+    // CR 602.2a + CR 605.3b: capture the activated mana ability's text and
+    // source-quality facts before costs can tap, sacrifice, exile, or otherwise
+    // make the live source unavailable during immediate resolution.
+    let source_could_produce_two_or_more_colors =
+        mana_sources::source_could_produce_two_or_more_colors(state, source_id, player);
 
     advance_mana_ability_activation(
         state,
-        PendingManaAbility {
+        PendingManaAbility::new(
             player,
             source_id,
             ability_index,
-            color_override,
+            &activation_ability,
+            source_could_produce_two_or_more_colors,
             resume,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        },
+            color_override,
+        ),
         events,
     )
 }
@@ -672,12 +692,9 @@ pub fn handle_choose_mana_color(
         }
     };
 
-    let ability_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+    let ability_def = ability_def_for_pending_activation(state, pending)?;
+    let source_could_produce_two_or_more_colors =
+        source_quality_for_pending_activation(state, pending);
 
     produce_mana_from_ability(
         state,
@@ -686,6 +703,7 @@ pub fn handle_choose_mana_color(
         &ability_def,
         events,
         Some(override_value),
+        source_could_produce_two_or_more_colors,
         pending.cost_paid_object.clone(),
     );
     complete_mana_ability_activation(
@@ -697,6 +715,35 @@ pub fn handle_choose_mana_color(
     );
 
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
+}
+
+fn ability_def_for_pending_activation(
+    state: &GameState,
+    pending: &PendingManaAbility,
+) -> Result<AbilityDefinition, EngineError> {
+    if let Some(snapshot) = &pending.activation_snapshot {
+        return Ok(snapshot.ability.clone());
+    }
+    state
+        .objects
+        .get(&pending.source_id)
+        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .cloned()
+        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))
+}
+
+fn source_quality_for_pending_activation(state: &GameState, pending: &PendingManaAbility) -> bool {
+    pending
+        .activation_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.source_could_produce_two_or_more_colors)
+        .unwrap_or_else(|| {
+            mana_sources::source_could_produce_two_or_more_colors(
+                state,
+                pending.source_id,
+                pending.player,
+            )
+        })
 }
 
 /// CR 605.3a: Bulk-activate the controller's other identical, choice-free mana
@@ -734,14 +781,7 @@ pub(crate) fn batch_activate_mana_siblings(
     // The originally-activated source's mana ability is the shape every sibling
     // was selected to match. Re-resolve each sibling's matching ability index
     // (a sibling may carry unrelated abilities too).
-    let reference_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::InvalidAction("Mana ability source no longer exists".to_string())
-        })?;
+    let reference_def = ability_def_for_pending_activation(state, pending)?;
 
     for &sibling_id in pending.batch_siblings.iter().take(extra) {
         let Some((index, def)) = state.objects.get(&sibling_id).and_then(|obj| {
@@ -1046,12 +1086,7 @@ pub(super) fn advance_mana_ability_activation(
     mut pending: PendingManaAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let ability_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+    let ability_def = ability_def_for_pending_activation(state, &pending)?;
 
     if pending.chosen_discards.is_empty() {
         if let Some((count, cards)) =
@@ -1285,6 +1320,8 @@ pub(super) fn advance_mana_ability_activation(
         }
     }
 
+    let source_could_produce_two_or_more_colors =
+        source_quality_for_pending_activation(state, &pending);
     resolve_mana_ability_with_selected_choices(
         state,
         pending.source_id,
@@ -1298,6 +1335,7 @@ pub(super) fn advance_mana_ability_activation(
         &pending.chosen_sacrificed_battlefield,
         pending.chosen_mana_payment.as_deref(),
         pending.chosen_counter_count,
+        source_could_produce_two_or_more_colors,
         pending.cost_paid_object,
     )?;
     complete_mana_ability_activation(
@@ -1349,6 +1387,7 @@ fn resolve_mana_ability_with_selected_choices(
     sacrificed_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
     chosen_counter_count: Option<u32>,
+    source_could_produce_two_or_more_colors: bool,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
@@ -1432,12 +1471,13 @@ fn resolve_mana_ability_with_selected_choices(
     // ability's cost includes the `{T}` symbol.
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
     for &mana_type in &produced_mana {
-        mana_payment::produce_mana_with_attributes(
+        mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             source_id,
             mana_type,
             player,
             tapped,
+            source_could_produce_two_or_more_colors,
             &restrictions,
             &grants,
             expiry,
@@ -2737,6 +2777,29 @@ mod tests {
         .cost(AbilityCost::Tap)
     }
 
+    fn two_color_self_sacrificing_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Red, ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        })
+    }
+
     fn gemstone_caverns_mana_ability() -> AbilityDefinition {
         let replacement = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -2794,6 +2857,46 @@ mod tests {
             ManaChoiceContext::ManaAbility(pending) => pending,
             other => panic!("expected mana ability context, got {other:?}"),
         }
+    }
+
+    fn pending_mana_ability_from_state(
+        state: &GameState,
+        player: PlayerId,
+        source_id: ObjectId,
+        ability_index: usize,
+        color_override: Option<ProductionOverride>,
+    ) -> PendingManaAbility {
+        let ability = state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.abilities.get(ability_index))
+            .expect("test source should carry the mana ability");
+        PendingManaAbility::new(
+            player,
+            source_id,
+            ability_index,
+            ability,
+            mana_sources::source_could_produce_two_or_more_colors(state, source_id, player),
+            ManaAbilityResume::Priority,
+            color_override,
+        )
+    }
+
+    fn pending_mana_ability_with_def(
+        player: PlayerId,
+        source_id: ObjectId,
+        ability: &AbilityDefinition,
+        color_override: Option<ProductionOverride>,
+    ) -> PendingManaAbility {
+        PendingManaAbility::new(
+            player,
+            source_id,
+            0,
+            ability,
+            false,
+            ManaAbilityResume::Priority,
+            color_override,
+        )
     }
 
     #[test]
@@ -5160,23 +5263,9 @@ mod tests {
             color_options: vec![ManaColor::Red, ManaColor::Green],
             contribution: ManaContribution::Base,
         });
-        Arc::make_mut(&mut obj.abilities).push(ability);
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
 
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: source,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(PlayerId(0), source, &ability, None);
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Red, ManaType::Green],
         };
@@ -5208,6 +5297,244 @@ mod tests {
     }
 
     #[test]
+    fn self_sacrificing_two_color_mana_choice_uses_activation_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9100),
+            PlayerId(0),
+            "Two-Color Spawn".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = two_color_self_sacrificing_mana_ability();
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.is_token = true;
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .expect("activation should pay the self-sacrifice cost and ask for color");
+
+        let (prompt, pending) = match waiting {
+            WaitingFor::ChooseManaColor {
+                choice, context, ..
+            } => (choice, expect_mana_ability_context(context)),
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+        assert_eq!(state.objects.get(&source).unwrap().zone, Zone::Graveyard);
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).clear();
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &prompt,
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut events,
+        )
+        .expect("snapshot should resolve after the live source ability is gone");
+
+        let produced = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .find(|unit| unit.source_id == source && unit.color == ManaType::Green)
+            .expect("chosen green mana should be produced");
+        assert!(
+            produced.source_could_produce_two_or_more_colors,
+            "mana must retain activation-time two-color source quality"
+        );
+    }
+
+    #[test]
+    fn self_sacrificing_banana_choice_survives_serialized_prompt_and_gains_life() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9102),
+            PlayerId(0),
+            "Banana".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = two_color_self_sacrificing_mana_ability();
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )));
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.is_token = true;
+        Arc::make_mut(&mut obj.abilities).push(ability);
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect("Banana token mana ability should activate into a color prompt");
+
+        assert_eq!(state.objects.get(&source).unwrap().zone, Zone::Graveyard);
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).clear();
+        let serialized_prompt = serde_json::to_value(&state.waiting_for).unwrap();
+        state.waiting_for = serde_json::from_value(serialized_prompt).unwrap();
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
+            },
+        )
+        .expect("serialized snapshot should resolve after the live ability is gone");
+
+        let produced = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .find(|unit| unit.source_id == source && unit.color == ManaType::Green)
+            .expect("chosen green mana should be produced");
+        assert!(produced.source_could_produce_two_or_more_colors);
+        assert_eq!(state.players[0].life, 22, "Banana life rider resolved");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn mana_ability_resume_uses_snapshot_after_intermediate_mana_payment() {
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .expect("hybrid sub-cost should require a payment choice");
+
+        let (options, pending) = match waiting {
+            WaitingFor::PayManaAbilityMana {
+                options,
+                pending_mana_ability,
+                ..
+            } => (options, pending_mana_ability),
+            other => panic!("expected PayManaAbilityMana, got {other:?}"),
+        };
+        Arc::make_mut(&mut state.objects.get_mut(&ruins).unwrap().abilities).clear();
+
+        let waiting = handle_pay_mana_ability_mana(
+            &mut state,
+            &options,
+            &pending,
+            &[ManaType::Blue],
+            &mut events,
+        )
+        .expect("snapshot should carry the ability through the intermediate payment");
+        let (prompt, pending) = match waiting {
+            WaitingFor::ChooseManaColor {
+                choice, context, ..
+            } => (choice, expect_mana_ability_context(context)),
+            other => panic!("expected ChooseManaColor after payment, got {other:?}"),
+        };
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &prompt,
+            ManaChoice::Combination(vec![ManaType::Blue, ManaType::Black]),
+            &mut events,
+        )
+        .expect("snapshot should resolve the output choice after live ability removal");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 2);
+        assert!(state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .filter(|unit| unit.source_id == ruins)
+            .all(|unit| unit.source_could_produce_two_or_more_colors));
+    }
+
+    #[test]
+    fn direct_mana_resolution_preserves_source_quality_after_self_sacrifice() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Direct Two-Color Spawn".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = two_color_self_sacrificing_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            &ability,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Red)),
+        )
+        .expect("direct mana resolution should survive self-sacrifice");
+
+        let produced = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .find(|unit| unit.source_id == source && unit.color == ManaType::Red)
+            .expect("red mana should be produced");
+        assert!(produced.source_could_produce_two_or_more_colors);
+    }
+
+    #[test]
+    fn pending_mana_ability_deserializes_without_activation_snapshot() {
+        let ability = two_color_self_sacrificing_mana_ability();
+        let pending = PendingManaAbility::new(
+            PlayerId(0),
+            ObjectId(10),
+            0,
+            &ability,
+            true,
+            ManaAbilityResume::Priority,
+            None,
+        );
+        let mut payload = serde_json::to_value(&pending).unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("activation_snapshot");
+
+        let decoded: PendingManaAbility = serde_json::from_value(payload).unwrap();
+        assert!(decoded.activation_snapshot.is_none());
+    }
+
+    #[test]
     fn handle_choose_mana_color_resolves_pain_land_damage_for_each_color() {
         for chosen in [ManaType::Green, ManaType::White] {
             let mut state = GameState::new_two_player(42);
@@ -5222,23 +5549,10 @@ mod tests {
             obj.card_types
                 .core_types
                 .push(crate::types::card_type::CoreType::Land);
-            Arc::make_mut(&mut obj.abilities).push(brushland_colored_ability());
+            let ability = brushland_colored_ability();
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
 
-            let pending = PendingManaAbility {
-                player: PlayerId(0),
-                source_id: source,
-                ability_index: 0,
-                color_override: None,
-                resume: ManaAbilityResume::Priority,
-                chosen_tappers: Vec::new(),
-                chosen_discards: Vec::new(),
-                chosen_mana_payment: None,
-                chosen_counter_count: None,
-                chosen_exiled: Vec::new(),
-                chosen_sacrificed_battlefield: Vec::new(),
-                cost_paid_object: None,
-                batch_siblings: Vec::new(),
-            };
+            let pending = pending_mana_ability_with_def(PlayerId(0), source, &ability, None);
             let prompt = ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::White],
             };
@@ -5450,23 +5764,10 @@ mod tests {
         obj.card_types
             .core_types
             .push(crate::types::card_type::CoreType::Land);
-        Arc::make_mut(&mut obj.abilities).push(sunken_ruins_colored_ability());
+        let ability = sunken_ruins_colored_ability();
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
 
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: ruins,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(PlayerId(0), ruins, &ability, None);
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
                 vec![ManaType::Blue, ManaType::Blue],
@@ -5551,23 +5852,10 @@ mod tests {
         obj.card_types
             .core_types
             .push(crate::types::card_type::CoreType::Land);
-        Arc::make_mut(&mut obj.abilities).push(sunken_ruins_colored_ability());
+        let ability = sunken_ruins_colored_ability();
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
 
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: ruins,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(PlayerId(0), ruins, &ability, None);
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
                 vec![ManaType::Blue, ManaType::Blue],
@@ -6452,21 +6740,7 @@ mod tests {
         // Handler rejects a payment vector not present in `options`.
         let mut state = GameState::new_two_player(42);
         let (ruins, _ability) = setup_sunken_ruins(&mut state);
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: ruins,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_from_state(&state, PlayerId(0), ruins, 0, None);
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
         let mut events = Vec::new();
         let result = handle_pay_mana_ability_mana(
@@ -6819,21 +7093,7 @@ mod tests {
             .push(crate::types::card_type::CoreType::Land);
         Arc::make_mut(&mut obj.abilities).push(brushland_colored_ability());
 
-        let pending = PendingManaAbility {
-            player: PlayerId(1),
-            source_id: brushland,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_from_state(&state, PlayerId(1), brushland, 0, None);
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Green, ManaType::White],
         };
@@ -7377,21 +7637,8 @@ mod tests {
             "Second graveyard card".to_string(),
             Zone::Graveyard,
         );
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: source,
-            ability_index: 0,
-            color_override: None,
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let ability = make_titans_nest_ability();
+        let pending = pending_mana_ability_with_def(PlayerId(0), source, &ability, None);
 
         let result = handle_exile_for_mana_ability(
             &mut state,
@@ -7418,7 +7665,7 @@ mod tests {
             Zone::Battlefield,
         );
         let ability = make_phyrexian_altar_ability();
-        Arc::make_mut(&mut state.objects.get_mut(&altar).unwrap().abilities).push(ability);
+        Arc::make_mut(&mut state.objects.get_mut(&altar).unwrap().abilities).push(ability.clone());
 
         let creature = spawn_creature_with_cost(
             &mut state,
@@ -7445,21 +7692,12 @@ mod tests {
                 },
             }));
 
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: altar,
-            ability_index: 0,
-            color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(
+            PlayerId(0),
+            altar,
+            &ability,
+            Some(ProductionOverride::SingleColor(ManaType::Black)),
+        );
 
         let result = handle_sacrifice_for_mana_ability(
             &mut state,
@@ -7556,8 +7794,8 @@ mod tests {
             Zone::Battlefield,
         );
         // Stash the food-chain ability so the dispatch can find it by index.
-        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities)
-            .push(make_food_chain_ability());
+        let ability = make_food_chain_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities).push(ability.clone());
 
         // 3-MV creature: cost {2}{G}.
         let three_cost = ManaCost::Cost {
@@ -7568,21 +7806,12 @@ mod tests {
             spawn_creature_with_cost(&mut state, PlayerId(0), "Grizzly Bears", three_cost);
 
         // Player picks the creature to exile via the resume handler.
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: chain,
-            ability_index: 0,
-            color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(
+            PlayerId(0),
+            chain,
+            &ability,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        );
         let mut events = Vec::new();
         let _ = handle_exile_for_mana_ability(
             &mut state,
@@ -7619,8 +7848,8 @@ mod tests {
             "Food Chain".to_string(),
             Zone::Battlefield,
         );
-        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities)
-            .push(make_food_chain_ability());
+        let ability = make_food_chain_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities).push(ability.clone());
 
         // 0-MV creature (Memnite-style): no shards, no generic.
         let zero_cost = ManaCost::Cost {
@@ -7629,21 +7858,12 @@ mod tests {
         };
         let creature = spawn_creature_with_cost(&mut state, PlayerId(0), "Memnite", zero_cost);
 
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: chain,
-            ability_index: 0,
-            color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(
+            PlayerId(0),
+            chain,
+            &ability,
+            Some(ProductionOverride::SingleColor(ManaType::Red)),
+        );
         let mut events = Vec::new();
         let _ = handle_exile_for_mana_ability(
             &mut state,
@@ -7771,8 +7991,8 @@ mod tests {
             "Food Chain".to_string(),
             Zone::Battlefield,
         );
-        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities)
-            .push(make_food_chain_ability());
+        let ability = make_food_chain_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities).push(ability.clone());
 
         let three_cost = ManaCost::Cost {
             shards: vec![ManaCostShard::Green],
@@ -7781,21 +8001,12 @@ mod tests {
         let creature =
             spawn_creature_with_cost(&mut state, PlayerId(0), "Grizzly Bears", three_cost);
 
-        let pending = PendingManaAbility {
-            player: PlayerId(0),
-            source_id: chain,
-            ability_index: 0,
-            color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
-            resume: ManaAbilityResume::Priority,
-            chosen_tappers: Vec::new(),
-            chosen_discards: Vec::new(),
-            chosen_mana_payment: None,
-            chosen_counter_count: None,
-            chosen_exiled: Vec::new(),
-            chosen_sacrificed_battlefield: Vec::new(),
-            cost_paid_object: None,
-            batch_siblings: Vec::new(),
-        };
+        let pending = pending_mana_ability_with_def(
+            PlayerId(0),
+            chain,
+            &ability,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        );
         let mut events = Vec::new();
         let _ = handle_exile_for_mana_ability(
             &mut state,
