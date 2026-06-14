@@ -1165,9 +1165,24 @@ pub(super) fn parse_targeted_action_ast(
         alt((value("tap", tag("tap ")), value("untap", tag("untap ")))).parse(input)
     }) {
         let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
+        // CR 608.2k: A bare object pronoun ("untaps it") in a subject-bearing
+        // clause is an anaphor, not a parent-target chain. Route it through
+        // `resolve_it_pronoun` — identical to the sacrifice/counter clauses in
+        // the same instruction — so "that player gains control of ~, untaps it,
+        // and puts a +1/+1 counter on it" (Alexios, Deimos of Kosmos) binds the
+        // untap to `SelfRef` (the named source), and observer triggers like
+        // "whenever a permanent you control enters tapped, untap it" (Amulet of
+        // Vigor) bind to `TriggeringSource` (the entering permanent). Without a
+        // subject (a true parent-target chain, "tap target creature. untap it")
+        // the guard falls through to `parse_target_with_ctx` → `ParentTarget`.
+        let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
+            resolve_it_pronoun(ctx)
+        } else {
+            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            #[cfg(debug_assertions)]
+            assert_no_compound_remainder(_rem, text);
+            target
+        };
         return match verb {
             "tap" => Some(TargetedImperativeAst::Tap { target }),
             "untap" => Some(TargetedImperativeAst::Untap { target }),
