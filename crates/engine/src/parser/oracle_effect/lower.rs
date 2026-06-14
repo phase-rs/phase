@@ -12,7 +12,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_for_each_clause,
-    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -2502,7 +2502,21 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         )
         .parse(i)
     }) {
-        if !before.is_empty() {
+        // CR 400.7 + CR 700.4: A "this turn" that belongs to a per-turn VALUE
+        // quantity in the preceding clause ("loses life equal to the total power
+        // of Daleks that died this turn, or destroy all non-Dalek creatures") is
+        // NOT an effect duration — stripping it here would amputate the ", or …"
+        // alternative-effect branch of a binary choice. Mirror the end-of-string
+        // handler's quantity-ownership guard so both strippers defer to the
+        // quantity grammar identically.
+        let this_turn_end = before.len() + "this turn".len();
+        let quantity_owns_suffix =
+            lower.get(before.len()..this_turn_end).is_some_and(|seg| {
+                all_consuming(tag::<_, _, OracleError<'_>>("this turn"))
+                    .parse(seg)
+                    .is_ok()
+            }) && quantity_clause_owns_this_turn_suffix(&lower[..this_turn_end]);
+        if !before.is_empty() && !quantity_owns_suffix {
             return (duration_text[..before.len()].trim_end(), Some(duration));
         }
     }
@@ -2513,6 +2527,45 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
 fn quantity_clause_owns_this_turn_suffix(lower: &str) -> bool {
     where_x_quantity_clause_owns_this_turn_suffix(lower)
         || for_each_quantity_clause_owns_this_turn_suffix(lower)
+        || value_quantity_clause_owns_this_turn_suffix(lower)
+}
+
+/// CR 400.7 + CR 700.4: True when the trailing " this turn" is part of a dynamic
+/// VALUE quantity (e.g. "loses life equal to the total power of Daleks that died
+/// this turn") rather than an effect duration. The end-of-string and mid-clause
+/// duration strippers both consult this guard so a per-turn quantity's "this
+/// turn" is never amputated as an outer `UntilEndOfTurn`. Generalizes the
+/// `where x is` / `for each` ownership checks to the "equal to <quantity ...
+/// this turn>" form by reusing the shared `parse_quantity_ref` building block:
+/// the quantity owns the suffix iff some word-boundary tail of the clause parses
+/// as a `QuantityRef` that consumes exactly through " this turn".
+fn value_quantity_clause_owns_this_turn_suffix(lower: &str) -> bool {
+    // The clause spans from the start through the first " this turn" suffix.
+    // Anchor on the LAST " this turn" — that is the suffix the duration stripper
+    // is testing (the trailing one for the end-of-string handler, the one before
+    // ", or "/", where " for the mid-clause handler, since callers slice their
+    // input to end there). An earlier per-turn quantity ("where X is the life
+    // you've lost this turn, then … +1/+1 this turn") must NOT mask the OUTER
+    // trailing duration on a later clause.
+    // allow-noncombinator: anchor slice on the last " this turn" for the scan_at_word_boundaries word-boundary scan below (Pattern 5), not parsing dispatch
+    let Some(idx) = lower.rfind(" this turn") else {
+        return false;
+    };
+    let clause = &lower[..idx + " this turn".len()];
+    // Scan word boundaries (via the shared `scan_at_word_boundaries` combinator)
+    // for a tail that parses fully as a dynamic quantity ending at " this turn";
+    // the quantity owns the suffix iff one exists. `parse_quantity_ref` is a
+    // whole-string match, so a successful tail necessarily consumes through
+    // " this turn" (the end of `clause`). Mirrors the `where_x` / `for_each`
+    // ownership helpers, generalized to any `QuantityRef`.
+    nom_primitives::scan_at_word_boundaries(clause, |i| match parse_quantity_ref(i) {
+        Some(_) => Ok((i, ())),
+        None => Err(nom::Err::Error(OracleError::new(
+            i,
+            nom::error::ErrorKind::Fail,
+        ))),
+    })
+    .is_some()
 }
 
 fn where_x_quantity_clause_owns_this_turn_suffix(lower: &str) -> bool {
@@ -5709,17 +5762,57 @@ mod tests {
     use super::{
         nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_where_x_quantity_expression,
         strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_where_x,
+        strip_trailing_duration, strip_trailing_where_x,
+        value_quantity_clause_owns_this_turn_suffix,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, ObjectScope, PtValue,
-        QuantityExpr, QuantityRef, TargetFilter, TriggerDefinition,
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Duration, Effect, ObjectScope,
+        PtValue, QuantityExpr, QuantityRef, TargetFilter, TriggerDefinition,
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// CR 400.7 + CR 700.4: A per-turn VALUE quantity's " this turn" suffix must
+    /// not be claimed as an outer effect duration. Both the value-ownership
+    /// predicate and the mid-clause ", or " duration stripper must defer to the
+    /// quantity grammar so a binary-choice alternative branch is never amputated.
+    #[test]
+    fn value_quantity_owns_died_this_turn_suffix() {
+        assert!(value_quantity_clause_owns_this_turn_suffix(
+            "each of your opponents loses life equal to the total power of daleks that died this turn"
+        ));
+        // The mid-clause ", or …" stripper must leave the whole choice intact.
+        let (rest, dur) = strip_trailing_duration(
+            "Destroy all Dalek creatures and each of your opponents loses life equal to the total power of Daleks that died this turn, or destroy all non-Dalek creatures",
+        );
+        assert_eq!(
+            rest,
+            "Destroy all Dalek creatures and each of your opponents loses life equal to the total power of Daleks that died this turn, or destroy all non-Dalek creatures"
+        );
+        assert_eq!(dur, None);
+    }
+
+    /// A genuine "this turn" duration before ", or " that is NOT a per-turn
+    /// quantity must still strip — the guard is scoped to value quantities only.
+    #[test]
+    fn genuine_this_turn_before_or_still_strips() {
+        let (rest, dur) =
+            strip_trailing_duration("creatures you control get +2/+2 this turn, or +0/+0");
+        assert_eq!(dur, Some(Duration::UntilEndOfTurn));
+        assert_eq!(rest, "creatures you control get +2/+2");
+    }
+
+    /// CR 119.3: A plain "lose 2 life this turn" with no dynamic quantity does
+    /// NOT trigger value-ownership; the suffix is a real duration boundary.
+    #[test]
+    fn plain_this_turn_not_owned_by_value_quantity() {
+        assert!(!value_quantity_clause_owns_this_turn_suffix(
+            "creatures you control get +1/+1 this turn"
+        ));
+    }
 
     /// CR 614.1c + issue #1498: "return it to the battlefield tapped and with
     /// two stun counters under its owner's control" (Unstoppable Slasher) must

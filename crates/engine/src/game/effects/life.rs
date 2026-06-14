@@ -1141,6 +1141,57 @@ mod tests {
         );
     }
 
+    /// CR 119.3 + CR 109.5: Genesis of the Daleks chapter IV — "...and each of
+    /// your opponents loses life equal to ...". End-to-end resolution guard for
+    /// the parser fix that lifts the "each of your opponents" subject onto the
+    /// sub_ability's `player_scope` (leaving `LoseLife.target: None`) instead of
+    /// stamping a non-resolvable `Typed(controller=Opponent)` target.
+    ///
+    /// This drives the actual parsed encoding through `resolve_ability_chain`:
+    /// the controller (p0) must NOT lose life and the opponent (p1) MUST. The
+    /// AST-only parser test (`genesis_villainous_branch_splits_destroy_and_lose_life`)
+    /// asserts the shape; this test asserts the runtime routing, closing the
+    /// path-divergence gap where a green AST test masked the inverse drain.
+    #[test]
+    fn genesis_each_opponent_loses_life_drains_opponent() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::PlayerFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+
+        // Genesis branch-1 LoseLife encoding: undirected `target: None` with the
+        // each-opponent scope lifted onto the ability (the post-fix shape). The
+        // amount is fixed here — the bug under test is target routing, not amount
+        // resolution (the dynamic `ZoneChangeAggregateThisTurn` amount is covered
+        // by the AST parser test).
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "Genesis's controller (p0) must NOT lose life — the each-opponent \
+             scope routes the loss to opponents, not the source controller"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 5,
+            "each opponent (p1) must lose 5 life"
+        );
+    }
+
     /// Issue #317 (Lich): "If you would gain life, draw that many cards
     /// instead." The replacement substitutes a *different* event type
     /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +

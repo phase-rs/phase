@@ -2738,6 +2738,30 @@ fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, Quantity
     Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
 }
 
+/// CR 400.7 + CR 700.4: Parse a trailing "that died [under your control] this
+/// turn" qualifier, returning the controller scope. "died" = battlefield→
+/// graveyard (CR 700.4), applied as a constant zone pair at the construction site
+/// exactly as `creatures_died_this_turn_ref` does. CR 109.5: "under your control"
+/// scopes to the source's controller (`ControllerRef::You`); unqualified forms
+/// return `None` (every player's deaths). Longer tags precede shorter so the
+/// qualified suffix isn't shadowed by `alt`. Building block shared by the
+/// aggregate this-turn-death quantity form.
+pub(crate) fn parse_died_this_turn_suffix(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(
+            Some(ControllerRef::You),
+            tag("that died under your control this turn"),
+        ),
+        value(
+            Some(ControllerRef::You),
+            tag("that died under your control"),
+        ),
+        value(None, tag("that died this turn")),
+        value(None, tag("that died")),
+    ))
+    .parse(input)
+}
+
 /// CR 700.4: Shared tail for "creature(s) that died" / graveyard-from-battlefield
 /// phrasing. Engine tracking is per-turn-only, so the trailing "this turn"
 /// qualifier is semantically redundant when present.
@@ -3178,6 +3202,30 @@ mod tests {
         TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    /// CR 400.7 + CR 700.4 + CR 109.5: the shared death-suffix combinator returns
+    /// the controller scope for all four "that died" tag forms and rejects
+    /// unrelated text.
+    #[test]
+    fn test_parse_died_this_turn_suffix_controller_scopes() {
+        assert_eq!(
+            parse_died_this_turn_suffix("that died under your control this turn").unwrap(),
+            ("", Some(ControllerRef::You))
+        );
+        assert_eq!(
+            parse_died_this_turn_suffix("that died under your control").unwrap(),
+            ("", Some(ControllerRef::You))
+        );
+        assert_eq!(
+            parse_died_this_turn_suffix("that died this turn").unwrap(),
+            ("", None)
+        );
+        assert_eq!(
+            parse_died_this_turn_suffix("that died").unwrap(),
+            ("", None)
+        );
+        assert!(parse_died_this_turn_suffix("you control").is_err());
+    }
 
     /// CR 400.7d: each subject anaphora maps to the correct
     /// `CastManaObjectScope` — "this …"/"it"/"them"/"~" → `SelfObject`;

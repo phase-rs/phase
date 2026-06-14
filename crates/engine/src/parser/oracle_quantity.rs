@@ -289,6 +289,37 @@ pub(crate) fn parse_quantity_ref_with_context(
             });
         }
 
+        // CR 400.7 + CR 700.4: "the total power of <filter> that died [under your
+        // control] this turn" aggregates over this turn's battlefield→graveyard
+        // zone-change records, not live battlefield objects — the objects have
+        // left play and carry their death-time P/T snapshot. Reuse the filter
+        // parse_type_phrase_with_ctx already produced (above) and run the shared
+        // death-suffix combinator on its remainder. Placed before the past-tense
+        // "you controlled" arm so it isn't shadowed, and after the present-tense
+        // arm so plain "the total power of creatures you control" stays a live
+        // `Aggregate`.
+        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
+            if let Ok((after, controller)) =
+                nom_quantity::parse_died_this_turn_suffix(remainder.trim_start())
+            {
+                if after.trim().is_empty() {
+                    // Only ControllerRef::You is producible by the suffix combinator.
+                    let filter = if controller.is_some() {
+                        inject_controller_you(filter)
+                    } else {
+                        filter
+                    };
+                    return Some(QuantityRef::ZoneChangeAggregateThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter,
+                        function: func,
+                        property: prop,
+                    });
+                }
+            }
+        }
+
         // CR 608.2i: past-tense "you controlled" look-back. tag("you control") in
         // parse_zone_controller has no word boundary and would prefix-match
         // "you controlled", corrupting the remainder to "led …". Isolate the bare
@@ -2709,6 +2740,70 @@ mod tests {
                 },
             }),
         }
+    }
+
+    /// CR 400.7 + CR 700.4: "the total power of <subtype> that died this turn"
+    /// aggregates the death-time power snapshot over this turn's battlefield→
+    /// graveyard records, not live battlefield objects.
+    #[test]
+    fn total_power_of_subtype_that_died_this_turn_is_zone_change_aggregate() {
+        assert_eq!(
+            parse_quantity_ref("the total power of Daleks that died this turn"),
+            Some(QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string())),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            })
+        );
+    }
+
+    /// CR 109.5: "under your control" scopes the aggregate to the source's
+    /// controller via `inject_controller_you` (controller=You + InZone Battlefield).
+    #[test]
+    fn total_toughness_died_under_your_control_injects_controller() {
+        let qty = parse_quantity_ref(
+            "the total toughness of creatures that died under your control this turn",
+        )
+        .expect("must parse");
+        let QuantityRef::ZoneChangeAggregateThisTurn {
+            from,
+            to,
+            filter,
+            function,
+            property,
+        } = qty
+        else {
+            panic!("expected ZoneChangeAggregateThisTurn, got {qty:?}");
+        };
+        assert_eq!(from, Some(Zone::Battlefield));
+        assert_eq!(to, Some(Zone::Graveyard));
+        assert_eq!(function, AggregateFunction::Sum);
+        assert_eq!(property, ObjectProperty::Toughness);
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+    }
+
+    /// Regression guard: a present-tense "total power of creatures you control"
+    /// (no "died this turn") still resolves to the live-battlefield `Aggregate`,
+    /// NOT the zone-change sibling.
+    #[test]
+    fn total_power_you_control_stays_live_aggregate() {
+        assert_eq!(
+            parse_quantity_ref("the total power of creatures you control"),
+            Some(QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            })
+        );
     }
 
     #[test]

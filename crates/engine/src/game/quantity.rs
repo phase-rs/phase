@@ -303,6 +303,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn { .. }
@@ -475,6 +476,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn { .. }
@@ -2027,6 +2029,41 @@ fn resolve_ref(
                 })
                 .count(),
         ),
+        // CR 400.7 + CR 603.10a: Reduce `property` over this turn's matching
+        // zone-change snapshots. Mirrors ZoneChangeCountThisTurn's population scan
+        // but sums/maxes/mins the per-record P/T/MV (CR 208.1 / CR 202.3) instead
+        // of counting.
+        QuantityRef::ZoneChangeAggregateThisTurn {
+            from,
+            to,
+            filter,
+            function,
+            property,
+        } => {
+            let vals = state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| {
+                    from.is_none_or(|zone| record.from_zone == Some(zone))
+                        && to.is_none_or(|zone| record.to_zone == zone)
+                        && matches_target_filter_on_zone_change_record(
+                            state,
+                            record,
+                            filter,
+                            &filter_ctx,
+                        )
+                })
+                .filter_map(|record| match property {
+                    ObjectProperty::Power => record.power,
+                    ObjectProperty::Toughness => record.toughness,
+                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(record.mana_value)),
+                });
+            match function {
+                AggregateFunction::Max => vals.max().unwrap_or(0),
+                AggregateFunction::Min => vals.min().unwrap_or(0),
+                AggregateFunction::Sum => vals.sum(),
+            }
+        }
         // CR 120.1 + CR 120.9 + CR 603.4: Damage dealt this turn matching the
         // supplied source/target filters. `group_by` selects whether records are
         // partitioned (per CR 120.9 "by a specific source") before `aggregate`
@@ -5207,6 +5244,82 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
+    /// CR 400.7 + CR 700.4 + CR 208.1: aggregate the death-time power snapshot
+    /// over this turn's battlefield→graveyard records matching the filter. Sum
+    /// adds matching records; Max picks the largest; a non-matching destination
+    /// is excluded (returns 0 when none match).
+    #[test]
+    fn resolve_zone_change_aggregate_this_turn_sums_dies_power() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Genesis of the Daleks".to_string(),
+            Zone::Battlefield,
+        );
+        let dalek_a = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dalek".to_string()],
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let dalek_b = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dalek".to_string()],
+            power: Some(3),
+            ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let non_dalek = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Human".to_string()],
+            power: Some(7),
+            ..ZoneChangeRecord::test_minimal(ObjectId(12), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        state
+            .zone_changes_this_turn
+            .extend([dalek_a, dalek_b, non_dalek]);
+
+        let dalek_filter = TargetFilter::Typed(TypedFilter::default().subtype("Dalek".to_string()));
+
+        let sum = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: dalek_filter.clone(),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &sum, PlayerId(0), source), 6);
+
+        let max = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: dalek_filter.clone(),
+                function: AggregateFunction::Max,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &max, PlayerId(0), source), 3);
+
+        // A destination the records never matched yields 0.
+        let none_match = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregateThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: dalek_filter,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &none_match, PlayerId(0), source),
+            0
+        );
     }
 
     #[test]
