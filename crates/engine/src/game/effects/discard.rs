@@ -199,11 +199,6 @@ pub fn resolve(
                             applied,
                             ..
                         } => {
-                            // CR 614.6: a plain discard's inner hand → graveyard
-                            // move still consults `Moved` redirects (RIP class);
-                            // `complete_discard_to_graveyard` re-proposes it
-                            // carrying `applied` so Discard-level definitions
-                            // don't re-run.
                             if let DiscardOutcome::NeedsReplacementChoice(player) =
                                 complete_discard_to_graveyard(
                                     state,
@@ -410,9 +405,6 @@ fn route_discard(
                 applied,
                 ..
             } => {
-                // CR 614.6: a plain discard's inner hand → graveyard move still
-                // consults `Moved` redirects (RIP class); re-propose carrying the
-                // outer pass's `applied` so Discard-level definitions don't re-run.
                 if let DiscardOutcome::NeedsReplacementChoice(choice_player) =
                     complete_discard_to_graveyard(state, oid, pid, source_id, applied, events)
                 {

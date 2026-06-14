@@ -133,34 +133,45 @@ fn selection_matches_each_filter(
     chosen: &[crate::types::identifiers::ObjectId],
     filters: &[TargetFilter],
 ) -> bool {
-    if chosen.len() != filters.len() {
+    // CR 701.23b: stated-quality search may fail to find some or all cards.
+    // A short (or empty) selection is legal as long as every chosen card can
+    // claim a distinct, matching, unused filter slot — leftover slots stay
+    // unfilled. Over-selection (more cards than slots) is still illegal.
+    if chosen.len() > filters.len() {
         return false;
     }
-    let mut used = vec![false; chosen.len()];
-    assign_filter_slot(state, chosen, filters, &mut used, 0)
+    let mut used = vec![false; filters.len()];
+    assign_each_chosen_to_distinct_slot(state, chosen, filters, &mut used, 0)
 }
 
-fn assign_filter_slot(
+/// Card-anchored backtracking matcher: each chosen card must claim a distinct,
+/// matching, still-unused filter slot. Leftover slots may go unfilled — the
+/// fail-to-find case (CR 701.23b). Backtracking (not greedy) is
+/// required: for filters `[basic-or-Shrine, Shrine]` and chosen `[shrine, basic]`,
+/// a greedy first-match would bind shrine→slot0 then fail basic→slot1, falsely
+/// rejecting the legal assignment shrine→slot1, basic→slot0.
+fn assign_each_chosen_to_distinct_slot(
     state: &GameState,
     chosen: &[crate::types::identifiers::ObjectId],
     filters: &[TargetFilter],
     used: &mut [bool],
-    filter_idx: usize,
+    card_idx: usize,
 ) -> bool {
-    if filter_idx == filters.len() {
+    if card_idx == chosen.len() {
         return true;
     }
 
     let filter_ctx = FilterContext::neutral();
-    chosen.iter().enumerate().any(|(card_idx, card_id)| {
-        if used[card_idx]
-            || !matches_target_filter(state, *card_id, &filters[filter_idx], &filter_ctx)
+    let card_id = chosen[card_idx];
+    (0..filters.len()).any(|slot_idx| {
+        if used[slot_idx] || !matches_target_filter(state, card_id, &filters[slot_idx], &filter_ctx)
         {
             return false;
         }
-        used[card_idx] = true;
-        let matched = assign_filter_slot(state, chosen, filters, used, filter_idx + 1);
-        used[card_idx] = false;
+        used[slot_idx] = true;
+        let matched =
+            assign_each_chosen_to_distinct_slot(state, chosen, filters, used, card_idx + 1);
+        used[slot_idx] = false;
         matched
     })
 }
@@ -424,7 +435,9 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef, TypedFilter};
+    use crate::types::ability::{
+        Comparator, FilterProp, QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
@@ -1567,6 +1580,163 @@ mod tests {
             &[black_green, green, blue],
             &constraint
         ));
+    }
+
+    /// CR 701.23b: a stated-quality MatchEachFilter search may find FEWER cards
+    /// than there are filter slots — including none — when the library can't
+    /// supply one card per slot (Aang's Journey kicked: basic land + Shrine, but
+    /// the deck has no Shrine). Exercises the building-block legality authority
+    /// across the full short/over/distinct-slot range, including the overlapping-
+    /// filter backtracking case a greedy matcher silently breaks.
+    #[test]
+    fn match_each_filter_permits_partial_and_empty_fail_to_find() {
+        let mut state = GameState::new_two_player(42);
+
+        // A basic land and a Shrine enchantment in the library.
+        let basic = add_library_land(&mut state, 1, PlayerId(0), "Forest", true);
+        let shrine = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Honden".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&shrine).unwrap();
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.subtypes.push("Shrine".to_string());
+        }
+
+        let basic_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            controller: None,
+            properties: vec![FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Basic,
+            }],
+        });
+        let shrine_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Shrine".to_string())],
+            controller: None,
+            properties: vec![],
+        });
+        let constraint = SearchSelectionConstraint::MatchEachFilter {
+            filters: vec![basic_filter.clone(), shrine_filter.clone()],
+        };
+
+        // Empty selection: always legal (full fail-to-find).
+        assert!(selection_satisfies_constraint(&state, &[], &constraint));
+
+        // Partial: a single basic fills the distinct basic slot, Shrine slot
+        // left unfilled — legal.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[basic],
+            &constraint
+        ));
+        // A single Shrine fills the Shrine slot — legal.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[shrine],
+            &constraint
+        ));
+
+        // Full selection still legal.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[basic, shrine],
+            &constraint
+        ));
+
+        // A card matching NO slot is illegal even as a singleton: a vanilla
+        // creature satisfies neither the basic-land nor the Shrine filter.
+        let creature = add_library_creature(&mut state, 3, PlayerId(0), "Bear");
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[creature],
+            &constraint
+        ));
+
+        // Over-selection: more cards than filter slots is illegal.
+        let basic2 = add_library_land(&mut state, 4, PlayerId(0), "Island", true);
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[basic, shrine, basic2],
+            &constraint
+        ));
+
+        // Two cards both matching only the same single slot is illegal: two
+        // basics against [basic, Shrine] cannot both claim the lone basic slot.
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[basic, basic2],
+            &constraint
+        ));
+    }
+
+    /// CR 701.23b: the card-anchored matcher MUST backtrack, not greedily bind
+    /// the first matching slot. For overlapping filters `[basic-or-Shrine, Shrine]`
+    /// and chosen `[shrine, basic]`, a greedy matcher binds shrine→slot0 then
+    /// fails basic→slot1 (Shrine-only), falsely rejecting the legal assignment
+    /// shrine→slot1, basic→slot0. This case is the regression sentinel for a
+    /// greedy rewrite.
+    #[test]
+    fn match_each_filter_backtracks_on_overlapping_slots() {
+        let mut state = GameState::new_two_player(42);
+        let basic = add_library_land(&mut state, 1, PlayerId(0), "Forest", true);
+        let shrine = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Honden".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&shrine).unwrap();
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.subtypes.push("Shrine".to_string());
+        }
+
+        // slot0 matches a basic land OR a Shrine; slot1 matches only a Shrine.
+        let basic_or_shrine = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Land,
+                TypeFilter::Subtype("Shrine".to_string()),
+            ])],
+            controller: None,
+            properties: vec![],
+        });
+        let shrine_only = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Shrine".to_string())],
+            controller: None,
+            properties: vec![],
+        });
+        let constraint = SearchSelectionConstraint::MatchEachFilter {
+            filters: vec![basic_or_shrine, shrine_only],
+        };
+
+        // Chosen order [shrine, basic]: only the backtracking assignment
+        // (shrine→slot1, basic→slot0) is valid. A greedy first-match returns
+        // false here.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[shrine, basic],
+            &constraint
+        ));
+    }
+
+    /// CR 701.23d: a pure-quantity (`None`) search is unaffected by the partial-
+    /// find relaxation — any size remains legal there, as before, because the
+    /// count bound is enforced separately at the submission guard.
+    #[test]
+    fn none_constraint_unaffected_by_partial_find_relaxation() {
+        let mut state = GameState::new_two_player(42);
+        let a = add_library_creature(&mut state, 1, PlayerId(0), "A");
+        let b = add_library_creature(&mut state, 2, PlayerId(0), "B");
+        let constraint = SearchSelectionConstraint::None;
+        assert!(selection_satisfies_constraint(&state, &[], &constraint));
+        assert!(selection_satisfies_constraint(&state, &[a], &constraint));
+        assert!(selection_satisfies_constraint(&state, &[a, b], &constraint));
+        assert!(!constraint.permits_partial_find());
     }
 
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — search for a creature card with mana

@@ -346,7 +346,7 @@ fn evaluate_constructed(
             // "illegal" — that was the bug that flagged Power 9 as banned
             // in Vintage.
             Some(LegalityStatus::Restricted) => {
-                restricted_canonical.insert(resolved.to_ascii_lowercase());
+                restricted_canonical.insert(canonical_deck_count_key(db, name));
             }
             Some(status) => {
                 illegal_cards.insert(format!("{name} ({})", status_label(status)));
@@ -1463,11 +1463,12 @@ fn quick_constructed_check(
         if db.get_face_by_name(resolved).is_none() {
             return QuickCheckResult::unknown(name);
         }
-        *counts.entry(resolved.to_ascii_lowercase()).or_insert(0) += 1;
+        let canonical = canonical_deck_count_key(db, name);
+        *counts.entry(canonical.clone()).or_insert(0) += 1;
         match db.legality_status(resolved, legality_format) {
             Some(LegalityStatus::Legal) => {}
             Some(LegalityStatus::Restricted) => {
-                restricted.insert(resolved.to_ascii_lowercase());
+                restricted.insert(canonical);
             }
             Some(status) => {
                 return QuickCheckResult::incompatible(format!(
@@ -1568,7 +1569,9 @@ fn quick_commander_check(
         let Some(face) = db.get_face_by_name(resolved) else {
             return QuickCheckResult::unknown(name);
         };
-        *counts.entry(resolved.to_ascii_lowercase()).or_insert(0) += 1;
+        *counts
+            .entry(canonical_deck_count_key(db, name))
+            .or_insert(0) += 1;
         if !rules.skip_commander_legality
             || !request
                 .commander
@@ -1956,15 +1959,23 @@ fn card_is_known(db: &CardDatabase, name: &str) -> bool {
 /// `"Delver of Secrets // Insectile Aberration"`/`"Delver of Secrets"` are
 /// counted as the same card.
 ///
-/// CR 201.3 + CR 903.5b: For deck construction, cards with interchangeable
-/// names have the same name.
+/// CR 201.3 + CR 100.2a: Canonical key for aggregating deck copy counts.
+/// Uses the indexed face name when the card resolves so alias spellings
+/// ("Nazgul" vs "Nazgûl") merge into one bucket for copy-limit checks.
+fn canonical_deck_count_key(db: &CardDatabase, name: &str) -> String {
+    let resolved = resolve_card_name(db, name);
+    db.get_face_by_name(resolved)
+        .map(|face| face.name.to_lowercase())
+        .unwrap_or_else(|| resolved.to_lowercase())
+}
+
 fn combined_copy_counts(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
 ) -> HashMap<String, u32> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     for name in all_deck_cards(request) {
-        let canonical = resolve_card_name(db, name).to_ascii_lowercase();
+        let canonical = canonical_deck_count_key(db, name);
         *counts.entry(canonical).or_insert(0) += 1;
     }
     counts
@@ -2815,6 +2826,69 @@ mod tests {
         assert!(copy_limit_violations(&db, &counts_of(&[("Nazgûl", 9)]), 1).is_empty());
         // A normal card is still singleton-restricted to 1.
         assert!(!copy_limit_violations(&db, &counts_of(&[("Red Card", 2)]), 1).is_empty());
+    }
+
+    #[test]
+    fn combined_copy_counts_merge_nazgul_spelling_variants() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut main = expand("Nazgul", 5);
+        main.extend(expand("Nazgûl", 5));
+        main.extend(expand("Plains", 80));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_match_type: None,
+            summary_only: false,
+        };
+
+        let counts = combined_copy_counts(&db, &request);
+        assert_eq!(counts.get("nazgûl"), Some(&10));
+        assert!(!copy_limit_violations(&db, &counts, 1).is_empty());
+    }
+
+    #[test]
+    fn commander_accepts_nine_nazgul_copies() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut main = expand("Nazgul", 9);
+        main.extend(expand("Mountain", 90));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Grub Commander".to_string()],
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_match_type: None,
+            summary_only: false,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected compatible commander deck, got: {:?}",
+            result.commander.reasons
+        );
+    }
+
+    #[test]
+    fn summary_commander_accepts_nine_nazgul_copies() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut main = expand("Nazgul", 9);
+        main.extend(expand("Mountain", 90));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Grub Commander".to_string()],
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Commander),
+            selected_match_type: None,
+            summary_only: true,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(true));
     }
 
     #[test]

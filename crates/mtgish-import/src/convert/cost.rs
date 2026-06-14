@@ -36,6 +36,7 @@ pub fn as_pure_mana(cost: &Cost) -> ConvResult<Option<ManaCost>> {
         // duplicates the X-binding that's already encoded as a
         // `ManaCostShard::X` shard in the symbol list.
         Cost::PayManaX(symbols, _x_value) => mana::convert_x(symbols).map(Some),
+        Cost::ItsManaCost => Ok(Some(ManaCost::SelfManaCost)),
         _ => Ok(None),
     }
 }

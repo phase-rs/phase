@@ -541,6 +541,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
             &mut events,
         );
 

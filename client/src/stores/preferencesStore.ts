@@ -112,6 +112,11 @@ export type FlexWidgetKey =
   | "actionRail"
   | "playerPiles"
   | "opponentPiles";
+/** The three reorderable cells of the battlefield middle row. Stored as an
+ *  order so the user can permute them (drag-to-reorder); flexbox reflows. */
+export type MiddleCell = "lands" | "support" | "command";
+/** Default left-to-right order — reproduces today's lands · support · command. */
+export const DEFAULT_MIDDLE_ROW_ORDER: readonly MiddleCell[] = ["lands", "support", "command"];
 /** Table sizes the opponent HUD position is keyed by: 1v1 renders a single pill,
  *  multiplayer a tab strip, so a shared offset wouldn't fit both. */
 export type FlexTableSize = "oneVsOne" | "multiplayer";
@@ -131,10 +136,21 @@ export interface GridBands {
  *  would overclaim. `default` is load-bearing — it is the {@link defaultFlexLayout}
  *  seed and the Reset target — so only the two editorial slots are neutralized. */
 export type FlexPresetId = "default" | "layout2" | "layout3" | "custom";
-/** An aspect-preserving size multiplier over a zone's existing auto-scale.
- *  `stack` scales the stack's cards (over the viewport `responsiveScale`);
- *  `summaryTile` scales the collapsed lands/support overflow pills. Absent ⇒ 1. */
-export type FlexScaleKey = "stack" | "summaryTile";
+/** An aspect-preserving size multiplier. Two flavours share one map:
+ *  content-scales — `stack` (the stack's cards, over the viewport
+ *  `responsiveScale`) and `summaryTile` (the collapsed lands/support overflow
+ *  pills) — and widget box-scales — `actionRail` and `playerPiles` — applied as
+ *  a `transform: scale()` on the whole `DraggableWidget`. Absent ⇒ 1. */
+export type FlexScaleKey = "stack" | "summaryTile" | "actionRail" | "playerPiles";
+/** Content alignment within a middle-row cell — maps to flexbox `justify-*`. */
+export type CellAlign = "start" | "center" | "end";
+/** Per-cell default alignment, reproducing the prior hardcoded layout: lands hug
+ *  the left, support the right, command centered. Absent key ⇒ this. */
+export const DEFAULT_CELL_ALIGN: Record<MiddleCell, CellAlign> = {
+  lands: "start",
+  support: "end",
+  command: "center",
+};
 /** Persisted board layout. One shared global config; only the opponent HUD is
  *  table-size-keyed. Presets are authoritative — applying one replaces every
  *  field wholesale. Any manual edit flips `activePreset` to "custom".
@@ -147,8 +163,13 @@ export interface FlexLayoutConfig {
   /** Lands' share of the lands↔support middle row, 0..1. Support takes the
    *  remainder (`1 - ratio`). Absent ⇒ 0.5 (the prior equal `flex-1` split). */
   landSupportRatio?: number;
+  /** Left-to-right order of the middle-row cells. Absent ⇒
+   *  {@link DEFAULT_MIDDLE_ROW_ORDER} (lands · support · command). */
+  middleRowOrder?: MiddleCell[];
   /** Per-zone aspect-preserving size multipliers. Absent key ⇒ 1.0. */
   scales?: Partial<Record<FlexScaleKey, number>>;
+  /** Per-cell content alignment. Absent key ⇒ {@link DEFAULT_CELL_ALIGN}. */
+  cellAlign?: Partial<Record<MiddleCell, CellAlign>>;
   widgets: Partial<Record<FlexWidgetKey, WidgetOffset>>;
   opponentHudByTableSize: Partial<Record<FlexTableSize, WidgetOffset>>;
   activePreset: FlexPresetId;
@@ -167,7 +188,9 @@ export function defaultFlexLayout(): FlexLayoutConfig {
   return {
     gridBands: { top: { pct: 12, pxCap: 100 }, bottom: { pct: 18, pxCap: 150 } },
     landSupportRatio: DEFAULT_LAND_SUPPORT_RATIO,
+    middleRowOrder: [...DEFAULT_MIDDLE_ROW_ORDER],
     scales: {},
+    cellAlign: {},
     widgets: {},
     opponentHudByTableSize: {},
     activePreset: "default",
@@ -183,7 +206,9 @@ function cloneFlexLayout(config: FlexLayoutConfig): FlexLayoutConfig {
       bottom: { ...config.gridBands.bottom },
     },
     landSupportRatio: config.landSupportRatio,
+    middleRowOrder: config.middleRowOrder ? [...config.middleRowOrder] : undefined,
     scales: { ...config.scales },
+    cellAlign: { ...config.cellAlign },
     widgets: Object.fromEntries(
       Object.entries(config.widgets).map(([k, v]) => [k, { ...v }]),
     ),
@@ -414,9 +439,15 @@ interface PreferencesActions {
   /** Set the lands↔support split (lands' share, clamped 0..1). The support
    *  column takes the remainder. Flips `activePreset` to "custom". */
   setFlexLandSupportRatio: (ratio: number) => void;
+  /** Set the left-to-right order of the middle-row cells (drag-to-reorder).
+   *  Flips `activePreset` to "custom". */
+  setFlexMiddleRowOrder: (order: MiddleCell[]) => void;
   /** Set a zone's aspect-preserving size multiplier. Flips `activePreset` to
    *  "custom". */
   setFlexScale: (key: FlexScaleKey, scale: number) => void;
+  /** Set a middle-row cell's content alignment. Flips `activePreset` to
+   *  "custom". */
+  setFlexCellAlign: (cell: MiddleCell, align: CellAlign) => void;
   /** Apply a preset wholesale — replaces every field, including the opponent
    *  HUD, and sets `activePreset` to the preset's id. Caller resolves the id to
    *  a config (from `presets.ts`) to keep the store free of a preset import. */
@@ -637,12 +668,28 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
             activePreset: "custom",
           },
         })),
+      setFlexMiddleRowOrder: (order) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            middleRowOrder: order,
+            activePreset: "custom",
+          },
+        })),
       setFlexScale: (key, scale) =>
         set((state) => ({
           flexLayout: {
             ...state.flexLayout,
             // Clamp to a sane, readable range (half to double the auto-size).
             scales: { ...state.flexLayout.scales, [key]: Math.min(2, Math.max(0.5, scale)) },
+            activePreset: "custom",
+          },
+        })),
+      setFlexCellAlign: (cell, align) =>
+        set((state) => ({
+          flexLayout: {
+            ...state.flexLayout,
+            cellAlign: { ...state.flexLayout.cellAlign, [cell]: align },
             activePreset: "custom",
           },
         })),

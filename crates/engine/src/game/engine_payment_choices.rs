@@ -1193,9 +1193,6 @@ pub(super) fn handle_ward_discard_choice(
         ));
     }
 
-    // CR 614.6: the discard's inner hand → graveyard move consults `Moved`
-    // redirects (RIP class) through the pipeline. A redirect that itself needs a
-    // CR 616.1 choice parks `state.waiting_for`; surface it and return.
     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
         effects::discard::complete_discard_to_graveyard(
             state,

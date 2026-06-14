@@ -1125,6 +1125,8 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
                 tag("this artifact"),
                 tag("this equipment"),
                 tag("this land"),
+                tag("this permanent"),
+                tag("this enchantment"),
             )),
         )
         .parse(i)
@@ -1144,6 +1146,25 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     } else {
         let (filter, _) = parse_type_phrase(filter_text);
         filter
+    };
+    let filter = match filter {
+        TargetFilter::Any => {
+            // CR 201.5: A cost using the source card's own name, such as
+            // "Return Recurring Nightmare to its owner's hand", refers to that
+            // source object.
+            TargetFilter::SelfRef
+        }
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty() => {
+            // CR 201.5: A cost using the source card's own name, such as
+            // "Return Recurring Nightmare to its owner's hand", refers to that
+            // source object.
+            TargetFilter::SelfRef
+        }
+        filter => filter,
     };
     Some(AbilityCost::ReturnToHand {
         count: 1,
@@ -1469,6 +1490,36 @@ mod tests {
                 from_zone: None,
             }
         );
+    }
+
+    #[test]
+    fn cost_return_card_name_to_hand_is_self_ref() {
+        assert_eq!(
+            parse_oracle_cost("Return Recurring Nightmare to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::SelfRef),
+                from_zone: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_recurring_nightmare_activation_cost_parses_self_return() {
+        match parse_oracle_cost(
+            "{2}{B}, Sacrifice a creature, Return Recurring Nightmare to its owner's hand",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::ReturnToHand {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected composite cost, got {other:?}"),
+        }
     }
 
     #[test]

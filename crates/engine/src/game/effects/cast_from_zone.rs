@@ -288,6 +288,80 @@ fn target_is_in_other_players_graveyard(
         .is_some_and(|obj| obj.zone == Zone::Graveyard && obj.owner != controller)
 }
 
+/// CR 608.2g + CR 601.2a: After a resolution-time hand pick for a free
+/// `CastFromZone` (Expertise cycle, Electrodominance), cast the chosen spell
+/// during resolution instead of granting a lingering hand permission.
+pub(crate) fn complete_hand_pick_cast_from_zone(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    let (without_paying, cast_transformed, alt_ability_cost, constraint, driver) =
+        match &ability.effect {
+            Effect::CastFromZone {
+                without_paying_mana_cost,
+                cast_transformed,
+                alt_ability_cost,
+                constraint,
+                driver,
+                ..
+            } => (
+                *without_paying_mana_cost,
+                *cast_transformed,
+                alt_ability_cost.as_ref(),
+                constraint.clone(),
+                *driver,
+            ),
+            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+        };
+
+    let during_resolution = driver.is_during_resolution()
+        || (without_paying
+            && alt_ability_cost.is_none()
+            && matches!(
+                &ability.effect,
+                Effect::CastFromZone { target, .. }
+                    if target.extract_in_zone() == Some(Zone::Hand)
+            ));
+
+    if during_resolution {
+        cast_single_target_during_resolution(
+            state,
+            ability,
+            card,
+            constraint.or_else(|| effective_cast_from_zone_constraint(ability)),
+            cast_transformed,
+            events,
+        )?;
+        return Ok(true);
+    }
+
+    grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?;
+    Ok(false)
+}
+
+fn effective_cast_from_zone_constraint(
+    ability: &ResolvedAbility,
+) -> Option<crate::types::ability::CastPermissionConstraint> {
+    let Effect::CastFromZone { target, .. } = &ability.effect else {
+        return None;
+    };
+    let TargetFilter::Typed(filter) = target else {
+        return None;
+    };
+    filter.properties.iter().find_map(|prop| {
+        if let crate::types::ability::FilterProp::Cmc { comparator, value } = prop {
+            Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                comparator: *comparator,
+                value: value.clone(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
 /// CR 608.2g + CR 601.2a–i: Cast a single targeted card DURING the resolution of
 /// this effect, for free, via the same authority Cascade/Discover/Suspend use.
 ///
@@ -1087,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn hand_cast_selection_grants_zero_cost_permission_in_hand() {
+    fn hand_cast_selection_casts_during_resolution_without_lingering_permission() {
         let mut state = make_test_state();
         let cheap = add_card_to_hand(&mut state, PlayerId(0), CardId(505));
         let ability = electrodominance_hand_ability(3);
@@ -1096,27 +1170,10 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
 
-        assert_eq!(state.objects[&cheap].zone, Zone::Hand);
-        assert!(state.objects[&cheap]
-            .casting_permissions
-            .iter()
-            .any(|p| matches!(
-                p,
-                CastingPermission::ExileWithAltCost {
-                    cost,
-                    granted_to: Some(PlayerId(0)),
-                    ..
-                } if *cost == ManaCost::zero()
-            )));
+        assert_eq!(state.objects[&cheap].zone, Zone::Stack);
+        assert!(state.objects[&cheap].casting_permissions.is_empty());
     }
 
-    /// CR 611.2a: A hand-origin in-place "you may cast it without paying its
-    /// mana cost" grant (Sunforger searches a card to hand, then casts it from
-    /// there) is a one-resolution offer. It must default to `UntilEndOfTurn` so
-    /// that if the cast is *declined* the grant is pruned at cleanup — otherwise
-    /// a `duration: None` grant lingers on the hand card and
-    /// `has_hand_alt_cost_permission` re-offers the free cast forever. Mirrors
-    /// the graveyard-origin (Emry) default.
     #[test]
     fn hand_in_place_grant_defaults_to_until_end_of_turn() {
         let mut state = make_test_state();
@@ -1124,8 +1181,7 @@ mod tests {
         let ability = electrodominance_hand_ability(3);
 
         let mut events = vec![];
-        resolve(&mut state, &ability, &mut events).unwrap();
-        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
+        grant_lingering_permissions(&mut state, &ability, &[cheap], &mut events).unwrap();
 
         assert_eq!(state.objects[&cheap].zone, Zone::Hand);
         assert!(

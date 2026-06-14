@@ -15,7 +15,7 @@ use engine::types::keywords::{
     BestowCost, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
     ProtectionTarget, WardCost,
 };
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::Keyword;
 
 use crate::convert::result::{ConvResult, ConversionGap};
@@ -187,6 +187,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Fortify(c) => Keyword::Fortify(pure_mana(c, "Rule::Fortify", path)?),
         Rule::Foretell(c) => Keyword::Foretell(pure_mana(c, "Rule::Foretell", path)?),
         Rule::Harmonize(c) => Keyword::Harmonize(pure_mana(c, "Rule::Harmonize", path)?),
+        Rule::Mayhem(c) => Keyword::Mayhem(pure_mana(c, "Rule::Mayhem", path)?),
+        Rule::BasicMayhem => Keyword::Mayhem(ManaCost::SelfManaCost),
         Rule::Kicker(c) => Keyword::Kicker(pure_mana(c, "Rule::Kicker", path)?),
         Rule::Madness(c) => Keyword::Madness(pure_mana(c, "Rule::Madness", path)?),
         Rule::Megamorph(c) => Keyword::Megamorph(pure_mana(c, "Rule::Megamorph", path)?),

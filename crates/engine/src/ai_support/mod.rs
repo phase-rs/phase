@@ -337,12 +337,19 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 cards,
                 count,
                 up_to,
+                constraint,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            let exact = if *up_to { None } else { Some(*count) };
-            selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+            // CR 701.23b vs CR 701.23d: a stated-quality search (MatchEachFilter,
+            // etc.) may legally find fewer cards than requested — including none.
+            // Mirror the submission guard / candidate generation lower bound so
+            // the validated legal-action path does not drop the legal short/empty
+            // fail-to-find candidate and freeze the AI.
+            let lower_bounded = *up_to || constraint.permits_partial_find();
+            let exact = if lower_bounded { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact) || (lower_bounded && chosen.len() > *count)
         }
         (
             WaitingFor::ChooseFromZoneChoice {
@@ -2004,6 +2011,53 @@ mod tests {
         assert!(!cheap_reject_candidate(
             &state,
             &GameAction::SelectCards { cards: choices }
+        ));
+    }
+
+    #[test]
+    fn cheap_reject_candidate_permits_partial_constrained_search() {
+        // CR 701.23b: a stated-quality (MatchEachFilter) search may legally find
+        // fewer cards than requested — including none. The validated legal-action
+        // path must NOT cheap-reject a short/empty pick, or the AI freezes.
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2)];
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards: choices.clone(),
+            count: 2,
+            reveal: false,
+            up_to: false,
+            constraint: SearchSelectionConstraint::MatchEachFilter {
+                filters: vec![TargetFilter::Any, TargetFilter::Any],
+            },
+            split: None,
+        };
+
+        // Empty (full fail-to-find) is legal and must survive cheap-reject.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards { cards: vec![] }
+        ));
+        // Partial pick (one of two) is legal and must survive cheap-reject.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0]]
+            }
+        ));
+        // The full pick is still legal.
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: choices.clone()
+            }
+        ));
+        // Over the requested count remains rejected.
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0], choices[1], ObjectId(3)]
+            }
         ));
     }
 

@@ -790,6 +790,7 @@ pub(crate) fn move_object(
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
         track_exiled_by_source,
+        None,
         events,
     )
 }
@@ -1836,6 +1837,7 @@ pub(crate) fn execute_zone_move(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -2022,10 +2024,7 @@ pub(crate) fn execute_zone_move(
                     duration,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
-                    // `execute_zone_move` carries no library placement (its
-                    // callers are battlefield/graveyard/exile moves); placements
-                    // route through `move_object`'s library arm directly.
-                    None,
+                    library_placement,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {}
@@ -2057,7 +2056,7 @@ pub(crate) fn execute_zone_move(
                 duration,
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
-                None,
+                library_placement,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}

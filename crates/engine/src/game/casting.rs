@@ -928,6 +928,19 @@ fn has_effective_graveyard_cast_keyword(
             && super::keywords::effective_mayhem_cost(state, object_id).is_some())
 }
 
+fn mayhem_castable_from_graveyard(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    was_discarded_this_turn(state, object_id)
+        && super::keywords::effective_mayhem_cost(state, object_id).is_some()
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|o| o.zone == Zone::Graveyard && o.owner == player)
+}
+
 fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
     if let Some(existing) = keywords
         .iter_mut()
@@ -2914,9 +2927,7 @@ fn casting_variant_candidates(
         // CR 702.187b: Mayhem is available only while the card was discarded this
         // turn. The cost may be printed or granted to graveyard cards by a static
         // (Green Goblin), so query the effective off-zone keyword cost.
-        if super::keywords::effective_mayhem_cost(state, object_id).is_some()
-            && was_discarded_this_turn(state, object_id)
-        {
+        if mayhem_castable_from_graveyard(state, player, object_id) {
             candidates.push(CastingVariant::Mayhem);
         }
         if super::keywords::effective_flashback_cost(state, object_id).is_some() {
@@ -3191,6 +3202,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         );
     let has_graveyard_cast_keyword =
         obj.zone == Zone::Graveyard && has_effective_graveyard_cast_keyword(state, object_id, obj);
+    let has_mayhem = mayhem_castable_from_graveyard(state, player, object_id);
     // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
     let graveyard_permission_src = if obj.zone == Zone::Graveyard && state.active_player == player {
         graveyard_permission_source(state, player, object_id)
@@ -3245,6 +3257,7 @@ fn prepare_spell_cast_with_variant_override_inner(
                     && oathbreaker_on_battlefield(state, player))
                 || has_madness
                 || has_graveyard_cast_keyword
+                || has_mayhem
                 || has_graveyard_permission
                 || has_graveyard_alt_cost
                 || has_top_of_library_permission));
@@ -3501,8 +3514,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     let (flashback_mana_cost, flashback_non_mana_cost) =
         split_flashback_cost_components(flashback_cost.as_ref());
 
-    // Precedence: Escape > Retrace > Harmonize > Flashback > Aftermath > Disturb >
-    // GraveyardPermission > Warp > Normal.
+    // Precedence: Escape > Retrace > Harmonize > Mayhem > Flashback > Aftermath >
+    // Disturb > Jump-start > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
     //
@@ -3559,6 +3572,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             CastingVariant::Retrace
         } else if harmonize_cost.is_some() {
             CastingVariant::Harmonize
+        } else if has_mayhem {
+            CastingVariant::Mayhem
         } else if flashback_cost.is_some() {
             CastingVariant::Flashback
         } else if obj.zone == Zone::Graveyard
@@ -3573,8 +3588,6 @@ fn prepare_spell_cast_with_variant_override_inner(
             CastingVariant::JumpStart
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
-        } else if mayhem_cost.is_some() {
-            CastingVariant::Mayhem
         } else if let Some(source) = graveyard_permission_src {
             // CR 110.4: For OncePerTurnPerPermanentType permissions, auto-pick
             // the slot when only one is available. When multiple slots are
@@ -3951,6 +3964,11 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    let effective_mayhem_cost_for_path = if casting_variant == CastingVariant::Mayhem {
+        mayhem_cost
+    } else {
+        None
+    };
     let effective_flashback_mana_cost_for_path = if casting_variant == CastingVariant::Flashback {
         flashback_mana_cost
     } else {
@@ -3958,13 +3976,6 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
     let effective_disturb_cost_for_path = if casting_variant == CastingVariant::Disturb {
         disturb_cost
-    } else {
-        None
-    };
-    // CR 702.187b: When casting via Mayhem, the mayhem mana cost replaces the
-    // card's mana cost (an alternative cost paid from the graveyard).
-    let effective_mayhem_cost_for_path = if casting_variant == CastingVariant::Mayhem {
-        mayhem_cost
     } else {
         None
     };
@@ -3995,9 +4006,9 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(prototype_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
+            .or(effective_mayhem_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
             .or(effective_disturb_cost_for_path)
-            .or(effective_mayhem_cost_for_path)
             .or(effective_sneak_cost_for_path)
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
@@ -9419,6 +9430,13 @@ fn can_cast_prepared_now(
     // CR 702.133a: Jump-start requires a discardable card (any card) in hand.
     if prepared.casting_variant == CastingVariant::JumpStart
         && !casting_costs::can_pay_jumpstart_additional_cost(state, player, prepared.object_id)
+    {
+        return false;
+    }
+
+    // CR 702.187b: Mayhem requires that you discarded this card this turn.
+    if prepared.casting_variant == CastingVariant::Mayhem
+        && !was_discarded_this_turn(state, prepared.object_id)
     {
         return false;
     }

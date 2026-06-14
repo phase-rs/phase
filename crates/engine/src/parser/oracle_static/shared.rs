@@ -2585,13 +2585,24 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
+    use crate::types::triggers::AttackTargetFilter;
+
     let (rest, _) = tag("can't attack").parse(input)?;
-    let (rest, owner_restriction) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
+    let (rest, owner_restriction) = opt(preceded(
+        space1,
+        alt((
+            value(
+                AttackTargetFilter::OwnerOrPlaneswalker,
+                tag("its owner or planeswalkers its owner controls"),
+            ),
+            value(AttackTargetFilter::Owner, tag("its owner")),
+        )),
+    ))
+    .parse(rest)?;
     let (rest, a_player) = opt(preceded(space1, tag("a player"))).parse(rest)?;
     let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
-    use crate::types::triggers::AttackTargetFilter;
-    let defended = if owner_restriction.is_some() {
-        Some(AttackTargetFilter::Owner)
+    let defended = if let Some(owner_restriction) = owner_restriction {
+        Some(owner_restriction)
     } else if a_player.is_some() {
         Some(AttackTargetFilter::Player)
     } else {

@@ -89,15 +89,33 @@ describe("preferencesStore flex layout actions", () => {
     expect(flexLayout.scales?.stack).toBe(0.5);
   });
 
-  it("reset clears the ratio and scales back to defaults", () => {
+  it("sets the middle-row cell order and flips to 'custom'", () => {
+    act(() => usePreferencesStore.getState().setFlexMiddleRowOrder(["command", "lands", "support"]));
+    const { flexLayout } = usePreferencesStore.getState();
+    expect(flexLayout.middleRowOrder).toEqual(["command", "lands", "support"]);
+    expect(flexLayout.activePreset).toBe("custom");
+  });
+
+  it("sets a cell's alignment and flips to 'custom'", () => {
+    act(() => usePreferencesStore.getState().setFlexCellAlign("lands", "center"));
+    const { flexLayout } = usePreferencesStore.getState();
+    expect(flexLayout.cellAlign).toEqual({ lands: "center" });
+    expect(flexLayout.activePreset).toBe("custom");
+  });
+
+  it("reset clears the ratio, order, and scales back to defaults", () => {
     act(() => {
       usePreferencesStore.getState().setFlexLandSupportRatio(0.7);
       usePreferencesStore.getState().setFlexScale("stack", 1.5);
+      usePreferencesStore.getState().setFlexMiddleRowOrder(["command", "support", "lands"]);
+      usePreferencesStore.getState().setFlexCellAlign("support", "start");
     });
     act(() => usePreferencesStore.getState().resetFlexLayout());
     const { flexLayout } = usePreferencesStore.getState();
     expect(flexLayout.landSupportRatio).toBe(0.5);
     expect(flexLayout.scales).toEqual({});
+    expect(flexLayout.cellAlign).toEqual({});
+    expect(flexLayout.middleRowOrder).toEqual(["lands", "support", "command"]);
     expect(flexLayout.activePreset).toBe("default");
   });
 

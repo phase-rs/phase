@@ -32,7 +32,6 @@
       "customUrl": "URL personnalisée",
       "none": "Aucun"
     },
-    "commandZone": "Zone de commandement",
     "commandZoneOptions": {
       "compact": "Compact",
       "inline": "Intégré",
@@ -89,11 +88,10 @@
     "reset": "Réinitialiser la disposition",
     "preset": "Préréglage",
     "hint": "Faites glisser un panneau pour le déplacer. Faites glisser les barres lumineuses pour redimensionner les zones.",
-    "scale": {
-      "stack": "Pile",
-      "tiles": "Tuiles",
-      "smaller": "Réduire la taille de {{label}}",
-      "larger": "Augmenter la taille de {{label}}"
+    "align": {
+      "left": "Aligner à gauche",
+      "center": "Centrer",
+      "right": "Aligner à droite"
     },
     "presets": {
       "default": { "label": "Disposition 1", "description": "La disposition équilibrée standard." },
