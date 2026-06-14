@@ -5550,7 +5550,11 @@ mod tests {
     /// duplicate-named entry is collapsed to its canonical id before
     /// combinations are generated (a duplicate cannot legally appear in any
     /// chosen set with its twin), so a 5-card pool with one duplicate
-    /// collapses to 4 unique-name ids → C(4,2) = 6 combinations.
+    /// collapses to 4 unique-name ids. Because a stated-quality constraint
+    /// permits partial finds (CR 701.23b/d — a player may find fewer than the
+    /// stated number, including none), the enumeration covers every size
+    /// 0..=count, i.e. C(4,0)+C(4,1)+C(4,2) = 1+4+6 = 11 combinations — each of
+    /// which is still name-unique.
     #[test]
     fn search_choice_candidates_filter_distinct_names() {
         use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
@@ -5589,9 +5593,10 @@ mod tests {
         );
 
         // With distinct names the engine pool cap collapses the duplicate
-        // Alpha to a single canonical id (5 → 4 ids), and the post-hoc
-        // selection-constraint filter then enumerates C(4,2) = 6 combos —
-        // every one of which contains two distinct names.
+        // Alpha to a single canonical id (5 → 4 ids). The constraint permits
+        // partial finds (CR 701.23b/d), so the enumeration covers sizes
+        // 0..=count = C(4,0)+C(4,1)+C(4,2) = 1+4+6 = 11 combos — every one of
+        // which is name-unique (no combo contains two cards sharing a name).
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
             cards: ids,
@@ -5606,8 +5611,9 @@ mod tests {
         let filtered = candidate_actions_broad(&state);
         assert_eq!(
             filtered.len(),
-            6,
-            "distinct names must collapse duplicate-named ids before enumeration"
+            11,
+            "distinct names collapse duplicate-named ids (5→4) before enumeration; \
+             partial finds permitted (CR 701.23b/d) so sizes 0..=2 → 1+4+6 = 11"
         );
         for action in &filtered {
             let GameAction::SelectCards { cards } = &action.action else {
