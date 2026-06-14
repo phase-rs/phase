@@ -425,9 +425,7 @@ mod tests {
 
     use super::*;
     use engine::game::game_object::GameObject;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ManaReplacementScope, QuantityExpr, TargetFilter,
-    };
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
 
@@ -482,41 +480,19 @@ mod tests {
     #[test]
     fn includes_only_qualifying_replacements() {
         let mut object = make_object();
-        object.replacement_definitions.push(ReplacementDefinition {
-            event: ReplacementEvent::ChangeZone,
-            execute: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::SetTapState {
-                    target: TargetFilter::SelfRef,
-                    scope: EffectScope::Single,
-                    state: TapStateChange::Tap,
-                },
-            ))),
-            runtime_execute: None,
-            mode: engine::types::ability::ReplacementMode::Mandatory,
-            valid_card: Some(TargetFilter::SelfRef),
-            description: None,
-            condition: None,
-            destination_zone: Some(Zone::Battlefield),
-            damage_modification: None,
-            damage_source_filter: None,
-            damage_target_filter: None,
-            combat_scope: None,
-            shield_kind: Default::default(),
-            quantity_modification: None,
-            token_owner_scope: None,
-            token_owner_redirect: None,
-            valid_player: None,
-            is_consumed: false,
-            expiry: None,
-            redirect_target: None,
-            mana_modification: None,
-            mana_replacement_scope: ManaReplacementScope::Any,
-            additional_token_spec: None,
-            ensure_token_specs: None,
-            counter_match: None,
-            enters_under: None,
-        });
+        object.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield),
+        );
         object.replacement_definitions.push(ReplacementDefinition {
             destination_zone: None,
             ..object.replacement_definitions[0].clone()
