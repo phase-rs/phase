@@ -1391,13 +1391,21 @@ pub(super) fn resolve_optional_effect_decision(
         AutoMayChoice::Decline => {
             let decline_branch = ability.else_ability.as_ref().or_else(|| {
                 ability.sub_ability.as_ref().filter(|sub| {
-                    // CR 608.2c: A separate-sentence sibling ("You may shuffle."
-                    // "Draw a card.") is the next printed instruction — it
-                    // resolves regardless of the optional decision. A
-                    // within-clause continuation only resolves if it is a
-                    // conditioned decline branch (IfYouDo / Otherwise / composite).
-                    sub.sub_link == SubAbilityLink::SequentialSibling
-                        || should_resolve_subability_on_optional_decline(sub)
+                    // CR 608.2c: a conditioned decline branch (IfYouDo /
+                    // Otherwise / composite) resolves on decline — authoritative
+                    // check.
+                    should_resolve_subability_on_optional_decline(sub)
+                        // CR 608.2c: a separate-sentence sibling is the next
+                        // printed instruction and resolves regardless of the
+                        // optional decision — BUT only when it is not a
+                        // reflexive trigger. CR 603.12: a reflexive ("When you
+                        // do, …") sub's "do" did not occur when the action was
+                        // declined, so it must NOT fire even though it is a
+                        // separate sentence (issue #3179: Swashbuckler
+                        // Extraordinaire's declined Treasure sacrifice must not
+                        // resolve the double-strike reflexive).
+                        || (sub.sub_link == SubAbilityLink::SequentialSibling
+                            && !sub_ability_is_reflexive(sub))
                 })
             });
             if let Some(branch) = decline_branch {
@@ -1442,6 +1450,21 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
             conditions.iter().any(condition_depends_on_effect_performed)
         }
         _ => false,
+    }
+}
+
+/// CR 603.12: Whether a sub-ability is a *reflexive* trigger — its "do"
+/// depends on whether the just-prompted action actually occurred during this
+/// resolution. A reflexive sub MUST NOT resolve when the optional parent was
+/// declined (the "do" did not happen), regardless of its sentence-boundary
+/// `sub_link`. Covers the bare `WhenYouDo` reflexive (CR 603.12 Heart-Piercer
+/// Manticore) and any condition that reads a per-iteration effect outcome
+/// (`IfYouDo` / composite `Or{[IfYouDo,…]}`). Predicate helper, not rule code.
+fn sub_ability_is_reflexive(sub: &ResolvedAbility) -> bool {
+    match &sub.condition {
+        Some(AbilityCondition::WhenYouDo) => true,
+        Some(condition) => condition_depends_on_effect_performed(condition),
+        None => false,
     }
 }
 
