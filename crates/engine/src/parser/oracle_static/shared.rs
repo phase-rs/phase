@@ -280,6 +280,169 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     parse_continuous_gets_has(predicate.original, affected, description)
 }
 
+/// CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
+/// the host creature's COMBAT STATE — "As long as equipped/enchanted creature is
+/// attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
+/// Baseball Bat, Slayer's-Cleaver-style lure compounds).
+///
+/// Distinct from `try_parse_inverted_attached_subject_grant` (which keys on a
+/// STATIC characteristic and folds it into `affected`): combat state is
+/// re-evaluated each layer cycle (CR 611.3a), so it is bound as a
+/// `RecipientMatchesFilter` GATE on the recipient (the host creature) instead of
+/// folded into the filter. Gating on the source (the Equipment/Aura) — as the
+/// generic inverted fallback did via `SourceIsAttacking` — is wrong: an
+/// Equipment is never an attacker, so the static never fires, and the keyword
+/// would land on the Equipment rather than the host.
+///
+/// Returns a `Vec` so that any conjunct of the effect predicate which
+/// `push_grant_clause_modifications` cannot model (e.g. "must be blocked by a
+/// Dalek if able") is surfaced as a sibling `Effect::Unimplemented` residual,
+/// rather than being silently dropped. The residual makes coverage mark the card
+/// partially unsupported (`is_static_supported`) and the swallow check defer
+/// (`any_ability_has_unimplemented`) — an honest signal independent of the
+/// whole-card `"condition":{` suppression that the supported static's gate would
+/// otherwise trip in `detect_condition_if`.
+///
+/// DEFER: typed "must be blocked by <filter> if able" requires parameterizing
+/// the `MustBeBlocked`/`MustBeBlockedByAll` requirement family with a blocker
+/// filter — /add-engine-variant Stage-2 REFUSE_WITH_REFACTOR (~80 sites). Until
+/// then the dropped conjunct rides as an `Effect::Unimplemented` residual. An
+/// `Unrecognized`-condition companion is NOT used: it would suppress
+/// `detect_condition_if` (cond_markers include `"condition":{`) AND be
+/// runtime-active (`layers.rs` evaluates `Unrecognized => true`). CR 509.1c.
+pub(crate) fn try_parse_inverted_attached_combat_grant(
+    split: &InvertedSplit,
+    description: &str,
+) -> Vec<StaticDefinition> {
+    let condition_lower = split.condition_text.to_lowercase();
+    // CR 611.3a: bind the combat state to the recipient, not the source.
+    let Ok((cond_rest, (affected, combat_prop))) =
+        nom_condition::parse_attached_subject_combat_state(&condition_lower)
+    else {
+        return Vec::new();
+    };
+    if !cond_rest.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
+    // Strip the anaphoric subject ("it "/"they ") to reach the bare predicate.
+    let Some(predicate) = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))
+    else {
+        return Vec::new();
+    };
+    let predicate_body = predicate.original.trim();
+
+    // CR 613.1f: parse the whole predicate ("has first strike and must be
+    // blocked by a Dalek if able") into its modeled continuous modifications
+    // (P/T + keyword grants). `parse_continuous_modifications` is the single
+    // authority for the grant portion and merges everything it can model; it does
+    // not consume combat-requirement / lure conjuncts ("must be blocked …").
+    let modifications = parse_continuous_modifications(predicate_body);
+
+    // CR 611.3a + CR 508.1a: gate the supported grant on the recipient (the
+    // equipped/enchanted creature) being in the stated combat state.
+    let gate = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![combat_prop])),
+    };
+    let mut defs = Vec::new();
+    if !modifications.is_empty() {
+        defs.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .condition(gate.clone())
+                .description(description.to_string()),
+        );
+    }
+
+    // CR 613.1f: identify conjuncts NOT covered by the grant above — the
+    // combat-requirement / lure conjuncts. Strip a leading verb ("has "/"have ")
+    // and split the conjunction; a conjunct that `parse_continuous_modifications`
+    // (with the verb re-attached) cannot model is a residual to classify below.
+    let body_lower = predicate_body.to_lowercase();
+    let list_input = nom_tag_lower(predicate_body, &body_lower, "has ")
+        .or_else(|| nom_tag_lower(predicate_body, &body_lower, "have "))
+        .unwrap_or(predicate_body);
+    let mut residual_conjuncts: Vec<String> = Vec::new();
+    for part in split_keyword_list(list_input.trim().trim_end_matches('.')) {
+        let conjunct = part.trim();
+        if conjunct.is_empty() {
+            continue;
+        }
+        let conjunct_lower = conjunct.to_lowercase();
+        // A conjunct that carries its own grant verb keeps that verb; a bare
+        // keyword conjunct is re-parsed as a grant only when re-prefixed with
+        // "has ". If neither form yields a continuous modification, it is a
+        // requirement/lure residual.
+        let grant_probe = if parse_grant_conjunct_verb(&conjunct_lower).is_ok() {
+            conjunct.to_string()
+        } else {
+            format!("has {conjunct}")
+        };
+        if parse_continuous_modifications(&grant_probe).is_empty() {
+            residual_conjuncts.push(conjunct.to_string());
+        }
+    }
+
+    for residual_text in residual_conjuncts {
+        // CR 508.1d / CR 509.1c / CR 701.15b: A conjunct `push_grant_clause_modifications`
+        // can't model may still be a recognized combat REQUIREMENT ("must be blocked
+        // if able", "attacks each combat if able", "is goaded"). Recover it via the
+        // rule-static predicate combinator and emit a sibling rule-static gated on the
+        // same combat condition — modeled, not an `Unimplemented` residual. (The
+        // FILTERED "must be blocked by a Dalek if able" form is NOT recognized by the
+        // combinator, so it correctly falls through to the residual below.)
+        let residual_lower = residual_text.to_lowercase();
+        if let Ok((rest, predicate)) =
+            all_consuming(parse_rule_static_predicate_nom).parse(residual_lower.trim())
+        {
+            let _ = rest;
+            let mut companion = lower_rule_static(predicate, affected.clone(), &residual_text);
+            companion.condition = Some(gate.clone());
+            defs.push(companion);
+            continue;
+        }
+
+        // CR 509.1c: surface the still-unmodeled conjunct as an `Effect::Unimplemented`
+        // residual carried in a `GrantAbility` modification so coverage flags it and
+        // the swallow check defers (see fn-level note). The stable category key
+        // groups the gap in coverage; the raw conjunct text is the diagnostic.
+        defs.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        crate::types::ability::Effect::unimplemented(
+                            "attached_grant_unmodeled_conjunct",
+                            residual_text.clone(),
+                        ),
+                    )),
+                }])
+                .description(residual_text),
+        );
+    }
+
+    defs
+}
+
+fn parse_grant_conjunct_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("gets "),
+            tag("get "),
+            tag("has "),
+            tag("have "),
+            tag("gains "),
+            tag("gain "),
+        )),
+    )
+    .parse(input)
+}
+
 /// Parse the attached-subject qualifier of an inverted grant
 /// ("enchanted/equipped creature is `<characteristic>`") into the `affected`
 /// `TargetFilter` for the enchanted/equipped permanent.
@@ -586,6 +749,24 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // non-static prose to the single-sentence fallback below.
     if let Some(defs) = parse_multi_sentence_statics(&stripped) {
         return defs;
+    }
+
+    // CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
+    // the host creature's COMBAT STATE — "As long as equipped/enchanted creature
+    // is attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
+    // Baseball Bat). This must run on the multi-static path (and before the
+    // single-return fallback) for two reasons: (1) the generic inverted rewrite
+    // would gate the grant on `SourceIsAttacking` (the Equipment, never an
+    // attacker) with `affected = SelfRef` — both wrong; (2) the compound effect
+    // may carry an unmodeled conjunct (the "must be blocked by a Dalek if able"
+    // lure) that must surface as a sibling `Effect::Unimplemented` residual
+    // rather than being silently dropped. The single-return path can carry only
+    // one def, so the residual would have nowhere to live there.
+    if let Some(split) = try_split_inverted_as_long_as(&tp) {
+        let defs = try_parse_inverted_attached_combat_grant(&split, &stripped);
+        if !defs.is_empty() {
+            return defs;
+        }
     }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and

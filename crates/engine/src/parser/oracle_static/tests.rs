@@ -4749,6 +4749,290 @@ fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     assert_eq!(defs[2].affected, defs[0].affected);
 }
 
+// --- Cluster 06: attached-creature combat-state gate + dropped-lure residual ---
+
+/// Helper: the `EquippedBy` creature filter used as the `affected` set for an
+/// Equipment's attached-subject grants.
+fn equipped_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+}
+
+/// Helper: is this static a `GrantAbility{Effect::Unimplemented}` residual whose
+/// description (raw Oracle fragment) contains `needle`? The `name` is the stable
+/// category key (`"attached_grant_unmodeled_conjunct"`); the dropped text lands
+/// in `description` via `Effect::unimplemented`.
+fn is_unimplemented_residual(def: &StaticDefinition, needle: &str) -> bool {
+    def.modifications.iter().any(|m| match m {
+        ContinuousModification::GrantAbility { definition } => matches!(
+            &*definition.effect,
+            Effect::Unimplemented { description: Some(frag), .. } if frag.contains(needle)
+        ),
+        _ => false,
+    })
+}
+
+/// CR 508.1a + CR 611.3a + CR 613.1f: "As long as equipped creature is
+/// attacking, it has first strike and must be blocked by a Dalek if able."
+/// (Ace's Baseball Bat). The first-strike grant must land on the EquippedBy
+/// creature gated on the recipient being attacking — NOT on SelfRef with
+/// SourceIsAttacking — and the unmodeled "must be blocked by a Dalek if able"
+/// lure must surface as an `Effect::Unimplemented` residual, not be dropped.
+#[test]
+fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.",
+    );
+    assert_eq!(defs.len(), 2, "expected supported + residual, got {defs:?}");
+
+    // Supported static: first strike on the host, gated on the host attacking.
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+    // Must NOT regress to the wrong subject/condition.
+    assert_ne!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert_ne!(defs[0].condition, Some(StaticCondition::SourceIsAttacking));
+
+    // Residual static surfaces the dropped lure.
+    assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    assert!(
+        is_unimplemented_residual(&defs[1], "must be blocked by a"),
+        "lure must surface as an Unimplemented residual, got {:?}",
+        defs[1]
+    );
+    // The lure must NOT be modeled as a (bare) MustBeBlocked mode.
+    assert_ne!(defs[1].mode, StaticMode::MustBeBlocked);
+}
+
+/// CR 611.3a: the Aura analog binds the gate to the EnchantedBy host.
+#[test]
+fn static_as_long_as_enchanted_creature_is_attacking_gate_binds_to_host() {
+    let defs =
+        parse_static_line_multi("As long as enchanted creature is attacking, it has trample.");
+    assert_eq!(
+        defs.len(),
+        1,
+        "no lure → single supported static, got {defs:?}"
+    );
+    assert_eq!(
+        defs[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+        )),
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        }));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+}
+
+/// CR 509.1a + CR 611.3a: the blocking branch of the combat-state gate.
+#[test]
+fn static_as_long_as_equipped_creature_is_blocking_grants_to_host() {
+    let defs = parse_static_line_multi("As long as equipped creature is blocking, it gets +2/+2.");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Blocking])
+            ),
+        }),
+    );
+}
+
+/// CR 508.1d / CR 509.1c: a BARE recognized combat requirement conjunct ("must
+/// be blocked if able" — The Masamune) inside the combat-state grant is modeled
+/// as a `MustBeBlocked` sibling gated on the same combat condition, NOT surfaced
+/// as an Unimplemented residual.
+#[test]
+fn static_as_long_as_attacking_bare_must_be_blocked_models_requirement() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it has first strike and must be blocked if able.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "supported grant + MustBeBlocked, got {defs:?}"
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+    // The requirement is also gated on the combat condition (CR 611.3a).
+    assert_eq!(
+        defs[1].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+    // No Unimplemented residual for a fully-modeled requirement.
+    assert!(!defs
+        .iter()
+        .any(|d| is_unimplemented_residual(d, "must be blocked")));
+}
+
+/// CR 509.1c + CR 611.3a: a pure combat-requirement predicate still belongs to
+/// the attached host and must not fall through to the generic source-gated
+/// inverted parser.
+#[test]
+fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it must be blocked if able.",
+    );
+    assert_eq!(defs.len(), 1, "pure requirement, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::MustBeBlocked);
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+    assert_eq!(
+        defs[0].condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }])
+            ),
+        }),
+    );
+}
+
+/// CR 613.1f: residual splitting must recognize already-verbed conjuncts
+/// ("gets", "has", "gains", etc.) and avoid false `Unimplemented` residuals.
+#[test]
+fn static_as_long_as_attacking_gets_and_has_keyword_has_no_false_residual() {
+    let defs = parse_static_line_multi(
+        "As long as equipped creature is attacking, it gets +1/+1 and has first strike.",
+    );
+    assert_eq!(defs.len(), 1, "fully modeled grant, got {defs:?}");
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike,
+        }));
+    assert!(!defs
+        .iter()
+        .any(|d| is_unimplemented_residual(d, "first strike")));
+}
+
+/// CR 509.1c: the un-gated direct attached-subject grant lure (Slayer's Cleaver:
+/// "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.")
+/// surfaces the filtered lure as an Unimplemented residual. The first def carries
+/// the P/T grant and no condition; the residual carries no condition either.
+#[test]
+fn slayers_cleaver_lure_conjunct_surfaces_as_unimplemented_residual() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.",
+    );
+    assert_eq!(defs.len(), 2, "P/T grant + residual, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 3 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert_eq!(defs[0].condition, None);
+    assert!(
+        is_unimplemented_residual(&defs[1], "must be blocked by an"),
+        "lure must surface as an Unimplemented residual, got {:?}",
+        defs[1]
+    );
+    assert_eq!(defs[1].condition, None);
+    assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
+}
+
+/// CR 509.1c: a direct attached-subject filtered lure with no continuous grant
+/// sibling is still an explicit unsupported residual, not a silent drop.
+#[test]
+fn attached_subject_pure_filtered_lure_surfaces_as_unimplemented_residual() {
+    let defs = parse_static_line_multi("Equipped creature must be blocked by an Eldrazi if able.");
+    assert_eq!(defs.len(), 1, "pure filtered lure residual, got {defs:?}");
+    assert!(
+        is_unimplemented_residual(&defs[0], "must be blocked by an"),
+        "filtered lure must surface as an Unimplemented residual, got {:?}",
+        defs[0]
+    );
+    assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
+}
+
+/// Building-block: the filtered-lure detector recognizes ONLY the by-filter form,
+/// never the bare form (which is a modeled requirement).
+#[test]
+fn must_be_blocked_by_filter_lure_detector_excludes_bare_form() {
+    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by a Dalek if able").is_ok());
+    assert!(parse_must_be_blocked_by_filter_lure("must be blocked by an Eldrazi if able").is_ok());
+    // Bare form has no "by <filter>" — must NOT match.
+    assert!(parse_must_be_blocked_by_filter_lure("must be blocked if able").is_err());
+}
+
+/// Building-block (Step 3 backstop): `parse_static_condition` for combat state
+/// must no longer collapse an ATTACHED subject into a `Source*` condition, while
+/// the genuine source-referential forms are preserved unchanged.
+#[test]
+fn combat_state_condition_does_not_collapse_attached_subject() {
+    // Attached subject is no longer a Source* combat condition.
+    assert_ne!(
+        parse_static_condition("equipped creature is attacking"),
+        Some(StaticCondition::SourceIsAttacking),
+    );
+    assert_ne!(
+        parse_static_condition("enchanted creature is attacking"),
+        Some(StaticCondition::SourceIsAttacking),
+    );
+    // Source-referential forms preserved.
+    assert_eq!(
+        parse_static_condition("~ is attacking"),
+        Some(StaticCondition::SourceIsAttacking),
+    );
+    assert_eq!(
+        parse_static_condition("~ isn't attacking"),
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsAttacking),
+        }),
+    );
+    assert_eq!(
+        parse_static_condition("~ is attacking or blocking"),
+        Some(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceIsAttacking,
+                StaticCondition::SourceIsBlocking,
+            ],
+        }),
+    );
+}
+
 #[test]
 fn static_pump_and_goaded_emits_both_defs() {
     let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and is goaded.");
