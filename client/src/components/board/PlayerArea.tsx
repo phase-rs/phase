@@ -182,15 +182,15 @@ export function PlayerArea({
   // than wedged into its own column or lane. As a content-width absolute overlay
   // it consumes zero vertical space, so the flex-1 creature row keeps its full
   // height, and the box hugs the HUD instead of spanning the row. Centered
-  // horizontally (`left-1/2 -translate-x-1/2`) and dropped just below the middle
-  // row for the player (`top-[130%] -translate-y-full`); the focused opponent
+  // horizontally (`left-1/2 -translate-x-1/2`) and dropped below the middle
+  // row for the player (`top-[165%] -translate-y-full`); the focused opponent
   // uses the vertical mirror (`bottom-[130%] translate-y-full`) so the HUD sits
   // just above its middle row. z-20 keeps it
   // above resting cards (lands/support are z-10) but below a hovered card
   // (PermanentCard lifts to z-60), so a card slides over the HUD on hover.
   const hudBand = hud ? (
     <div
-      className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[130%] translate-y-full" : "top-[130%] -translate-y-full"}`}
+      className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[130%] translate-y-full" : "top-[165%] -translate-y-full"}`}
       data-debug-label="HUD"
     >
       {hud}
@@ -222,13 +222,22 @@ export function PlayerArea({
               {hudBand}
             </div>
             <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
-              <BattlefieldRow groups={creatures} rowType="creatures" className="w-full" />
+              <BattlefieldZoneOverflow
+                groups={creatures}
+                zone="creatures"
+                side="left"
+                className="w-full"
+              />
             </div>
           </>
         ) : (
           <>
             <div className="min-h-0 flex-1 px-2" data-debug-label="Creatures">
-              <BattlefieldRow groups={creatures} rowType="creatures" />
+              <BattlefieldZoneOverflow
+                groups={creatures}
+                zone="creatures"
+                side="left"
+              />
             </div>
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}

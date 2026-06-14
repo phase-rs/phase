@@ -1165,9 +1165,24 @@ pub(super) fn parse_targeted_action_ast(
         alt((value("tap", tag("tap ")), value("untap", tag("untap ")))).parse(input)
     }) {
         let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
+        // CR 608.2k: A bare object pronoun ("untaps it") in a subject-bearing
+        // clause is an anaphor, not a parent-target chain. Route it through
+        // `resolve_it_pronoun` — identical to the sacrifice/counter clauses in
+        // the same instruction — so "that player gains control of ~, untaps it,
+        // and puts a +1/+1 counter on it" (Alexios, Deimos of Kosmos) binds the
+        // untap to `SelfRef` (the named source), and observer triggers like
+        // "whenever a permanent you control enters tapped, untap it" (Amulet of
+        // Vigor) bind to `TriggeringSource` (the entering permanent). Without a
+        // subject (a true parent-target chain, "tap target creature. untap it")
+        // the guard falls through to `parse_target_with_ctx` → `ParentTarget`.
+        let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
+            resolve_it_pronoun(ctx)
+        } else {
+            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            #[cfg(debug_assertions)]
+            assert_no_compound_remainder(_rem, text);
+            target
+        };
         return match verb {
             "tap" => Some(TargetedImperativeAst::Tap { target }),
             "untap" => Some(TargetedImperativeAst::Untap { target }),
@@ -2626,6 +2641,22 @@ fn try_parse_choose_owned_by_voter(
         nom_primitives::scan_preceded(lower, tag::<_, _, E>("owned by the voter"))?;
     let filter_text = filter_text.trim_end();
     let filter = super::search::parse_search_filter(filter_text, ctx);
+    // CR 108.3: Inject ownership filter so choose_from_zone restricts
+    // candidates to permanents owned by the scoped player (voter).
+    let filter = match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer,
+            });
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::Any => {
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer,
+            }]))
+        }
+        other => other,
+    };
     Some(ChooseImperativeAst::FromZone {
         count: 1,
         zones: vec![Zone::Battlefield],
@@ -4433,6 +4464,40 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary {
             origins: vec![Zone::Hand],
         });
+    }
+    // CR 701.24c + CR 400.3: "shuffle <descriptive target> into their/your
+    // library" — the actor-possessive destination form. A card put into a
+    // library always returns to its OWNER's library (CR 400.3), and the target
+    // phrase carries the actor scope (e.g. "another creature they own" →
+    // `Owned { controller: ScopedPlayer }`), which binds the chosen object to
+    // the acting player. Powers the villainous-choice branch "they shuffle
+    // another creature they own into their library" (This Is How It Ends).
+    //
+    // Placed AFTER the whole-zone mass-move paths so that bare zone-possessive
+    // moves with an actor-possessive destination ("shuffle your graveyard into
+    // your library") are still classified as `ChangeZoneAll`, not as a single
+    // descriptive-target shuffle.
+    if let Some(((target_phrase, ()), _)) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(input)?;
+        let (input, target_phrase) = take_until(" into ").parse(input)?;
+        not(take_until::<_, _, OracleError<'_>>(" from ")).parse(target_phrase)?;
+        let (input, _) = tag(" into ").parse(input)?;
+        let (input, ()) = alt((
+            value((), tag("their library")),
+            value((), tag("your library")),
+        ))
+        .parse(input)?;
+        Ok((input, (target_phrase.to_string(), ())))
+    }) {
+        let (target, _) = parse_target(&target_phrase);
+        // Only accept a real typed object target — never a whole-zone phrase
+        // (which the mass-move paths above already handled).
+        if matches!(target, TargetFilter::Typed(_)) {
+            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library: true,
+            });
+        }
     }
     // CR 701.24c: "shuffle target card from your graveyard into your library" —
     // targeted zone change (origin → library) + implicit shuffle.
@@ -11264,7 +11329,7 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
+                    choice_type: ChoiceType::Opponent { .. },
                     ..
                 }
             ),

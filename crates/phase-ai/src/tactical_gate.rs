@@ -19,6 +19,7 @@ use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
 };
 use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
+use crate::policies::strategy_helpers::can_pay_ward_cost;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
 
@@ -280,16 +281,64 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     let TargetRef::Object(object_id) = target else {
         return None;
     };
+    let object = ctx.state.objects.get(object_id)?;
     let effects = ctx.effects();
+
+    // CR 701.8 + CR 702.12b: destroy-based removal can't destroy an
+    // indestructible permanent.
     let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
-    if is_destroy {
-        if let Some(object) = ctx.state.objects.get(object_id) {
-            if object.has_keyword(&Keyword::Indestructible) {
+    if is_destroy && object.has_keyword(&Keyword::Indestructible) {
+        return Some(GateDecision::Reject);
+    }
+
+    // CR 702.12b: an indestructible creature ignores the lethal-damage SBA
+    // (CR 704.5g), so a damage-only spell can NEVER kill it regardless of the
+    // amount — provably futile. Shrink effects are exempt: reducing toughness to
+    // 0 kills via CR 704.5f (which indestructible does not prevent), and two
+    // shrink spells can combine, so those stay in the judgment layer.
+    if object.has_keyword(&Keyword::Indestructible)
+        && deals_damage(&effects)
+        && !has_toughness_shrink(&effects)
+    {
+        return Some(GateDecision::Reject);
+    }
+
+    // CR 702.21a: targeting a warded permanent triggers ward; if the AI can't
+    // pay the cost, the spell is simply countered — a strict card-down. Never
+    // choose such a target.
+    for keyword in &object.keywords {
+        if let Keyword::Ward(ward) = keyword {
+            if !can_pay_ward_cost(ctx, ward) {
                 return Some(GateDecision::Reject);
             }
+            break;
         }
     }
+
     None
+}
+
+/// Whether any effect deals damage (fixed or variable).
+fn deals_damage(effects: &[&Effect]) -> bool {
+    effects
+        .iter()
+        .any(|e| matches!(e, Effect::DealDamage { .. }))
+}
+
+/// Whether any effect reduces toughness via a negative `Pump` or a negative P/T
+/// counter. Variable pump toughness is treated as possible shrink (conservative:
+/// never hard-reject a line that might reduce toughness to 0).
+fn has_toughness_shrink(effects: &[&Effect]) -> bool {
+    effects.iter().any(|e| match e {
+        Effect::Pump { toughness, .. } => match toughness {
+            PtValue::Fixed(v) => *v < 0,
+            PtValue::Variable(_) | PtValue::Quantity(_) => true,
+        },
+        Effect::PutCounter { counter_type, .. } => counter_type
+            .power_toughness_delta()
+            .is_some_and(|(_, t)| t < 0),
+        _ => false,
+    })
 }
 
 fn target_choice_penalty(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
@@ -639,6 +688,7 @@ mod tests {
         WaitingFor,
     };
     use engine::types::identifiers::CardId;
+    use engine::types::keywords::WardCost;
     use engine::types::mana::ManaCost;
 
     #[test]
@@ -895,5 +945,149 @@ mod tests {
         };
 
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// Build a `ChooseTarget` decision for a damage spell aimed at `creature`.
+    fn damage_target_decision(creature: ObjectId, damage: i32) -> AiDecisionContext {
+        AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P0,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(900),
+                    CardId(900),
+                    ResolvedAbility::new(
+                        Effect::DealDamage {
+                            amount: engine::types::ability::QuantityExpr::Fixed { value: damage },
+                            target: TargetFilter::Any,
+                            damage_source: None,
+                        },
+                        Vec::new(),
+                        ObjectId(900),
+                        P0,
+                    ),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(creature)],
+                    optional: false,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: Vec::new(),
+        }
+    }
+
+    fn choose_target_candidate(creature: ObjectId) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            },
+            metadata: ActionMetadata {
+                actor: Some(P0),
+                tactical_class: TacticalClass::Target,
+            },
+        }
+    }
+
+    /// CR 702.12b: a damage-only spell can never kill an indestructible creature.
+    #[test]
+    fn rejects_damage_targeting_indestructible_creature() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Darksteel Wall", 0, 4)
+            .with_keyword(Keyword::Indestructible)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// A normal creature targeted by damage is NOT gate-rejected — non-lethal
+    /// burn is a judgment-layer preference, not a provable futility.
+    #[test]
+    fn allows_damage_targeting_normal_creature() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario.add_creature(P1, "Wall", 0, 4).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a: never target a warded creature whose ward cost the AI can't
+    /// pay — the spell would just be countered.
+    #[test]
+    fn rejects_targeting_unpayable_ward() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::PayLife(100)))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        // P0 starts at 20 life — paying 100 is impossible.
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// A payable ward does not gate the target out — it's only priced (in the
+    /// judgment layer), not vetoed.
+    #[test]
+    fn allows_targeting_payable_ward() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::PayLife(2)))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
     }
 }

@@ -23,6 +23,11 @@ interface BattlefieldRowProps {
    *  keeping two sub-clusters (e.g. enchantments|planeswalkers) on one wrapping
    *  line while visually separating them. Omit for no divider. */
   dividerBeforeIndex?: number;
+  /** Creatures only: render at the card size inherited from the parent's CSS
+   *  vars and wrap top-down, skipping the measure-based shrink-to-fit. Lets a
+   *  scrollable parent present a fixed, readable size and scroll the overflow
+   *  (used by the crowded-creature overview) instead of cramming the row. */
+  fixedSize?: boolean;
 }
 
 const ROW_JUSTIFY: Record<string, string> = {
@@ -61,7 +66,7 @@ function getCreatureScale(groupCount: number, display: "art_crop" | "full_card")
   return Math.max(min, 1 / Math.sqrt(1 + excess * 0.15));
 }
 
-export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex }: BattlefieldRowProps) {
+export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex, fixedSize = false }: BattlefieldRowProps) {
   const { t } = useTranslation("game");
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const isCompactHeight = useIsCompactHeight();
@@ -75,7 +80,9 @@ export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex 
   // non-empty render (the early return below means the ref is null when empty).
   const hasGroups = groups.length > 0;
   useEffect(() => {
-    if (rowType !== "creatures" || !hasGroups) return;
+    // fixedSize inherits its card dimensions from the parent's CSS vars and lets
+    // the parent scroll, so the measure-based sizing observer is unnecessary.
+    if (rowType !== "creatures" || !hasGroups || fixedSize) return;
     const el = containerRef.current?.parentElement;
     if (!el) return;
     const observer = new ResizeObserver(([entry]) => {
@@ -86,7 +93,7 @@ export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex 
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [rowType, hasGroups]);
+  }, [rowType, hasGroups, fixedSize]);
 
   useEffect(() => {
     const currentGroupIds = new Set(groups.map((group) => group.ids[0]));
@@ -142,7 +149,11 @@ export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex 
     0,
   );
 
-  if (rowType === "creatures") {
+  if (rowType === "creatures" && fixedSize) {
+    // Inherit card size from the parent's CSS vars; wrap top-down and let the
+    // parent scroll. No rowStyle override.
+    creatureWrap = true;
+  } else if (rowType === "creatures") {
     if (containerSize && containerSize.height > 0) {
       // Measure-based sizing: fill available space
       const { width: cw, height: ch } = containerSize;
@@ -208,9 +219,11 @@ export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex 
     }
   }
 
-  const creatureClass = creatureWrap
-    ? "flex-wrap items-end content-end"
-    : "flex-nowrap items-end";
+  const creatureClass = fixedSize
+    ? "flex-wrap items-start content-start"
+    : creatureWrap
+      ? "flex-wrap items-end content-end"
+      : "flex-nowrap items-end";
 
   // Planeswalkers stay on a single horizontal line — wrapping them stacks
   // vertically and warps the surrounding board rows. Every other non-creature

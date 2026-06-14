@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} de {{total}} desviradas",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Crt",
     "landsAbbr": "Trr",
     "otherAbbr": "Out",
+    "manaAvailable": "{{untapped}} de {{total}} terrenos desvirados",
     "out": "FORA",
     "eliminated": "Eliminado",
     "phasedOut": "Em Fase Inativa",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Contadores de experiência: {{count}}",
     "speedAriaLabel": "Velocidade {{value}}",
     "speedTooltip": "Velocidade: {{value}}",
+    "condCantWin": "Não pode vencer o jogo",
+    "condCantGainLife": "Não pode ganhar vida",
+    "condCantLoseLife": "Não pode perder vida",
+    "condCantPayLife": "Não pode pagar vida",
+    "condCantCast": "Não pode conjurar mágicas",
+    "condCantActivate": "Não pode ativar habilidades",
+    "condCastOnlyFromZones": "Só pode conjurar de zonas limitadas",
+    "condFromSource": "{{condition}} — de {{name}}",
+    "pendingSpell": "Próxima mágica",
+    "pendingCantBeCountered": "A próxima mágica não pode ser anulada",
+    "pendingHasKeyword": "A próxima mágica tem {{keyword}}",
+    "pendingFlash": "A próxima mágica pode ser conjurada como se tivesse lampejo",
+    "pendingFree": "A próxima mágica sem pagar seu custo de mana",
+    "pendingCheaper": "A próxima mágica custa {{amount}} a menos",
     "companion": "Companheiro"
   },
   "avatar": {

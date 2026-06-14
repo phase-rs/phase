@@ -8132,6 +8132,33 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
+    // CR 700.4 + CR 120.1 + CR 608.2i: "another creature dealt damage this turn
+    // by [source filter] dies" (Shelob, Child of Ungoliant).
+    let mut damaged_this_turn_prefix = alt((
+        tag::<_, _, OracleError<'_>>("whenever another creature dealt damage this turn by "),
+        tag("when another creature dealt damage this turn by "),
+    ));
+    if let Ok((rest, _)) = damaged_this_turn_prefix.parse(lower) {
+        if let Some((after_source, source)) =
+            super::oracle_replacement::parse_damage_history_source(rest)
+        {
+            if tag::<_, _, OracleError<'_>>(" dies")
+                .parse(after_source)
+                .is_ok()
+            {
+                let mut def = make_base();
+                def.mode = TriggerMode::ChangesZone;
+                def.origin = Some(Zone::Battlefield);
+                def.destination = Some(Zone::Graveyard);
+                def.valid_card = Some(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Another]),
+                ));
+                def.condition = Some(TriggerCondition::DealtDamageThisTurnBySource { source });
+                return Some((TriggerMode::ChangesZone, def));
+            }
+        }
+    }
+
     // CR 603.8: "when ~ has no [type] counters on it" — state trigger that fires
     // when the source permanent has zero counters of the specified type.
     // Handles: Dark Depths ("has no ice counters"), Afiya Grove ("has no +1/+1
@@ -12648,6 +12675,71 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::ZoneChangeObjectIsTapped)
+        );
+    }
+
+    /// CR 608.2k: the "untap it"/"tap it" bare-object-pronoun anaphor binds by
+    /// the trigger SUBJECT, not to `ParentTarget` (which resolves against the
+    /// effect's empty target list on a primary, non-targeted trigger effect and
+    /// silently no-ops the untap). This is a parse-shape building-block test for
+    /// the whole class, exercised end-to-end by
+    /// `tests/integration/issue_2915_alexios.rs`:
+    ///   - typed/attached subject ("a permanent you control", "equipped
+    ///     creature") → `TriggeringSource` (the entering/attacking object),
+    ///     matching the sibling sacrifice/destroy/exile anaphor verbs;
+    ///   - self subject (the source named in the same instruction, Alexios's
+    ///     "gains control of ~, untaps it") → `SelfRef`.
+    #[test]
+    fn untap_it_anaphor_binds_to_trigger_subject_not_parent_target() {
+        fn find_untap_target(ability: &AbilityDefinition) -> &TargetFilter {
+            let mut node = Some(ability);
+            while let Some(current) = node {
+                if let Effect::SetTapState {
+                    target,
+                    state: TapStateChange::Untap,
+                    ..
+                } = current.effect.as_ref()
+                {
+                    return target;
+                }
+                node = current.sub_ability.as_deref();
+            }
+            panic!("expected an Untap SetTapState in the trigger chain");
+        }
+
+        // Typed subject: "it" is the entering permanent (the triggering object).
+        let amulet = parse_trigger_line(
+            "Whenever a permanent you control enters tapped, untap it.",
+            "Amulet of Vigor",
+        );
+        assert_eq!(
+            find_untap_target(amulet.execute.as_ref().expect("execute present")),
+            &TargetFilter::TriggeringSource,
+            "typed-subject 'untap it' must bind to the triggering object"
+        );
+
+        // Attached subject: "it" is the equipped (attacking) creature.
+        let genji = parse_trigger_line(
+            "Whenever equipped creature attacks, untap it.",
+            "Genji Glove",
+        );
+        assert_eq!(
+            find_untap_target(genji.execute.as_ref().expect("execute present")),
+            &TargetFilter::TriggeringSource,
+            "attached-subject 'untap it' must bind to the triggering object"
+        );
+
+        // Self subject: "it" is the source named earlier in the instruction.
+        let alexios = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player gains control of \
+             Alexios, untaps it, and puts a +1/+1 counter on it. It gains haste until \
+             end of turn.",
+            "Alexios, Deimos of Kosmos",
+        );
+        assert_eq!(
+            find_untap_target(alexios.execute.as_ref().expect("execute present")),
+            &TargetFilter::SelfRef,
+            "self-subject 'untaps it' must bind to the named source"
         );
     }
 
@@ -24194,6 +24286,34 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::DealtDamageBySourceThisTurn)
+        );
+    }
+
+    #[test]
+    fn trigger_another_creature_damaged_by_spider_you_controlled_dies() {
+        // Issue #1206 — Shelob, Child of Ungoliant
+        let def = parse_trigger_line(
+            "Whenever another creature dealt damage this turn by a Spider you controlled dies, create a token that's a copy of that creature, except it's a Food artifact with \"{2}, {T}, Sacrifice ~: You gain 3 life,\" and it loses all other card types.",
+            "Shelob, Child of Ungoliant",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Another])
+            ))
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DealtDamageThisTurnBySource {
+                source: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Spider".to_string())
+                        .controller(ControllerRef::You)
+                )
+            })
         );
     }
 

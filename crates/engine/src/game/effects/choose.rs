@@ -32,6 +32,7 @@ pub fn resolve(
         state,
         &choice_type,
         ability.controller,
+        ability.source_id,
         &ability.chosen_players,
     );
 
@@ -152,6 +153,7 @@ fn compute_options(
     state: &GameState,
     choice_type: &ChoiceType,
     controller: PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
     already_chosen: &[PlayerId],
 ) -> Vec<String> {
     match choice_type {
@@ -186,11 +188,24 @@ fn compute_options(
         ChoiceType::Labeled { options } => options.clone(),
         // CR 205.3i: Land types include the basic land types plus Cave, Desert, Gate, etc.
         ChoiceType::LandType => to_strings(LAND_TYPES),
-        // CR 800.4a: An opponent is any other player in the game.
+        // CR 102.3: An opponent is any player not on the choosing player's team
+        // (in a free-for-all game, every other player). `players::opponents`
+        // already drops eliminated players (CR 104.3a — a player who loses
+        // leaves the game and is no longer an opponent).
         // CR 608.2c: Exclude players already chosen earlier in this resolution.
-        ChoiceType::Opponent => players::opponents(state, controller)
+        // CR 102.3 + CR 608.2d: When a `restriction` is present ("with the most
+        // life among your opponents"), narrow the eligible set to opponents
+        // satisfying that `PlayerFilter` — the controller then picks ONE of the
+        // qualifying opponents (CR 608.2d handles ties), keeping it a single
+        // pick rather than fanning the effect out to every tied opponent.
+        ChoiceType::Opponent { restriction } => players::opponents(state, controller)
             .iter()
             .filter(|id| !already_chosen.contains(id))
+            .filter(|id| {
+                restriction.as_ref().is_none_or(|filter| {
+                    super::matches_player_scope(state, **id, filter, controller, source_id)
+                })
+            })
             .map(|id| id.0.to_string())
             .collect(),
         // CR 102.1: A player is one of the people in the game.
@@ -498,7 +513,7 @@ mod tests {
     #[test]
     fn choose_opponent_lists_opponents() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Opponent);
+        let ability = make_choose_ability(ChoiceType::Opponent { restriction: None });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {

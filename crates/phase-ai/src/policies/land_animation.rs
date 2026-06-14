@@ -4,14 +4,18 @@
 //! animating lands every turn regardless of strategic value, considering mana needs,
 //! color requirements, and combat value.
 
+use std::collections::HashSet;
+
+use engine::game::casting::can_pay_ability_mana_cost_after_auto_tap_excluding;
 use engine::game::game_object;
 use engine::types::ability::{
-    AbilityDefinition, ContinuousModification, CostCategory, Effect, ManaProduction,
+    AbilityCost, AbilityDefinition, ContinuousModification, CostCategory, Effect, ManaProduction,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 
 use super::activation::turn_only;
@@ -22,7 +26,7 @@ use crate::features::DeckFeatures;
 /// Penalty for animating a land when mana is needed for other spells.
 const MANA_NEEDED_PENALTY: f64 = -2.0;
 
-/// Penalty for animation abilities whose cost needs an untapped source.
+/// Penalty for animating a land that ends up tapped (no combat value).
 const TAPPED_LAND_PENALTY: f64 = -100.0;
 
 /// Bonus for animating when sufficient alternative mana sources exist.
@@ -92,8 +96,13 @@ impl TacticalPolicy for LandAnimationPolicy {
 
         let mut delta = 0.0;
 
-        // CR 107.5: A permanent that's already tapped can't be tapped again to pay a cost.
-        if obj.tapped && ability_taps_source(ability_def) {
+        // CR 508.1a / CR 509.1a: an animated land that ends up tapped can
+        // neither attack nor block this turn, so animating it has no combat
+        // value. This is the Shambling Vent failure mode — the AI taps the
+        // manland for mana to help pay its own {1}{W}{B} animation cost and
+        // turns it into a useless tapped creature. Strongly disprefer any
+        // activation that leaves the source tapped.
+        if animation_leaves_source_tapped(ctx, *source_id, obj, ability_def) {
             return PolicyVerdict::Score {
                 delta: TAPPED_LAND_PENALTY,
                 reason: PolicyReason::new("land_animation_tapped"),
@@ -240,6 +249,58 @@ fn ability_taps_source(ability: &AbilityDefinition) -> bool {
     })
 }
 
+/// CR 508.1a / CR 509.1a: returns true when activating `ability` would leave
+/// the source land tapped — making the animated creature unable to attack or
+/// block this turn. Three ways this happens:
+///   1. the land is already tapped (e.g. used for mana earlier this turn),
+///   2. the activation cost itself taps the source, or
+///   3. paying the mana cost would force tapping the source for mana. The
+///      engine's auto-tap (CR 605.3b) deprioritizes the source but still taps
+///      it as a last resort, so the source is forced exactly when the cost
+///      can't be paid *without* it. We answer that by asking the engine's own
+///      payment solver to pay the cost with the source excluded — keeping color
+///      and multi-mana yield exact instead of re-deriving them here.
+fn animation_leaves_source_tapped(
+    ctx: &PolicyContext<'_>,
+    source_id: ObjectId,
+    source: &game_object::GameObject,
+    ability: &AbilityDefinition,
+) -> bool {
+    if source.tapped || ability_taps_source(ability) {
+        return true;
+    }
+
+    // Only plain mana costs are assessable here; non-mana or dynamically-priced
+    // animation costs (none exist among current man-lands) fall through to the
+    // additive scoring below rather than being penalized blind.
+    let Some(AbilityCost::Mana { cost }) = ability.cost.as_ref() else {
+        return false;
+    };
+    if cost.mana_value() == 0 {
+        return false;
+    }
+
+    !can_pay_cost_excluding_source(ctx, source_id, cost)
+}
+
+/// True iff the AI can pay `cost` for `source_id`'s ability without tapping the
+/// source itself. Delegates to the engine's payment solver (color- and
+/// yield-accurate) with the source added to the excluded set.
+fn can_pay_cost_excluding_source(
+    ctx: &PolicyContext<'_>,
+    source_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    let excluded = HashSet::from([source_id]);
+    can_pay_ability_mana_cost_after_auto_tap_excluding(
+        ctx.state,
+        ctx.ai_player,
+        source_id,
+        cost,
+        &excluded,
+    )
+}
+
 /// Check if the AI needs mana for spells in hand.
 fn mana_needed_in_hand(ctx: &PolicyContext<'_>) -> bool {
     // Check if AI has spells in hand that require mana
@@ -301,7 +362,7 @@ mod tests {
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
-    use engine::types::mana::ManaColor;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
 
@@ -392,6 +453,115 @@ mod tests {
         };
         assert_eq!(delta, 0.0);
         assert_eq!(reason.kind, expected_reason);
+    }
+
+    fn reason_kind(verdict: &PolicyVerdict) -> &str {
+        let PolicyVerdict::Score { reason, .. } = verdict else {
+            panic!("expected score verdict");
+        };
+        reason.kind
+    }
+
+    /// {1}{W}{B} animation ability (mana value 3), mirroring Shambling Vent.
+    fn animate_ability_with_mana_cost() -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, animate_effect()).cost(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::Black],
+                generic: 1,
+            },
+        })
+    }
+
+    /// {1}{W}{B} animation via the `GenericEffect` + `AddType Creature` shape
+    /// that real man-lands (Shambling Vent) actually use, not the synthetic
+    /// `Effect::Animate`. Locks the production code path through the guard.
+    fn generic_animate_ability_with_mana_cost() -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, generic_creature_type_effect()).cost(
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White, ManaCostShard::Black],
+                    generic: 1,
+                },
+            },
+        )
+    }
+
+    /// An untapped basic-style land: `{T}: Add {color}`.
+    fn mana_land(state: &mut GameState, color: ManaColor) -> ObjectId {
+        land_with_ability(
+            state,
+            AbilityDefinition::new(AbilityKind::Activated, mana_effect(vec![color]))
+                .cost(AbilityCost::Tap),
+        )
+    }
+
+    #[test]
+    fn animation_forcing_self_tap_for_mana_is_penalized() {
+        // Manland is untapped but the AI has no other mana: paying {1}{W}{B}
+        // would tap the manland itself, animating it into a tapped creature.
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(&mut state, animate_ability_with_mana_cost());
+
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_tapped");
+        let PolicyVerdict::Score { delta, .. } = verdict else {
+            panic!("expected score verdict");
+        };
+        assert_eq!(delta, TAPPED_LAND_PENALTY);
+    }
+
+    #[test]
+    fn animation_with_sufficient_other_mana_is_not_tapped_penalized() {
+        // W + B + a third source cover {1}{W}{B} without tapping the manland,
+        // so it can animate and still attack/block this turn.
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(&mut state, animate_ability_with_mana_cost());
+        mana_land(&mut state, ManaColor::White);
+        mana_land(&mut state, ManaColor::Black);
+        mana_land(&mut state, ManaColor::White);
+
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_score");
+    }
+
+    #[test]
+    fn animation_color_starved_off_source_is_penalized() {
+        // Three other untapped sources cover the *total* of {1}{W}{B}, but none
+        // produces black — only the manland could, so the engine would tap it
+        // for {B} and leave a tapped creature. A count-only check would miss
+        // this; the color-aware engine solver catches it.
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(&mut state, animate_ability_with_mana_cost());
+        mana_land(&mut state, ManaColor::White);
+        mana_land(&mut state, ManaColor::White);
+        mana_land(&mut state, ManaColor::Green);
+
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_tapped");
+    }
+
+    #[test]
+    fn generic_effect_manland_self_tap_is_penalized() {
+        // Real Shambling Vent shape (GenericEffect AddType Creature). With no
+        // other mana, paying {1}{W}{B} forces tapping the manland → penalized.
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(&mut state, generic_animate_ability_with_mana_cost());
+
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_tapped");
+    }
+
+    #[test]
+    fn already_tapped_manland_animation_is_penalized() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(&mut state, animate_ability_with_mana_cost());
+        mana_land(&mut state, ManaColor::White);
+        mana_land(&mut state, ManaColor::Black);
+        mana_land(&mut state, ManaColor::White);
+        state.objects.get_mut(&source_id).unwrap().tapped = true;
+
+        let verdict = policy_verdict(&state, source_id);
+        assert_eq!(reason_kind(&verdict), "land_animation_tapped");
     }
 
     #[test]

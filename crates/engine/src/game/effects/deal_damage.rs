@@ -1036,10 +1036,13 @@ fn collect_matching_players(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
-                    // CR 109.4: the parent-object-target anchor has no meaning
-                    // for a damage-each-player effect (no parent object target
-                    // is in scope); never matches.
-                    PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
+                    // the resolution-scoped chosen-player anchor have no meaning
+                    // for a damage-each-player effect (no parent object target /
+                    // chosen player is in scope here); never matches.
+                    PlayerFilter::ParentObjectTargetController
+                    | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
                     // `relation` and the controlled-permanent count comparison.
@@ -1230,10 +1233,13 @@ pub fn resolve_each_player(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
-                    // CR 109.4: the parent-object-target anchor has no meaning
-                    // for a damage-each-player effect (no parent object target
-                    // is in scope); never matches.
-                    PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 108.3: the parent-object-target anchors and
+                    // the resolution-scoped chosen-player anchor have no meaning
+                    // for a damage-each-player effect (no parent object target /
+                    // chosen player is in scope here); never matches.
+                    PlayerFilter::ParentObjectTargetController
+                    | PlayerFilter::ParentObjectTargetOwner
+                    | PlayerFilter::ChosenPlayer { .. } => false,
                     // CR 109.4 + CR 109.5: "each [player class] who controls
                     // [comparator] [count] [filter]" — candidate satisfies both
                     // `relation` and the controlled-permanent count comparison.

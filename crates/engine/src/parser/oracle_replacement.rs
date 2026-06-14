@@ -3091,7 +3091,10 @@ fn parse_dealt_damage_this_turn_source_condition(input: &str) -> Option<Replacem
         .then_some(ReplacementCondition::DealtDamageThisTurnBySource { source })
 }
 
-fn parse_damage_history_source(input: &str) -> Option<(&str, TargetFilter)> {
+pub(crate) fn parse_damage_history_source(input: &str) -> Option<(&str, TargetFilter)> {
+    if let Ok(result) = parse_typed_permanent_you_controlled_damage_source(input) {
+        return Some(result);
+    }
     alt((
         value(
             TargetFilter::SelfRef,
@@ -3111,6 +3114,43 @@ fn parse_damage_history_source(input: &str) -> Option<(&str, TargetFilter)> {
     ))
     .parse(input)
     .ok()
+}
+
+/// CR 608.2i: "a [type] you controlled" damage-source look-back (Shelob's Spider gate).
+fn parse_typed_permanent_you_controlled_damage_source(
+    input: &str,
+) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("a ").parse(input)?;
+    let (after_type, type_text) =
+        take_until::<_, _, OracleError<'_>>(" you controlled").parse(rest)?;
+    let (after, _) = tag::<_, _, OracleError<'_>>(" you controlled").parse(after_type)?;
+    let (filter, leftover) = parse_type_phrase(type_text);
+    if !leftover.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            leftover,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+    let filter = match filter {
+        TargetFilter::Typed(mut tf) => {
+            if tf.controller.is_none() {
+                tf.controller = Some(ControllerRef::You);
+            }
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::Or { mut filters } => {
+            for branch in &mut filters {
+                if let TargetFilter::Typed(tf) = branch {
+                    if tf.controller.is_none() {
+                        tf.controller = Some(ControllerRef::You);
+                    }
+                }
+            }
+            TargetFilter::Or { filters }
+        }
+        other => other,
+    };
+    Ok((after, filter))
 }
 
 /// CR 614.1a: Match the exile-anaphor clause in either word order, returning
@@ -9038,6 +9078,21 @@ mod tests {
             Some(ReplacementCondition::DealtDamageThisTurnBySource {
                 source: TargetFilter::AttachedTo,
             })
+        );
+    }
+
+    #[test]
+    fn creature_damaged_by_spider_you_controlled_replacement_source_filter() {
+        let (rest, source) =
+            parse_damage_history_source("a spider you controlled would die").unwrap();
+        assert_eq!(rest, " would die");
+        assert_eq!(
+            source,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spider".to_string())
+                    .controller(ControllerRef::You)
+            )
         );
     }
 

@@ -98,8 +98,19 @@
       "open_other": "Open lands drawer ({{count}} lands)",
       "pipTooltip_one": "{{count}} hidden land can currently produce",
       "pipTooltip_other": "{{count}} hidden lands can currently produce",
+      "pipAvailability": "{{untapped}} von {{total}} ungetappt",
       "title_one": "Lands ({{count}})",
       "title_other": "Lands ({{count}})"
+    },
+    "creatures": {
+      "label": "Creatures",
+      "open_one": "Open creatures drawer ({{count}} creature)",
+      "open_other": "Open creatures drawer ({{count}} creatures)",
+      "title_one": "Creatures ({{count}})",
+      "title_other": "Creatures ({{count}})",
+      "totalPower": "{{power}}/{{toughness}} total power and toughness",
+      "viewAll": "Click to view all",
+      "scrollHint": "Scroll"
     },
     "support": {
       "label": "Support",
@@ -163,6 +174,7 @@
     "creaturesAbbr": "Krt",
     "landsAbbr": "Lnd",
     "otherAbbr": "Snst",
+    "manaAvailable": "{{untapped}} von {{total}} Ländern ungetappt",
     "out": "RAUS",
     "eliminated": "Ausgeschieden",
     "phasedOut": "Ausgephast",
@@ -293,6 +305,20 @@
     "experienceTooltip": "Erfahrungsmarken: {{count}}",
     "speedAriaLabel": "Tempo {{value}}",
     "speedTooltip": "Tempo: {{value}}",
+    "condCantWin": "Kann das Spiel nicht gewinnen",
+    "condCantGainLife": "Kann keine Lebenspunkte dazugewinnen",
+    "condCantLoseLife": "Kann keine Lebenspunkte verlieren",
+    "condCantPayLife": "Kann keine Lebenspunkte als Kosten bezahlen",
+    "condCantCast": "Kann keine Zauber wirken",
+    "condCantActivate": "Kann keine Fähigkeiten aktivieren",
+    "condCastOnlyFromZones": "Kann nur aus bestimmten Zonen wirken",
+    "condFromSource": "{{condition}} — von {{name}}",
+    "pendingSpell": "Nächster Zauber",
+    "pendingCantBeCountered": "Nächster Zauber kann nicht neutralisiert werden",
+    "pendingHasKeyword": "Nächster Zauber hat {{keyword}}",
+    "pendingFlash": "Nächster Zauber kann gewirkt werden, als hätte er Blitz",
+    "pendingFree": "Nächster Zauber, ohne seine Manakosten zu bezahlen",
+    "pendingCheaper": "Nächster Zauber kostet {{amount}} weniger",
     "companion": "Gefährte"
   },
   "avatar": {

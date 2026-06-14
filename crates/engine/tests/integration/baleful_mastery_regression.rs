@@ -170,7 +170,7 @@ fn baleful_mastery_alternative_cost_makes_chosen_opponent_draw() {
                 options,
                 ..
             } => {
-                assert_eq!(choice_type, ChoiceType::Opponent);
+                assert_eq!(choice_type, ChoiceType::Opponent { restriction: None });
                 assert_eq!(options, vec![P1.0.to_string()]);
                 runner
                     .act(GameAction::ChooseOption {

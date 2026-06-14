@@ -4654,6 +4654,27 @@ pub(crate) fn check_trigger_condition(
                 _ => false,
             }
         }
+        // CR 700.4 + CR 120.1 + CR 608.2i: "another creature dealt damage this turn
+        // by [source filter] dies" — match the dying creature against damage records
+        // whose source satisfies the filter (Spider you controlled, etc.).
+        TriggerCondition::DealtDamageThisTurnBySource { source } => {
+            let dying_creature = trigger_event.and_then(|e| match e {
+                GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            });
+            let Some(subj) = dying_creature else {
+                return false;
+            };
+            let ctx = FilterContext::from_source_with_controller(
+                source_id.unwrap_or(ObjectId(0)),
+                controller,
+            );
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.target == TargetRef::Object(subj)
+                    && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
+            })
+        }
         // CR 400.7 + CR 603.10: "if it was a [type]" — check LKI for the source's
         // core types at the time it left the battlefield.
         TriggerCondition::WasType { card_type } => source_id
@@ -4806,6 +4827,11 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
+            // CR 108.3 + CR 608.2c: parent-target-owner and resolution-scoped
+            // chosen-player anchors are effect-resolution references, not
+            // turn-binding predicates — no "whose turn" semantic. Fail-closed.
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::ChosenPlayer { .. }
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
             // Fail-closed alongside the other set-valued variants.
@@ -5595,8 +5621,8 @@ pub mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, ManaTapState};
     use crate::types::game_state::{
-        DelayedTrigger, DistributionUnit, GameState, SpellCastRecord, StackEntry, StackEntryKind,
-        WaitingFor, ZoneChangeRecord,
+        DamageRecord, DelayedTrigger, DistributionUnit, GameState, SpellCastRecord, StackEntry,
+        StackEntryKind, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -10404,6 +10430,143 @@ pub mod tests {
             Some(source),
             None,
         ));
+    }
+
+    #[test]
+    fn dealt_damage_this_turn_by_source_trigger_condition() {
+        // Issue #1206 — Shelob's Spider damage gate on another creature's death.
+        let mut state = setup();
+        let shelob = ObjectId(10);
+        let spider = ObjectId(11);
+        let victim = ObjectId(20);
+
+        let mut spider_obj = GameObject::new(
+            spider,
+            CardId(1),
+            PlayerId(0),
+            "Spider".to_string(),
+            Zone::Battlefield,
+        );
+        spider_obj.controller = PlayerId(0);
+        spider_obj.card_types.subtypes.push("Spider".to_string());
+        state.objects.insert(spider, spider_obj);
+
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: spider,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: false,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            source_subtypes: vec!["Spider".to_string()],
+            ..Default::default()
+        });
+
+        let condition = TriggerCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spider".to_string())
+                    .controller(ControllerRef::You),
+            ),
+        };
+        let event = GameEvent::CreatureDestroyed { object_id: victim };
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(shelob),
+            Some(&event),
+        ));
+
+        let wrong_victim = GameEvent::CreatureDestroyed {
+            object_id: ObjectId(99),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(shelob),
+            Some(&wrong_victim),
+        ));
+    }
+
+    #[test]
+    fn shelob_spider_damage_death_trigger_end_to_end() {
+        use crate::game::sba;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::game_state::TriggerIndex;
+        use crate::types::triggers::TriggerMode;
+
+        const SHELOB_DEATH_TRIGGER: &str = "Whenever another creature dealt damage this turn by a Spider you controlled dies, create a token that's a copy of that creature, except it's a Food artifact with \"{2}, {T}, Sacrifice ~: You gain 3 life,\" and it loses all other card types.";
+
+        let mut scenario = GameScenario::new();
+        let shelob_id = scenario
+            .add_creature(P0, "Shelob, Child of Ungoliant", 4, 4)
+            .id();
+        let spider_id = scenario.add_creature(P0, "Acid Web Spider", 3, 3).id();
+        let victim_id = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&spider_id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Spider".to_string());
+
+        let death_trigger = parse_trigger_line(SHELOB_DEATH_TRIGGER, "Shelob, Child of Ungoliant");
+        assert_eq!(death_trigger.mode, TriggerMode::ChangesZone);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&shelob_id)
+            .unwrap()
+            .trigger_definitions
+            .push(death_trigger);
+
+        TriggerIndex::rebuild_from_battlefield(runner.state_mut());
+
+        runner
+            .state_mut()
+            .damage_dealt_this_turn
+            .push_back(DamageRecord {
+                source_id: spider_id,
+                source_controller: P0,
+                target: TargetRef::Object(victim_id),
+                target_controller: P0,
+                amount: 2,
+                is_combat: false,
+                source_controller_snapshot: P0,
+                source_owner: P0,
+                source_subtypes: vec!["Spider".to_string()],
+                ..Default::default()
+            });
+
+        let mut death_events = Vec::new();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .damage_marked = 99;
+        sba::check_state_based_actions(runner.state_mut(), &mut death_events);
+
+        let pending = collect_pending_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !pending.is_empty(),
+            "Shelob's spider-damage death trigger must collect pending entries"
+        );
+        process_triggers(runner.state_mut(), &death_events);
+        assert!(
+            !runner.state().stack.is_empty(),
+            "Shelob trigger must reach the stack"
+        );
     }
 
     #[test]

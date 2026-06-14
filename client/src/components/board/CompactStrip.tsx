@@ -1,9 +1,10 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { PlayerId } from "../../adapter/types.ts";
+import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
+import { LandManaRail } from "../mana/LandManaRail.tsx";
 
 interface CompactStripProps {
   playerId: PlayerId;
@@ -16,8 +17,13 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
 
-  const { player, counts } = useMemo(() => {
-    if (!gameState) return { player: null, counts: { creatures: 0, lands: 0, other: 0 } };
+  const { player, counts, landObjects } = useMemo(() => {
+    const empty = {
+      player: null,
+      counts: { creatures: 0, other: 0 },
+      landObjects: [] as GameObject[],
+    };
+    if (!gameState) return empty;
 
     const p = gameState.players[playerId];
     const battlefieldObjects = gameState.battlefield
@@ -26,14 +32,19 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
       .filter((obj) => obj.controller === playerId);
 
     const partition = partitionByType(battlefieldObjects);
+    // partitionByType returns ObjectIds; resolve the land ids back to objects
+    // for the mana rail (it reads each land's available_mana_pips + tapped).
+    const landObjects = partition.lands
+      .map((id) => gameState.objects[id])
+      .filter((obj): obj is GameObject => Boolean(obj));
 
     return {
       player: p,
       counts: {
         creatures: partition.creatures.length,
-        lands: partition.lands.length,
         other: partition.support.length + partition.planeswalkers.length + partition.other.length,
       },
+      landObjects,
     };
   }, [gameState, playerId]);
 
@@ -77,8 +88,13 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
       {counts.creatures > 0 && (
         <PermanentCount label={t("player.creaturesAbbr")} count={counts.creatures} color="text-red-400" />
       )}
-      {counts.lands > 0 && (
-        <PermanentCount label={t("player.landsAbbr")} count={counts.lands} color="text-green-400" />
+      {/* Lands surface as a per-source mana rail (untapped bright, tapped dimmed)
+          rather than a bare count — see LandManaRail / manaAvailability. */}
+      {landObjects.length > 0 && (
+        <div className="flex flex-col items-center">
+          <span className="text-[10px] text-gray-500">{t("player.landsAbbr")}</span>
+          <LandManaRail lands={landObjects} />
+        </div>
       )}
       {counts.other > 0 && (
         <PermanentCount label={t("player.otherAbbr")} count={counts.other} color="text-blue-400" />

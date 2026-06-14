@@ -580,7 +580,7 @@ pub(crate) fn drain_pending_vote_ballot_iteration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, Chooser, PlayerScope, TargetFilter, ZoneOwner};
+    use crate::types::ability::AbilityKind;
     use crate::types::identifiers::ObjectId;
     use crate::types::zones::Zone;
 
@@ -1301,172 +1301,109 @@ mod tests {
         assert_eq!(state.waiting_for.acting_player(), Some(controller));
     }
     /// CR 701.38d + CR 608.2c: Expropriate money votes suspend and resume
-    /// per ballot. Each money ballot opens a `ChooseFromZoneChoice` for the
-    /// controller to select a permanent owned by the voter, then a
-    /// `GainControl` sub-effect resolves via continuation. With two
-    /// opponents both choosing money, the first ballot pauses, the choice
-    /// resolves, the drain resumes the second ballot, which also pauses,
-    /// and after the second choice resolves, `EffectResolved { Vote }` is
-    /// emitted.
+    /// per ballot. Uses the production parser path (`parse_vote_block`) to
+    /// build the Vote effect from Expropriate's real Oracle text. With two
+    /// opponents both choosing money, the first ballot pauses at
+    /// `ChooseFromZoneChoice`, remaining voters are stashed in
+    /// `pending_vote_ballot_iteration`, and `EffectResolved { Vote }` is NOT
+    /// emitted until all ballots resolve.
     #[test]
     fn expropriate_money_votes_suspend_and_resume_per_ballot() {
         use crate::game::zones::create_object;
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::card_type::CoreType;
         use crate::types::identifiers::CardId;
 
+        // Parse Expropriate's Oracle text through the production parser.
+        let text = "starting with you, each player votes for time or money. \
+                    For each time vote, take an extra turn after this one. \
+                    For each money vote, choose a permanent owned by the voter \
+                    and gain control of it.";
+        let parsed_def =
+            parse_vote_block(text, AbilityKind::Spell).expect("Expropriate vote block must parse");
+
+        // Extract per_choice_effect from the parsed Vote definition.
+        let (choices, per_choice_effect) = match *parsed_def.effect {
+            Effect::Vote {
+                choices,
+                per_choice_effect,
+                ..
+            } => (choices, per_choice_effect),
+            ref other => panic!("expected Vote, got {:?}", other),
+        };
+        assert_eq!(choices, vec!["time".to_string(), "money".to_string()]);
+
+        // Set up a 3-player game.
         let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
         let controller = state.players[0].id;
         let opp1 = state.players[1].id;
         let opp2 = state.players[2].id;
 
         // Place one permanent on the battlefield owned by each opponent.
-        let _perm_opp1 = create_object(
+        // Must have a permanent core type so TypeFilter::Permanent matches.
+        let perm_opp1 = create_object(
             &mut state,
             CardId(101),
             opp1,
-            "Opp1 Permanent".to_string(),
+            "Opp1 Creature".to_string(),
             Zone::Battlefield,
         );
-        let _perm_opp2 = create_object(
+        state
+            .objects
+            .get_mut(&perm_opp1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let perm_opp2 = create_object(
             &mut state,
             CardId(102),
             opp2,
-            "Opp2 Permanent".to_string(),
+            "Opp2 Artifact".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&perm_opp2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
 
-        // Build the money clause: ChooseFromZone { Battlefield, ScopedPlayer }
-        // with a GainControl sub-ability (mirrors Expropriate's parsed output).
-        let gain_control_sub = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::GainControl {
-                target: TargetFilter::ChosenCards,
-                duration: None,
-                original_controller: Some(ControllerRef::You),
-            },
-        );
-        let money_def = {
-            let mut def = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::ChooseFromZone {
-                    zone: Zone::Battlefield,
-                    additional_zones: Vec::new(),
-                    zone_owner: ZoneOwner::ScopedPlayer,
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                    filter: TargetFilter::Any,
-                    chooser: Chooser::Controller,
-                    up_to: false,
-                },
-            );
-            def.sub_ability = Some(Box::new(gain_control_sub));
-            def
-        };
-        // Time clause: simple ExtraTurn (aggregate, non-interactive).
-        let time_def = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ExtraTurn {
-                player: PlayerScope::You,
-            },
-        );
-
-        let ability = ResolvedAbility {
-            effect: Effect::Vote {
-                choices: vec!["time".to_string(), "money".to_string()],
-                per_choice_effect: vec![Box::new(time_def), Box::new(money_def)],
-                starting_with: ControllerRef::You,
-                voter_scope: VoterScope::AllPlayers,
-            },
-            targets: vec![],
-            source_id: ObjectId(1),
-            source_incarnation: None,
+        // Also place a permanent owned by the controller (should NOT appear
+        // in the candidate set when the voter is opp1 or opp2).
+        let perm_ctrl = create_object(
+            &mut state,
+            CardId(100),
             controller,
-            original_controller: None,
-            scoped_player: None,
-            target_chooser: None,
-            kind: AbilityKind::Spell,
-            sub_ability: None,
-            else_ability: None,
-            duration: None,
-            condition: None,
-            context: Default::default(),
-            optional_targeting: false,
-            optional: false,
-            optional_for: None,
-            multi_target: None,
-            target_constraints: Vec::new(),
-            target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
-            description: None,
-            repeat_for: None,
-            min_x_value: 0,
-            cant_be_copied: false,
-            copy_count_status: crate::types::ability::CopyCountStatus::Pending,
-            forward_result: false,
-            unless_pay: None,
-            distribution: None,
-            player_scope: None,
-            starting_with: None,
-            chosen_x: None,
-            cost_paid_object: None,
-            effect_context_object: None,
-            ability_index: None,
-            may_trigger_origin: None,
-            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
-            chosen_players: Vec::new(),
-            repeat_until: None,
-            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
-            modal: None,
-            mode_abilities: vec![],
-        };
+            "Controller Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&perm_ctrl)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
 
-        // Initiate the vote.
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).expect("vote resolves");
-
-        // Controller votes first. Simulate: all players vote "money" (idx 1).
-        // After all votes, resolve_tally is called by the engine handler.
-        // For this unit test, we directly call resolve_tally with pre-built ballots.
+        // Build ballots: all three players voted "money" (index 1).
         let ballots: crate::im::Vector<(PlayerId, u8)> =
             crate::im::Vector::from(vec![(controller, 1), (opp1, 1), (opp2, 1)]);
-        let per_choice_effect: Vec<Box<AbilityDefinition>> = {
-            let gain_control_sub2 = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainControl {
-                    target: TargetFilter::ChosenCards,
-                    duration: None,
-                    original_controller: Some(ControllerRef::You),
-                },
-            );
-            let money_def2 = {
-                let mut def = AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::ChooseFromZone {
-                        zone: Zone::Battlefield,
-                        additional_zones: Vec::new(),
-                        zone_owner: ZoneOwner::ScopedPlayer,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                        filter: TargetFilter::Any,
-                        chooser: Chooser::Controller,
-                        up_to: false,
-                    },
-                );
-                def.sub_ability = Some(Box::new(gain_control_sub2));
-                def
-            };
-            let time_def2 = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::ExtraTurn {
-                    player: PlayerScope::You,
-                },
-            );
-            vec![Box::new(time_def2), Box::new(money_def2)]
-        };
+        let tallies = vec![0u32, 3];
+        let options = choices.clone();
 
-        events.clear();
+        // Call resolve_tally with the parsed per_choice_effect.
+        let mut events = Vec::new();
         resolve_tally(
             &mut state,
-            &ballots,
-            &per_choice_effect,
             ObjectId(1),
             controller,
+            &options,
+            &per_choice_effect,
+            &tallies,
+            &ballots,
             &mut events,
         )
         .expect("resolve_tally succeeds");
@@ -1483,15 +1420,29 @@ mod tests {
                 // Controller makes the choice (Chooser::Controller).
                 assert_eq!(*player, controller);
                 assert_eq!(*count, 1);
-                // The candidate set should include permanents owned by the
-                // first voter (controller) on the battlefield.
-                assert!(!cards.is_empty());
+                // The candidate set should contain ONLY permanents owned by
+                // the first voter (controller). The controller owns perm_ctrl.
+                assert!(
+                    cards.contains(&perm_ctrl),
+                    "candidate set must include controller's permanent, got {:?}",
+                    cards
+                );
+                // Opponent permanents must NOT be in the candidate set.
+                assert!(
+                    !cards.contains(&perm_opp1),
+                    "opp1's permanent must not be in controller's ballot candidates"
+                );
+                assert!(
+                    !cards.contains(&perm_opp2),
+                    "opp2's permanent must not be in controller's ballot candidates"
+                );
             }
             other => panic!(
                 "Expected ChooseFromZoneChoice after first ballot, got {:?}",
                 other
             ),
         }
+
         // Remaining voters should be stashed.
         assert!(
             state.pending_vote_ballot_iteration.is_some(),
@@ -1507,6 +1458,7 @@ mod tests {
             2,
             "two voters (opp1 + opp2) remain after controller's ballot"
         );
+
         // No EffectResolved { Vote } yet.
         assert!(
             !events.iter().any(|e| matches!(

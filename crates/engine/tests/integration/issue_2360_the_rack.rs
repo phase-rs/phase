@@ -24,7 +24,7 @@ fn the_rack_full_oracle_parses_replacement_and_trigger() {
     assert!(matches!(
         execute.effect.as_ref(),
         Effect::Choose {
-            choice_type: ChoiceType::Opponent,
+            choice_type: ChoiceType::Opponent { .. },
             persist: true,
         }
     ));

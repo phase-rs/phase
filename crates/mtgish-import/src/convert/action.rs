@@ -3939,7 +3939,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // existing `players_to_controller` bridge for opponent detection.
         Action::ChooseAPlayer(players) => {
             let choice_type = match filter_mod::players_to_controller(players.as_ref()) {
-                Ok(ControllerRef::Opponent) => ChoiceType::Opponent,
+                Ok(ControllerRef::Opponent) => ChoiceType::Opponent { restriction: None },
                 _ => ChoiceType::Player,
             };
             Effect::Choose {
