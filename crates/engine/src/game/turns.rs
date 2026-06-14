@@ -420,6 +420,14 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.linked_exile_lki.clear();
 
     events.push(GameEvent::PhaseChanged { phase: next });
+
+    // CR 904.9: Immediately after the archenemy's precombat main phase begins,
+    // they set the top scheme of their scheme deck in motion (a turn-based action
+    // that doesn't use the stack). No-op outside an Archenemy game, when the active
+    // player isn't the archenemy, or when the scheme deck is empty.
+    if next == Phase::PreCombatMain && state.archenemy == Some(state.active_player) {
+        crate::game::archenemy::set_in_motion(state, events);
+    }
 }
 
 /// Begin the next player's turn (CR 500.1 / CR 101.4 seat order).

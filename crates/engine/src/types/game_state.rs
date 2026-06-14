@@ -6390,6 +6390,15 @@ pub struct GameState {
     /// Planechase game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planar_controller: Option<PlayerId>,
+    /// CR 904.3 / CR 904.4: The archenemy's scheme deck (single-deck Archenemy
+    /// option). Front = top; face-down in the command zone (CR 314.2). Schemes
+    /// that are set in motion turn face up and stay in the command zone, NOT here.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub scheme_deck: im::Vector<ObjectId>,
+    /// CR 904.2a: The archenemy — owner/controller of all scheme cards
+    /// (CR 314.5 / CR 904.7). `None` outside an Archenemy game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archenemy: Option<PlayerId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -6935,6 +6944,8 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             planar_deck: im::Vector::new(),
             planar_controller: None,
+            scheme_deck: im::Vector::new(),
+            archenemy: None,
             initiative: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
@@ -7349,6 +7360,8 @@ impl PartialEq for GameState {
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
+            && self.scheme_deck == other.scheme_deck
+            && self.archenemy == other.archenemy
     }
 }
 

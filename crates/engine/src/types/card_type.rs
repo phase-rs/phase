@@ -67,6 +67,10 @@ pub enum CoreType {
     /// CR 312: Phenomena — nontraditional cards used in the Planechase variant
     /// that are encountered from the planar deck (CR 312.2).
     Phenomenon,
+    /// CR 314: Schemes — nontraditional cards used in the Archenemy variant that
+    /// remain in the command zone (CR 314.2) and are set in motion from the
+    /// scheme deck (CR 904.9).
+    Scheme,
 }
 
 impl FromStr for CoreType {
@@ -87,6 +91,7 @@ impl FromStr for CoreType {
             "Dungeon" => Ok(CoreType::Dungeon),
             "Plane" => Ok(CoreType::Plane),
             "Phenomenon" => Ok(CoreType::Phenomenon),
+            "Scheme" => Ok(CoreType::Scheme),
             _ => Err(()),
         }
     }
@@ -108,6 +113,7 @@ impl fmt::Display for CoreType {
             CoreType::Dungeon => write!(f, "Dungeon"),
             CoreType::Plane => write!(f, "Plane"),
             CoreType::Phenomenon => write!(f, "Phenomenon"),
+            CoreType::Scheme => write!(f, "Scheme"),
         }
     }
 }
@@ -163,7 +169,8 @@ impl CoreType {
             | CoreType::Kindred
             | CoreType::Dungeon
             | CoreType::Plane
-            | CoreType::Phenomenon => None,
+            | CoreType::Phenomenon
+            | CoreType::Scheme => None,
         }
     }
 }
@@ -413,5 +420,6 @@ mod tests {
         assert_eq!(CoreType::Dungeon.protection_quality_str(), None);
         assert_eq!(CoreType::Plane.protection_quality_str(), None);
         assert_eq!(CoreType::Phenomenon.protection_quality_str(), None);
+        assert_eq!(CoreType::Scheme.protection_quality_str(), None);
     }
 }

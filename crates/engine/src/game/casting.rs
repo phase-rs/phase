@@ -1618,12 +1618,8 @@ fn source_has_collection_counter_play_permission(
     state.objects.get(&source).is_some_and(|source_obj| {
         source_obj.zone == Zone::Battlefield
             && source_obj.controller == player
-            && active_static_definitions(state, source_obj).any(|def| {
-                matches!(
-                    &def.mode,
-                    StaticMode::Other(name) if name == "LinkedCollectionCounterPlayPermission"
-                )
-            })
+            && active_static_definitions(state, source_obj)
+                .any(|def| matches!(&def.mode, StaticMode::LinkedCollectionCounterPlayPermission))
     })
 }
 
@@ -24770,9 +24766,9 @@ mod tests {
             .get_mut(&source)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::Other(
-                "LinkedCollectionCounterPlayPermission".to_string(),
-            )));
+            .push(StaticDefinition::new(
+                StaticMode::LinkedCollectionCounterPlayPermission,
+            ));
 
         let obj_id = create_object(
             &mut state,
@@ -24838,9 +24834,9 @@ mod tests {
             .get_mut(&source)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::Other(
-                "LinkedCollectionCounterPlayPermission".to_string(),
-            )));
+            .push(StaticDefinition::new(
+                StaticMode::LinkedCollectionCounterPlayPermission,
+            ));
 
         // An opponent-owned (PlayerId(1)) exiled spell with a collection counter,
         // exiled by an ability PlayerId(0) controlled — the reported scenario.

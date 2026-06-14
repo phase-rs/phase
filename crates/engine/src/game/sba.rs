@@ -173,6 +173,14 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             );
         }
 
+        // CR 904.10 / CR 314.6: A face-up non-ongoing scheme with no scheme
+        // triggered ability on the stack or waiting to be put on the stack is
+        // abandoned (turned face down, put on the bottom of the scheme deck).
+        // Gated on an Archenemy game.
+        if state.archenemy.is_some() {
+            crate::game::archenemy::check_scheme_abandon_sba(state, events, &mut any_performed);
+        }
+
         if !any_performed {
             break;
         }

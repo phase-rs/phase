@@ -379,6 +379,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::Planeswalked { .. }
             | GameEvent::ChaosEnsued { .. }
             | GameEvent::PlanarDieRolled { .. }
+            // Archenemy events: the scheme deck / archenemy are authoritative
+            // state serialized directly; they carry no per-object display delta.
+            | GameEvent::SchemeSetInMotion { .. }
+            | GameEvent::SchemeAbandoned { .. }
             | GameEvent::Firebend { .. }
             | GameEvent::Airbend { .. }
             | GameEvent::Earthbend { .. }

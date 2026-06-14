@@ -67,6 +67,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // enforcement is in casting.rs::exile_objects_castable_by_permission
             // and casting_costs.rs.
             | StaticMode::ExileCastPermission { .. }
+            // CR 113.6 + CR 601.2a: LinkedCollectionCounterPlayPermission is a
+            // nullary marker static — runtime enforcement is in
+            // casting.rs::source_has_collection_counter_play_permission, which
+            // gates the per-card `CastingPermission::PlayFromExile` on a live
+            // source. Not registry-keyed (mirrors the cast-permission cluster).
+            | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::CastWithKeyword { .. }
             // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
@@ -1680,6 +1686,7 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Dungeon => "dungeon",
         CoreType::Plane => "plane",
         CoreType::Phenomenon => "phenomenon",
+        CoreType::Scheme => "scheme",
     }
 }
 

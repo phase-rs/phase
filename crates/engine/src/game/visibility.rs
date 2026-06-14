@@ -157,6 +157,22 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 901.15 + CR 904.4: Planar and scheme decks are hidden-order
+    // supplementary decks whose face-down cards live in the command zone. Redact
+    // every unrevealed card identity for all viewers, matching the library and
+    // Attraction deck treatment above.
+    let supplementary_deck_ids: Vec<ObjectId> = filtered
+        .planar_deck
+        .iter()
+        .chain(filtered.scheme_deck.iter())
+        .copied()
+        .collect();
+    for obj_id in supplementary_deck_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide_card(&mut filtered, obj_id);
+        }
+    }
+
     // CR 406.3: A card exiled face down can't be examined by any player
     // except when an instruction allows it. Two modeled look-permission classes:
     // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
@@ -1130,6 +1146,58 @@ mod tests {
         assert!(!commander.face_down);
         assert_eq!(commander.zone, Zone::Command);
         assert!(commander.is_commander);
+    }
+
+    #[test]
+    fn supplementary_deck_cards_are_hidden_from_all_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let plane_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Secret Plane".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&plane_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Plane);
+        state.planar_deck.push_back(plane_id);
+
+        let scheme_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Secret Scheme".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&scheme_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Scheme);
+        state.scheme_deck.push_back(scheme_id);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(
+            filtered.objects.get(&plane_id).map(|obj| obj.name.as_str()),
+            Some("Hidden Card")
+        );
+        assert_eq!(
+            filtered
+                .objects
+                .get(&scheme_id)
+                .map(|obj| obj.name.as_str()),
+            Some("Hidden Card")
+        );
+        assert_eq!(filtered.planar_deck, im::vector![plane_id]);
+        assert_eq!(filtered.scheme_deck, im::vector![scheme_id]);
     }
 
     // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —

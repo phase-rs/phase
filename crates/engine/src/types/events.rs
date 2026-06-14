@@ -673,6 +673,18 @@ pub enum GameEvent {
         player_id: PlayerId,
         face: crate::game::planechase::PlanarDieFace,
     },
+    /// CR 904.9 / CR 701.32b: A scheme was set in motion (turned face up in the
+    /// command zone). Fires "When you set this scheme in motion" (SetInMotion).
+    SchemeSetInMotion {
+        player_id: PlayerId,
+        scheme_id: ObjectId,
+    },
+    /// CR 701.33b / CR 904.10: A scheme was abandoned (turned face down and put
+    /// on the bottom of its owner's scheme deck).
+    SchemeAbandoned {
+        player_id: PlayerId,
+        scheme_id: ObjectId,
+    },
     /// CR 726.2: A player took the initiative.
     InitiativeTaken {
         player_id: PlayerId,
