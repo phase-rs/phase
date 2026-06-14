@@ -218,36 +218,109 @@ fn run_all_matchups(
     capture: Option<&CaptureLayer>,
 ) -> Vec<MatchupResult> {
     let matchups = all_matchups();
-    let mut results: Vec<MatchupResult> = Vec::with_capacity(matchups.len());
+    let total = matchups.len();
+    // Indexed selection honoring the id filter. The retained index is the
+    // matchup's *original* position, which both derives its deterministic seed
+    // (base_seed + idx*1000) and labels progress output.
+    let selected: Vec<(usize, &MatchupSpec)> = matchups
+        .iter()
+        .enumerate()
+        .filter(|(_, spec)| {
+            options
+                .filter
+                .as_ref()
+                .is_none_or(|filter| spec.id.contains(filter))
+        })
+        .collect();
 
-    for (idx, spec) in matchups.iter().enumerate() {
-        if let Some(filter) = &options.filter {
-            if !spec.id.contains(filter) {
-                continue;
+    // Attribution drains a process-global tracing subscriber between matchups,
+    // so capture runs must stay sequential — concurrent matchups would interleave
+    // their decision-trace events into the one capture layer.
+    if capture.is_some() {
+        let mut results = Vec::with_capacity(selected.len());
+        for (idx, spec) in &selected {
+            eprintln!(
+                "[{n:>2}/{total}] {id}  (games: {games})",
+                n = idx + 1,
+                id = spec.id,
+                games = options.games_per_matchup,
+            );
+            // Drain any stale events captured before this matchup started.
+            if let Some(layer) = capture {
+                let _ = layer.drain();
             }
+            let matchup_seed = options.base_seed.wrapping_add(*idx as u64 * 1_000);
+            let mut result = run_single_matchup(db, spec, options, matchup_seed);
+            if let Some(layer) = capture {
+                let events = layer.drain();
+                result.attribution = Some(aggregate_events(&events));
+            }
+            print_matchup_row(&result);
+            results.push(result);
         }
-        eprintln!(
-            "[{idx:>2}/{total}] {id}  (games: {games})",
-            idx = idx + 1,
-            total = matchups.len(),
-            id = spec.id,
-            games = options.games_per_matchup,
-        );
-        // Drain any stale events captured before this matchup started — e.g.
-        // from the previous matchup's cooldown.
-        if let Some(layer) = capture {
-            let _ = layer.drain();
-        }
-        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
-        let mut result = run_single_matchup(db, spec, options, matchup_seed);
-        if let Some(layer) = capture {
-            let events = layer.drain();
-            result.attribution = Some(aggregate_events(&events));
-        }
-        print_matchup_row(&result);
-        results.push(result);
+        return results;
     }
-    results
+
+    run_matchups_parallel(db, options, &selected)
+}
+
+/// Run the selected matchups across all available cores via a work-stealing
+/// atomic cursor (matchups vary widely in length, so a static split would leave
+/// cores idle). Each matchup is a pure function of `(db, spec, options,
+/// matchup_seed)` with its seed derived from the original index, so results are
+/// byte-identical to a sequential run regardless of scheduling — only live
+/// progress order varies. The returned Vec is restored to selection order.
+fn run_matchups_parallel(
+    db: &CardDatabase,
+    options: &SuiteOptions,
+    selected: &[(usize, &MatchupSpec)],
+) -> Vec<MatchupResult> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let run_total = selected.len();
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(run_total.max(1));
+    let cursor = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+
+    let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..n_workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                    loop {
+                        let pos = cursor.fetch_add(1, Ordering::Relaxed);
+                        if pos >= run_total {
+                            break;
+                        }
+                        let (idx, spec) = selected[pos];
+                        let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
+                        let result = run_single_matchup(db, spec, options, matchup_seed);
+                        let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!(
+                            "[{completed:>2}/{run_total}] {id}  done (games: {games})",
+                            id = spec.id,
+                            games = options.games_per_matchup,
+                        );
+                        print_matchup_row(&result);
+                        local.push((pos, result));
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("suite worker thread panicked"))
+            .collect()
+    });
+
+    // Parallel completion is unordered; restore the original selection order so
+    // the report and any baseline comparison are stable across runs.
+    collected.sort_by_key(|(pos, _)| *pos);
+    collected.into_iter().map(|(_, result)| result).collect()
 }
 
 fn finalize_report(
