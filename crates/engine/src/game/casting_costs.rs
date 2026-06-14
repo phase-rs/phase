@@ -5326,6 +5326,20 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         super::casting::consume_single_use_play_from_exile(state, group);
     }
 
+    // CR 611.2f: Snapshot the spell's effective keywords NOW, while the spell is
+    // not yet in `spells_cast_this_turn_by_player`, so that
+    // `SpellsCastThisTurn == 0`-gated `CastWithKeyword` grants (first-qualifying-
+    // spell each turn) evaluate against the pre-record count and correctly attach
+    // to this spell. The post-record SpellCast trigger seams (Cascade, Demonstrate)
+    // read this snapshot instead of re-querying the now-incremented grant. Uses
+    // `effective_spell_keyword_instances` so multi-instance keywords (Cascade x2,
+    // Ripple) are preserved, matching what the seams' instance counting expects.
+    let cast_spell_keywords =
+        super::casting::effective_spell_keyword_instances(state, player, object_id);
+    if let Some(obj_mut) = state.objects.get_mut(&object_id) {
+        obj_mut.cast_spell_keywords = cast_spell_keywords;
+    }
+
     let obj = state
         .objects
         .get(&object_id)

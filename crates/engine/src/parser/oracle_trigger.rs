@@ -10446,6 +10446,39 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
         }
     }
 
+    // CR 601.2a: cast-origin qualifier. A spell is cast from a zone; "from
+    // anywhere other than [hand]" matches the cast-capable zones except the hand
+    // (The Twelfth Doctor), and "from exile" / "from your graveyard" match that
+    // single origin zone (Wild-Magic Sorcerer class). Emits an InAnyZone /
+    // InZone origin predicate consumed by `spell_object_matches_filter_from_state`
+    // against the cast-from zone.
+    if let Ok((rest, ())) = value(
+        (),
+        tag::<_, _, OracleError<'_>>("from anywhere other than your hand"),
+    )
+    .parse(modifier)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::InAnyZone {
+                    zones: super::oracle_target::cast_capable_zones_except(Zone::Hand),
+                }],
+            )));
+        }
+    }
+    if let Ok((rest, zone)) = alt((
+        value(Zone::Exile, tag::<_, _, OracleError<'_>>("from exile")),
+        value(Zone::Graveyard, tag("from your graveyard")),
+    ))
+    .parse(modifier)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::InZone { zone }]),
+            ));
+        }
+    }
+
     None
 }
 
@@ -12059,6 +12092,56 @@ mod tests {
             }
             other => panic!("expected Typed or Or filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_post_spell_modifier_cast_origin_from_nonhand() {
+        // CR 601.2a: "from anywhere other than your hand" → InAnyZone over the
+        // cast-capable zones except the hand.
+        let expected = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+        let filter = parse_post_spell_modifier("from anywhere other than your hand")
+            .expect("expected a cast-origin filter");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::InAnyZone {
+                zones: expected.clone()
+            }),
+            "expected InAnyZone({expected:?}), got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn parse_post_spell_modifier_cast_origin_single_zone() {
+        // CR 601.2a: "from exile" / "from your graveyard" → InZone(single).
+        for (text, zone) in [
+            ("from exile", Zone::Exile),
+            ("from your graveyard", Zone::Graveyard),
+        ] {
+            let filter = parse_post_spell_modifier(text)
+                .unwrap_or_else(|| panic!("expected a filter for {text:?}"));
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}");
+            };
+            assert!(
+                tf.properties.contains(&FilterProp::InZone { zone }),
+                "expected InZone({zone:?}) for {text:?}, got {:?}",
+                tf.properties
+            );
+        }
+    }
+
+    #[test]
+    fn parse_post_spell_modifier_rejects_unsupported_origin() {
+        // CR 601.2a: only the printed cast-origin forms are recognized; an
+        // unmodeled exclusion ("from anywhere other than your graveyard") must
+        // return None so the first-spell parser reports UnsupportedQualifier.
+        assert_eq!(
+            parse_post_spell_modifier("from anywhere other than your graveyard"),
+            None
+        );
     }
 
     #[test]

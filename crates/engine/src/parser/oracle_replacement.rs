@@ -1214,7 +1214,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     )
 }
 
-/// CR 110.2a + CR 614.1c: "`<this permanent>` enters under the control of an
+/// CR 110.2a + CR 614.1d: "`<this permanent>` enters under the control of an
 /// opponent of your choice." — a self-ETB controller-override replacement.
 ///
 /// The permanent enters the battlefield directly under an opponent's control;
@@ -1264,7 +1264,7 @@ fn parse_self_enters_under_opponent(
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .valid_card(TargetFilter::SelfRef)
-            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            // CR 614.1d: battlefield-entry-scoped (see destination-gate note above).
             .destination_zone(Zone::Battlefield)
             // CR 110.2a: enters under an opponent's control (resolved at apply time).
             .enters_under(ControllerRef::Opponent)
@@ -4666,11 +4666,40 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     let descriptor = lower
         .get(descriptor_start..descriptor_start + descriptor_len)?
         .trim();
-    let token = super::oracle_effect::parse_token_description(descriptor)?;
+    let descriptor = normalize_additional_token_descriptor(descriptor)?;
+    let token = super::oracle_effect::parse_token_description(&descriptor)?;
     let spec = token_description_to_spec(&token)?;
     Some(TokenReplacementShape::PlusSpec {
         spec: Box::new(spec),
     })
+}
+
+/// CR 614.1a + CR 111.1: Normalize the optional "additional" modifier on
+/// token descriptors before delegating to `parse_token_description`, whose token
+/// grammar expects an article or numeric count prefix.
+fn normalize_additional_token_descriptor(descriptor: &str) -> Option<String> {
+    let (rest, stripped_additional) = opt(value(
+        (),
+        preceded(
+            opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))),
+            tag("additional "),
+        ),
+    ))
+    .parse(descriptor)
+    .ok()?;
+    let descriptor = rest.trim();
+    if descriptor.is_empty() {
+        return None;
+    }
+    if stripped_additional.is_some() {
+        let (_, article) = peek(opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))))
+            .parse(descriptor)
+            .ok()?;
+        if article.is_none() {
+            return Some(format!("a {descriptor}"));
+        }
+    }
+    Some(descriptor.to_string())
 }
 
 /// CR 614.1a + CR 111.1: Parse Xorn-class subtype-gated additional-token
@@ -11264,6 +11293,21 @@ mod tests {
         assert_eq!(spec.characteristics.colors, vec![ManaColor::Green]);
     }
 
+    /// CR 614.1a + CR 111.1: Peregrin Took's "those tokens plus an additional
+    /// Food token are created instead" replacement.
+    #[test]
+    fn parses_peregrin_took_additional_food_token() {
+        let text = "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead.";
+        let def = parse_replacement_line(text, "Peregrin Took").expect("should parse Peregrin");
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+        let spec = def
+            .additional_token_spec
+            .as_ref()
+            .expect("additional Food token spec");
+        assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);
+    }
+
     /// CR 614.1a: The "twice that many" shape and the "those tokens plus"
     /// shape are mutually exclusive in `parse_token_replacement_shape`. The
     /// Double branch must not leak an `additional_token_spec`.
@@ -12149,7 +12193,7 @@ mod snapshot_tests {
             assert_eq!(
                 def.destination_zone,
                 Some(Zone::Battlefield),
-                "{card_name}: battlefield-entry-scoped (CR 614.1c)"
+                "{card_name}: battlefield-entry-scoped (CR 614.1d)"
             );
             assert_eq!(
                 def.enters_under,
@@ -12157,6 +12201,34 @@ mod snapshot_tests {
                 "{card_name}: enters under an opponent's control (CR 110.2a)"
             );
         }
+    }
+
+    /// Regression for #3213: the controller-override line must route THROUGH the
+    /// classifier (`REPLACEMENT_CONTAINS_PATTERNS`) to `parse_replacement_line`.
+    /// The test above calls `parse_replacement_line` directly (bypassing the
+    /// classifier), which is exactly why it passed while the real cards still
+    /// gapped. This drives the full `parse_oracle_text` path: reverting the
+    /// classifier entry makes the line fall through to the effect parser as
+    /// `Unimplemented`, producing zero replacements — caught here.
+    #[test]
+    fn full_card_enters_under_opponent_routes_to_replacement() {
+        let result = crate::parser::oracle::parse_oracle_text(
+            "Xantcha enters under the control of an opponent of your choice.",
+            "Xantcha, Sleeper Agent",
+            &[],
+            &["Creature".to_string()],
+            &["Phyrexian".to_string(), "Minion".to_string()],
+        );
+        assert!(
+            result.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::Moved
+                    && r.enters_under == Some(ControllerRef::Opponent)
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+            }),
+            "the controller-override line must route to a replacement (not Unimplemented); \
+             replacements = {:?}",
+            result.replacements
+        );
     }
 
     /// The control clause is NOT claimed when the subject is an external filter

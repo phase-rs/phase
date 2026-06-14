@@ -183,6 +183,10 @@ pub enum AttackTargetFilter {
     /// CR 506.2 + CR 508.1a: "can't attack its owner" — the permanent may not
     /// declare an attack against the player who owns it (distinct from controller).
     Owner,
+    /// CR 506.2 + CR 508.1c: "can't attack its owner or planeswalkers its owner
+    /// controls" restricts attacks against the owning player and planeswalkers
+    /// that player controls.
+    OwnerOrPlaneswalker,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).

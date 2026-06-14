@@ -1813,11 +1813,24 @@ fn collect_pending_triggers(
                 }
             }
 
+            // CR 611.2f + CR 702.85a: count Cascade from the cast-time keyword
+            // snapshot (`obj.cast_spell_keywords`), NOT a fresh
+            // `effective_spell_keywords` query. The latter re-evaluates the
+            // grant's `SpellsCastThisTurn == 0` gate AFTER the spell was recorded,
+            // which would drop a first-qualifying-spell-each-turn Cascade grant on
+            // its own spell (Maelstrom Nexus / Wild-Magic Sorcerer / Tardis Bay).
+            // Only `SpellsCastThisTurn`-gated `CastWithKeyword` grants require this
+            // snapshot; the Storm/Ripple/Casualty/Conspire/Replicate seams stay on
+            // the live query because their gates are point-stable. For printed
+            // Cascade and unconditional grants the snapshot is behavior-preserving:
+            // printed Cascade is in `obj.keywords` (captured by the snapshot) and
+            // unconditional grants evaluate identically pre- and post-record.
             let (instance_count, controller) = state
                 .objects
                 .get(cast_obj_id)
                 .map(|obj| {
-                    let n = super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
+                    let n = obj
+                        .cast_spell_keywords
                         .iter()
                         .filter(|k| matches!(k, Keyword::Cascade))
                         .count();
@@ -2159,6 +2172,60 @@ fn collect_pending_triggers(
                         die_result: None,
                     }));
                 }
+            }
+
+            // CR 702.144a: Demonstrate's copy trigger is synthesized onto printed
+            // Demonstrate spells by `synthesize_demonstrate`. Dynamically granted
+            // Demonstrate (StaticMode::CastWithKeyword — The Twelfth Doctor) has no
+            // face-level trigger and no additional cost, so mirror the dynamic
+            // copy-keyword seams here (minus the cost gate) and reuse the canonical
+            // Demonstrate copy ability definition. Gate on the cast-time keyword
+            // snapshot (CR 611.2f) rather than a fresh `effective_spell_keywords`
+            // query, so a first-qualifying-spell grant is not dropped by the
+            // post-record `SpellsCastThisTurn == 0` gate. Count only the granted
+            // delta: printed Demonstrate instances are handled by the face trigger,
+            // while a printed-Demonstrate spell with an extra dynamic Demonstrate
+            // still gets the extra CR 702.144a trigger.
+            let dynamically_granted_demonstrate_instances = state
+                .objects
+                .get(cast_obj_id)
+                .map(|obj| {
+                    let printed_count = obj
+                        .keywords
+                        .iter()
+                        .filter(|k| matches!(k, Keyword::Demonstrate))
+                        .count();
+                    let cast_count = obj
+                        .cast_spell_keywords
+                        .iter()
+                        .filter(|k| matches!(k, Keyword::Demonstrate))
+                        .count();
+                    (cast_count.saturating_sub(printed_count), obj.controller)
+                })
+                .unwrap_or((0, PlayerId(0)));
+            for _ in 0..dynamically_granted_demonstrate_instances.0 {
+                let demonstrate_ability = build_resolved_from_def(
+                    &crate::database::synthesis::demonstrate_copy_ability_definition(),
+                    *cast_obj_id,
+                    dynamically_granted_demonstrate_instances.1,
+                );
+                let timestamp = state.next_timestamp() as u32;
+                pending.push(PendingTriggerContext::single(PendingTrigger {
+                    source_id: *cast_obj_id,
+                    controller: dynamically_granted_demonstrate_instances.1,
+                    condition: None,
+                    ability: demonstrate_ability,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: Some(event.clone()),
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: Some("Demonstrate".to_string()),
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }));
             }
         }
 
@@ -14558,6 +14625,11 @@ pub mod tests {
             let obj = state.objects.get_mut(&spell).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
             obj.cast_from_zone = Some(Zone::Hand);
+            // CR 611.2f: the Cascade seam reads the cast-time keyword snapshot
+            // (`cast_spell_keywords`) stamped by `finalize_cast`. This test bypasses
+            // finalize and pushes a synthetic SpellCast, so set the snapshot to the
+            // keyword the static would have granted at cast time.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         process_triggers(
@@ -14598,6 +14670,11 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Sorcery);
             obj.keywords.push(Keyword::Cascade);
             obj.cast_from_zone = Some(Zone::Hand);
+            // CR 611.2f: the Cascade seam reads the cast-time keyword snapshot.
+            // For a printed-Cascade spell `finalize_cast` snapshots the printed
+            // keyword (`effective_spell_keyword_instances` includes `obj.keywords`);
+            // mirror that here since this test bypasses finalize.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         process_triggers(
@@ -14657,6 +14734,9 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.card_types.subtypes.push("Sliver".into());
             obj.cast_from_zone = Some(Zone::Hand);
+            // CR 611.2f: the Cascade seam reads the cast-time keyword snapshot;
+            // mirror the grant the First Sliver static would have stamped at cast.
+            obj.cast_spell_keywords.push(Keyword::Cascade);
         }
 
         process_triggers(
@@ -14677,6 +14757,177 @@ pub mod tests {
                 )
             }),
             "Sliver spells cast with The First Sliver on the battlefield should trigger cascade"
+        );
+    }
+
+    #[test]
+    fn dynamically_granted_demonstrate_enqueues_copy_trigger() {
+        // CR 702.144a + CR 611.2f: a spell whose cast-time snapshot carries a
+        // granted Demonstrate (The Twelfth Doctor) and has NO printed Demonstrate
+        // must get a synthesized Demonstrate copy trigger from the seam.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Granted Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.cast_from_zone = Some(Zone::Graveyard);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { description, .. }
+                    if description.as_deref() == Some("Demonstrate")
+            )),
+            "dynamically granted Demonstrate should enqueue a copy trigger"
+        );
+    }
+
+    fn count_demonstrate_triggers(state: &GameState) -> usize {
+        state
+            .stack
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { description, .. }
+                        if description.as_deref() == Some("Demonstrate")
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn printed_demonstrate_does_not_double_enqueue_via_seam() {
+        // CR 702.144a: a printed-Demonstrate spell already carries its face
+        // copy trigger. A cast-time snapshot with only that printed instance has
+        // no granted delta, so this seam must not enqueue an extra trigger.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Printed Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert_eq!(
+            count_demonstrate_triggers(&state),
+            0,
+            "printed Demonstrate must not get a second copy trigger from the dynamic seam"
+        );
+    }
+
+    #[test]
+    fn printed_demonstrate_with_dynamic_grant_enqueues_delta_trigger() {
+        // CR 702.144a: multiple Demonstrate instances trigger separately. The
+        // printed instance is covered by the face-synthesized trigger; an extra
+        // cast-time Demonstrate instance from a static grant still needs one seam
+        // trigger.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Printed Plus Granted Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert_eq!(
+            count_demonstrate_triggers(&state),
+            1,
+            "one granted Demonstrate beyond the printed instance should enqueue one seam trigger"
+        );
+    }
+
+    #[test]
+    fn multiple_dynamic_demonstrate_grants_enqueue_multiple_triggers() {
+        // CR 702.144a: each Demonstrate instance is a separate triggered ability.
+        // With no printed instance, two cast-time granted instances require two
+        // seam triggers.
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Double Granted Demonstrate Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+            obj.cast_spell_keywords.push(Keyword::Demonstrate);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert_eq!(
+            count_demonstrate_triggers(&state),
+            2,
+            "two dynamically granted Demonstrate instances should enqueue two seam triggers"
         );
     }
 

@@ -1845,8 +1845,16 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
             permanent_controller(*b_id) == Some(source_controller)
         }
-        // CR 506.2: "can't attack its owner" — compare against the permanent's owner.
+        // CR 506.2 + CR 508.1c: "can't attack its owner" — compare against the
+        // permanent's owner, distinct from its controller.
         (AttackTargetFilter::Owner, AttackTarget::Player(p)) => *p == source_owner,
+        // CR 506.2 + CR 508.1c: "can't attack its owner or planeswalkers its
+        // owner controls" also restricts attacks against the owning player's
+        // planeswalkers.
+        (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Player(p)) => *p == source_owner,
+        (AttackTargetFilter::OwnerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_owner)
+        }
         _ => false,
     }
 }
