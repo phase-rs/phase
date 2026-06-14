@@ -1569,6 +1569,19 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
     .trim();
     let type_filter = if pre_type.is_empty() {
         None
+    } else if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
+        .parse(pre_type)
+        .is_ok()
+    {
+        // CR 700.6: bare "historic" is a card-property adjective, not a type word.
+        // `parse_type_phrase` only emits `FilterProp::Historic` when a type word
+        // follows (oracle_target.rs), so the bare "historic spell" subject must
+        // lower the property here. Covers every "first historic spell you cast …"
+        // grantor (Peri Brown class) without weakening the `parse_type_phrase`
+        // guard, and benefits both the keyword-grant and cost-modifier callers.
+        Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::Historic]),
+        ))
     } else {
         let (filter, remainder) = parse_type_phrase(pre_type);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
@@ -1600,6 +1613,38 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
         },
     };
     FirstQualifiedSpell::Supported(filter, timing)
+}
+
+/// CR 601.2f: Audit that a "the first … spell <timing> has [keyword]" subject is
+/// FULLY represented by `parse_first_qualified_spell_filter` — i.e. the text
+/// AFTER the timing phrase is empty.
+///
+/// `parse_first_qualified_spell_filter` discards everything after the timing
+/// phrase (the cost-modification verb on the cost-reducer path, "costs {1} less
+/// …"). On the keyword-grant path the grant verb was already split off by the
+/// caller, so a clean subject must terminate at the timing phrase. Any trailing
+/// residue means an unrepresentable qualifier sits in the discarded region
+/// (Rain of Riches' "that mana from a Treasure was spent to cast"; TARDIS Bay's
+/// post-timing "with mana value 2 or greater"), so the keyword-grant caller must
+/// decline rather than emit a residue-blind gate.
+///
+/// Lives next to the parser whose discard it audits. Called ONLY from the
+/// keyword-grant arm — the cost-modifier consumer legitimately expects trailing
+/// cost-verb text, so this guard must NOT move into the shared
+/// `parse_first_qualified_spell_filter`.
+pub(crate) fn first_qualified_spell_subject_fully_consumed(subject: &str) -> bool {
+    let Some(after_prefix) = nom_tag_lower(subject, subject, "the first ") else {
+        return false;
+    };
+    let Some((_, post)) = split_first_spell_cast_region(after_prefix) else {
+        return false;
+    };
+    let Some((_, _, after_timing)) =
+        nom_primitives::scan_preceded(post.trim(), parse_first_spell_timing_phrase)
+    else {
+        return false;
+    };
+    after_timing.trim().is_empty()
 }
 
 fn split_first_spell_cast_region(subject: &str) -> Option<(&str, &str)> {

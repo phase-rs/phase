@@ -151,6 +151,58 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // clause binds an earlier variable-X mana-value qualifier on the subject.
     let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
 
+    // CR 611.2f: "The first <qualifier> spell you cast [from <zone>] <timing> has
+    // [keyword]" — a once-per-turn keyword grant gated on the first qualifying
+    // spell of the turn (Peri Brown, The Twelfth Doctor, Maelstrom Nexus,
+    // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
+    // `parse_first_qualified_spell_filter` grammar + `first_qualified_spell_condition`
+    // gate as the paired cost-modifier consumer, so the qualifying spell filter,
+    // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
+    // instead of collapsing to "every spell you cast".
+    match parse_first_qualified_spell_filter(subject) {
+        // Not a first-qualified-spell line — fall through to the ordinary
+        // "[type] spells you cast [from zone] have [keyword]" patterns below.
+        FirstQualifiedSpell::NotApplicable => {}
+        // The shape is present but the qualifier/timing isn't representable. Fall
+        // through (NOT a `return None`) so the existing gateless static is
+        // preserved for not-yet-representable qualifiers — no regression.
+        FirstQualifiedSpell::UnsupportedQualifier => {}
+        FirstQualifiedSpell::Supported(filter, timing) => {
+            // CR 601.2f: trailing-residue guard. `parse_first_qualified_spell_filter`
+            // discards any text after the timing phrase; if that region is
+            // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
+            // "that mana from a Treasure was spent to cast"; TARDIS Bay's
+            // post-timing "with mana value 2 or greater"). Decline rather than emit
+            // a residue-blind gate — fall through to the existing gateless static.
+            if first_qualified_spell_subject_fully_consumed(subject) {
+                // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
+                // recursion) so an opponent's qualifying spell never qualifies.
+                let affected =
+                    apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
+                // CR 611.2f: `SpellsCastThisTurn(filter) == 0` first-spell gate,
+                // plus `DuringYourTurn` for the controller-turn timing (a clean
+                // "during each of your turns" subject with no post-timing residue;
+                // TARDIS Bay itself declines above because its MV qualifier follows
+                // the timing). When a leading "during your turn," scope was already
+                // stripped, combine both rather than dropping either.
+                let first_qualified = first_qualified_spell_condition(&filter, &timing);
+                let combined_condition = match condition.clone() {
+                    Some(leading) => StaticCondition::And {
+                        conditions: vec![leading, first_qualified],
+                    },
+                    None => first_qualified,
+                };
+                return Some(
+                    StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+                        .affected(affected)
+                        .condition(combined_condition)
+                        .description(text.to_string())
+                        .active_zones(vec![Zone::Battlefield]),
+                );
+            }
+        }
+    }
+
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
     let spell_marker = subject
         .match_indices("spells you cast")
@@ -439,6 +491,32 @@ pub(crate) fn apply_spell_keyword_subject_constraints(
                     )
                 })
                 .collect(),
+        },
+        // CR 601.2a: compound subjects ("<type> spell you cast from <zone>") lower
+        // to And/Not; recurse so `ControllerRef::You` reaches every leaf, otherwise
+        // the grant would scope to opponents' qualifying spells too. The And arm is
+        // live on the first-qualified-spell keyword-grant path (type + origin-zone
+        // both present); the Not arm is defensive.
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| {
+                    apply_spell_keyword_subject_constraints(
+                        filter,
+                        zone_filter.clone(),
+                        mv_filter.clone(),
+                        extra_props.clone(),
+                    )
+                })
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(apply_spell_keyword_subject_constraints(
+                *filter,
+                zone_filter.clone(),
+                mv_filter.clone(),
+                extra_props.clone(),
+            )),
         },
         other => other,
     }

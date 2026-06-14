@@ -884,6 +884,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_controller: Option<PlayerId>,
 
+    /// CR 611.2f: Spell keywords effective AT CAST TIME (printed + statically /
+    /// transiently granted), snapshotted during `finalize_cast` BEFORE
+    /// `record_spell_cast_from_zone` increments the turn's spell history. Cast-time
+    /// "first qualifying spell each turn" grants (a `SpellsCastThisTurn == 0`-gated
+    /// `CastWithKeyword` static) must attach to THIS spell at the moment it is put
+    /// on the stack; re-querying the grant in `process_triggers` (post-record)
+    /// would see the spell already counted and wrongly drop the grant. Consumed by
+    /// the post-record SpellCast trigger seams (Cascade, Demonstrate). Transient:
+    /// cleared on zone change, mirroring `cast_from_zone`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast_spell_keywords: Vec<Keyword>,
+
     /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
     /// is exiled instead of being put into its owner's graveyard as it resolves,
     /// and the resulting exile is recorded as "exiled with" the stored source.
@@ -1220,6 +1232,7 @@ impl GameObject {
             class_level: None,
             cast_from_zone: None,
             cast_controller: None,
+            cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
@@ -1327,6 +1340,9 @@ impl GameObject {
         // resolution path repopulates from the resolving spell's context.
         self.cast_from_zone = None;
         self.cast_controller = None;
+        // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
+        // event as `cast_from_zone`; clear it on zone change for the same reason.
+        self.cast_spell_keywords.clear();
         self.kickers_paid.clear();
         self.additional_cost_payment_count = 0;
         self.additional_cost_payments.clear();
@@ -1413,6 +1429,9 @@ impl GameObject {
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
         self.cast_controller = None;
+        // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
+        // event as `cast_from_zone`; clear it on the same zone-change boundary.
+        self.cast_spell_keywords.clear();
         // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
         // scoped — a permanent that leaves the battlefield is a new object on any
         // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.

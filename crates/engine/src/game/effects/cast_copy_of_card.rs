@@ -170,6 +170,20 @@ fn cast_one_copy(
     copy.additional_cost_payment_count = 0;
     state.objects.insert(copy_id, copy);
 
+    // CR 611.2f + CR 707.12: This cast path bypasses `finalize_cast`, so snapshot
+    // the copy's effective keywords here (mirroring the finalize_cast snapshot at
+    // casting_costs.rs). The post-record SpellCast trigger seams (Cascade per
+    // CR 702.85a, Demonstrate per CR 702.144a) read `obj.cast_spell_keywords`
+    // rather than re-querying `effective_spell_keywords`; without this, a copy of
+    // a printed-Cascade card would carry an empty snapshot and silently drop its
+    // Cascade trigger. `effective_spell_keyword_instances` preserves multi-instance
+    // keywords (Cascade x2, Ripple) exactly as the seams' instance counting expects.
+    let cast_spell_keywords =
+        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
+    if let Some(copy_mut) = state.objects.get_mut(&copy_id) {
+        copy_mut.cast_spell_keywords = cast_spell_keywords;
+    }
+
     let mut resolved =
         ability_def.map(|def| build_resolved_from_def(&def, copy_id, ability.controller));
     if let Some(resolved) = resolved.as_mut() {
@@ -420,5 +434,72 @@ mod tests {
             )),
             other => panic!("expected spell with resolved ability, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cast_copy_snapshots_printed_keywords_for_spellcast_seams() {
+        use crate::types::keywords::Keyword;
+
+        // CR 611.2f + CR 707.12: A copy cast via this effect bypasses
+        // `finalize_cast`, so the cast-time keyword snapshot must be stamped here.
+        // The post-record SpellCast trigger seams (Cascade per CR 702.85a,
+        // Demonstrate per CR 702.144a) read `obj.cast_spell_keywords`; if the copy
+        // were left with an empty snapshot, a copy of a printed-Cascade card would
+        // silently drop its Cascade trigger.
+        let mut state = GameState::new_two_player(7);
+        let source_id = add_exiled_spell_card(&mut state, "Bloodbraid Elf");
+        {
+            let source = state
+                .objects
+                .get_mut(&source_id)
+                .expect("source object exists");
+            source.keywords.push(Keyword::Cascade);
+        }
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::None,
+                cost: ManaCost::zero(),
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).expect("cast copy resolves");
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(
+            copy.cast_spell_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Cascade)),
+            "cast-copy of a printed-Cascade card must snapshot Cascade so the \
+             post-record SpellCast seam can enqueue the trigger"
+        );
+
+        // Drive the post-record SpellCast seam end-to-end: the snapshot stamped
+        // above must let the Cascade trigger enqueue even though this cast path
+        // bypassed `finalize_cast`.
+        let cast_event = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::SpellCast { object_id, .. } if *object_id == copy_id => {
+                    Some(event.clone())
+                }
+                _ => None,
+            })
+            .expect("cast-copy emits a SpellCast event for the copy");
+        crate::game::triggers::process_triggers(&mut state, &[cast_event]);
+
+        assert!(
+            state.stack.iter().any(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { ability, .. }
+                    if matches!(ability.effect, Effect::Cascade)
+            )),
+            "a cast copy of a printed-Cascade card should enqueue a Cascade trigger \
+             via the SpellCast seam reading the cast-time keyword snapshot"
+        );
     }
 }

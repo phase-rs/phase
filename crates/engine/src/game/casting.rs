@@ -43161,4 +43161,238 @@ mod tests {
             "legendary creature present → cost reduced by {{3}}"
         );
     }
+
+    // --- cluster-04: first-qualifying-spell keyword grant, cast-time snapshot
+    // (CR 611.2f). These tests would FAIL if the Cascade/Demonstrate seams
+    // re-queried the grant post-record (the `SpellsCastThisTurn == 0` gate would
+    // be false for the first spell), and pass only because `finalize_cast`
+    // snapshots the cast-time keywords into `cast_spell_keywords`. ---
+
+    /// Create a {0}-cost sorcery (Effect::Draw, no targets) in hand for the given
+    /// owner. Free to cast through `finalize_cast` without mana or target choices.
+    fn create_free_sorcery(state: &mut GameState, card_id: CardId, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            card_id,
+            owner,
+            "Free Sorcery".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::zero();
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        id
+    }
+
+    /// Drive a full cast of `spell` to completion (spell on the stack, waiting for
+    /// priority), resolving any targetless target-selection prompts. Returns the
+    /// `SpellCast` events emitted by `handle_cast_spell`.
+    fn cast_free_sorcery_to_stack(
+        state: &mut GameState,
+        spell: ObjectId,
+        card_id: CardId,
+    ) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        let waiting = handle_cast_spell(state, PlayerId(0), spell, card_id, &mut events)
+            .expect("free sorcery should be castable");
+        if !matches!(waiting, WaitingFor::Priority { .. }) {
+            state.waiting_for = waiting;
+            loop {
+                match &state.waiting_for {
+                    WaitingFor::Priority { .. } => break,
+                    WaitingFor::TargetSelection { .. } => {
+                        apply_as_current(state, GameAction::SelectTargets { targets: vec![] })
+                            .expect("targetless draw spell should not need targets");
+                    }
+                    other => panic!("unexpected waiting state during free cast: {other:?}"),
+                }
+            }
+        }
+        events
+    }
+
+    /// Empty the stack and return priority to P0 so a subsequent sorcery-speed
+    /// cast is legal. The turn-scoped `spells_cast_this_turn_by_player` history is
+    /// intentionally left intact — that is the first-spell gate's source of truth.
+    fn clear_stack_to_priority(state: &mut GameState) {
+        state.stack.clear();
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+    }
+
+    fn install_first_spell_cascade_grant(state: &mut GameState) {
+        let source = create_object(
+            state,
+            CardId(7_000),
+            PlayerId(0),
+            "Maelstrom Nexus".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = parse_static_line("The first spell you cast each turn has cascade.")
+            .expect("Maelstrom Nexus static should parse");
+        // Sanity: the parser must emit the gated form, not the legacy condition-null
+        // static — otherwise this test silently stops exercising the gate.
+        assert!(
+            grant.condition.is_some(),
+            "first-spell grant must carry the SpellsCastThisTurn gate"
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+    }
+
+    #[test]
+    fn snapshot_first_qualifying_spell_captures_grant_second_does_not() {
+        let mut state = setup_game_at_main_phase();
+        install_first_spell_cascade_grant(&mut state);
+
+        let first = create_free_sorcery(&mut state, CardId(7_001), PlayerId(0));
+        cast_free_sorcery_to_stack(&mut state, first, CardId(7_001));
+        assert!(
+            state.objects[&first]
+                .cast_spell_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Cascade)),
+            "the first qualifying spell's cast-time snapshot must capture the granted Cascade"
+        );
+
+        // CR 117.1a: clear the stack so the second sorcery may be cast at
+        // sorcery speed. `spells_cast_this_turn_by_player` (the gate's source)
+        // persists, so the second spell still counts as the second cast.
+        clear_stack_to_priority(&mut state);
+
+        let second = create_free_sorcery(&mut state, CardId(7_002), PlayerId(0));
+        cast_free_sorcery_to_stack(&mut state, second, CardId(7_002));
+        assert!(
+            !state.objects[&second]
+                .cast_spell_keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Cascade)),
+            "the second same-turn spell must NOT receive Cascade (the gate is now false)"
+        );
+    }
+
+    #[test]
+    fn first_qualifying_spell_enqueues_cascade_second_does_not() {
+        let mut state = setup_game_at_main_phase();
+        install_first_spell_cascade_grant(&mut state);
+
+        let count_cascade = |state: &GameState| {
+            state
+                .stack
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility { ability, .. }
+                            if matches!(ability.effect, Effect::Cascade)
+                    )
+                })
+                .count()
+        };
+
+        let first = create_free_sorcery(&mut state, CardId(7_011), PlayerId(0));
+        let events = cast_free_sorcery_to_stack(&mut state, first, CardId(7_011));
+        super::super::triggers::process_triggers(&mut state, &events);
+        assert_eq!(
+            count_cascade(&state),
+            1,
+            "the first qualifying spell each turn must enqueue a Cascade trigger"
+        );
+
+        // CR 117.1a: clear the stack so the second sorcery may be cast at
+        // sorcery speed; the gate's spell history persists.
+        clear_stack_to_priority(&mut state);
+
+        let second = create_free_sorcery(&mut state, CardId(7_012), PlayerId(0));
+        let events = cast_free_sorcery_to_stack(&mut state, second, CardId(7_012));
+        super::super::triggers::process_triggers(&mut state, &events);
+        assert_eq!(
+            count_cascade(&state),
+            0,
+            "the second same-turn spell must NOT enqueue a Cascade trigger"
+        );
+    }
+
+    #[test]
+    fn convoke_query_before_record_unaffected_by_snapshot() {
+        // CR 702.51a: the pre-record convoke consumer (`effective_spell_keywords`
+        // read during finalize) must still see the grant for the first historic
+        // spell and NOT for the second. Step 0 must not disturb this path.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(7_200),
+            PlayerId(0),
+            "Peri Brown".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = parse_static_line("The first historic spell you cast each turn has convoke.")
+            .expect("Peri Brown static should parse");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        // A historic (legendary) spell already on the stack, recorded as if cast.
+        let first = create_object(
+            &mut state,
+            CardId(7_201),
+            PlayerId(0),
+            "Legendary Sorcery".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&first).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        // Before any historic spell is recorded, the grant applies to a historic
+        // spell (count == 0).
+        assert!(
+            effective_spell_keywords(&state, PlayerId(0), first)
+                .iter()
+                .any(|k| matches!(k, Keyword::Convoke)),
+            "first historic spell (pre-record) must receive Convoke"
+        );
+
+        // Record one historic spell this turn; the gate is now false.
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            vec![SpellCastRecord {
+                name: "Already Cast Legend".to_string(),
+                core_types: vec![CoreType::Sorcery],
+                supertypes: vec![Supertype::Legendary],
+                subtypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                mana_value: 0,
+                has_x_in_cost: false,
+                from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
+            }]
+            .into(),
+        );
+        assert!(
+            !effective_spell_keywords(&state, PlayerId(0), first)
+                .iter()
+                .any(|k| matches!(k, Keyword::Convoke)),
+            "second historic spell (a historic spell already recorded) must NOT receive Convoke"
+        );
+    }
 }

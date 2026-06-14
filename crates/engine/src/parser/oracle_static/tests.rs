@@ -12474,6 +12474,314 @@ fn static_spells_from_exile_have_convoke() {
     }
 }
 
+// --- Group C': "The first <qualifier> spell you cast [from <zone>] each turn
+// has [keyword]" once-per-turn keyword grants (cluster-04). ---
+
+/// CR 611.2f: assert a `CastWithKeyword` static's condition is the
+/// `SpellsCastThisTurn(filter) == 0` first-spell gate, optionally wrapped in an
+/// `And` with `DuringYourTurn`. Returns the inner spell filter for further
+/// assertions.
+fn assert_first_spell_gate(
+    condition: &StaticCondition,
+    expect_during_your_turn: bool,
+) -> TargetFilter {
+    let gate = if expect_during_your_turn {
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected And condition with DuringYourTurn, got {condition:?}");
+        };
+        assert!(
+            conditions.contains(&StaticCondition::DuringYourTurn),
+            "expected DuringYourTurn in {conditions:?}"
+        );
+        conditions
+            .iter()
+            .find(|c| matches!(c, StaticCondition::QuantityComparison { .. }))
+            .expect("expected a QuantityComparison alongside DuringYourTurn")
+            .clone()
+    } else {
+        condition.clone()
+    };
+    let StaticCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(inner),
+                    },
+            },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    } = gate
+    else {
+        panic!("expected SpellsCastThisTurn(filter) == 0 gate, got {gate:?}");
+    };
+    inner
+}
+
+#[test]
+fn static_peri_brown_first_historic_spell_each_turn_has_convoke() {
+    // CR 700.6 + CR 702.51a: Peri Brown — bare "historic" is a card-property
+    // adjective; the grant is gated to the first historic spell each turn.
+    let def =
+        parse_static_line("The first historic spell you cast each turn has convoke.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.contains(&FilterProp::Historic),
+        "expected Historic property, got {:?}",
+        tf.properties
+    );
+    let inner = assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+    let TargetFilter::Typed(inner_tf) = inner else {
+        panic!("expected typed inner filter");
+    };
+    assert!(inner_tf.properties.contains(&FilterProp::Historic));
+}
+
+#[test]
+fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
+    // CR 601.2a + CR 702.144a: The Twelfth Doctor — cast-origin "from anywhere
+    // other than your hand" lowers to InAnyZone over the cast-capable non-hand
+    // zones; gated to the first such spell each turn.
+    let def = parse_static_line(
+        "The first spell you cast from anywhere other than your hand each turn has demonstrate.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Demonstrate,
+        }
+    );
+    let expected_zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.contains(&FilterProp::InAnyZone {
+            zones: expected_zones.clone(),
+        }),
+        "expected InAnyZone({expected_zones:?}), got {:?}",
+        tf.properties
+    );
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_wild_magic_sorcerer_first_spell_from_exile_each_turn_has_cascade() {
+    // CR 601.2a + CR 702.85a: Wild-Magic Sorcerer — "from exile" lowers to
+    // InZone(Exile); the once-per-turn gate is now present (was condition-null).
+    let def =
+        parse_static_line("The first spell you cast from exile each turn has cascade.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }),
+        "expected InZone(Exile), got {:?}",
+        tf.properties
+    );
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_maelstrom_nexus_first_spell_each_turn_has_cascade() {
+    // CR 611.2f: Maelstrom Nexus — bare "the first spell you cast each turn" now
+    // carries the once-per-turn gate (was condition-null = every spell).
+    let def = parse_static_line("The first spell you cast each turn has cascade.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_current_curriculum_first_merfolk_spell_each_turn_has_convoke() {
+    // CR 205.3: Current Curriculum — subtype "Merfolk" qualifier preserved, gated.
+    let def = parse_static_line("The first Merfolk spell you cast each turn has convoke.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed affected, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Merfolk")),
+        "expected Merfolk subtype, got {:?}",
+        tf.type_filters
+    );
+    assert_first_spell_gate(
+        def.condition.as_ref().expect("expected first-spell gate"),
+        false,
+    );
+}
+
+#[test]
+fn static_tardis_bay_post_timing_mv_qualifier_declined_to_existing() {
+    // CR 601.2f: TARDIS Bay — "with mana value 2 or greater" sits AFTER the timing
+    // phrase ("during each of your turns"), which the shared first-spell parser
+    // discards. The keyword-grant trailing-residue guard therefore declines the
+    // gated form and falls through to the existing gateless static (no regression,
+    // no MV-blind gate). Tracked coverage gap, like Rain of Riches.
+    let def = parse_static_line(
+        "The first spell you cast during each of your turns with mana value 2 or greater has cascade.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    assert_eq!(
+        def.condition, None,
+        "post-timing MV residue must fall through to the gateless static, not emit an MV-blind gate"
+    );
+}
+
+#[test]
+fn static_rain_of_riches_treasure_qualifier_declined_to_existing() {
+    // CR 601.2f: Rain of Riches — "that mana from a Treasure was spent to cast" is
+    // unrepresentable and sits in the post-timing discarded region. The trailing-
+    // residue guard declines the gated form (no Treasure-blind gate); the existing
+    // gateless static is preserved (unchanged-broken, not regressed).
+    let def = parse_static_line(
+        "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+    assert_eq!(
+        def.condition, None,
+        "unrepresentable Treasure qualifier must fall through to the gateless static"
+    );
+}
+
+#[test]
+fn first_qualified_spell_filter_bare_historic_supported() {
+    // CR 700.6: bare "historic spell" must lower to a Historic-property filter.
+    let result = super::grammar::parse_first_qualified_spell_filter(
+        "the first historic spell you cast each turn",
+    );
+    let super::grammar::FirstQualifiedSpell::Supported(filter, timing) = result else {
+        panic!("expected Supported, got a non-Supported FirstQualifiedSpell");
+    };
+    assert_eq!(
+        timing,
+        super::oracle_trigger::NthEventTimingKind::Unrestricted
+    );
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed filter");
+    };
+    assert!(tf.properties.contains(&FilterProp::Historic));
+}
+
+#[test]
+fn first_qualified_spell_subject_residue_rejected() {
+    // CR 601.2f: a subject with non-empty post-timing residue is NOT fully
+    // consumed; a clean "...each turn" subject is.
+    assert!(
+        !super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast each turn that mana from a treasure was spent to cast"
+        ),
+        "Treasure residue must report not-fully-consumed"
+    );
+    assert!(
+        !super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast during each of your turns with mana value 2 or greater"
+        ),
+        "post-timing MV residue must report not-fully-consumed"
+    );
+    assert!(
+        super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast each turn"
+        ),
+        "clean subject must report fully-consumed"
+    );
+    assert!(
+        super::grammar::first_qualified_spell_subject_fully_consumed(
+            "the first spell you cast from exile each turn"
+        ),
+        "clean from-exile subject must report fully-consumed"
+    );
+}
+
+#[test]
+fn apply_spell_keyword_subject_constraints_recurses_and() {
+    // CR 601.2a: an And of two Typed leaves must receive ControllerRef::You on
+    // every leaf, not just the first.
+    let compound = TargetFilter::And {
+        filters: vec![
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+            ),
+        ],
+    };
+    let scoped = apply_spell_keyword_subject_constraints(compound, None, None, Vec::new());
+    let TargetFilter::And { filters } = scoped else {
+        panic!("expected And preserved");
+    };
+    assert_eq!(filters.len(), 2);
+    for leaf in &filters {
+        let TargetFilter::Typed(tf) = leaf else {
+            panic!("expected Typed leaf, got {leaf:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "every And leaf must carry ControllerRef::You"
+        );
+    }
+}
+
 // Witherbloom, the Balancer regression: "Instant and sorcery spells you cast
 // have affinity for creatures." Two parser issues had to be fixed:
 //  (1) `Keyword::from_str("affinity for creatures")` previously returned
