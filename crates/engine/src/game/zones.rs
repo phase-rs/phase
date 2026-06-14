@@ -188,6 +188,38 @@ pub(crate) fn apply_zone_exit_cleanup(
             state.exile_links.retain(|link| link.exiled_id != object_id);
         }
 
+        // CR 400.7 + CR 601.2a + CR 118.9 + CR 701.17d: An object-tagged cast/play
+        // grant ("you may cast it without paying its mana cost", a milled card's
+        // "you may play that card") attaches an `ExileWithAltCost` /
+        // `ExileWithAltAbilityCost` / `PlayFromExile` permission *in place* on a
+        // card picked from the hand or graveyard (Sunforger searches a card to
+        // hand and casts it from there; Electrodominance / Emry cast in place;
+        // Ark of Hunger / Tablet of Discovery mill-grant in the graveyard) — see
+        // `effects::cast_from_zone` and the #751 graveyard `PlayFromExile` path.
+        // Such a card never passes through exile, so the exile-exit clear above
+        // never fires for it. Each grant authorizes exactly one cast of *that*
+        // card; once it has been cast and is leaving the stack (resolved or
+        // countered), the spent grant must be dropped so CR 400.7's new object
+        // does not inherit it. Without this, a stale grant lands back in the
+        // graveyard where `has_graveyard_timed_alt_cost_permission` /
+        // `graveyard_spell_objects_available_to_cast` re-offer the free cast on
+        // every priority — an unbounded recast loop. Exile-origin grants are
+        // already cleared at the Exile→Stack move, so this is a no-op for them
+        // (impulse draw, Suspend, Discover, Cascade). Other exile-scoped
+        // permissions (AdventureCreature, Plotted, Foretold, WarpExile) are left
+        // untouched: an Adventure spell, for instance, gains `AdventureCreature`
+        // precisely as it resolves to exile.
+        if from == Zone::Stack {
+            obj_mut.casting_permissions.retain(|p| {
+                !matches!(
+                    p,
+                    crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+                        | crate::types::ability::CastingPermission::PlayFromExile { .. }
+                )
+            });
+        }
+
         if from == Zone::Battlefield {
             obj_mut.reset_for_battlefield_exit();
         }

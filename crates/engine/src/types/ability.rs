@@ -12523,6 +12523,11 @@ pub enum TriggerCondition {
     /// gated on the dying creature having been dealt damage by the trigger source this turn.
     DealtDamageBySourceThisTurn,
 
+    /// CR 700.4 + CR 120.1 + CR 608.2i: "another creature dealt damage this turn by
+    /// [source filter] dies" — death trigger gated on the dying creature having been
+    /// dealt damage this turn by a source matching the filter (e.g. Shelob's Spider gate).
+    DealtDamageThisTurnBySource { source: TargetFilter },
+
     /// CR 400.7 + CR 603.10: "if it was a [type]" — true when the trigger source's
     /// last known information includes the specified core type. Used by the Glimmer cycle
     /// ("when this dies, if it was a creature, return it").

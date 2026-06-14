@@ -5,7 +5,9 @@ use engine::types::ability::{
     TargetFilter, TypeFilter,
 };
 use engine::types::counter::CounterType;
+use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
@@ -250,6 +252,100 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         // NOTE: SearchLibrary uses `filter`, not `target`.
         _ => None,
     }
+}
+
+/// Whether `effects`, all applied to the creature `object_id`, will kill it.
+///
+/// Models the three toughness-reducing removal modalities the AI must reason
+/// about when deciding whether a removal spell is worth casting:
+/// - direct damage (`Effect::DealDamage`),
+/// - negative `Pump` (covers `-X/-X` and `-0/-X`),
+/// - `-1/-1` (and other negative P/T) counters (`Effect::PutCounter`).
+///
+/// All such effects in the spell are assumed to hit this creature, which is the
+/// single-target removal case the callers care about.
+///
+/// Returns:
+/// - `Some(true)`  — provably lethal,
+/// - `Some(false)` — provably non-lethal (every relevant amount is fixed and
+///   the creature survives),
+/// - `None`        — not determinable: either no damage/shrink effect is present
+///   (e.g. `Destroy`, `Bounce`, `Exile`), or a relevant amount is variable (an
+///   `X` spell whose value the caster chooses). Callers fail open on `None`.
+pub(crate) fn lethal_to_creature(
+    state: &GameState,
+    object_id: ObjectId,
+    effects: &[&Effect],
+) -> Option<bool> {
+    let object = state.objects.get(&object_id)?;
+    let base_toughness = object.toughness?;
+
+    let mut toughness_reduction = 0i32; // from negative pumps and -1/-1 counters
+    let mut total_damage = 0i32;
+    let mut saw_relevant = false;
+
+    for effect in effects {
+        match effect {
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value },
+                ..
+            } => {
+                total_damage += *value;
+                saw_relevant = true;
+            }
+            // Variable (X) damage — the caster picks the amount, so lethality
+            // can't be decided here.
+            Effect::DealDamage { .. } => return None,
+            Effect::Pump { toughness, .. } => match toughness {
+                PtValue::Fixed(v) if *v < 0 => {
+                    toughness_reduction += -*v;
+                    saw_relevant = true;
+                }
+                PtValue::Fixed(_) => {}
+                // -X/-X: variable shrink, undecidable here.
+                PtValue::Variable(_) | PtValue::Quantity(_) => return None,
+            },
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                if let Some((_, t_delta)) = counter_type.power_toughness_delta() {
+                    if t_delta < 0 {
+                        match count {
+                            QuantityExpr::Fixed { value } => {
+                                toughness_reduction += -t_delta * *value;
+                                saw_relevant = true;
+                            }
+                            _ => return None,
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_relevant {
+        return None;
+    }
+
+    let new_toughness = base_toughness - toughness_reduction;
+    // CR 704.5f: a creature with toughness 0 or less is put into its owner's
+    // graveyard. This is not destruction, so indestructible does not prevent it.
+    if new_toughness <= 0 {
+        return Some(true);
+    }
+    // CR 704.5g + CR 702.12b: lethal marked damage destroys the creature — but
+    // an indestructible permanent ignores that state-based action, so damage
+    // alone can never kill it.
+    if total_damage > 0 && !object.has_keyword(&Keyword::Indestructible) {
+        let marked = object.damage_marked as i32;
+        if marked + total_damage >= new_toughness {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// Returns true if the effect exclusively targets creatures (not "any target").
@@ -580,5 +676,163 @@ fn filter_excludes_parent_target(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter: inner } => matches!(inner.as_ref(), TargetFilter::ParentTarget),
         TargetFilter::And { filters } => filters.iter().any(filter_excludes_parent_target),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod lethality_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P1};
+    use engine::types::keywords::Keyword;
+
+    fn deal_damage(value: i32) -> Effect {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value },
+            target: TargetFilter::Any,
+            damage_source: None,
+        }
+    }
+
+    fn shrink(power: i32, toughness: i32) -> Effect {
+        Effect::Pump {
+            power: PtValue::Fixed(power),
+            toughness: PtValue::Fixed(toughness),
+            target: TargetFilter::Any,
+        }
+    }
+
+    fn minus_counters(count: i32) -> Effect {
+        Effect::PutCounter {
+            counter_type: CounterType::Minus1Minus1,
+            count: QuantityExpr::Fixed { value: count },
+            target: TargetFilter::Any,
+        }
+    }
+
+    #[test]
+    fn damage_lethal_only_at_or_above_remaining_toughness() {
+        let mut scenario = GameScenario::new();
+        let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+        let runner = scenario.build();
+        let state = runner.state();
+        assert_eq!(
+            lethal_to_creature(state, bear, &[&deal_damage(2)]),
+            Some(true)
+        );
+        assert_eq!(
+            lethal_to_creature(state, bear, &[&deal_damage(1)]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn abrade_on_zero_four_reads_non_lethal() {
+        // Regression: 3 damage on a 0/4 must not look lethal (the reported bug).
+        let mut scenario = GameScenario::new();
+        let wall = scenario.add_creature(P1, "Wall", 0, 4).id();
+        let runner = scenario.build();
+        assert_eq!(
+            lethal_to_creature(runner.state(), wall, &[&deal_damage(3)]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn damage_accounts_for_marked_damage() {
+        // CR 704.5g: total marked damage (prior + this) vs toughness.
+        let mut scenario = GameScenario::new();
+        let wall = scenario.add_creature(P1, "Wall", 0, 4).id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&wall)
+            .unwrap()
+            .damage_marked = 2;
+        let state = runner.state();
+        assert_eq!(
+            lethal_to_creature(state, wall, &[&deal_damage(2)]),
+            Some(true)
+        );
+        assert_eq!(
+            lethal_to_creature(state, wall, &[&deal_damage(1)]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn negative_pump_kills_via_zero_toughness() {
+        // CR 704.5f: -0/-4 brings a 0/4 to 0 toughness -> dies; -0/-3 survives.
+        let mut scenario = GameScenario::new();
+        let wall = scenario.add_creature(P1, "Wall", 0, 4).id();
+        let runner = scenario.build();
+        let state = runner.state();
+        assert_eq!(
+            lethal_to_creature(state, wall, &[&shrink(0, -4)]),
+            Some(true)
+        );
+        assert_eq!(
+            lethal_to_creature(state, wall, &[&shrink(0, -3)]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn minus_one_counters_kill_by_toughness() {
+        let mut scenario = GameScenario::new();
+        let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+        let runner = scenario.build();
+        let state = runner.state();
+        assert_eq!(
+            lethal_to_creature(state, bear, &[&minus_counters(2)]),
+            Some(true)
+        );
+        assert_eq!(
+            lethal_to_creature(state, bear, &[&minus_counters(1)]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn indestructible_survives_damage_but_dies_to_zero_toughness() {
+        let mut scenario = GameScenario::new();
+        let wall = scenario
+            .add_creature(P1, "Wall", 0, 4)
+            .with_keyword(Keyword::Indestructible)
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        // CR 702.12b: damage never destroys an indestructible creature.
+        assert_eq!(
+            lethal_to_creature(state, wall, &[&deal_damage(10)]),
+            Some(false)
+        );
+        // CR 704.5f: toughness 0 bypasses indestructible.
+        assert_eq!(
+            lethal_to_creature(state, wall, &[&shrink(0, -4)]),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn variable_and_non_shrink_effects_are_undecidable() {
+        let mut scenario = GameScenario::new();
+        let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+        let runner = scenario.build();
+        let state = runner.state();
+        // Variable (X) shrink: the caster picks the amount -> undecidable.
+        let variable_shrink = Effect::Pump {
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Variable("X".to_string()),
+            target: TargetFilter::Any,
+        };
+        assert_eq!(lethal_to_creature(state, bear, &[&variable_shrink]), None);
+        // Destroy has no toughness-reducing component -> undecidable here (the
+        // gate handles it; lethality math doesn't apply).
+        let destroy = Effect::Destroy {
+            target: TargetFilter::Any,
+            cant_regenerate: false,
+        };
+        assert_eq!(lethal_to_creature(state, bear, &[&destroy]), None);
     }
 }
