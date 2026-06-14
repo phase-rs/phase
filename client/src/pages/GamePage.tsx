@@ -21,6 +21,7 @@ import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGam
 import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
+import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
 import { flashStartingPlayerContest } from "../game/diceContest.ts";
@@ -1399,6 +1400,8 @@ function GamePageContent({
 
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
+      {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
+      <RevealOverlay />
       <TurnBanner />
       <DiceRollOverlay />
 
