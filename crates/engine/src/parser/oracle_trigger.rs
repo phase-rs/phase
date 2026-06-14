@@ -22,6 +22,7 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_static::parse_commander_subject_filter_prefix;
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
@@ -5955,50 +5956,90 @@ fn with_triggering_player_controller(filter: TargetFilter) -> TargetFilter {
 /// - "to you"                       → `Controller`
 /// - "to a player or planeswalker"  → `Or { Player, Planeswalker }`
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
-    let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
-        .parse(after_verb.trim_start())
-        .ok()?;
-    // Use nom alt() to match damage target qualifiers (input already lowercase)
-    fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
-        fn opponent_player_filter() -> TargetFilter {
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-        }
-
-        fn parse_opponent_player_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
-            value(
-                opponent_player_filter(),
-                alt((
-                    preceded(tag("an "), tag("opponent")),
-                    preceded(tag("one of your "), tag("opponents")),
-                    preceded(tag("another "), tag("player")),
-                )),
-            )
-            .parse(input)
-        }
-
-        alt((
-            value(
-                TargetFilter::Or {
-                    filters: vec![
-                        TargetFilter::Player,
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
-                    ],
-                },
-                alt((
-                    tag("a player or planeswalker"),
-                    tag("a player or a planeswalker"),
-                )),
-            ),
-            value(TargetFilter::Player, tag("a player")),
-            parse_opponent_player_recipient,
-            value(TargetFilter::Controller, tag("you")),
-        ))
-        .parse(input)
-    }
-    parse_damage_target
-        .parse(rest)
+    parse_damage_to_qualifier_with_rest(after_verb)
         .ok()
         .map(|(_, filter)| filter)
+}
+
+/// CR 120.1 + CR 603.2: Parse the `"to <recipient>"` clause that follows a
+/// damage predicate, returning the recipient `TargetFilter` AND the remainder so
+/// the caller can consume a trailing qualifier. `parse_damage_to_qualifier` is
+/// the discard-remainder convenience wrapper for call sites that don't read the
+/// tail.
+///
+/// Recognizes only the *player* recipient axis — "a player", "an opponent",
+/// "you", "a player or planeswalker". The object-recipient axis (a
+/// creature/permanent/planeswalker that took the damage) is deliberately NOT
+/// matched here: it is reachable only through
+/// [`parse_object_recipient_pt_gate`], which requires the trailing "equal to
+/// that <recipient>'s toughness/power" qualifier. Folding the object axis in
+/// unconditionally would silently change the `valid_target` of every existing
+/// DamageDone trigger that names an object recipient (e.g. Questing Beast's
+/// "deals combat damage to a planeswalker"), so the object axis stays gated.
+fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, ()) =
+        value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
+
+    fn opponent_player_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    fn parse_opponent_player_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+        value(
+            opponent_player_filter(),
+            alt((
+                preceded(tag("an "), tag("opponent")),
+                preceded(tag("one of your "), tag("opponents")),
+                preceded(tag("another "), tag("player")),
+            )),
+        )
+        .parse(input)
+    }
+
+    alt((
+        value(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                ],
+            },
+            alt((
+                tag("a player or planeswalker"),
+                tag("a player or a planeswalker"),
+            )),
+        ),
+        value(TargetFilter::Player, tag("a player")),
+        parse_opponent_player_recipient,
+        value(TargetFilter::Controller, tag("you")),
+    ))
+    .parse(rest)
+}
+
+/// CR 120.1 + CR 208.1 + CR 603.4: Parse the full Taii Wakeen recipient shape —
+/// `"to <object> equal to that <object>'s toughness|power"` — atomically. Only
+/// succeeds when an object recipient is immediately followed by the equal-to-P/T
+/// qualifier, so it never perturbs the `valid_target` of an ordinary DamageDone
+/// trigger that merely names an object recipient (those have no such tail and
+/// fall through to the player-only [`parse_damage_to_qualifier_with_rest`]).
+///
+/// Returns the recipient object `TargetFilter` (so the trigger's `valid_target`
+/// scopes to the damaged object's type) and the recipient-relative `QuantityRef`
+/// for the intervening-`if` `QuantityComparison`.
+fn parse_object_recipient_pt_gate(
+    after_verb: &str,
+) -> OracleResult<'_, (TargetFilter, QuantityRef)> {
+    let (rest, ()) =
+        value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
+    // CR 120.1: object recipient ("a creature" / "a permanent" / typed). The
+    // leading article is consumed before delegating to `parse_type_phrase`.
+    let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+    let (rest, filter) = parse_type_phrase_nom(rest)?;
+    // The equal-to-P/T qualifier is mandatory: without it this is an ordinary
+    // damage recipient that the player-only qualifier already declined, and the
+    // caller must not set an EventTarget gate.
+    let (rest, recipient_pt) = parse_damage_equal_to_recipient_pt(rest.trim_start())?;
+    Ok((rest, (filter, recipient_pt)))
 }
 
 /// CR 603.6a + CR 110.5b: After consuming the `"enter"` prefix in a ChangesZone
@@ -6486,7 +6527,26 @@ fn try_parse_event(
             def.damage_kind = kind;
             def.damage_amount = amount;
             def.valid_source = Some(subject.clone());
-            def.valid_target = parse_damage_to_qualifier(after_damage);
+            // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T
+            // shape ("to <object> equal to that <object>'s toughness/power") is
+            // tried first and atomically — it succeeds only when the object
+            // recipient is immediately followed by the equal-to-P/T qualifier, so
+            // it never fires for "deals damage equal to its power to X" (amount =
+            // source's power) or for ordinary object recipients without the tail.
+            if let Ok((_, (filter, recipient_pt))) = parse_object_recipient_pt_gate(after_damage) {
+                def.valid_target = Some(filter);
+                def.condition = Some(TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Ref { qty: recipient_pt },
+                });
+            } else if let Some(filter) = parse_damage_to_qualifier(after_damage) {
+                // Ordinary player recipient ("to a player" / "to an opponent" /
+                // …) — unchanged from the pre-Taii behavior.
+                def.valid_target = Some(filter);
+            }
             return Some((TriggerMode::DamageDone, def));
         }
     }
@@ -7657,6 +7717,25 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     def.mode = TriggerMode::DamageDone;
     def.damage_kind = damage_kind;
     def.valid_source = Some(source_filter);
+    // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T shape
+    // ("to <object> equal to that <object>'s toughness/power"). Tried first and
+    // atomically — succeeds only when an object recipient is immediately
+    // followed by the equal-to-P/T qualifier, so it never fires for "deals
+    // damage equal to its power to X" (amount = source's power) nor changes the
+    // recipient handling of any ordinary damage trigger.
+    if let Ok((_, (filter, recipient_pt))) = parse_object_recipient_pt_gate(after_damage) {
+        def.valid_target = Some(filter);
+        def.condition = Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Ref { qty: recipient_pt },
+        });
+        def.damage_amount = threshold;
+        return Some((TriggerMode::DamageDone, def));
+    }
+
     // Optional recipient: "to <recipient>" narrows the damage target; absence
     // means any damage target may satisfy the event. If a "to ..." tail exists
     // but is not one of this parser's recipient qualifiers, leave the line for
@@ -7809,6 +7888,42 @@ fn parse_damage_predicate_tail(
     let (rest, amount) = opt(parse_event_amount_quantifier).parse(rest)?;
     let (rest, _) = tag("damage").parse(rest)?;
     Ok((rest, (kind.unwrap_or(DamageKindFilter::Any), amount)))
+}
+
+/// CR 120.1 + CR 208.1 + CR 603.2: Parse the `"equal to <recipient>'s
+/// toughness|power"` tail that gates a damage trigger on the dealt amount
+/// matching the damaged object's characteristic (Taii Wakeen — "deals noncombat
+/// damage to a creature equal to that creature's toughness").
+///
+/// The possessive antecedent is a demonstrative referring back to the damage
+/// recipient ("that creature's" / "that permanent's" / "that planeswalker's") or
+/// the pronoun "its"; all resolve to `ObjectScope::EventTarget` (the object that
+/// received the triggering damage). Returns the recipient-relative `QuantityRef`
+/// so the caller can lift it into the intervening-`if` `QuantityComparison`.
+fn parse_damage_equal_to_recipient_pt(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("equal to ").parse(input.trim_start())?;
+    let (rest, _) = alt((
+        tag("that creature's "),
+        tag("that permanent's "),
+        tag("that planeswalker's "),
+        tag("its "),
+    ))
+    .parse(rest)?;
+    alt((
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::EventTarget,
+            },
+            tag("toughness"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::EventTarget,
+            },
+            tag("power"),
+        ),
+    ))
+    .parse(rest)
 }
 
 /// CR 603.2: Parse an event-magnitude quantifier ("`5 or more `" / "`exactly 5 `")
@@ -28572,6 +28687,218 @@ mod tests {
             ),
             other => panic!("expected Discard, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Taii Wakeen, Perfect Shot — "deals … damage to a creature equal to that
+    // creature's toughness" damage==recipient-P/T gate, and the anti-over-match
+    // regression that distinguishes it from "deals damage equal to its power to
+    // X" (amount = source's power, NOT a recipient-P/T gate).
+    // -----------------------------------------------------------------------
+
+    /// CR 120.1 + CR 208.1 + CR 603.4: the recipient-P/T gate fires only on a
+    /// genuine object recipient parsed on the success path, producing
+    /// `QuantityComparison { EventContextAmount EQ Toughness{EventTarget} }`.
+    #[test]
+    fn taii_damage_equals_recipient_toughness_gate() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals noncombat damage to a creature \
+             equal to that creature's toughness, draw a card.",
+            "Taii Wakeen, Perfect Shot",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::EventTarget,
+                    },
+                },
+            }),
+            "the damage==toughness intervening-if must compare the dealt amount \
+             against the damaged creature's toughness (EventTarget)"
+        );
+    }
+
+    /// The "power" variant resolves to `Power{EventTarget}`.
+    #[test]
+    fn taii_variant_damage_equals_recipient_power() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals noncombat damage to a creature \
+             equal to that creature's power, draw a card.",
+            "Taii Variant",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventTarget,
+                    },
+                },
+            })
+        );
+    }
+
+    /// A permanent recipient parses on the object axis and still anchors the gate.
+    #[test]
+    fn taii_variant_permanent_recipient() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals noncombat damage to a permanent \
+             equal to that permanent's toughness, draw a card.",
+            "Taii Permanent Variant",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)))
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::EventTarget,
+                    },
+                },
+            })
+        );
+    }
+
+    /// Anti-over-match regression (Bionic Blow's clause). "it deals damage equal
+    /// to its power to up to one other target creature" defines the damage
+    /// AMOUNT as the SOURCE's power (CR 120.3) — the "equal to" precedes the
+    /// recipient, so no object recipient parses on the success path and the
+    /// `EventTarget` gate must NOT be set. This locks the over-match fix.
+    #[test]
+    fn deals_damage_equal_to_its_power_does_not_set_event_target_gate() {
+        // The subject-led ("it deals …") and source-led ("a source you control
+        // deals …") forms both route through the recipient/gate logic; assert
+        // neither produces an EventTarget condition for the "equal to its power
+        // to X" shape.
+        for line in [
+            "Whenever a creature you control deals damage equal to its power to \
+             another target creature, draw a card.",
+            "When a source you control deals damage equal to its power to each \
+             other creature, draw a card.",
+        ] {
+            let def = parse_trigger_line(line, "Over-Match Probe");
+            let sets_event_target = matches!(
+                &def.condition,
+                Some(TriggerCondition::QuantityComparison { rhs, .. })
+                    if matches!(
+                        rhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness { scope: ObjectScope::EventTarget }
+                                | QuantityRef::Power { scope: ObjectScope::EventTarget },
+                        }
+                    )
+            );
+            assert!(
+                !sets_event_target,
+                "'deals damage equal to its power to X' must NOT set an \
+                 EventTarget recipient-P/T gate (amount is the source's power, \
+                 not a damage==recipient-P/T condition): {line}"
+            );
+        }
+    }
+
+    /// End-to-end: the full card parses into both abilities (the damage==
+    /// toughness trigger and the {X}{T} damage-boost activated ability) with no
+    /// `Effect::Unimplemented` and no swallowed clause.
+    #[test]
+    fn taii_wakeen_full_card_parses_both_abilities() {
+        let parsed = parse_oracle_text(
+            "Whenever a source you control deals noncombat damage to a creature \
+             equal to that creature's toughness, draw a card.\n\
+             {X}, {T}: If a source you control would deal noncombat damage to a \
+             permanent or player this turn, it deals that much damage plus X instead.",
+            "Taii Wakeen, Perfect Shot",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Mercenary".to_string()],
+        );
+
+        // No clause may be swallowed into an Unimplemented effect.
+        let has_unimplemented = parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { .. }))
+            || parsed.triggers.iter().any(|t| {
+                t.execute
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.effect.as_ref(), Effect::Unimplemented { .. }))
+            });
+        assert!(
+            !has_unimplemented,
+            "Taii must parse with no Unimplemented effect: {parsed:#?}"
+        );
+
+        // Ability 1: the damage==toughness draw trigger.
+        assert_eq!(parsed.triggers.len(), 1, "exactly one trigger (ability 1)");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::NoncombatOnly);
+        assert_eq!(
+            trigger.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::EventTarget,
+                    },
+                },
+            })
+        );
+        let exec = trigger.execute.as_deref().expect("trigger execute body");
+        assert!(
+            matches!(exec.effect.as_ref(), Effect::Draw { .. }),
+            "ability 1 draws a card, got {:?}",
+            exec.effect
+        );
+
+        // Ability 2: the {X}{T} damage-boost activated ability installs an
+        // AddTargetReplacement with the "plus X" placeholder, NoncombatOnly,
+        // end-of-turn expiry.
+        assert_eq!(parsed.abilities.len(), 1, "exactly one activated ability");
+        let activated = &parsed.abilities[0];
+        let Effect::AddTargetReplacement { replacement, .. } = activated.effect.as_ref() else {
+            panic!(
+                "ability 2 must be AddTargetReplacement, got {:?}",
+                activated.effect
+            );
+        };
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::Plus { value: 0 }),
+            "the 'plus X' placeholder is frozen at activation, not parse time"
+        );
+        assert_eq!(
+            replacement.combat_scope,
+            Some(crate::types::ability::CombatDamageScope::NoncombatOnly)
+        );
+        assert_eq!(
+            replacement.expiry,
+            Some(crate::types::ability::RestrictionExpiry::EndOfTurn),
+            "the boost lasts until end of turn"
+        );
     }
 }
 

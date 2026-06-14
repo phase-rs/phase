@@ -4102,16 +4102,33 @@ fn scan_damage_modification(text: &str) -> Option<DamageModification> {
     {
         return Some(modification);
     }
-    // Fallback: "that much damage plus/minus N" uses strip_after for the number
-    if let Some(rest) = strip_after(text, "that much damage plus ") {
-        let (_rem, val) = nom_primitives::parse_number.parse(rest).ok()?;
-        return Some(DamageModification::Plus { value: val });
-    }
-    if let Some(rest) = strip_after(text, "that much damage minus ") {
-        let (_rem, val) = nom_primitives::parse_number.parse(rest).ok()?;
-        return Some(DamageModification::Minus { value: val });
-    }
-    None
+    // Fallback: "that much damage plus/minus N" (fixed) or "that much damage
+    // plus X" (variable). The X case yields a `Plus { value: 0 }` placeholder —
+    // `DamageModification::Plus` carries a `u32`, so X is frozen at activation in
+    // `add_target_replacement::resolve` (CR 107.3a). Composed from nom
+    // combinators rather than `strip_after` so dispatch stays structural.
+    nom_primitives::scan_at_word_boundaries(text, parse_that_much_damage_offset)
+}
+
+/// CR 614.1a + CR 107.3a: "that much damage plus N" / "plus X" / "minus N".
+/// The "plus X" arm emits `Plus { value: 0 }` as a placeholder frozen at
+/// activation (X cannot live in the `u32`-typed `DamageModification`).
+fn parse_that_much_damage_offset(
+    input: &str,
+) -> nom::IResult<&str, DamageModification, OracleError<'_>> {
+    let (rest, _) = tag("that much damage ").parse(input)?;
+    alt((
+        // "plus X" — variable offset, frozen at install. Tried before the
+        // numeric arm so the literal "x" token is not consumed by parse_number.
+        value(DamageModification::Plus { value: 0 }, tag("plus x")),
+        nom::combinator::map(preceded(tag("plus "), nom_primitives::parse_number), |n| {
+            DamageModification::Plus { value: n }
+        }),
+        nom::combinator::map(preceded(tag("minus "), nom_primitives::parse_number), |n| {
+            DamageModification::Minus { value: n }
+        }),
+    ))
+    .parse(rest)
 }
 
 /// Nom combinator for damage modification phrases.
@@ -11714,6 +11731,41 @@ mod tests {
             ),
             "Worship must keep its IfControlsMatching condition, got {:?}",
             def.condition
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Taii Wakeen, Perfect Shot — "it deals that much damage plus X/N instead"
+    // damage-modification scanning. The "plus X" form emits a `Plus { value: 0 }`
+    // placeholder frozen at activation (CR 107.3a); a literal "plus N" carries N.
+    // -----------------------------------------------------------------------
+
+    /// CR 614.1a + CR 107.3a: "plus X" yields the `Plus { value: 0 }` placeholder
+    /// (the announced X is frozen into it at activation time, not parse time).
+    #[test]
+    fn that_much_damage_plus_x_is_zero_placeholder() {
+        assert_eq!(
+            scan_damage_modification("it deals that much damage plus x instead"),
+            Some(DamageModification::Plus { value: 0 }),
+            "'plus X' must parse to the Plus(0) placeholder frozen at activation"
+        );
+    }
+
+    /// A literal "plus 2" carries the constant directly.
+    #[test]
+    fn that_much_damage_plus_literal_carries_value() {
+        assert_eq!(
+            scan_damage_modification("it deals that much damage plus 2 instead"),
+            Some(DamageModification::Plus { value: 2 })
+        );
+    }
+
+    /// The "minus N" sibling stays intact through the nom conversion.
+    #[test]
+    fn that_much_damage_minus_literal_carries_value() {
+        assert_eq!(
+            scan_damage_modification("it deals that much damage minus 1 instead"),
+            Some(DamageModification::Minus { value: 1 })
         );
     }
 }

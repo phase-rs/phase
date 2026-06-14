@@ -178,6 +178,7 @@ mod issue_2864_kaldra_compleat_haste;
 mod issue_2866_professor_onyx_magecraft_copy;
 mod issue_2871_currency_converter;
 mod issue_2872_drc_flashback_cast_trigger;
+mod issue_2874_vow_of_lightning;
 mod issue_2881_infamous_cruelclaw;
 mod issue_2888_unbreathing_horde_self_prevention;
 mod issue_2890_reality_shift;
