@@ -328,7 +328,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     // avatar + name + life when the row is squeezed by additional opponents on
     // a narrow (mobile) viewport. `max-w` on each tab caps its size so one or
     // two opponents don't balloon on desktop. KickConfirmDialog is a fixed
-    // overlay, so its position in the flow is irrelevant.
+    // overlay portaled to document.body: this rail can sit inside a Flex Layout
+    // DraggableWidget whose transform would otherwise become the containing
+    // block for the dialog's `fixed` positioning and clip it to the rail box.
     <div className="flex w-full items-center justify-center gap-1.5 px-2 py-1">
       {allOpponents.map((opId) => (
         <OpponentTab
@@ -364,15 +366,18 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
         enabled={followActiveOpponent}
         onToggle={handleToggleFollowActiveOpponent}
       />
-      <KickConfirmDialog
-        isOpen={kickTarget !== null}
-        playerLabel={targetLabel}
-        onConfirm={() => {
-          if (kickTarget !== null && onKickPlayer) onKickPlayer(kickTarget);
-          setKickTarget(null);
-        }}
-        onCancel={() => setKickTarget(null)}
-      />
+      {createPortal(
+        <KickConfirmDialog
+          isOpen={kickTarget !== null}
+          playerLabel={targetLabel}
+          onConfirm={() => {
+            if (kickTarget !== null && onKickPlayer) onKickPlayer(kickTarget);
+            setKickTarget(null);
+          }}
+          onCancel={() => setKickTarget(null)}
+        />,
+        document.body,
+      )}
     </div>
   );
 }

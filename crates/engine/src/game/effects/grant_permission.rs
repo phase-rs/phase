@@ -7,6 +7,19 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::TrackedSetId;
 use crate::types::player::PlayerId;
 
+#[cfg(test)]
+use crate::game::casting::{can_pay_cost_after_auto_tap, spell_objects_available_to_cast};
+#[cfg(test)]
+use crate::types::ability::{AbilityDefinition, AbilityKind, ManaSpendPermission, QuantityExpr};
+#[cfg(test)]
+use crate::types::card_type::CoreType;
+#[cfg(test)]
+use crate::types::identifiers::ObjectId;
+#[cfg(test)]
+use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+#[cfg(test)]
+use std::sync::Arc;
+
 /// Grant a CastingPermission to the target object (CR 604.6).
 ///
 /// Implements static abilities that modify where/how a card can be cast, such as
@@ -909,6 +922,85 @@ mod tests {
             state.objects[&card].casting_permissions.len(),
             1,
             "UntilNextStepOf {{ step: End }} must survive the untap-step prune",
+        );
+    }
+
+    /// Issue #1200 — Gonti, Night Minister: the third-person tracked-set grant
+    /// with `AnyTypeOrColor` must let the parent player target pay off-color mana
+    /// to cast the exiled spell.
+    #[test]
+    fn parent_target_controller_any_mana_allows_off_color_cast_payment() {
+        let mut state = GameState::new_two_player(1);
+        let exiled = create_object(
+            &mut state,
+            CardId(1200),
+            PlayerId(1),
+            "Borrowed Blue Spell".to_string(),
+            Zone::Exile,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1200), vec![exiled]);
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: crate::types::statics::CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                grantee: PermissionGrantee::ParentTargetController,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        state.players[1].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(1)).contains(&exiled),
+            "parent target should see the exiled spell as castable"
+        );
+        assert!(
+            can_pay_cost_after_auto_tap(
+                &state,
+                PlayerId(1),
+                exiled,
+                &state.objects[&exiled].mana_cost
+            ),
+            "AnyTypeOrColor should let red mana pay for a blue spell"
         );
     }
 }

@@ -6173,6 +6173,10 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
         tag("they may cast those cards"),
         tag("they may play them"),
         tag("they may cast them"),
+        tag("they may play that card"),
+        tag("they may cast that card"),
+        tag("they may play that spell"),
+        tag("they may cast that spell"),
     ))
     .parse(lower)
     .is_ok()
@@ -6329,16 +6333,41 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
 }
 
 fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("you may look at and play "),
-        tag("you may play "),
-        tag("you may cast "),
-        tag("look at and play "),
-        tag("play "),
-        tag("cast "),
-    ))
-    .parse(tp.lower)
-    .ok()?;
+    // Third-person "they may play/cast that card ... cast a spell this way" (Gonti,
+    // Night Minister) binds to the parent player target via `ParentTargetController`
+    // and the tracked exile set. First-person forms keep the legacy `Any` target
+    // (rebound to TrackedSet by the chain parser when chained after an exile).
+    let (rest, grantee, target) = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("they may play ").parse(tp.lower)
+    {
+        (
+            rest,
+            crate::types::ability::PermissionGrantee::ParentTargetController,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        )
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they may cast ").parse(tp.lower) {
+        (
+            rest,
+            crate::types::ability::PermissionGrantee::ParentTargetController,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        )
+    } else {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("you may look at and play "),
+            tag("you may play "),
+            tag("you may cast "),
+            tag("look at and play "),
+            tag("play "),
+            tag("cast "),
+        ))
+        .parse(tp.lower)
+        .ok()?;
+        (rest, Default::default(), TargetFilter::Any)
+    };
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that card"),
         tag("that spell"),
@@ -6361,6 +6390,8 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("mana of any type can be spent to cast that spell"),
         tag("mana of any color can be spent to cast that spell"),
+        tag("mana of any type can be spent to cast a spell this way"),
+        tag("mana of any color can be spent to cast a spell this way"),
     ))
     .parse(rest)
     .ok()?;
@@ -6378,8 +6409,8 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             single_use_group: None,
             single_use: false,
         },
-        target: TargetFilter::Any,
-        grantee: Default::default(),
+        target,
+        grantee,
     }))
 }
 
@@ -6387,15 +6418,19 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
 fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
+    // CR 118.9 + CR 609.4b: The any-mana conjunct must win over the bare
+    // per-grantee branch so "they may play that card ... mana of any type can
+    // be spent to cast a spell this way" (Gonti, Night Minister) keeps
+    // `mana_spend_permission: AnyTypeOrColor`.
+    if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
+        return Some(clause);
+    }
     // CR 611.2a + CR 108.3: Per-object grant clauses from compound-exile chains.
     // These bind the grant to a player OTHER than the ability's controller via
     // Theme D's `granted_to` field, resolved per-iteration by
     // `grant_permission::resolve`. The target is `TrackedSet` — the most
     // recently published set (the exiled cards from the parent effect).
     if let Some(clause) = try_parse_per_grantee_play_grant(tp) {
-        return Some(clause);
-    }
-    if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
         return Some(clause);
     }
     // CR 400.7i + CR 609.4b: Persistent duration-scoped variant —
@@ -12976,6 +13011,13 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     if !scan_contains_phrase(rest, "from among")
         && (scan_contains_phrase(rest, "they control") || scan_contains_phrase(rest, "you control"))
     {
+        return true;
+    }
+
+    // CR 108.3 + CR 701.38d: Passive ownership form "owned by <player-ref>".
+    // Expropriate: "choose a permanent owned by the voter and gain control of it."
+    // The ownership suffix scopes the candidate pool to a specific player.
+    if scan_contains_phrase(rest, "owned by") {
         return true;
     }
 
@@ -27389,13 +27431,55 @@ mod tests {
         );
     }
 
-    /// CR 406.3 + CR 701.16a: "look at the top card of <player>'s library, then
-    /// exile it face down" is the Gonti, Canny Acquisitor impulse idiom. The
-    /// private `Dig` look step (CR 701.16a) only inspects the top card; the
-    /// "then exile it face down" clause must rewrite it into a face-down
+    /// CR 701.20e + CR 701.13a + CR 406.3: "look at the top card of <player>'s
+    /// library, then exile it face down" is the Gonti, Canny Acquisitor impulse
+    /// idiom. The private `Dig` look step (CR 701.20e) only inspects the top
+    /// card; the "then exile it face down" clause must rewrite it into a face-down
     /// `Effect::ExileTop` so the card actually leaves the library (issue #1316).
     /// Building-block coverage independent of any trigger context — a bare chain
     /// resolves "that player's library" to `ParentTarget`.
+    #[test]
+    fn gonti_night_minister_look_and_exile_face_down_fuses_to_exile_top() {
+        let def = parse_effect_chain(
+            "Its controller looks at the top card of that opponent's library and exiles it face down. They may play that card for as long as it remains exiled, and mana of any type can be spent to cast a spell this way.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "expected fused look-and-exile to lower to ExileTop, got {:?}",
+            def.effect
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("impulse-play grant must chain after exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    grantee: crate::types::ability::PermissionGrantee::ParentTargetController,
+                }
+            ),
+            "expected PlayFromExile grant on tracked set with any-mana permission, got {:?}",
+            grant.effect
+        );
+    }
+
     #[test]
     fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
         let def = parse_effect_chain(

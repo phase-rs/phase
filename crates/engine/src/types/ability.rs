@@ -52,6 +52,11 @@ pub enum ZoneOwner {
     TargetedPlayer,
     /// An opponent of the controller owns the referenced zone.
     Opponent,
+    /// CR 701.38d: The scoped player (voter) owns the referenced zone.
+    /// Used by per-ballot vote iteration (Expropriate) where the candidate
+    /// pool is "permanents owned by the voter". For Battlefield, filters
+    /// by `obj.owner` (ownership) rather than `obj.controller` (control).
+    ScopedPlayer,
 }
 
 /// CR 101.4: Who selects permanents in a multi-player category choice effect

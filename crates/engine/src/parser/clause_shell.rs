@@ -247,6 +247,10 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         // at `oracle_effect/mod.rs:2701`.
         value((), tag("you may play ")),
         value((), tag("you may cast ")),
+        // CR 400.7i + CR 118.9 — Gonti, Night Minister third-person impulse
+        // play with any-mana conjunct. Same deferral as the first-person forms.
+        value((), tag("they may play ")),
+        value((), tag("they may cast ")),
         // CR 601.2f — "the next [type] spell you cast this turn ..."
         // next-spell limiter (cost reduction, keyword grant). The
         // specialized parser at `oracle_effect/mod.rs:571` requires

@@ -12,6 +12,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
+import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 const EMPTY_STACK: StackEntryType[] = [];
 const EMPTY_GROUPS: StackDisplayGroup[] = [];
@@ -97,6 +98,9 @@ export function StackDisplay() {
   const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
   const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
   const dockedLeft = stackDockSide === "left";
+  // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
+  // Cards derive width AND height from one scale, so this stays aspect-correct.
+  const userStackScale = usePreferencesStore((s) => s.flexLayout.scales?.stack) ?? 1;
 
   useEffect(() => {
     function handleResize() {
@@ -151,7 +155,7 @@ export function StackDisplay() {
       viewport.width < 1024 ? 0.72 :
         viewport.width < 1440 ? 0.86 : 1;
   const heightScale = viewport.height < 820 ? 0.9 : 1;
-  const responsiveScale = widthScale * heightScale;
+  const responsiveScale = widthScale * heightScale * userStackScale;
   const cardSize = {
     width: Math.max(112, Math.round(rawCardSize.width * responsiveScale)),
     height: Math.max(156, Math.round(rawCardSize.height * responsiveScale)),
@@ -210,25 +214,31 @@ export function StackDisplay() {
   }));
 
   return (
-    <AnimatePresence>
-      <motion.div
-        key="stack-container"
-        initial={{ opacity: 0, x: dockedLeft ? -60 : 60 }}
-        animate={{ opacity: 1, x: 0 }}
-        exit={{ opacity: 0, x: dockedLeft ? -60 : 60 }}
-        transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        // `pointer-events-none`: the outer box keeps its full panel width even
-        // when the inner panel is transform-collapsed offscreen, so a
-        // transparent region would otherwise hover over (and swallow clicks
-        // meant for) battlefield objects. Click-through here; the real
-        // interactive surfaces below opt back in with `pointer-events-auto`.
-        // Vertical position comes entirely from the clamped pixel `top` in
-        // `panelAnchorStyle` — no `top-1/2`/`-translate-y-1/2` centering, which
-        // would let a tall panel's header slide above the viewport top edge.
-        className="pointer-events-none fixed z-[35]"
-        style={panelAnchorStyle}
-      >
+    // The DraggableWidget owns the fixed dock anchor so its Flex Layout offset
+    // composes with the panel's own entry/collapse animations below. Its
+    // `pointer-events-none`: the outer box keeps its full panel width even when
+    // the inner panel is transform-collapsed offscreen, so a transparent region
+    // would otherwise hover over (and swallow clicks meant for) battlefield
+    // objects. Click-through here; the real interactive surfaces below opt back
+    // in with `pointer-events-auto`. Vertical position comes entirely from the
+    // clamped pixel `top` in `panelAnchorStyle` — no `top-1/2`/`-translate-y-1/2`
+    // centering, which would let a tall panel's header slide above the viewport.
+    <DraggableWidget
+      target={{ kind: "widget", key: "stackPanel" }}
+      flexZone="stackPanel"
+      className="pointer-events-none fixed z-[35]"
+      style={panelAnchorStyle}
+    >
+      <AnimatePresence>
         <motion.div
+          key="stack-container"
+          initial={{ opacity: 0, x: dockedLeft ? -60 : 60 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: dockedLeft ? -60 : 60 }}
+          transition={{ type: "spring", stiffness: 300, damping: 30 }}
+          className="pointer-events-none"
+        >
+          <motion.div
           animate={{ x: isCollapsed ? collapsedX : 0 }}
           transition={{ type: "spring", stiffness: 340, damping: 34 }}
           className="relative"
@@ -339,5 +349,6 @@ export function StackDisplay() {
         />
       </motion.div>
     </AnimatePresence>
+    </DraggableWidget>
   );
 }

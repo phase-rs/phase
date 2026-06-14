@@ -84,6 +84,22 @@ fn strip_spell_not_owned_qualifier(payload: &str) -> (&str, bool) {
         .unwrap_or((payload, false))
 }
 
+/// CR 603.7c: "Whenever a player casts a spell they don't own" — the casting
+/// player is the trigger event's player; the spell must not be owned by them.
+fn strip_spell_they_dont_own_qualifier(payload: &str) -> (&str, bool) {
+    let mut parser = alt((
+        terminated(
+            take_until(" they don't own"),
+            tag::<_, _, OracleError<'_>>(" they don't own"),
+        ),
+        terminated(take_until(" they do not own"), tag(" they do not own")),
+    ));
+    parser
+        .parse(payload)
+        .map(|(body, _)| (body.trim(), true))
+        .unwrap_or((payload, false))
+}
+
 fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
@@ -9767,7 +9783,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 .map(|(rest, _)| rest)
                 .unwrap_or(after_casts)
                 .trim_start();
-            let spell_clause = after_article;
+            let (spell_clause, spell_not_owned_by_caster) =
+                strip_spell_they_dont_own_qualifier(after_article);
+            if spell_not_owned_by_caster {
+                def.valid_target = Some(TargetFilter::TriggeringPlayer);
+            }
             // CR 601.2a: pre-extract the "from <zone>" cast-origin tail (see
             // the rationale in the "you cast a/an" branch above). Without
             // this, the zone constraint is silently dropped (Ghostly Pilferer
@@ -9792,17 +9812,35 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             // (Talion, the Kindly Lord). CR 202.3 + CR 208.1: disjunctive match on
             // mana value, power, or toughness against the source's chosen number.
             if let Some(base_tf) = parse_spell_chosen_number_quality(spell_clause) {
-                def.valid_card = Some(TargetFilter::Typed(base_tf));
+                let filter = if spell_not_owned_by_caster {
+                    with_owner_scope(TargetFilter::Typed(base_tf), ControllerRef::Opponent)
+                } else {
+                    TargetFilter::Typed(base_tf)
+                };
+                def.valid_card = Some(filter);
                 return Some((TriggerMode::SpellCast, def));
             }
             // Handle "multicolored" as a spell property (not a type phrase)
             if scan_contains(spell_clause, "multicolored") {
-                def.valid_card = Some(TargetFilter::Typed(TypedFilter::default().properties(
-                    vec![FilterProp::ColorCount {
-                        comparator: Comparator::GE,
-                        count: 2,
-                    }],
-                )));
+                let filter = if spell_not_owned_by_caster {
+                    with_owner_scope(
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::ColorCount {
+                                comparator: Comparator::GE,
+                                count: 2,
+                            },
+                        ])),
+                        ControllerRef::Opponent,
+                    )
+                } else {
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::ColorCount {
+                            comparator: Comparator::GE,
+                            count: 2,
+                        },
+                    ]))
+                };
+                def.valid_card = Some(filter);
             } else {
                 let (filter, _rest) = parse_type_phrase(spell_clause);
                 let is_meaningful = match &filter {
@@ -9810,7 +9848,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                     TargetFilter::Or { .. } => true,
                     _ => false,
                 };
-                if is_meaningful {
+                let filter = if spell_not_owned_by_caster {
+                    with_owner_scope(filter, ControllerRef::Opponent)
+                } else {
+                    filter
+                };
+                if is_meaningful || spell_not_owned_by_caster {
                     def.valid_card = Some(filter);
                 }
             }
@@ -12752,6 +12795,71 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::ZoneChangeObjectIsTapped)
+        );
+    }
+
+    /// CR 608.2k: the "untap it"/"tap it" bare-object-pronoun anaphor binds by
+    /// the trigger SUBJECT, not to `ParentTarget` (which resolves against the
+    /// effect's empty target list on a primary, non-targeted trigger effect and
+    /// silently no-ops the untap). This is a parse-shape building-block test for
+    /// the whole class, exercised end-to-end by
+    /// `tests/integration/issue_2915_alexios.rs`:
+    ///   - typed/attached subject ("a permanent you control", "equipped
+    ///     creature") → `TriggeringSource` (the entering/attacking object),
+    ///     matching the sibling sacrifice/destroy/exile anaphor verbs;
+    ///   - self subject (the source named in the same instruction, Alexios's
+    ///     "gains control of ~, untaps it") → `SelfRef`.
+    #[test]
+    fn untap_it_anaphor_binds_to_trigger_subject_not_parent_target() {
+        fn find_untap_target(ability: &AbilityDefinition) -> &TargetFilter {
+            let mut node = Some(ability);
+            while let Some(current) = node {
+                if let Effect::SetTapState {
+                    target,
+                    state: TapStateChange::Untap,
+                    ..
+                } = current.effect.as_ref()
+                {
+                    return target;
+                }
+                node = current.sub_ability.as_deref();
+            }
+            panic!("expected an Untap SetTapState in the trigger chain");
+        }
+
+        // Typed subject: "it" is the entering permanent (the triggering object).
+        let amulet = parse_trigger_line(
+            "Whenever a permanent you control enters tapped, untap it.",
+            "Amulet of Vigor",
+        );
+        assert_eq!(
+            find_untap_target(amulet.execute.as_ref().expect("execute present")),
+            &TargetFilter::TriggeringSource,
+            "typed-subject 'untap it' must bind to the triggering object"
+        );
+
+        // Attached subject: "it" is the equipped (attacking) creature.
+        let genji = parse_trigger_line(
+            "Whenever equipped creature attacks, untap it.",
+            "Genji Glove",
+        );
+        assert_eq!(
+            find_untap_target(genji.execute.as_ref().expect("execute present")),
+            &TargetFilter::TriggeringSource,
+            "attached-subject 'untap it' must bind to the triggering object"
+        );
+
+        // Self subject: "it" is the source named earlier in the instruction.
+        let alexios = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player gains control of \
+             Alexios, untaps it, and puts a +1/+1 counter on it. It gains haste until \
+             end of turn.",
+            "Alexios, Deimos of Kosmos",
+        );
+        assert_eq!(
+            find_untap_target(alexios.execute.as_ref().expect("execute present")),
+            &TargetFilter::SelfRef,
+            "self-subject 'untaps it' must bind to the named source"
         );
     }
 
@@ -16871,6 +16979,21 @@ mod tests {
         );
         // Must restrict to controller's spells
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_a_player_casts_spell_they_dont_own() {
+        let def = parse_trigger_line(
+            "Whenever a player casts a spell they don't own, that player creates a Treasure token.",
+            "Gonti, Night Minister",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::TriggeringPlayer));
+        assert_owned_by_opponent(
+            def.valid_card
+                .as_ref()
+                .expect("spell they don't own must carry valid_card"),
+        );
     }
 
     #[test]

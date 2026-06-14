@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Regroup duplicate creature groups",
     "changeBackground": "Change background…",
+    "customizeLayout": "Customize layout…",
     "gameLog": "Game log",
     "debugLog": "Debug log",
     "waitingForGame": "Waiting for game...",
@@ -943,6 +944,12 @@
       "title": "Choose Ring-bearer",
       "subtitle": "Choose a creature you control"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Drag to reorder · the top card is drawn first",
     "scry": {
       "title": "Scry",
@@ -1358,6 +1365,18 @@
   "clashOpponent": {
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Card Data Missing",

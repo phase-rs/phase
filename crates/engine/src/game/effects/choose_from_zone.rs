@@ -141,11 +141,31 @@ fn collect_direct_zone_cards(
     zone_owner: ZoneOwner,
     filter: Option<&TargetFilter>,
 ) -> Result<Vec<ObjectId>, EffectError> {
-    let owner = resolve_zone_owner(state, ability, zone_owner)?;
     let filter_ctx = FilterContext::from_ability(ability);
     let mut zones = Vec::with_capacity(1 + additional_zones.len());
     zones.push(zone);
     zones.extend_from_slice(additional_zones);
+
+    // CR 701.38d: For ScopedPlayer on Battlefield, scan ALL battlefield
+    // permanents and rely on the filter (FilterProp::Owned { ScopedPlayer })
+    // to restrict to objects owned by the voter. This is necessary because
+    // "owned by" is distinct from "controlled by" — the voter may own
+    // permanents that another player controls.
+    if matches!(zone_owner, ZoneOwner::ScopedPlayer)
+        && zones.iter().any(|z| matches!(z, Zone::Battlefield))
+    {
+        return Ok(state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| state.objects.get(id).is_some_and(|obj| obj.is_phased_in()))
+            .filter(|id| {
+                filter.is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
+            })
+            .collect());
+    }
+
+    let owner = resolve_zone_owner(state, ability, zone_owner)?;
 
     Ok(zones
         .into_iter()
@@ -175,6 +195,8 @@ fn resolve_zone_owner(
             .into_iter()
             .next()
             .ok_or_else(|| EffectError::MissingParam("ChooseFromZone opponent".to_string())),
+        // CR 701.38d: The scoped player (voter) supplies the zone.
+        ZoneOwner::ScopedPlayer => Ok(ability.scoped_player.unwrap_or(ability.controller)),
     }
 }
 

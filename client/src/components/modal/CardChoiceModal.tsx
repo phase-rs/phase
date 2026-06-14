@@ -80,6 +80,7 @@ type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
 type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
+type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -259,6 +260,9 @@ export function CardChoiceModal() {
     case "ChooseRingBearer":
       if (!canActForWaitingState) return null;
       return <RingBearerModal data={waitingFor.data} />;
+    case "LearnChoice":
+      if (!canActForWaitingState) return null;
+      return <LearnModal data={waitingFor.data} />;
     case "ChooseManaColor":
       if (!canActForWaitingState) return null;
       return <ManaColorChoiceModal data={waitingFor.data} />;
@@ -295,6 +299,91 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
     >
       <ScrollableCardStrip>
         {data.candidates.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected === id;
+          return (
+            <motion.button
+              key={id}
+              type="button"
+              aria-label={obj.name}
+              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+                isSelected
+                  ? "ring-2 ring-emerald-400/80"
+                  : "ring-1 ring-white/10 hover:ring-white/35"
+              }`}
+              initial={{ opacity: 0, y: 40, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => setSelected(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage {...objectImageProps(obj)} size="normal" />
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
+                  isSelected
+                    ? "bg-emerald-500/80 text-white"
+                    : "bg-slate-800/90 text-slate-300"
+                }`}
+              >
+                {isSelected ? t("cardChoice.badges.selected") : t("cardChoice.badges.choose")}
+              </span>
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Learn Modal ────────────────────────────────────────────────────────────
+
+// CR 701.48a: "Learn" means "You may discard a card. If you do, draw a card. If
+// you didn't discard a card, you may reveal a Lesson card you own from outside
+// the game and put it into your hand." The second mode (revealing a Lesson from
+// outside the game) is engine-deferred, so this modal renders only the rummage
+// (discard-then-draw) and skip branches. Selecting a card dispatches a Rummage
+// LearnOption (engine discards then draws); skipping dispatches Skip (no-op).
+function LearnModal({ data }: { data: LearnChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<ObjectId | null>(null);
+
+  const handleRummage = useCallback(() => {
+    if (selected !== null) {
+      dispatch({
+        type: "LearnDecision",
+        data: { choice: { type: "Rummage", data: { card_id: selected } } },
+      });
+    }
+  }, [dispatch, selected]);
+
+  const handleSkip = useCallback(() => {
+    dispatch({ type: "LearnDecision", data: { choice: { type: "Skip" } } });
+  }, [dispatch]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.learn.title")}
+      subtitle={t("cardChoice.learn.subtitle")}
+      footer={
+        <div className="mx-auto flex w-full max-w-xl flex-col gap-2">
+          <ConfirmButton
+            onClick={handleRummage}
+            disabled={selected === null}
+            label={t("cardChoice.learn.labelRummage")}
+          />
+          <CancelButton onClick={handleSkip} label={t("cardChoice.learn.labelSkip")} />
+        </div>
+      }
+    >
+      <ScrollableCardStrip>
+        {data.hand_cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selected === id;

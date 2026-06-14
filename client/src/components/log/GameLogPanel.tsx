@@ -14,6 +14,7 @@ import {
   uniqueTurns,
 } from "../../viewmodel/logSearch.ts";
 import { LogEntry } from "./LogEntry.tsx";
+import { useDraggableWidget } from "../../hooks/useDraggableWidget.ts";
 
 const EMPTY_LOG: GameLogEntry[] = [];
 
@@ -57,6 +58,10 @@ export function GameLogPanel() {
   const [categoryFilter, setCategoryFilter] = useState<Set<LogCategory>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // Flex Layout reposition. The hook's own ref is left unused here (panelRef
+  // owns the node for outside-click detection), so its viewport clamp no-ops
+  // for the log — acceptable; the drag offset still applies and persists.
+  const logDrag = useDraggableWidget({ kind: "widget", key: "logPanel" });
 
   const verbosityFiltered = useMemo(
     () => filterLogByVerbosity(logHistory, verbosity),
@@ -98,6 +103,9 @@ export function GameLogPanel() {
 
   const handleOutsideClick = useCallback(
     (e: MouseEvent) => {
+      // Don't close while Flex Layout edit mode is active: the user may be
+      // clicking the edit toolbar (outside the panel) or repositioning the log.
+      if (useUiStore.getState().flexEditMode) return;
       if (isOpen && !isGameOver && panelRef.current && !panelRef.current.contains(e.target as Node)) {
         setLogPanelOpen(false);
       }
@@ -156,10 +164,20 @@ export function GameLogPanel() {
         {isOpen && (
           <motion.div
             ref={panelRef}
+            data-flex-zone="logPanel"
+            drag={logDrag.drag}
+            dragMomentum={logDrag.dragMomentum}
+            dragElastic={logDrag.dragElastic}
+            onDragEnd={logDrag.onDragEnd}
+            onClickCapture={logDrag.onClickCapture}
             className="fixed bottom-0 right-0 top-0 z-[60] flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
-            initial={{ x: "100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "100%" }}
+            // Opacity (not an x-slide) so the Flex Layout drag offset, which
+            // owns the x/y transform on this same fixed node, isn't fought by
+            // the open/close animation.
+            style={logDrag.style}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
           >
             <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">

@@ -891,6 +891,12 @@ pub(crate) enum SearchCreationImperativeAst {
         reveal: bool,
         player: TargetFilter,
     },
+    /// CR 701.20e + CR 701.13a + CR 406.3: Fused "look at the top N ... and exiles it face down".
+    ExileTopLookedAt {
+        player: TargetFilter,
+        count: QuantityExpr,
+        face_down: bool,
+    },
     CopyTokenOf {
         target: TargetFilter,
         /// CR 107.1 + CR 707.2: Number of copy tokens to create.

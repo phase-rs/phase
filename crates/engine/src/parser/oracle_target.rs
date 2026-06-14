@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{opt, peek, value};
+use nom::combinator::{opt, peek, success, value};
 use nom::multi::many0;
 use nom::Parser;
 
@@ -4153,6 +4153,32 @@ fn parse_ownership_or_controller_suffix(
     let parsed: nom::IResult<&str, (ControllerRef, &str, bool), OracleError<'_>> =
         (subject, space1, action).parse(own_ctrl);
     if let Ok((rest, (owner, _, also_control))) = parsed {
+        properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+        if also_control {
+            *controller = Some(owner);
+        }
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
+    }
+    // CR 108.3 + CR 701.38d: Passive ownership form "owned by <player-ref>".
+    // Expropriate: "choose a permanent owned by the voter" — the voter is the
+    // scoped player during per-ballot iteration.  Compositional: every
+    // player-ref recognized by the active-voice combinator above is also
+    // accepted in the passive voice here.
+    let passive_parsed: nom::IResult<&str, (ControllerRef, bool), OracleError<'_>> = (
+        tag("owned by "),
+        alt((
+            tag("the voter").map(|_| ControllerRef::ScopedPlayer),
+            tag("that player").map(|_| ControllerRef::TargetPlayer),
+            tag("an opponent").map(|_| ControllerRef::Opponent),
+            tag("you").map(|_| ControllerRef::You),
+        )),
+        alt((tag(" and controlled by").map(|_| true), success(false))),
+    )
+        .map(|(_, owner, also_control)| (owner, also_control))
+        .parse(own_ctrl);
+    if let Ok((rest, (owner, also_control))) = passive_parsed {
         properties.push(FilterProp::Owned {
             controller: owner.clone(),
         });

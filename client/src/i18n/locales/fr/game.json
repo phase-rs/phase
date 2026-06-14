@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Regrouper les groupes de créatures en double",
     "changeBackground": "Changer l'arrière-plan…",
+    "customizeLayout": "Personnaliser la disposition…",
     "gameLog": "Journal de partie",
     "debugLog": "Journal de débogage",
     "waitingForGame": "En attente de la partie...",
@@ -938,6 +939,12 @@
       "title": "Choisir le porteur de l'Anneau",
       "subtitle": "Choisissez une créature que vous contrôlez"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Glissez pour réorganiser · la première carte est piochée en premier",
     "scry": {
       "title": "Cartomancie",
@@ -1353,6 +1360,18 @@
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",
     "subtitle": "Choisissez quel adversaire fera la confrontation avec vous."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Données de cartes manquantes",

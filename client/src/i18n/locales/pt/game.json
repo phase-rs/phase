@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
     "changeBackground": "Alterar plano de fundo…",
+    "customizeLayout": "Personalizar layout…",
     "gameLog": "Registro do jogo",
     "debugLog": "Registro de depuração",
     "waitingForGame": "Aguardando o jogo...",
@@ -938,6 +939,12 @@
       "title": "Escolher Portador do Anel",
       "subtitle": "Escolha uma criatura que você controla"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Arraste para reordenar · a primeira carta é comprada primeiro",
     "scry": {
       "title": "Vidência",
@@ -1353,6 +1360,18 @@
   "clashOpponent": {
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Dados das Cartas Ausentes",

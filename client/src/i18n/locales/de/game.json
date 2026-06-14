@@ -81,6 +81,7 @@
   "board": {
     "regroupCreatures": "Doppelte Kreaturengruppen neu gruppieren",
     "changeBackground": "Hintergrund ändern…",
+    "customizeLayout": "Layout anpassen…",
     "gameLog": "Spielprotokoll",
     "debugLog": "Debug-Protokoll",
     "waitingForGame": "Warten auf Spiel...",
@@ -938,6 +939,12 @@
       "title": "Ringträger wählen",
       "subtitle": "Wähle eine Kreatur, die du kontrollierst"
     },
+    "learn": {
+      "title": "Learn",
+      "subtitle": "Discard a card to draw a card, or skip",
+      "labelRummage": "Discard & draw",
+      "labelSkip": "Skip"
+    },
     "reorderHint": "Zum Umsortieren ziehen · die oberste Karte wird zuerst gezogen",
     "scry": {
       "title": "Hellsicht",
@@ -1353,6 +1360,18 @@
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
+  },
+  "assist": {
+    "choose": {
+      "title": "Choose a Player to Assist",
+      "subtitle": "Choose another player who may pay up to {{max}} generic mana for this spell.",
+      "decline": "Decline"
+    },
+    "payment": {
+      "title": "Assist: Pay Generic Mana",
+      "commit": "Pay {{value}}",
+      "decline": "Pay nothing"
+    }
   },
   "cardDataMissing": {
     "title": "Kartendaten fehlen",

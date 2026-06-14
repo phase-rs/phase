@@ -6,6 +6,7 @@ interface BoardContextMenuProps {
   y: number;
   onClose: () => void;
   onChangeBackground: () => void;
+  onCustomizeLayout: () => void;
   onToggleGameLog: () => void;
   onToggleDebugLog: () => void;
 }
@@ -15,6 +16,7 @@ export function BoardContextMenu({
   y,
   onClose,
   onChangeBackground,
+  onCustomizeLayout,
   onToggleGameLog,
   onToggleDebugLog,
 }: BoardContextMenuProps) {
@@ -65,6 +67,14 @@ export function BoardContextMenu({
         label={t("board.changeBackground")}
         onClick={() => {
           onChangeBackground();
+          onClose();
+        }}
+      />
+      <MenuItem
+        label={t("board.customizeLayout")}
+        shortcut="Ctrl+Shift+L"
+        onClick={() => {
+          onCustomizeLayout();
           onClose();
         }}
       />
