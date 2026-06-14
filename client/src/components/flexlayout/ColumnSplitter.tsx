@@ -1,5 +1,6 @@
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { ratioFromPointerX } from "./gridBandMath.ts";
+import { SplitterHandle } from "./SplitterHandle.tsx";
 
 interface ColumnSplitterProps {
   /** Viewport X (px) of the lands↔support boundary this grabber straddles. */
@@ -47,10 +48,10 @@ export function ColumnSplitter({ x, top, height, left, right }: ColumnSplitterPr
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      className="fixed z-[71] flex w-4 -translate-x-1/2 cursor-col-resize items-center justify-center"
+      className="group fixed z-[71] flex w-6 -translate-x-1/2 cursor-col-resize touch-none items-center justify-center"
       style={{ left: x, top, height }}
     >
-      <span className="h-16 w-1 rounded-full bg-sky-400/80 shadow-[0_0_8px_2px_rgba(56,189,248,0.6)]" />
+      <SplitterHandle orientation="vertical" />
     </div>
   );
 }

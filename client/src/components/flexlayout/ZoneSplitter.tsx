@@ -2,6 +2,7 @@ import { useRef } from "react";
 
 import { usePreferencesStore, type CappedTrack } from "../../stores/preferencesStore.ts";
 import { resizeBand } from "./gridBandMath.ts";
+import { SplitterHandle } from "./SplitterHandle.tsx";
 
 interface ZoneSplitterProps {
   /** Which band this grabber resizes. "top" sits on the opponent/battlefield
@@ -52,10 +53,10 @@ export function ZoneSplitter({ side, top }: ZoneSplitterProps) {
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      className="fixed inset-x-0 z-[71] flex h-4 -translate-y-1/2 cursor-row-resize items-center justify-center"
+      className="group fixed inset-x-0 z-[71] flex h-6 -translate-y-1/2 cursor-row-resize touch-none items-center justify-center"
       style={{ top }}
     >
-      <span className="h-1 w-16 rounded-full bg-sky-400/80 shadow-[0_0_8px_2px_rgba(56,189,248,0.6)]" />
+      <SplitterHandle orientation="horizontal" />
     </div>
   );
 }
