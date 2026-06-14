@@ -970,6 +970,11 @@ pub struct PendingChangeZoneIteration {
     /// carry-through pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
+    /// CR 401.4 + CR 701.24a: Library placement override carried across a
+    /// replacement-ordering pause so Endurance-style "on the bottom of their
+    /// library" still suppresses auto-shuffle on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_placement: Option<crate::types::ability::LibraryPosition>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -8220,6 +8225,7 @@ mod tests {
                 subtypes: vec!["Forest".to_string()],
                 ward: None,
             }),
+            library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
         };
         let json = serde_json::to_string(&original).expect("serialize");

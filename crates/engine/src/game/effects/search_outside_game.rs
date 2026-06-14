@@ -173,6 +173,7 @@ pub(crate) fn put_face_up_exile_into(
         track_exiled_by_source: false,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
+        library_placement: None,
     };
     Ok(change_zone::process_one_zone_move(
         state, &ctx, object_id, events,

@@ -1750,6 +1750,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // counters (e.g. a finality counter on Shilgengar's mass return).
                 enter_with_counters,
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             }
         }
         TargetedImperativeAst::Fight { target } => Effect::Fight {
@@ -2349,6 +2351,8 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enter_with_counters: vec![],
             face_down_profile: None,
+            library_position: None,
+            random_order: false,
         },
     }
 }
@@ -3983,17 +3987,19 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
+    let has_mass_zone_origin = (nom_primitives::scan_contains(lower, "all")
+        || nom_primitives::scan_contains(lower, "each"))
+        && nom_primitives::scan_contains(lower, "from");
+
     // "put X on top of Y's library" — specific position, no auto-shuffle.
     // Must check before try_parse_put_zone_change which would emit ChangeZone (auto-shuffles).
-    // Only matches forms WITHOUT an explicit origin zone ("from your hand") — those
-    // specify a real zone transfer and should go through try_parse_put_zone_change.
+    // Fixed-count forms with an origin zone ("from your graveyard") remain library
+    // reposition effects; mass "all"/"each" forms move a whole source zone.
     if nom_primitives::scan_contains(lower, "on top of")
         && nom_primitives::scan_contains(lower, "library")
+        && !has_mass_zone_origin
     {
-        let has_origin = nom_primitives::scan_contains(lower, " from ");
-        if !has_origin {
-            return Some(PutImperativeAst::TopOfLibrary);
-        }
+        return Some(PutImperativeAst::TopOfLibrary);
     }
 
     // "put that card on top" / "put it on top" / "put them on top" —
@@ -4002,16 +4008,14 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         return Some(PutImperativeAst::TopOfLibrary);
     }
 
-    // "put X on the bottom of Y's library" — specific position without
-    // explicit origin zone. Forms with "from" (e.g. "from your hand") go through
-    // try_parse_put_zone_change for proper ChangeZone handling.
+    // "put X on the bottom of Y's library" — specific position. Fixed-count
+    // origin-zone forms remain library reposition effects; mass "all"/"each"
+    // forms move a whole source zone.
     if nom_primitives::scan_contains(lower, "on the bottom of")
         && nom_primitives::scan_contains(lower, "library")
+        && !has_mass_zone_origin
     {
-        let has_origin = nom_primitives::scan_contains(lower, " from ");
-        if !has_origin {
-            return Some(PutImperativeAst::BottomOfLibrary);
-        }
+        return Some(PutImperativeAst::BottomOfLibrary);
     }
 
     // "put that card on the bottom" / "put it on the bottom" —
@@ -4043,6 +4047,8 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                 target,
                 enters_under,
                 enter_tapped,
+                library_position,
+                random_order,
                 ..
             } => {
                 // CR 608.2c: "Put all <filter> revealed this way into <z1> and
@@ -4064,6 +4070,8 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                     target,
                     enters_under,
                     enter_tapped: enter_tapped.is_tapped(),
+                    library_position,
+                    random_order,
                     rest_destination,
                 })
             }
@@ -4113,6 +4121,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             enters_under,
             enter_tapped,
+            library_position,
+            random_order,
             // CR 608.2c: The "and the rest into <zone>" complement is materialized
             // as a sibling sub-ability by `lower_imperative_family_ast`, which
             // intercepts the partition form before this bare-effect lowering.
@@ -4126,6 +4136,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
             enter_with_counters: vec![],
             face_down_profile: None,
+            library_position,
+            random_order,
         },
         PutImperativeAst::ZoneChange {
             origin,
@@ -4158,6 +4170,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enter_with_counters: vec![],
                     face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
                 }
             } else {
                 Effect::ChangeZone {
@@ -4933,6 +4947,8 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_with_counters: vec![],
         face_down_profile: None,
+        library_position: None,
+        random_order: false,
     }
 }
 
@@ -7342,6 +7358,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             enters_under,
             enter_tapped,
+            library_position,
+            random_order,
             rest_destination: Some(rest_destination),
         }) => {
             // "The rest" excludes the chosen subset by predicate. When the
@@ -7372,6 +7390,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position,
+                random_order,
             };
             let complement = Effect::ChangeZoneAll {
                 origin: None,
@@ -7381,6 +7401,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             };
             let mut clause = parsed_clause(primary);
             clause.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -7962,6 +7984,8 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enter_with_counters: vec![],
                     face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
                 }
             } else {
                 Effect::ChangeZone {
@@ -9689,6 +9713,8 @@ mod tests {
                 enter_tapped,
                 enter_with_counters: _,
                 face_down_profile: None,
+                library_position: None,
+                random_order: false,
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);
