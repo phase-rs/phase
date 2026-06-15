@@ -2314,7 +2314,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            flipper,
         } => {
+            // CR 705.2: surface a non-default flipper ("that player flips a coin").
+            if !matches!(flipper, TargetFilter::Controller) {
+                d.push(("flipper".into(), format!("{flipper:?}")));
+            }
             if win_effect.is_some() {
                 d.push(("win".into(), "yes".into()));
             }
@@ -2326,8 +2331,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             win_effect,
             lose_effect,
+            flipper,
         } => {
             d.push(("count".into(), format!("{count:?}")));
+            if !matches!(flipper, TargetFilter::Controller) {
+                d.push(("flipper".into(), format!("{flipper:?}")));
+            }
             if win_effect.is_some() {
                 d.push(("win".into(), "yes".into()));
             }
@@ -5849,6 +5858,7 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         }
         | Effect::FlipCoins {
             win_effect,

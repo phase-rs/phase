@@ -8398,11 +8398,31 @@ pub enum Effect {
         modifier: Option<DieRollModifier>,
     },
     /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
+    ///
+    /// CR 705.2: "only the player who flips a coin wins or loses the flip." The
+    /// `flipper` selects WHICH player flips (and therefore whose win/lose result
+    /// drives the branches and whose `CoinFlipped` is recorded). It is the same
+    /// player-reference type every other player-acting effect carries
+    /// (`LoseLife.target`, `Draw.target`, `GainLife.player`) and is resolved by
+    /// the single-authority `resolve_player_for_context_ref`, so "that player
+    /// flips a coin" (Mirrored Depths, Planar Chaos) flips for the triggering
+    /// player rather than the source's controller. Defaults to `Controller` for
+    /// the bare "flip a coin" / "you flip a coin" case (CR 705.2) and for
+    /// back-compat with serialized data written before this field existed.
+    /// "each player flips a coin" is NOT expressed here — it rides the
+    /// surrounding `AbilityDefinition.player_scope` iteration (CR 101.4 APNAP),
+    /// which rebinds the acting controller per player so `flipper = Controller`
+    /// flips once for each player.
     FlipCoin {
         #[serde(default)]
         win_effect: Option<Box<AbilityDefinition>>,
         #[serde(default)]
         lose_effect: Option<Box<AbilityDefinition>>,
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        flipper: TargetFilter,
     },
     /// CR 705: Flip N coins. `win_effect` runs once per heads (win),
     /// `lose_effect` runs once per tails (loss). Generalization of `FlipCoin`
@@ -8410,6 +8430,9 @@ pub enum Effect {
     /// Lecturer). The one-flip degenerate case stays as `FlipCoin` — this
     /// variant is only emitted when `count > 1` or when the Oracle text
     /// explicitly binds a count.
+    ///
+    /// CR 705.2: `flipper` selects which player flips all `count` coins (see
+    /// `FlipCoin::flipper`). Defaults to `Controller`.
     FlipCoins {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -8417,6 +8440,11 @@ pub enum Effect {
         win_effect: Option<Box<AbilityDefinition>>,
         #[serde(default)]
         lose_effect: Option<Box<AbilityDefinition>>,
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        flipper: TargetFilter,
     },
     /// CR 705: Flip coins until you lose a flip, then execute effect with win count.
     FlipCoinUntilLose {

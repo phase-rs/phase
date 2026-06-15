@@ -7790,14 +7790,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             results: vec![],
             modifier,
         },
+        // CR 705.2: the bare imperative lowers with `flipper = Controller`; a
+        // player subject ("that player flips a coin") is stamped onto `flipper`
+        // afterward by `inject_subject_target`.
         ImperativeFamilyAst::FlipCoin => Effect::FlipCoin {
             win_effect: None,
             lose_effect: None,
+            flipper: TargetFilter::Controller,
         },
         ImperativeFamilyAst::FlipCoins { count } => Effect::FlipCoins {
             count,
             win_effect: None,
             lose_effect: None,
+            flipper: TargetFilter::Controller,
         },
         ImperativeFamilyAst::FlipCoinUntilLose => Effect::FlipCoinUntilLose {
             // Stub — subsequent "For each flip you won, ..." clauses are
@@ -13033,19 +13038,41 @@ mod tests {
         );
     }
 
-    /// CR 705.1: Subject-prefixed coin flips ("you flip a coin", "that player
-    /// flips a coin", "each player flips a coin") must subject-strip to the
-    /// existing bare `FlipCoin` path rather than falling to `Unimplemented`.
-    /// The flip happens for the resolving player; `Effect::FlipCoin` carries no
-    /// player field, so subject anaphora is a harmless no-op here.
+    /// CR 705.1 + CR 705.2: Subject-prefixed coin flips lower to `FlipCoin` AND
+    /// carry the subject as the typed `flipper` so the right player flips and
+    /// wins/loses (CR 705.2: "only the player who flips wins or loses the flip").
+    ///   - "you flip a coin" → `flipper = Controller` (the default).
+    ///   - "that player flips a coin" → the anaphoric parent-target controller
+    ///     (a SpellCast trigger resolves this to `TriggeringPlayer`; see
+    ///     `flip_coin.rs` runtime tests).
+    ///   - "its controller flips a coin" → likewise the parent-target controller.
+    ///   - "each player flips a coin" → `flipper = Controller` but the whole
+    ///     ability is tagged `player_scope = All`, so the resolver flips once for
+    ///     EACH player (CR 101.4 APNAP) rather than collapsing to one flip.
     #[test]
-    fn subject_prefixed_flip_a_coin_routes_to_flip_coin() {
-        for text in [
+    fn subject_prefixed_flip_a_coin_binds_flipper() {
+        // "you flip a coin" — controller flipper, no player_scope.
+        let mut ctx = ParseContext::default();
+        let you = crate::parser::oracle_effect::parse_effect_chain_with_context(
             "you flip a coin",
-            "that player flips a coin",
-            "each player flips a coin",
-            "its controller flips a coin",
-        ] {
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                &*you.effect,
+                Effect::FlipCoin {
+                    flipper: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected FlipCoin {{ flipper: Controller }}, got {:?}",
+            you.effect
+        );
+        assert_eq!(you.player_scope, None);
+
+        // "that player" / "its controller" → parent-target controller anaphor.
+        for text in ["that player flips a coin", "its controller flips a coin"] {
             let mut ctx = ParseContext::default();
             let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
                 text,
@@ -13053,41 +13080,82 @@ mod tests {
                 &mut ctx,
             );
             assert!(
-                matches!(&*ability.effect, Effect::FlipCoin { .. }),
-                "expected FlipCoin for {text:?}, got {:?}",
+                matches!(
+                    &*ability.effect,
+                    Effect::FlipCoin {
+                        flipper: TargetFilter::ParentTargetController,
+                        ..
+                    }
+                ),
+                "expected FlipCoin {{ flipper: ParentTargetController }} for {text:?}, got {:?}",
                 ability.effect
             );
         }
-    }
 
-    /// CR 705.1: End-to-end — a trigger whose effect is "that player flips a
-    /// coin" (Mirrored Depths, Planar Chaos) must emit a `FlipCoin` effect in
-    /// the parsed trigger, not leave the coin-flip clause `Unimplemented`. This
-    /// is the real card class the `PREDICATE_VERBS` change unlocks (the subject
-    /// "that player" reaches subject-stripping inside the trigger effect chain).
-    #[test]
-    fn trigger_subject_flip_a_coin_parses_to_flip_coin() {
-        fn effect_tree_has_flip_coin(def: &AbilityDefinition) -> bool {
-            matches!(&*def.effect, Effect::FlipCoin { .. })
-                || def
-                    .sub_ability
-                    .as_ref()
-                    .is_some_and(|s| effect_tree_has_flip_coin(s))
-        }
-        let parsed = crate::parser::oracle::parse_oracle_text(
-            "Whenever a player casts a spell, that player flips a coin. If the player loses the flip, counter that spell.",
-            "Mirrored Depths",
-            &[],
-            &[],
-            &[],
+        // "each player flips a coin" → controller flipper iterated over ALL
+        // players via player_scope, NOT a single controller flip.
+        let mut ctx = ParseContext::default();
+        let each = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "each player flips a coin",
+            AbilityKind::Spell,
+            &mut ctx,
         );
         assert!(
-            parsed.triggers.iter().any(|t| t
-                .execute
-                .as_ref()
-                .is_some_and(|e| effect_tree_has_flip_coin(e))),
-            "trigger coin-flip clause must lower to FlipCoin, got:\n{parsed:#?}"
+            matches!(
+                &*each.effect,
+                Effect::FlipCoin {
+                    flipper: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected FlipCoin {{ flipper: Controller }} for each-player, got {:?}",
+            each.effect
         );
+        assert_eq!(
+            each.player_scope,
+            Some(crate::types::ability::PlayerFilter::All),
+            "each player must iterate ALL players, not collapse to one flip"
+        );
+    }
+
+    /// CR 705.1 + CR 705.2: End-to-end — a trigger whose effect is "that player
+    /// flips a coin" (Mirrored Depths, Planar Chaos) must emit a `FlipCoin` whose
+    /// `flipper` is the TRIGGERING player, not the source's controller. This is
+    /// the heart of the maintainer's CHANGES_REQUESTED: a non-controller who casts
+    /// must be the one who flips and wins/loses (the runtime consequence is
+    /// asserted in `flip_coin.rs`).
+    #[test]
+    fn trigger_subject_flip_a_coin_binds_triggering_player_flipper() {
+        fn flip_coin_flipper(def: &AbilityDefinition) -> Option<&TargetFilter> {
+            match &*def.effect {
+                Effect::FlipCoin { flipper, .. } | Effect::FlipCoins { flipper, .. } => {
+                    Some(flipper)
+                }
+                _ => def.sub_ability.as_ref().and_then(|s| flip_coin_flipper(s)),
+            }
+        }
+        for (text, name) in [
+            (
+                "Whenever a player casts a spell, that player flips a coin. If the player loses the flip, counter that spell.",
+                "Mirrored Depths",
+            ),
+            (
+                "Whenever a player casts a spell, that player flips a coin. If the flip comes up tails, counter that spell.",
+                "Planar Chaos",
+            ),
+        ] {
+            let parsed = crate::parser::oracle::parse_oracle_text(text, name, &[], &[], &[]);
+            let flipper = parsed
+                .triggers
+                .iter()
+                .find_map(|t| t.execute.as_ref().and_then(|e| flip_coin_flipper(e)))
+                .unwrap_or_else(|| panic!("{name}: trigger must lower to FlipCoin, got:\n{parsed:#?}"));
+            assert_eq!(
+                *flipper,
+                TargetFilter::TriggeringPlayer,
+                "{name}: the casting (triggering) player must be the flipper, not the controller"
+            );
+        }
     }
 
     /// CR 710.4 vs CR 705.1: The Kamigawa "flip <permanent>" flip-card mechanic

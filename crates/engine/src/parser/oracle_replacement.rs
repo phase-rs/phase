@@ -782,6 +782,10 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
                 },
                 win_effect: None,
                 lose_effect: None,
+                // CR 614.1a + CR 705.2: the replacement re-flips for the same
+                // flipper the original event named (the replacement applier rebinds
+                // the acting controller), so `Controller` reads that flipper.
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
         ))
         .description(text.to_string());

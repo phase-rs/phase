@@ -1446,14 +1446,17 @@ fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut AbilityDefini
 pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
     let mut i = 0;
     while i < defs.len() {
-        // CR 705: Consolidate coin flip branches
-        if matches!(
-            &*defs[i].effect,
-            Effect::FlipCoin {
-                win_effect: None,
-                lose_effect: None,
-            }
-        ) {
+        // CR 705: Consolidate coin flip branches. CR 705.2: the bare flip carries
+        // the `flipper` (which player flips); the following branch-only flips are
+        // stubs with the default `Controller` flipper, so preserve the bare flip's
+        // flipper rather than the stubs'.
+        if let Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper,
+        } = &*defs[i].effect
+        {
+            let flipper = flipper.clone();
             let mut win = None;
             let mut lose = None;
             let mut j = i + 1;
@@ -1462,6 +1465,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                     Effect::FlipCoin {
                         win_effect: Some(w),
                         lose_effect: None,
+                        ..
                     } if win.is_none() => {
                         win = Some(w.clone());
                         j += 1;
@@ -1469,6 +1473,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                     Effect::FlipCoin {
                         win_effect: None,
                         lose_effect: Some(l),
+                        ..
                     } if lose.is_none() => {
                         lose = Some(l.clone());
                         j += 1;
@@ -1480,6 +1485,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                 *defs[i].effect = Effect::FlipCoin {
                     win_effect: win,
                     lose_effect: lose,
+                    flipper,
                 };
                 defs.drain(i + 1..j);
             }
@@ -1504,15 +1510,18 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             win_effect: None,
             lose_effect: None,
             count,
+            flipper,
         } = &*defs[i].effect
         {
             if i + 1 < defs.len() {
                 let count = count.clone();
+                let flipper = flipper.clone();
                 let next = defs.remove(i + 1);
                 *defs[i].effect = Effect::FlipCoins {
                     count,
                     win_effect: Some(Box::new(next)),
                     lose_effect: None,
+                    flipper,
                 };
             }
         }

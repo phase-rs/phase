@@ -909,6 +909,12 @@ pub enum PendingCoinFlipKind {
 pub struct PendingCoinFlip {
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// CR 705.2: The player who flips (and therefore wins/loses) the coin — the
+    /// already-resolved `Effect::FlipCoin::flipper`. The kept Krark's-Thumb flip's
+    /// `CoinFlipped` is recorded for this player, not `controller`. Defaults to
+    /// the controller for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub flipper: PlayerId,
     pub targets: Vec<TargetRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_effect: Option<Box<AbilityDefinition>>,
