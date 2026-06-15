@@ -1209,6 +1209,20 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
+    // CR 108.3 + CR 109.4: "its owner" / "their owner" — the OWNER of the parent
+    // target, which is distinct from its controller (control can be transferred
+    // separately from ownership). "Its owner gains/loses N life" (Misfortune's
+    // Gain, Path of Peace, Thieving Amalgam, The Matrix of Time) must hit the
+    // referenced object's owner, not the spell's controller.
+    if lower == "its owner" || lower == "their owner" {
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTargetOwner,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        });
+    }
     // CR 608.2c: Definite/anaphoric "[the|that] <noun>'s controller" /
     // "[the|that] <noun>'s owner" — the parent target's controller/owner.
     // Mirrors the generic "the <noun>'s controller" path in `parse_target`
@@ -1226,10 +1240,22 @@ pub(super) fn parse_subject_application(
         // structural check that the remaining tail is `<noun>'s controller` /
         // `<noun>'s owner`, mirroring the existing `parse_target` path that uses
         // `find("'s controller")` for the same purpose.
-        if after_det.ends_with("'s controller may") // allow-noncombinator: post-tokenized subject suffix classification
-            || after_det.ends_with("'s owner may")
+        // CR 108.3 + CR 109.4: "owner" is the OWNER of the parent target (distinct
+        // from its controller); "controller" stays the controller. The owner phrasing
+        // must route to `ParentTargetOwner` (The Matrix of Time: "that card's owner
+        // loses 3 life").
         // allow-noncombinator: post-tokenized subject suffix classification
-        {
+        if after_det.ends_with("'s owner may") {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTargetOwner,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: true,
+            });
+        }
+        // allow-noncombinator: post-tokenized subject suffix classification
+        if after_det.ends_with("'s controller may") {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTargetController,
                 target: None,
@@ -1238,7 +1264,18 @@ pub(super) fn parse_subject_application(
                 is_optional: true,
             });
         }
-        if after_det.ends_with("'s controller") || after_det.ends_with("'s owner") {
+        // allow-noncombinator: post-tokenized subject suffix classification
+        if after_det.ends_with("'s owner") {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTargetOwner,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
+        // allow-noncombinator: post-tokenized subject suffix classification
+        if after_det.ends_with("'s controller") {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTargetController,
                 target: None,
@@ -4025,6 +4062,136 @@ mod tests {
         let app = result.expect("should recognize 'their controller'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(!app.is_optional);
+    }
+
+    // CR 108.3 + CR 109.4 (issue #3351): "its owner" / "their owner" is the OWNER
+    // of the parent target — distinct from its controller. Bare "its owner" was
+    // previously unhandled and fell through (Misfortune's Gain / Path of Peace's
+    // "Its owner gains 4 life" clause was DROPPED). It must resolve to
+    // ParentTargetOwner, while "its controller" stays ParentTargetController.
+    #[test]
+    fn parse_subject_its_owner_bare() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("its owner", &mut ctx);
+        let app = result.expect("should recognize bare 'its owner'");
+        assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
+        assert!(!app.is_optional, "no 'may' modal → not optional");
+    }
+
+    #[test]
+    fn parse_subject_their_owner_bare() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("their owner", &mut ctx);
+        let app = result.expect("should recognize bare 'their owner'");
+        assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
+        assert!(!app.is_optional);
+    }
+
+    #[test]
+    fn parse_subject_owner_and_controller_are_distinct() {
+        // The discriminating pair: identical phrasing modulo owner/controller must
+        // route to the two distinct context refs.
+        let mut ctx = ParseContext::default();
+        assert_eq!(
+            parse_subject_application("its owner", &mut ctx)
+                .unwrap()
+                .affected,
+            TargetFilter::ParentTargetOwner
+        );
+        assert_eq!(
+            parse_subject_application("its controller", &mut ctx)
+                .unwrap()
+                .affected,
+            TargetFilter::ParentTargetController
+        );
+    }
+
+    // CR 108.3: "that <noun>'s owner" / "the <noun>'s owner" possessive-suffix
+    // form (The Matrix of Time: "that card's owner loses 3 life") routes to
+    // ParentTargetOwner, while the "...'s controller" suffix stays controller.
+    #[test]
+    fn parse_subject_noun_possessive_owner_vs_controller() {
+        let mut ctx = ParseContext::default();
+        assert_eq!(
+            parse_subject_application("that card's owner", &mut ctx)
+                .unwrap()
+                .affected,
+            TargetFilter::ParentTargetOwner
+        );
+        assert_eq!(
+            parse_subject_application("that creature's controller", &mut ctx)
+                .unwrap()
+                .affected,
+            TargetFilter::ParentTargetController
+        );
+    }
+
+    /// Recursively search an ability tree (effect + sub_ability + else_ability)
+    /// for a `GainLife` and return the `player` filter of the first one found.
+    fn find_gain_life_player(ability: &AbilityDefinition) -> Option<TargetFilter> {
+        if let Effect::GainLife { player, .. } = &*ability.effect {
+            return Some(player.clone());
+        }
+        ability
+            .sub_ability
+            .as_deref()
+            .and_then(find_gain_life_player)
+            .or_else(|| {
+                ability
+                    .else_ability
+                    .as_deref()
+                    .and_then(find_gain_life_player)
+            })
+    }
+
+    /// CR 108.3 + CR 109.4 (issue #3351): Misfortune's Gain / Path of Peace —
+    /// "Destroy target creature. Its owner gains 4 life." The "Its owner" subject
+    /// must bind the GainLife to the destroyed object's OWNER (ParentTargetOwner),
+    /// not the spell's controller. Before the fix the bare "its owner" arm was
+    /// unhandled and the GainLife clause was DROPPED entirely.
+    #[test]
+    fn misfortunes_gain_its_owner_gains_life_to_parent_target_owner() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Destroy target creature. Its owner gains 4 life.",
+            "Misfortune's Gain",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let player = parsed
+            .abilities
+            .iter()
+            .find_map(find_gain_life_player)
+            .expect("the 'Its owner gains 4 life' clause must produce a GainLife");
+        assert_eq!(
+            player,
+            TargetFilter::ParentTargetOwner,
+            "life must go to the destroyed creature's OWNER (CR 108.3)"
+        );
+    }
+
+    /// REGRESSION control (issue #3351): the controller phrasing must be UNCHANGED
+    /// — "Its controller gains 4 life." still binds to ParentTargetController. This
+    /// guards the suffix-arm split from accidentally rerouting controller → owner.
+    #[test]
+    fn its_controller_gains_life_stays_parent_target_controller() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Destroy target creature. Its controller gains 4 life.",
+            "Control Variant Test",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let player = parsed
+            .abilities
+            .iter()
+            .find_map(find_gain_life_player)
+            .expect("the 'Its controller gains 4 life' clause must produce a GainLife");
+        assert_eq!(
+            player,
+            TargetFilter::ParentTargetController,
+            "controller phrasing must remain ParentTargetController (no regression)"
+        );
     }
 
     #[test]
