@@ -1885,7 +1885,16 @@ pub fn resolve_remove(
             counter_type,
             count,
             ..
-        } => (counter_type.clone(), *count),
+        } => {
+            // CR 122.1: Resolve the count against game state so dynamic amounts
+            // compose — "remove that many +1/+1 counters" (Protean Hydra class)
+            // picks up the prevented-damage amount via `EventContextAmount`.
+            // The `-1` "remove all" sentinel survives resolution as `Fixed{-1}`
+            // and is keyed off `< 0` below, exactly as before.
+            let resolved =
+                crate::game::quantity::resolve_quantity_with_targets(state, count, ability);
+            (counter_type.clone(), resolved)
+        }
         _ => (Some(CounterType::Plus1Plus1), 1),
     };
 
@@ -2223,7 +2232,7 @@ mod tests {
             &make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: Some(CounterType::Plus1Plus1),
-                    count: 3,
+                    count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                 },
                 obj_id,
