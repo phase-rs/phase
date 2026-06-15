@@ -2121,6 +2121,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
             if let Some((ctrl, consumed)) = parse_controller_suffix(after_that, ctx) {
                 controller = Some(ctrl);
                 pos += that_ctrl_offset + "that ".len() + consumed;
+
+                // A predicate relative clause can follow the controller clause —
+                // e.g. "untapped creatures that player controls that didn't attack
+                // this turn" (Angel's Trumpet). The controller clause was consumed
+                // above, so re-run the generic relative-clause extractor on the
+                // remainder to pick up the trailing verb/quality/attachment "that …"
+                // restriction that the first call (which saw "that player controls")
+                // could not match.
+                if let Some((trailing_props, consumed)) =
+                    parse_that_clause_suffix(&lower[pos..], Some(ctx))
+                {
+                    properties.extend(trailing_props);
+                    pos += consumed;
+                }
             }
         }
     }
@@ -4584,8 +4598,8 @@ pub(crate) fn attachment_kinds_filter_prop(
 /// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
-pub(crate) fn parse_that_clause_suffix(
-    text: &str,
+pub(crate) fn parse_that_clause_suffix<'a>(
+    text: &'a str,
     ctx: Option<&ParseContext>,
 ) -> Option<(Vec<FilterProp>, usize)> {
     let default_ctx = ParseContext::default();
@@ -4660,6 +4674,86 @@ pub(crate) fn parse_that_clause_suffix(
         if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
         {
             return Some((props, consumed));
+        }
+    }
+
+    // --- CR 608.2c (De Morgan): "that didn't <verb> [or <verb>] this turn" ---
+    // Negated verb-phrase relative clause. The verbs after "didn't" are
+    // present-tense/infinitive ("attack"/"block"/"enter"), distinct from the
+    // past-tense positive VERB_PHRASES below ("attacked"/"entered"). Each verb
+    // maps to its existing positive FilterProp wrapped in `Not`; a disjunction
+    // ("attack or enter") lowers to AND-of-negations because the parsed props
+    // are AND-combined in the enclosing TypedFilter ("apply the rules of
+    // English", CR 608.2c). Must run BEFORE the positive VERB_PHRASES loop, but
+    // there is no collision risk since past-tense and present-tense are disjoint.
+    if let Ok((after_neg, _)) = tag::<_, _, OracleError<'_>>("didn't ").parse(after_that) {
+        // verb token -> positive FilterProp; longest-match-first
+        // ("enter the battlefield" before "enter"), mirroring VERB_PHRASES.
+        // CR 508.1a (attack declaration) / CR 509.1a (block declaration) /
+        // CR 400.7 (entering the battlefield is a new object).
+        static NEG_VERBS: &[(&str, FilterProp)] = &[
+            ("attack", FilterProp::AttackedThisTurn),
+            ("block", FilterProp::BlockedThisTurn),
+            ("enter the battlefield", FilterProp::EnteredThisTurn),
+            ("enter", FilterProp::EnteredThisTurn),
+        ];
+        let parse_neg_verb = |i: &'a str| -> Option<(&'a str, FilterProp)> {
+            NEG_VERBS.iter().find_map(|(token, prop)| {
+                tag::<_, _, OracleError<'_>>(*token)
+                    .parse(i)
+                    .ok()
+                    .map(|(rest, _)| (rest, prop.clone()))
+            })
+        };
+        if let Some((rest1, prop1)) = parse_neg_verb(after_neg) {
+            let mut props = vec![FilterProp::Not {
+                prop: Box::new(prop1),
+            }];
+            // Optional " or <verb>" disjunction (CR 608.2c De Morgan split).
+            let after_disjunction = match tag::<_, _, OracleError<'_>>(" or ").parse(rest1) {
+                Ok((rest2, _)) => match parse_neg_verb(rest2) {
+                    Some((rest3, prop2)) => {
+                        props.push(FilterProp::Not {
+                            prop: Box::new(prop2),
+                        });
+                        rest3
+                    }
+                    None => rest1,
+                },
+                Err(_) => rest1,
+            };
+            // Terminator: the canonical form carries the shared " this turn"
+            // suffix ("...didn't attack or enter this turn", The Fifth Doctor).
+            // Some upstream producers (e.g. the "tap all" target extractor for
+            // Angel's Trumpet) strip a trailing duration before the target text
+            // reaches here, leaving "...didn't attack" with the duration already
+            // removed. Accept either: (a) an explicit " this turn" + boundary, or
+            // (b) the verb already sitting at a clause boundary (end-of-string or
+            // a "."/"," terminator) with "this turn" stripped upstream. A trailing
+            // SPACE is NOT a boundary — it signals continued, unmatched text
+            // ("didn't attack a player"), which must not match.
+            let consumed_at =
+                |remainder: &str| -> usize { leading_ws + trimmed.len() - remainder.len() };
+            // (a) explicit " this turn" + word boundary (guards "this turning").
+            if let Ok((after_turn, _)) =
+                tag::<_, _, OracleError<'_>>(" this turn").parse(after_disjunction)
+            {
+                let at_boundary = after_turn
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                if at_boundary {
+                    return Some((props, consumed_at(after_turn)));
+                }
+            }
+            // (b) duration stripped upstream: verb at a clause boundary.
+            let at_clause_boundary = after_disjunction
+                .chars()
+                .next()
+                .is_none_or(|c| c == '.' || c == ',');
+            if at_clause_boundary {
+                return Some((props, consumed_at(after_disjunction)));
+            }
         }
     }
 
@@ -10614,6 +10708,186 @@ mod tests {
                 value: Supertype::Legendary,
             }),
             "must exclude legendary permanents, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Cluster 15 (The Fifth Doctor / Angel's Trumpet): the negated verb-phrase
+    /// relative clause "that didn't <verb> this turn" was dropped, so the
+    /// mass effect applied to every creature. CR 608.2c De Morgan: each verb
+    /// becomes its positive FilterProp wrapped in `Not`.
+    #[test]
+    fn that_didnt_attack_emits_not_attacked() {
+        let (props, consumed) = parse_that_clause_suffix(" that didn't attack this turn", None)
+            .expect("should parse negated attack clause");
+        assert_eq!(consumed, " that didn't attack this turn".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_didnt_attack_or_enter_emits_de_morgan_pair() {
+        let (props, consumed) =
+            parse_that_clause_suffix(" that didn't attack or enter this turn", None)
+                .expect("should parse negated attack-or-enter clause");
+        assert_eq!(consumed, " that didn't attack or enter this turn".len());
+        assert_eq!(
+            props,
+            vec![
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::AttackedThisTurn),
+                },
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::EnteredThisTurn),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn that_didnt_enter_the_battlefield_emits_not_entered() {
+        let (props, consumed) =
+            parse_that_clause_suffix(" that didn't enter the battlefield this turn", None)
+                .expect("should parse negated enter-the-battlefield clause");
+        assert_eq!(
+            consumed,
+            " that didn't enter the battlefield this turn".len()
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::EnteredThisTurn),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_didnt_block_emits_not_blocked() {
+        let (props, consumed) = parse_that_clause_suffix(" that didn't block this turn", None)
+            .expect("should parse negated block clause");
+        assert_eq!(consumed, " that didn't block this turn".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::BlockedThisTurn),
+            }]
+        );
+    }
+
+    /// Word-boundary guard: " this turning" must NOT match (the negated arm
+    /// requires a boundary after "this turn", unlike the positive VERB_PHRASES).
+    #[test]
+    fn that_didnt_attack_this_turning_does_not_match() {
+        assert!(parse_that_clause_suffix(" that didn't attack this turning", None).is_none());
+    }
+
+    /// Regression: the negated arm must not shadow the positive past-tense path.
+    #[test]
+    fn that_attacked_still_emits_positive_attacked() {
+        let (props, _) = parse_that_clause_suffix(" that attacked this turn", None)
+            .expect("positive past-tense clause must still parse");
+        assert_eq!(props, vec![FilterProp::AttackedThisTurn]);
+    }
+
+    /// Upstream-truncated form: some producers (the "tap all" target extractor)
+    /// strip the trailing " this turn" duration before the target text reaches
+    /// the type-phrase parser, leaving "that didn't attack" at end-of-string.
+    /// The negated arm must still match when the verb sits at a clause boundary.
+    #[test]
+    fn that_didnt_attack_without_this_turn_at_boundary_matches() {
+        let (props, _) = parse_that_clause_suffix(" that didn't attack", None)
+            .expect("duration-stripped form must still parse at end-of-string");
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]
+        );
+
+        // Also accepts a "."/"," clause terminator.
+        let (props, _) = parse_that_clause_suffix(" that didn't attack.", None)
+            .expect("duration-stripped form must parse before a period");
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]
+        );
+    }
+
+    /// Guard: a verb followed by a SPACE + more words (no "this turn", no clause
+    /// boundary) must NOT match — that is unmatched continued text, not a
+    /// complete negated relative clause.
+    #[test]
+    fn that_didnt_attack_with_trailing_words_does_not_match() {
+        assert!(parse_that_clause_suffix(" that didn't attack a player", None).is_none());
+    }
+
+    /// The Fifth Doctor end-to-end: the mass-target type phrase (the "each"
+    /// quantifier is stripped upstream before `parse_type_phrase` is reached)
+    /// must carry both negated props alongside the controller scope, so the
+    /// counter (and the chained TrackedSet untap) follow only the qualifying
+    /// subset.
+    #[test]
+    fn creature_you_control_that_didnt_attack_or_enter_full_phrase() {
+        let (filter, rest) =
+            parse_type_phrase("creature you control that didn't attack or enter this turn");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }),
+            "must exclude attackers, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::EnteredThisTurn),
+            }),
+            "must exclude this-turn entrants, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Angel's Trumpet end-to-end: a negated verb clause that FOLLOWS a
+    /// controller clause ("untapped creatures that player controls that didn't
+    /// attack this turn") must still attach. The controller clause is consumed
+    /// first, then the trailing relative clause is re-parsed — so `Untapped`
+    /// (from "untapped creatures"), the `ScopedPlayer` controller, AND
+    /// `Not(AttackedThisTurn)` all land together.
+    #[test]
+    fn untapped_creatures_that_player_controls_that_didnt_attack_full_phrase() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..ParseContext::default()
+        };
+        let (filter, rest) = parse_type_phrase_with_ctx(
+            "untapped creatures that player controls that didn't attack this turn",
+            &mut ctx,
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::ScopedPlayer));
+        assert!(
+            tf.properties.contains(&FilterProp::Untapped),
+            "must keep the untapped restriction, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }),
+            "trailing negated clause must attach after the controller clause, got {:?}",
             tf.properties
         );
     }

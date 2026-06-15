@@ -3171,6 +3171,8 @@ fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
         | FilterProp::PowerGTSource
         | FilterProp::ToughnessGTPower => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
+        // CR 608.2c: Negation reads the inner prop's stats — recurse (mirrors AnyOf).
+        FilterProp::Not { prop } => filter_prop_references_pt_stat(prop),
         _ => false,
     }
 }
