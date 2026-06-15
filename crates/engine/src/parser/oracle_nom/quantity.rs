@@ -488,7 +488,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_the_number_of,
         parse_the_total_mana_value,
         parse_distinct_card_types_exiled_with_source,
-        parse_linked_exile_mana_value_ref,
+        // Group mana-value aggregate parsers to reduce alt arity
+        alt((
+            parse_linked_exile_mana_value_ref,
+            parse_commander_mana_value_ref,
+        )),
         parse_distinct_card_types_in_zone,
         parse_distinct_card_types_among_objects,
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
@@ -612,6 +616,60 @@ fn parse_linked_exile_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRe
                         },
                     ])),
                 ],
+            },
+        },
+    ))
+}
+
+/// Parse "the [greatest] mana value of a commander you own on the battlefield or in the command zone".
+///
+/// Used for patterns like Stinging Study's "where X is the mana value of a commander you own
+/// on the battlefield or in the command zone" and flashback costs with "where X is the greatest
+/// mana value of a commander you own on the battlefield or in the command zone".
+///
+/// Maps to `QuantityRef::Aggregate` with Max function to handle partner commanders (takes highest MV).
+/// The filter includes IsCommander, Owned{You}, and a zone disjunction (Battlefield OR Command).
+fn parse_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("the greatest "), tag("the "))).parse(input)?;
+    let (rest, _) = tag("mana value of a commander you own ").parse(rest)?;
+    let (rest, _) = tag("on the battlefield or in the command zone").parse(rest)?;
+
+    // Build zone disjunction filter: commanders in battlefield OR command zone
+    let battlefield_filter = TargetFilter::Typed(TypedFilter {
+        controller: None,
+        type_filters: vec![],
+        properties: vec![
+            FilterProp::IsCommander,
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::InZone {
+                zone: Zone::Battlefield,
+            },
+        ],
+    });
+
+    let command_zone_filter = TargetFilter::Typed(TypedFilter {
+        controller: None,
+        type_filters: vec![],
+        properties: vec![
+            FilterProp::IsCommander,
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::InZone {
+                zone: Zone::Command,
+            },
+        ],
+    });
+
+    Ok((
+        rest,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Max,
+            property: ObjectProperty::ManaValue,
+            filter: TargetFilter::Or {
+                filters: vec![battlefield_filter, command_zone_filter],
             },
         },
     ))
@@ -6082,6 +6140,69 @@ mod tests {
                     },
                 }
             );
+        }
+    }
+
+    #[test]
+    fn test_parse_commander_mana_value_ref() {
+        // Test both pattern variants: with and without "greatest"
+        for phrase in [
+            "the mana value of a commander you own on the battlefield or in the command zone",
+            "the greatest mana value of a commander you own on the battlefield or in the command zone",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(rest, "", "phrase should be fully consumed: {phrase}");
+
+            // Verify it produces an Aggregate with Max function
+            let QuantityRef::Aggregate {
+                function,
+                property,
+                filter,
+            } = q
+            else {
+                panic!("Expected Aggregate, got {q:?}");
+            };
+
+            assert_eq!(function, AggregateFunction::Max);
+            assert_eq!(property, ObjectProperty::ManaValue);
+
+            // Verify the filter is an Or disjunction of two zone filters
+            let TargetFilter::Or { filters } = filter else {
+                panic!("Expected Or filter, got {filter:?}");
+            };
+
+            assert_eq!(filters.len(), 2, "Should have exactly 2 zone filters");
+
+            // Verify each filter has IsCommander, Owned{You}, and appropriate zone
+            for (idx, filter) in filters.iter().enumerate() {
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("Filter {idx} should be Typed, got {filter:?}");
+                };
+
+                assert!(
+                    tf.properties.contains(&FilterProp::IsCommander),
+                    "Filter {idx} missing IsCommander"
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Owned {
+                        controller: ControllerRef::You
+                    }),
+                    "Filter {idx} missing Owned{{You}}"
+                );
+
+                // One should be Battlefield, one should be Command
+                let has_battlefield = tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                });
+                let has_command = tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Command,
+                });
+
+                assert!(
+                    has_battlefield || has_command,
+                    "Filter {idx} should have either Battlefield or Command zone"
+                );
+            }
         }
     }
 
