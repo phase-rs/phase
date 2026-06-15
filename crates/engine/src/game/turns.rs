@@ -769,24 +769,34 @@ pub fn execute_untap_with_choices(
         })
         .collect();
 
-    // CR 502.3 + CR 604.1: Also check permanent-sourced CantUntap
-    // statics, including attached-subject restrictions from Auras/enchantments.
+    // CR 502.3 + CR 604.1: Also check permanent-sourced CantUntap statics
+    // (including attached-subject Aura restrictions) AND filter-scoped transient
+    // CantUntap (CR 611.1 — a spell/effect that installs "creatures don't untap
+    // …" by typed/filter target). The `cant_untap_ids` set above only catches
+    // SpecificObject transients; this loop covers the printed-static and
+    // filter-scoped-transient classes so the actual untap agrees with the
+    // cap-prompt group built by `untap_excluded_ids`.
     let intrinsic_cant_untap: HashSet<ObjectId> = state
         .battlefield
         .iter()
         .copied()
         .filter(|id| {
-            state.objects.get(id).is_some_and(|obj| {
-                obj.controller == active
-                    && super::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CantUntap,
-                        &super::static_abilities::StaticCheckContext {
-                            target_id: Some(*id),
-                            ..Default::default()
-                        },
-                    )
-            })
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == active)
+                && (super::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantUntap,
+                    &super::static_abilities::StaticCheckContext {
+                        target_id: Some(*id),
+                        ..Default::default()
+                    },
+                ) || super::static_abilities::transient_grants_static_mode_to_object(
+                    state,
+                    *id,
+                    &StaticMode::CantUntap,
+                ))
         })
         .collect();
 
@@ -1021,18 +1031,33 @@ fn untap_excluded_ids(state: &GameState, player: PlayerId) -> HashSet<ObjectId> 
         })
         .collect();
     for id in state.battlefield.iter().copied() {
-        let intrinsic = state.objects.get(&id).is_some_and(|obj| {
-            obj.controller == player
-                && super::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantUntap,
-                    &super::static_abilities::StaticCheckContext {
-                        target_id: Some(id),
-                        ..Default::default()
-                    },
-                )
-        });
-        if intrinsic {
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if obj.controller != player {
+            continue;
+        }
+        // CR 502.3 + CR 604.1: permanent-sourced printed/static CantUntap
+        // (including attached-subject Aura restrictions).
+        let intrinsic = super::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantUntap,
+            &super::static_abilities::StaticCheckContext {
+                target_id: Some(id),
+                ..Default::default()
+            },
+        );
+        // CR 502.3 + CR 611.1: filter-scoped transient CantUntap (a spell/effect
+        // installing "creatures don't untap …" by typed/filter target rather
+        // than a single SpecificObject). Build for the whole class so any such
+        // affected permanent is removed from the max-untap cap group and math —
+        // the exact-id SpecificObject case is already folded in above.
+        let transient_filtered = super::static_abilities::transient_grants_static_mode_to_object(
+            state,
+            id,
+            &StaticMode::CantUntap,
+        );
+        if intrinsic || transient_filtered {
             excluded.insert(id);
         }
     }
@@ -3843,6 +3868,123 @@ mod tests {
         let mut declined = HashSet::new();
         declined.insert(creature_a);
         assert!(max_untap_subset_prompt(&state, PlayerId(0), &declined).is_none());
+    }
+
+    /// CR 502.3: a max-untap cap ("can't untap more than one creature") bounds
+    /// the untap count from ABOVE only — choosing ZERO is legal. When the active
+    /// player resolves the `ChooseUntapSubset` prompt with an empty selection,
+    /// every member of the over-cap group folds into the skipped set, the whole
+    /// group stays tapped, and the untap step advances cleanly with no residual
+    /// prompt. This is the engine-side guarantee behind the frontend allowing an
+    /// empty `SelectCards { cards: [] }` confirmation.
+    #[test]
+    fn max_untap_empty_subset_leaves_whole_group_tapped() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let smoke = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Smoke".to_string(),
+            Zone::Battlefield,
+        );
+        install_max_untap_one_creature_static(&mut state, smoke);
+
+        let creature_a = create_tapped_creature(&mut state, 2, "Bear A");
+        let creature_b = create_tapped_creature(&mut state, 3, "Bear B");
+
+        // Empty selection: the engine's SelectCards handler folds the entire
+        // prompted group into the skipped set (chosen.len() == 0 <= max). Mirror
+        // that fold here — nothing was chosen, so both group members stay tapped.
+        let mut skipped = HashSet::new();
+        skipped.insert(creature_a);
+        skipped.insert(creature_b);
+        let resumed = begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), skipped);
+        assert!(
+            resumed.is_none(),
+            "an empty untap subset resolves the step — no further prompt is raised"
+        );
+
+        assert!(
+            state.objects[&creature_a].tapped,
+            "choosing zero leaves the first group member tapped"
+        );
+        assert!(
+            state.objects[&creature_b].tapped,
+            "choosing zero leaves the second group member tapped"
+        );
+    }
+
+    /// CR 502.3 + CR 611.1: a filter-scoped transient `CantUntap` (a spell/effect
+    /// that installs "creatures don't untap …" by typed/filter target rather than
+    /// a single `SpecificObject`) removes every affected permanent from the
+    /// max-untap cap group AND the cap math. Here a creature-wide transient
+    /// CantUntap makes BOTH tapped creatures ineligible, so the eligible group
+    /// drops to zero — under the cap — and no `ChooseUntapSubset` prompt is
+    /// raised. Proves the cap prompt no longer offers a permanent that cannot
+    /// legally untap. Builds for the class (any filter-scoped transient
+    /// CantUntap), not a single card.
+    #[test]
+    fn max_untap_prompt_excludes_filter_scoped_transient_cant_untap() {
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypedFilter};
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let smoke = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Smoke".to_string(),
+            Zone::Battlefield,
+        );
+        install_max_untap_one_creature_static(&mut state, smoke);
+
+        let creature_a = create_tapped_creature(&mut state, 2, "Bear A");
+        let creature_b = create_tapped_creature(&mut state, 3, "Bear B");
+
+        // Without the transient effect, the over-cap group offers both creatures.
+        let (group, _max) = max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new())
+            .expect("two over a cap of one must prompt before the transient effect");
+        assert_eq!(group.len(), 2);
+
+        // Install a filter-scoped transient CantUntap on ALL creatures (a typed
+        // filter target, not SpecificObject). Source is the smoke permanent.
+        let source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Frost Lattice".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantUntap,
+            }],
+            None,
+        );
+
+        // Both creatures are now ineligible to untap, so the eligible group is
+        // empty — at/under the cap — and no subset prompt is raised.
+        assert!(
+            max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new()).is_none(),
+            "filter-scoped transient CantUntap removes affected permanents from the cap group"
+        );
+        assert!(
+            untap_excluded_ids(&state, PlayerId(0))
+                .is_superset(&[creature_a, creature_b].into_iter().collect()),
+            "both creatures are excluded by the filter-scoped transient CantUntap"
+        );
+
+        // And the real untap step keeps both tapped (cap prompt and untap agree).
+        execute_untap(&mut state, &mut Vec::new());
+        assert!(state.objects[&creature_a].tapped);
+        assert!(state.objects[&creature_b].tapped);
     }
 
     #[test]

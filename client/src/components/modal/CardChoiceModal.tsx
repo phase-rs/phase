@@ -18,6 +18,7 @@ import type {
   ObjectId,
   OutsideGameChoiceEntry,
   OutsideGameSelection,
+  PlayerId,
   TargetFilter,
   WaitingFor,
   Zone,
@@ -1305,9 +1306,11 @@ function ChooseUntapSubsetModal({
       title={t("cardChoice.untapSubset.title")}
       subtitle={t("cardChoice.untapSubset.subtitle", { count: data.max })}
       footer={
+        // CR 502.3: a max-untap cap ("can't untap more than one <type>") bounds
+        // the untap count from above only — choosing zero is legal (the whole
+        // group simply stays tapped). Never force an at-least-one selection here.
         <ConfirmButton
           onClick={handleConfirm}
-          disabled={selected.size === 0}
           label={t("cardChoice.buttons.labelCount", {
             label: t("gamePage.untap.untap"),
             selected: selected.size,
