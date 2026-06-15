@@ -2861,35 +2861,21 @@ fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, Qua
     Ok((rest, creatures_died_this_turn_ref(controller)))
 }
 
-/// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" → `TargetFilter`.
+/// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" -> `TargetFilter`.
 /// Shared inner combinator for both `parse_number_of_sacrificed_this_turn` and
-/// `parse_for_each_sacrificed_this_turn`. `take_until(" you")` is safe here
-/// because MTG type-phrase tokens are proper nouns that never contain " you"
-/// as a substring (card names are normalized to `~` before parsing).
+/// `parse_for_each_sacrificed_this_turn`.
 fn parse_sacrificed_this_turn_filter(input: &str) -> OracleResult<'_, TargetFilter> {
     // CR 701.21a: sacrifice moves the permanent directly to its owner's graveyard
     // (not destroyed — bypasses indestructible and regeneration).
-    let (suffix_rest, type_text) = take_until(" you").parse(input)?;
-    let (rest, _) =
-        (tag(" you"), opt(tag("'ve")), tag(" sacrificed this turn")).parse(suffix_rest)?;
-    let type_trimmed = type_text.trim();
-    // Fast-path: "permanents" / "permanent" → canonical Permanent supertype filter.
-    if type_trimmed == "permanents" || type_trimmed == "permanent" {
-        return Ok((
-            rest,
-            TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Permanent],
-                ..Default::default()
-            }),
-        ));
-    }
-    let (filter, leftover) = parse_type_phrase(type_trimmed);
-    if !leftover.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+    let (filter, rest) = parse_type_phrase(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
+
+    let (rest, _) = (tag(" you"), opt(tag("'ve")), tag(" sacrificed this turn")).parse(rest)?;
     Ok((rest, filter))
 }
 
