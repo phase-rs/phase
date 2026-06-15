@@ -218,10 +218,11 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    if nom_primitives::scan_contains(&norm_lower, "enchanted land would be destroyed") {
-        if let Some(def) = parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &text) {
-            return Some(def);
-        }
+    // --- "If enchanted land would be destroyed, instead {effect}" ---
+    if let Some(def) =
+        parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &normalized, &text)
+    {
+        return Some(def);
     }
 
     // --- "If ~ would die, {effect}" ---
@@ -757,6 +758,32 @@ fn parse_self_enters_pay_cost_replacement(
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+/// CR 614.1a: "instead" marks the enchanted-land destruction event as replaced
+/// by the parsed sacrifice/grant effect chain.
+fn parse_enchanted_land_destroy_sacrifice_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), rest) = nom_on_lower(normalized, norm_lower, |i| {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, _) = tag("enchanted land").parse(i)?;
+        let (i, _) = tag(" would be destroyed, ").parse(i)?;
+        let (i, _) = tag("instead ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let effect_text = rest.trim_end_matches('.');
+    if effect_text.is_empty() {
+        return None;
+    }
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::AttachedTo)
+            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .description(original_text.to_string()),
+    )
 }
 
 /// CR 705.1 + CR 614.1a: Krark's Thumb — "If you would flip a coin, instead flip
@@ -5096,27 +5123,6 @@ fn token_description_to_spec(
 /// can't put a negative number of markers on a permanent — and the
 /// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
 /// CR 107.14 + CR 614.1a: Izzet Generatorium — additional {E} on would-get events.
-/// CR 614.1a: Harmonious Emergence destroy → sacrifice aura + indestructible until EOT.
-fn parse_enchanted_land_destroy_sacrifice_replacement(
-    norm_lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("if enchanted land would be destroyed, ")
-        .parse(norm_lower)
-        .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("instead ").parse(rest).ok()?;
-    let effect_text = rest.trim_end_matches('.');
-    if effect_text.is_empty() {
-        return None;
-    }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Destroy)
-            .valid_card(TargetFilter::AttachedTo)
-            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
-            .description(original_text.to_string()),
-    )
-}
-
 fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     all_consuming(value(
         (),
@@ -11973,6 +11979,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_enchanted_land_destroy_sacrifice_indestructible() {
+        let def = parse_replacement_line(
+            "If enchanted land would be destroyed, instead sacrifice ~ and that land gains indestructible until end of turn.",
+            "Harmonious Emergence",
+        )
+        .expect("enchanted land destroy");
+
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+
+        let execute = def.execute.as_ref().expect("replacement execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+
+        let grant = execute.sub_ability.as_ref().expect("indestructible grant");
+        match &*grant.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            } => {
+                assert!(static_abilities.iter().any(|static_ability| {
+                    static_ability.affected == Some(TargetFilter::ParentTarget)
+                        && static_ability.modifications.contains(
+                            &ContinuousModification::AddKeyword {
+                                keyword: Keyword::Indestructible,
+                            },
+                        )
+                }));
+            }
+            other => panic!("expected indestructible grant to enchanted land, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_generic_additional_food_token_replacement() {
         let def = parse_replacement_line(
             "If you would create one or more tokens, instead create those tokens plus an additional Food token.",
@@ -12031,18 +12077,6 @@ mod tests {
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
-
-    #[test]
-    fn parses_enchanted_land_destroy_sacrifice_indestructible() {
-        let def = parse_replacement_line(
-            "If enchanted land would be destroyed, instead sacrifice ~ and that land gains indestructible until end of turn.",
-            "Harmonious Emergence",
-        )
-        .expect("enchanted land destroy");
-        assert_eq!(def.event, ReplacementEvent::Destroy);
-        assert!(def.execute.is_some());
-    }
-
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
