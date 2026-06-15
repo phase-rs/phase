@@ -17,7 +17,7 @@ use crate::types::ability::{
     TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -660,10 +660,26 @@ fn parse_graveyard_keyword_continuation(
             if !continuation_fully_consumed(rest) {
                 return None;
             }
-            Some(Keyword::Escape {
-                cost: ManaCost::SelfManaCost,
-                exile_count,
-            })
+            // CR 702.138a: The granted escape cost is "[card's mana cost] plus
+            // exile N other cards from your graveyard". Build the compound
+            // `EscapeCost::NonMana(Composite[Mana(SelfManaCost), Exile{N,gy}])`
+            // so the runtime split (`split_escape_cost_components`) extracts the
+            // mana sub-cost for normal payment and routes the exile residual
+            // through `pay_additional_cost`.
+            Some(Keyword::Escape(EscapeCost::NonMana(
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::SelfManaCost,
+                        },
+                        AbilityCost::Exile {
+                            count: exile_count,
+                            zone: Some(Zone::Graveyard),
+                            filter: None,
+                        },
+                    ],
+                },
+            )))
         }
         GraveyardGrantedKeywordKind::Mayhem => {
             // CR 702.187b: "The mayhem cost is equal to [its/that card's/the
@@ -4964,6 +4980,56 @@ mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::CountScope;
+
+    /// Test helper: pull the graveyard-exile sub-cost count out of a compound
+    /// `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{count,...}]))`.
+    /// Asserts exactly one `Exile` sub-cost is present and returns its count.
+    fn escape_graveyard_exile_count(kw: &Keyword) -> u32 {
+        let Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected compound escape cost, got {kw:?}");
+        };
+        let exiles: Vec<u32> = costs
+            .iter()
+            .filter_map(|c| match c {
+                AbilityCost::Exile { count, .. } => Some(*count),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exiles.len(), 1, "expected one Exile sub-cost: {costs:?}");
+        exiles[0]
+    }
+
+    /// Test helper: pull the mana sub-cost out of a compound escape cost.
+    fn escape_mana_cost(kw: &Keyword) -> ManaCost {
+        let Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected compound escape cost, got {kw:?}");
+        };
+        costs
+            .iter()
+            .find_map(|c| match c {
+                AbilityCost::Mana { cost } => Some(cost.clone()),
+                _ => None,
+            })
+            .expect("compound escape cost must contain a mana sub-cost")
+    }
+
+    /// Test helper: the granted-escape `EscapeCost` (card's mana cost plus exile
+    /// N other cards from your graveyard) produced by the "The escape cost is
+    /// equal to ... plus exile N other cards" continuation.
+    fn granted_escape_cost(exile_count: u32) -> Keyword {
+        Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCost,
+                },
+                AbilityCost::Exile {
+                    count: exile_count,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        }))
+    }
 
     /// CR 601.2c (#2344): a single "target opponent" governs the whole verb list
     /// ("sacrifices …, discards …, and loses 3 life") — the player is chosen once
@@ -12343,15 +12409,13 @@ mod tests {
         let escape_kw = r
             .extracted_keywords
             .iter()
-            .find(|k| matches!(k, Keyword::Escape { .. }));
+            .find(|k| matches!(k, Keyword::Escape(_)));
         assert!(escape_kw.is_some(), "Escape keyword should be extracted");
-        match escape_kw.unwrap() {
-            Keyword::Escape { cost, exile_count } => {
-                assert_eq!(*exile_count, 2);
-                assert!(matches!(cost, ManaCost::Cost { generic: 0, shards } if shards.len() == 1));
-            }
-            _ => unreachable!(),
-        }
+        let kw = escape_kw.unwrap();
+        assert_eq!(escape_graveyard_exile_count(kw), 2);
+        assert!(
+            matches!(escape_mana_cost(kw), ManaCost::Cost { generic: 0, shards } if shards.len() == 1)
+        );
         // No Unimplemented abilities for the escape line
         assert!(
             !r.abilities
@@ -12374,15 +12438,13 @@ mod tests {
         let escape_kw = r
             .extracted_keywords
             .iter()
-            .find(|k| matches!(k, Keyword::Escape { .. }));
+            .find(|k| matches!(k, Keyword::Escape(_)));
         assert!(escape_kw.is_some());
-        match escape_kw.unwrap() {
-            Keyword::Escape { cost, exile_count } => {
-                assert_eq!(*exile_count, 5);
-                assert!(matches!(cost, ManaCost::Cost { generic: 3, shards } if shards.len() == 2));
-            }
-            _ => unreachable!(),
-        }
+        let kw = escape_kw.unwrap();
+        assert_eq!(escape_graveyard_exile_count(kw), 5);
+        assert!(
+            matches!(escape_mana_cost(kw), ManaCost::Cost { generic: 3, shards } if shards.len() == 2)
+        );
     }
 
     #[test]
@@ -12395,15 +12457,75 @@ mod tests {
             &["Creature"],
             &[],
         );
-        match r
+        let kw = r
             .extracted_keywords
             .iter()
-            .find(|k| matches!(k, Keyword::Escape { .. }))
-            .unwrap()
-        {
-            Keyword::Escape { exile_count, .. } => assert_eq!(*exile_count, 8),
-            _ => unreachable!(),
-        }
+            .find(|k| matches!(k, Keyword::Escape(_)))
+            .unwrap();
+        assert_eq!(escape_graveyard_exile_count(kw), 8);
+    }
+
+    /// CR 702.138a regression (WHO cluster #9 — Lunar Hatchling): a multi-clause
+    /// escape additional cost must compose ALL exile clauses, not just the first.
+    /// "Escape—{4}{G}{U}, Exile a land you control, Exile five other cards from
+    /// your graveyard" parses to a Composite of the mana sub-cost plus BOTH exile
+    /// sub-costs: the count-1 "land you control" battlefield clause (zone: None,
+    /// land-permanent filter) and the count-5 graveyard clause. Neither sub-cost
+    /// may be Unimplemented.
+    #[test]
+    fn parse_escape_lunar_hatchling_multi_clause_cost() {
+        let r = parse(
+            "Escape\u{2014}{4}{G}{U}, Exile a land you control, Exile five other cards from your graveyard. (You may cast this card from your graveyard for its escape cost.)",
+            "Lunar Hatchling",
+            &[],
+            &["Creature"],
+            &["Alien", "Beast"],
+        );
+        let kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::Escape(_)))
+            .expect("Escape keyword should be extracted");
+        let Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected compound escape cost, got {kw:?}");
+        };
+        // No sub-cost may be Unimplemented.
+        assert!(
+            !costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Unimplemented { .. })),
+            "escape cost has Unimplemented sub-cost: {costs:?}"
+        );
+        // Mana sub-cost: {4}{G}{U}.
+        assert_eq!(
+            escape_mana_cost(kw).mana_value(),
+            6,
+            "mana sub-cost: {costs:?}"
+        );
+        // Two exile sub-costs: a count-1 battlefield "land you control" clause
+        // (zone None, land-permanent filter) and a count-5 graveyard clause.
+        let exiles: Vec<(&u32, &Option<crate::types::zones::Zone>)> = costs
+            .iter()
+            .filter_map(|c| match c {
+                AbilityCost::Exile { count, zone, .. } => Some((count, zone)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exiles.len(), 2, "expected two exile sub-costs: {costs:?}");
+        // The land clause is count 1 with no explicit zone (battlefield-implying
+        // filter resolves to battlefield at runtime); the graveyard clause is
+        // count 5 from the graveyard.
+        let land_clause = exiles
+            .iter()
+            .find(|(c, z)| **c == 1 && z.is_none())
+            .unwrap_or_else(|| panic!("missing count-1 battlefield land clause: {costs:?}"));
+        let _ = land_clause;
+        assert!(
+            exiles
+                .iter()
+                .any(|(c, z)| **c == 5 && **z == Some(crate::types::zones::Zone::Graveyard)),
+            "missing count-5 graveyard clause: {costs:?}"
+        );
     }
 
     #[test]
@@ -13974,10 +14096,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Escape {
-                        cost: ManaCost::SelfManaCost,
-                        exile_count: 3,
-                    },
+                    keyword: granted_escape_cost(3),
                 }),
             "missing escape grant: {:?}",
             static_def.modifications
@@ -13999,10 +14118,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Escape {
-                        cost: ManaCost::SelfManaCost,
-                        exile_count: 3,
-                    },
+                    keyword: granted_escape_cost(3),
                 })
         }));
     }
@@ -14185,10 +14301,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Escape {
-                        cost: ManaCost::SelfManaCost,
-                        exile_count: 3,
-                    },
+                    keyword: granted_escape_cost(3),
                 }),
             "missing escape grant: {:?}",
             static_def.modifications
@@ -14202,13 +14315,7 @@ mod tests {
             GraveyardGrantedKeywordKind::Escape,
         )
         .expect("continuation should parse");
-        assert_eq!(
-            keyword,
-            Keyword::Escape {
-                cost: ManaCost::SelfManaCost,
-                exile_count: 3,
-            }
-        );
+        assert_eq!(keyword, granted_escape_cost(3));
     }
 
     #[test]

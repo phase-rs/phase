@@ -175,7 +175,9 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // a parent target. Placed after longer "that ..." phrases so
             // longest-match-first dispatch is preserved.
             value(TargetFilter::TriggeringSource, tag("that creature")),
-            // CR 506.3d: "defending player" — the player being attacked.
+            // CR 508.5 / CR 508.5a: "defending player" — the player (or the
+            // protector of the battle / controller of the planeswalker) that the
+            // attacking creature is attacking.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
         ))
         .parse(input)
@@ -8902,6 +8904,73 @@ mod tests {
                     ),
                     "leg 2 = modified creatures you control"
                 );
+            }
+            other => panic!("Expected Or filter, got {other:?}"),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    // CR 508.5 / CR 508.5a: the "defending player controls" controller suffix
+    // scopes attack-trigger targets to the defending player (Kogla, The
+    // Tarrasque, ~42 cards). These tests pin the class-level combinator
+    // behavior across the bug-card path: the high-level controller-suffix
+    // delegate, the end-to-end target verb path, and Or-target propagation.
+
+    // High-level `parse_controller_suffix` (the runtime function the bug-card
+    // path relies on). The direct assertion guarantees the `parse_zone_controller`
+    // delegate is actually reached and not shadowed by an earlier past-tense or
+    // "that player controls" arm.
+    #[test]
+    fn parse_controller_suffix_defending_player() {
+        let ctx = ParseContext::default();
+        let (ctrl, len) = parse_controller_suffix("defending player controls", &ctx)
+            .expect("defending player controls should resolve a controller scope");
+        assert_eq!(ctrl, ControllerRef::DefendingPlayer);
+        assert_eq!(len, "defending player controls".len());
+
+        // Leading whitespace is included in the consumed length (the type-phrase
+        // suffix step passes the post-type-word remainder, which begins with a
+        // space).
+        let (ctrl_ws, len_ws) = parse_controller_suffix(" defending player controls", &ctx)
+            .expect("leading-space variant should resolve");
+        assert_eq!(ctrl_ws, ControllerRef::DefendingPlayer);
+        assert_eq!(len_ws, " defending player controls".len());
+    }
+
+    // End-to-end target verb path: a representative effect phrase parses to a
+    // Typed filter scoped to the defending player. Generic type phrase, not a
+    // card name (The Tarrasque class: "fights target creature defending player
+    // controls").
+    #[test]
+    fn parse_target_defending_player_controls_single_type() {
+        let (f, rest) = parse_target("target creature defending player controls");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // Or-target propagation: an Or-target phrase ending in "defending player
+    // controls" fans the DefendingPlayer scope onto each disjunct via
+    // `distribute_controller_to_or` (Kogla class: "destroy target artifact or
+    // enchantment defending player controls").
+    #[test]
+    fn parse_target_defending_player_controls_or_target() {
+        let (f, rest) = parse_target("target artifact or enchantment defending player controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+                for (i, leg) in filters.iter().enumerate() {
+                    match leg {
+                        TargetFilter::Typed(tf) => assert_eq!(
+                            tf.controller,
+                            Some(ControllerRef::DefendingPlayer),
+                            "leg {i} must inherit the defending-player scope"
+                        ),
+                        other => panic!("leg {i} expected Typed, got {other:?}"),
+                    }
+                }
             }
             other => panic!("Expected Or filter, got {other:?}"),
         }
