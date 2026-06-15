@@ -641,6 +641,33 @@ pub(crate) fn parse_enchanted_is_type(
             }
         }
 
+        // CR 305.7: If the only core type is Land and there's exactly one basic land subtype,
+        // use SetBasicLandType instead of SetCardTypes + AddSubtype to trigger ability removal.
+        if granted_core_types == vec![CoreType::Land] && granted_subtypes.len() == 1 {
+            if let Some(basic_type) = parse_basic_land_type(&granted_subtypes[0].to_lowercase()) {
+                let affected = TargetFilter::Typed(
+                    TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+                );
+                let mut mods = modifications;
+                if let Some(color) = opt_color {
+                    mods.push(ContinuousModification::SetColor {
+                        colors: vec![color],
+                    });
+                } else if is_colorless {
+                    mods.push(ContinuousModification::SetColor { colors: vec![] });
+                }
+                mods.push(ContinuousModification::SetBasicLandType {
+                    land_type: basic_type,
+                });
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(affected)
+                        .modifications(mods)
+                        .description(description.to_string()),
+                );
+            }
+        }
+
         // This branch handles type-*changing* auras that grant at least one
         // core card type ("is an Insect artifact creature ..."). A bare
         // "is a [land subtype]" ("Enchanted land is a Mountain") grants no
