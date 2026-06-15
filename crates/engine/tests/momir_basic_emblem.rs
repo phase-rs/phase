@@ -1,4 +1,4 @@
-//! Momir Basic format integration tests.
+//! Momir's Madness format integration tests.
 //!
 //! These drive the REAL activation + resolution pipeline (`GameAction::
 //! ActivateAbility` -> `ChooseX` -> discard cost -> mana payment -> resolve)
@@ -48,7 +48,7 @@ fn creature_face(name: &str, mana_value: u32) -> CardFace {
     }
 }
 
-/// Build a Momir Basic game state at precombat main with P0 holding priority.
+/// Build a Momir's Madness game state at precombat main with P0 holding priority.
 /// The pool is populated directly (mirroring `rehydrate_card_db_metadata`) so
 /// the test does not depend on the full card database.
 fn momir_state(pool: &[(u32, &str)]) -> (GameState, ObjectId) {
@@ -459,11 +459,11 @@ fn create_token_copy_from_pool_empty_candidates_is_noop() {
     );
 }
 
-/// Format config: Momir Basic is 24 life, 60-card deck, command zone enabled.
+/// Format config: Momir's Madness is 20 life, 60-card deck, command zone enabled.
 #[test]
 fn momir_format_config_values() {
     let config = FormatConfig::momir();
-    assert_eq!(config.starting_life, 24);
+    assert_eq!(config.starting_life, 20);
     assert_eq!(config.deck_size, 60);
     assert!(config.command_zone, "Momir needs the command zone enabled");
     assert!(!config.uses_commander);

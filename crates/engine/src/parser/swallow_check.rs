@@ -4088,6 +4088,94 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
     }
 
+    /// CR 121.3a + CR 506.2 + CR 608.2d: "<actor> may have you draw a card" —
+    /// the named actor decides; the printed controller draws. Covers the
+    /// targeted-opponent actor (Palantír of Orthanc, Bane, Lord of Darkness) and
+    /// the defending-player actor (Shakedown Heavy). The build-for-the-class
+    /// invariants checked here:
+    ///   1. the grant is an `Effect::Draw`, not an Unimplemented "have" static;
+    ///   2. the clause is `optional` (the actor's may-choice);
+    ///   3. the actor is captured as the may-actor `player_scope`;
+    ///   4. "you" is bound to `OriginalController`, so the controller-rebind the
+    ///      `player_scope` fan-out applies (CR 109.5) does not redirect the draw
+    ///      to the actor.
+    fn have_you_draw_grant_trigger(text: &str, name: &str) -> AbilityDefinition {
+        let parsed = parse_named(text, name, &["Creature"]);
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("trigger must parse")
+            .execute
+            .as_deref()
+            .expect("trigger must have an executed ability")
+            .clone();
+        assert!(
+            !def_tree_has_unimplemented(&trigger),
+            "{name}: have-you-draw grant must not be Unimplemented"
+        );
+        trigger
+    }
+
+    #[test]
+    fn defending_player_may_have_you_draw_routes_to_original_controller() {
+        let def = have_you_draw_grant_trigger(
+            "Whenever this creature attacks, defending player may have you draw a card. \
+             If they do, untap this creature and remove it from combat.",
+            "Shakedown Heavy",
+        );
+        assert!(matches!(*def.effect, Effect::Draw { .. }), "must be a Draw");
+        assert!(
+            def.optional,
+            "the defending player's may-choice is optional"
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(crate::types::ability::PlayerFilter::DefendingPlayer),
+            "may-actor must be the defending player",
+        );
+        if let Effect::Draw { ref target, .. } = *def.effect {
+            assert_eq!(
+                *target,
+                TargetFilter::OriginalController,
+                "\"you draw\" must survive the may-actor controller rebind",
+            );
+        }
+    }
+
+    #[test]
+    fn target_opponent_may_have_you_draw_routes_to_original_controller() {
+        let def = have_you_draw_grant_trigger(
+            "At the beginning of your end step, target opponent may have you draw a card. \
+             If they don't, you scry 2.",
+            "Palantir of Orthanc",
+        );
+        assert!(matches!(*def.effect, Effect::Draw { .. }), "must be a Draw");
+        assert!(def.optional, "the opponent's may-choice is optional");
+        assert_eq!(
+            def.player_scope,
+            Some(crate::types::ability::PlayerFilter::Opponent),
+            "may-actor must be the targeted opponent",
+        );
+        if let Effect::Draw { ref target, .. } = *def.effect {
+            assert_eq!(
+                *target,
+                TargetFilter::OriginalController,
+                "\"you draw\" must survive the may-actor controller rebind",
+            );
+        }
+    }
+
+    #[test]
+    fn defending_player_may_have_you_draw_not_swallowed() {
+        let parsed = parse_named(
+            "Whenever this creature attacks, defending player may have you draw a card. \
+             If they do, untap this creature and remove it from combat.",
+            "Shakedown Heavy",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
     #[test]
     fn optional_may_have_channel_harm() {
         let parsed = parse_named(
