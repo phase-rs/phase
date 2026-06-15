@@ -14478,6 +14478,22 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                         player: PlayerScope::ScopedPlayer,
                     }
                 }
+                // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
+                // this turn" under a per-opponent `player_scope` loop binds to the
+                // iterating player, the same rebind the analogous
+                // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
+                // hand". The leaf combinator emits `Target`; this walker (run only
+                // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
+                // purely targeted clause (Blitzwing — no `player_scope`) never
+                // reaches this walker, so its `Target` survives to read the
+                // targeted opponent's own life lost.
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                } => {
+                    *qty = QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                }
                 QuantityRef::TargetZoneCardCount { zone } => match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
@@ -18896,6 +18912,18 @@ fn parse_put_rest_destination(lower: &str) -> Option<Zone> {
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
     // CR 400.7: An object that moves from one zone to another becomes a new
     // object — the "from" prepositional phrase identifies that origin zone.
+    if let Some((zone, _, props)) = super::oracle_target::scan_zone_phrase(lower) {
+        if props.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                }
+            )
+        }) {
+            return Some(zone);
+        }
+    }
     // Adjective-qualified indefinite forms ("a single graveyard", "a random
     // graveyard") share the same semantic origin as bare "a graveyard"; the
     // qualifier constrains *which* instance, not which zone.
@@ -18938,6 +18966,20 @@ fn add_inferred_origin_constraints_to_target(
     let Some(zone) = origin else {
         return target;
     };
+    if let Some((matched_zone, _, props)) = super::oracle_target::scan_zone_phrase(lower) {
+        if matched_zone == zone
+            && props.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    }
+                )
+            })
+        {
+            return add_filter_props(target, &props);
+        }
+    }
     if target.extract_in_zone().is_some() && origin_is_your_zone(lower, zone) {
         return add_filter_props(
             target,
@@ -23370,6 +23412,48 @@ mod tests {
                 }
             ),
             "exile target player's graveyard should be ChangeZoneAll with origin=Graveyard, target=Player, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn suffer_the_past_exiles_from_target_player_graveyard() {
+        let def = parse_effect_chain(
+            "Exile X target cards from target player's graveyard. For each card exiled this way, that player loses 1 life and you gain 1 life.",
+            AbilityKind::Spell,
+        );
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected ChangeZone exile, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *origin,
+            Some(Zone::Graveyard),
+            "must exile from graveyard, not an open-zone pick"
+        );
+        assert_eq!(*destination, Zone::Exile);
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected typed card target, got {target:?}");
+        };
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Card),
+            "Suffer target must remain a card selector, got {typed:?}"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "Suffer target must be constrained to graveyard, got {typed:?}"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::TargetPlayer
+            }),
+            "Suffer target must be constrained to the chosen target player's graveyard, got {typed:?}"
         );
     }
 
@@ -33742,6 +33826,93 @@ mod tests {
                 rounding: RoundingMode::Up,
             },
             "nested each-opponent 'their life' must rebind to ScopedPlayer, got {amount:?}",
+        );
+    }
+
+    /// CR 115.10a + CR 119.3 + CR 608.2c (Wound Reflection / Warlock Class L3):
+    /// "each opponent loses life equal to the life they lost this turn" lifts the
+    /// each-opponent subject onto `player_scope: Opponent` and the third-person
+    /// "they" anaphor must rebind to `ScopedPlayer` so each iterated opponent
+    /// loses its OWN life lost this turn (not the source's controller's). Before
+    /// the fix the leaf emitted `Controller`, draining the controller's count for
+    /// every opponent.
+    #[test]
+    fn each_opponent_loses_life_equal_to_life_they_lost_uses_scoped_player() {
+        let def = parse_effect_chain(
+            "Each opponent loses life equal to the life they lost this turn.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        let Effect::LoseLife { amount, .. } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            "per-opponent 'they lost' must rebind to ScopedPlayer, got {amount:?}",
+        );
+    }
+
+    /// CR 115.10a + CR 119.3 (Archfiend of Despair): the "that player" phrasing of
+    /// the per-opponent anaphor must rebind to `ScopedPlayer` identically to the
+    /// "they" phrasing above.
+    #[test]
+    fn each_opponent_loses_life_equal_to_life_that_player_lost_uses_scoped_player() {
+        let def = parse_effect_chain(
+            "Each opponent loses life equal to the life that player lost this turn.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        let Effect::LoseLife { amount, .. } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            "per-opponent 'that player lost' must rebind to ScopedPlayer, got {amount:?}",
+        );
+    }
+
+    /// CR 115.1 + CR 119.3 (Blitzwing, Cruel Tormentor): a TARGETED clause —
+    /// "target opponent loses life equal to the life that player lost this turn" —
+    /// has no `player_scope`, so the rewrite walker never runs and the leaf's
+    /// `Target` scope survives, reading the targeted opponent's own life lost.
+    #[test]
+    fn target_opponent_loses_life_equal_to_life_that_player_lost_uses_target() {
+        let def = parse_effect_chain(
+            "Target opponent loses life equal to the life that player lost this turn.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope, None,
+            "targeted clause must not carry a per-opponent player_scope",
+        );
+        let Effect::LoseLife { amount, target } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        // The "target opponent" subject yields a real opponent player target
+        // (`Typed { controller: Opponent }`); the precise encoding is incidental —
+        // what matters is the loss is directed at a target, not the controller.
+        assert!(
+            matches!(target, Some(TargetFilter::Player | TargetFilter::Typed(_))),
+            "expected a player target, got {target:?}",
+        );
+        assert_eq!(
+            *amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Target,
+                },
+            },
+            "targeted 'that player lost' must stay Target-scoped, got {amount:?}",
         );
     }
 

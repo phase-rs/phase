@@ -348,12 +348,14 @@ fn parse_life_verb_remainder<'a>(
 /// player the surrounding LoseLife/GainLife affects, so a target opponent loses
 /// life equal to *their own* life lost this turn.
 ///
-/// Kept distinct from the shared `parse_life_lost_ref` "they lost" arms (which
-/// map to `Controller` for the per-iteration rebind of "each opponent" effects
-/// and to which Astarion's phrase never reaches because that combinator's
-/// `opt("the amount of ")` strip makes its "amount of …" tag unreachable). This
-/// recognizer requires the "amount of" gloss, so the article-only each-opponent
-/// phrasing ("the life they lost this turn", Archfiend of Despair) is untouched.
+/// The shared `parse_life_lost_ref` "they lost"/"that player lost" arms now also
+/// emit `PlayerScope::Target` (not `Controller`), so the bare article-only
+/// each-opponent phrasing ("the life they lost this turn", Archfiend of Despair /
+/// Wound Reflection) is `Target`-scoped at the leaf and then rebound to
+/// `ScopedPlayer` by `rewrite_player_scope_refs` under the per-opponent
+/// `player_scope` loop. This recognizer still runs first for the "amount of"
+/// gloss (Astarion), yielding the identical `Target` mapping, so both phrasings
+/// resolve to the affected player's own life lost this turn.
 fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<QuantityExpr> {
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("the "))
         .parse(qty_text)
