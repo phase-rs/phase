@@ -3759,6 +3759,59 @@ fn static_can_attack_despite_defender_self_unconditional() {
 }
 
 #[test]
+fn static_block_shadow_as_though_they_didnt_have_shadow() {
+    // CR 509.1b + CR 702.28b: Heartwood Dryad phrasing. After card-name
+    // normalization the subject is `~`.
+    let def =
+        parse_static_line("~ can block creatures with shadow as though they didn't have shadow.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_block_shadow_as_though_it_had_shadow() {
+    // CR 509.1b + CR 702.28b: Wall of Diffusion phrasing — same block-legality
+    // outcome, different "as though" clause; both map to CanBlockShadow.
+    let def =
+        parse_static_line("~ can block creatures with shadow as though it had shadow.").unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_block_shadow_as_though_keeps_subject_scope() {
+    // CR 509.1b + CR 609.4 + CR 702.28b: subject-scoped as-though permissions
+    // must keep their affected filter; runtime resolves this through
+    // `check_static_ability` against the blocker.
+    let def = parse_static_line(
+        "Creatures you control can block creatures with shadow as though they didn't have shadow.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_block_shadow_does_not_match_plain_shadow_grant() {
+    // Discriminating: a plain shadow keyword grant must NOT parse to CanBlockShadow.
+    let parsed = parse_static_line("~ has shadow.");
+    assert!(
+        !matches!(
+            parsed.as_ref().map(|d| &d.mode),
+            Some(StaticMode::CanBlockShadow)
+        ),
+        "plain shadow grant must not become CanBlockShadow: {parsed:?}"
+    );
+}
+
+#[test]
 fn static_can_attack_despite_defender_self_conditional() {
     // CR 702.3b + CR 611.3a: ~ subject + "as long as" condition
     // (Bristlepack Sentry pattern).

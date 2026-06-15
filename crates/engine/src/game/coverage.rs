@@ -7087,6 +7087,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
             }
+            // CR 509.1b + CR 609.4 + CR 702.28b: both printed phrasings of the
+            // shadow block permission ("as though they didn't have shadow" /
+            // "as though it had shadow"). Anchor on the "block creatures with
+            // shadow" subject so it doesn't false-match other shadow lines.
+            StaticMode::CanBlockShadow => {
+                effective_lower.contains("can block creatures with shadow")
+                    && effective_lower.contains("as though")
+            }
             // CR 614.1b + CR 614.10: "Skip your [step] step" is a
             // step-specific replacement effect, so coverage must match the
             // parsed `Phase` rather than any syntactically similar skip line.
@@ -7121,6 +7129,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                             && effective_lower.contains(&kw)
                     }
                     StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
+                    // CR 509.1b + CR 609.4 + CR 702.28b: mirror predicate for the
+                    // shadow block permission nested under a GenericEffect.
+                    StaticMode::CanBlockShadow => {
+                        effective_lower.contains("can block creatures with shadow")
+                            && effective_lower.contains("as though")
+                    }
                     _ => false,
                 })
             } else {

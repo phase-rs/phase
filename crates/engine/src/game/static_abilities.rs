@@ -245,6 +245,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
         StaticMode::CanActivateAbilitiesAsThoughHaste,
         handle_rule_mod,
     );
+    // CR 509.1b + CR 609.4 + CR 702.28b: CanBlockShadow — per-source permission to
+    // block shadow attackers despite not having shadow (Heartwood Dryad, Wall of
+    // Diffusion). Runtime enforcement is in combat.rs via `can_block_shadow_attacker`,
+    // consulted by both validate_blockers_for_player and can_block_pair.
+    registry.insert(StaticMode::CanBlockShadow, handle_rule_mod);
     // CR 510.1a: AssignNoCombatDamage — creature assigns no combat damage.
     // Runtime enforcement is in combat_damage.rs::combat_damage_amount().
     registry.insert(StaticMode::AssignNoCombatDamage, handle_rule_mod);
