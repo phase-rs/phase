@@ -103,6 +103,10 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
             // applicability as `RemoveKeyword` — the granted/printed keyword
             // it targets may live on an object outside the battlefield.
             | ContinuousModification::RemoveChosenKeyword
+            // CR 608.2d + CR 613.1f: `AddChosenKeyword` grants the keyword
+            // stored in the source's `chosen_attributes`. Same off-zone
+            // applicability as `AddKeyword`.
+            | ContinuousModification::AddChosenKeyword
     )
 }
 
@@ -140,6 +144,19 @@ fn apply_keyword_modification(
                 .and_then(|src| src.chosen_keyword())
             {
                 keywords.retain(|existing| existing != kw);
+            }
+        }
+        // CR 608.2d + CR 613.1f: Grant the *exact* keyword chosen at
+        // resolution time — the additive mirror of `RemoveChosenKeyword`,
+        // matching the `AddKeyword` upsert semantics above. No-op when the
+        // source has no stored chosen keyword.
+        ContinuousModification::AddChosenKeyword => {
+            if let Some(kw) = state
+                .objects
+                .get(&effect.source_id)
+                .and_then(|src| src.chosen_keyword())
+            {
+                upsert_keyword(keywords, kw.clone());
             }
         }
         _ => {}
