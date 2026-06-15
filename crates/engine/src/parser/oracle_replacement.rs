@@ -460,6 +460,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if let Some(def) = parse_xorn_subtype_token_replacement(&lower, &text) {
             return Some(def);
         }
+        if let Some(def) = parse_generic_additional_token_replacement(&lower, &text) {
+            return Some(def);
+        }
     }
 
     // CR 614.1a + CR 111.1: Manufactor-class ensure-all token replacement —
@@ -4829,48 +4832,7 @@ fn parse_xorn_subtype_token_replacement(
         return None;
     }
 
-    // Extract the additional-token descriptor after
-    // "instead create those tokens plus [an additional ]?", up to a
-    // terminating comma or "." Track the post-strip position via input length.
-    let total_len = lower.len();
-    let ((desc_start, desc_len, needs_article), _) = nom_on_lower(lower, lower, |i| {
-        let (i, _) =
-            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
-        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
-        // Strip the "additional " modifier (with its optional leading article)
-        // so parse_token_description sees the canonical token tail. Factor as
-        // (opt article) + required "additional " to avoid the cartesian-product
-        // expansion of {a_, an_, ε} × additional_.
-        let (i, _) = opt(value(
-            (),
-            preceded(opt(alt((tag("a "), tag("an ")))), tag("additional ")),
-        ))
-        .parse(i)?;
-        let start_offset = total_len - i.len();
-        let (i, article) =
-            peek(opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))).parse(i)?;
-        let needs_article = article.is_none();
-        let (i, descriptor) = alt((
-            take_until::<_, _, OracleError<'_>>("."),
-            nom::combinator::rest,
-        ))
-        .parse(i)?;
-        Ok((i, (start_offset, descriptor.len(), needs_article)))
-    })?;
-
-    let descriptor_raw = lower.get(desc_start..desc_start + desc_len)?.trim();
-    // CR 111.1: parse_token_description's count-prefix requirement
-    // (parser/oracle_effect/token.rs:169-175) needs an article or numeric
-    // count. Re-add "a " when the modifier strip above consumed the article.
-    let descriptor_owned;
-    let descriptor: &str = if needs_article {
-        descriptor_owned = format!("a {descriptor_raw}");
-        &descriptor_owned
-    } else {
-        descriptor_raw
-    };
-    let token = super::oracle_effect::parse_token_description(descriptor)?;
-    let spec = token_description_to_spec(&token)?;
+    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
 
     // Capitalize the subtype to match the parser's existing convention
     // (TokenSpec.subtypes uses title-case: "Treasure", not "treasure").
@@ -4888,6 +4850,54 @@ fn parse_xorn_subtype_token_replacement(
             .additional_token_spec(spec)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 614.1a + CR 111.1: Tippy-Toe class — generic additional token without subtype gate.
+fn parse_generic_additional_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "would create one or more tokens") {
+        return None;
+    }
+    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            // CR 614.1a + CR 109.5: "If you would create..." scopes this
+            // replacement to the source's controller, without Xorn's subtype gate.
+            .token_owner_scope(ControllerRef::You)
+            .additional_token_spec(spec)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a + CR 111.1: Extract the appended token spec from the
+/// "instead create those tokens plus ..." wording shared by Xorn- and
+/// Tippy-Toe-class replacement effects.
+fn parse_instead_create_those_tokens_plus_spec(
+    lower: &str,
+) -> Option<crate::types::proposed_event::TokenSpec> {
+    let total_len = lower.len();
+    let ((descriptor_start, descriptor_len), _) = nom_on_lower(lower, lower, |i| {
+        let (i, _) =
+            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
+        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
+        let start_offset = total_len - i.len();
+        let (i, descriptor) = alt((
+            take_until::<_, _, OracleError<'_>>("."),
+            nom::combinator::rest,
+        ))
+        .parse(i)?;
+        Ok((i, (start_offset, descriptor.len())))
+    })?;
+
+    let descriptor = lower
+        .get(descriptor_start..descriptor_start + descriptor_len)?
+        .trim();
+    let descriptor = normalize_additional_token_descriptor(descriptor)?;
+    let token = super::oracle_effect::parse_token_description(&descriptor)?;
+    token_description_to_spec(&token)
 }
 
 /// Title-case a single-word subtype string for canonical TokenSpec storage.
@@ -11933,6 +11943,30 @@ mod tests {
             scan_damage_modification("it deals that much damage minus 1 instead"),
             Some(DamageModification::Minus { value: 1 })
         );
+    }
+
+    #[test]
+    fn parses_generic_additional_food_token_replacement() {
+        let def = parse_replacement_line(
+            "If you would create one or more tokens, instead create those tokens plus an additional Food token.",
+            "Tippy-Toe, Terrific Partner",
+        )
+        .expect("generic additional token");
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+        assert!(
+            def.condition.is_none(),
+            "generic token wording must not inherit Xorn's subtype gate"
+        );
+        let spec = def
+            .additional_token_spec
+            .as_ref()
+            .expect("additional Food token spec");
+        assert_eq!(spec.characteristics.display_name, "Food");
+        assert_eq!(spec.characteristics.core_types, vec![CoreType::Artifact]);
+        assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);
+        assert_eq!(spec.characteristics.power, None);
+        assert_eq!(spec.characteristics.toughness, None);
     }
 
     #[test]
