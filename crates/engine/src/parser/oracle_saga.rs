@@ -632,9 +632,7 @@ mod tests {
     /// lower to PutCounterAll scoped to other Moogles you control.
     #[test]
     fn good_king_mog_chapter_four_counters_other_moogles_issue_588() {
-        use crate::types::ability::{
-            ControllerRef, FilterProp, QuantityExpr, TypeFilter,
-        };
+        use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TypeFilter};
         use crate::types::counter::CounterType;
 
         let lines = vec!["IV — Put two +1/+1 counters on each other Moogle you control."];
