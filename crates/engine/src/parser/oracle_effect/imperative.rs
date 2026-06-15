@@ -1523,11 +1523,17 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("fight ")).parse(input))
     {
-        let (target_text, _) = super::strip_optional_target_prefix(rest);
+        // CR 115.6: "fights up to one target creature …" allows zero targets.
+        // Preserve the optional-target spec through the AST; it is stamped onto
+        // the clause in `lower_imperative_family_ast`.
+        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::Fight { target });
+        return Some(TargetedImperativeAst::Fight {
+            target,
+            multi_target,
+        });
     }
     // CR 722.1: "You control target player during that player's next turn"
     // (Mindslaver). Declarative form — "you" is not stripped as an imperative
@@ -1756,7 +1762,14 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 random_order: false,
             }
         }
-        TargetedImperativeAst::Fight { target } => Effect::Fight {
+        // CR 115.6: the "up to N" target cardinality is an ability-level field
+        // (`ParsedEffectClause.multi_target`), not an `Effect::Fight` field. It is
+        // recovered at the clause layer in `lower_imperative_family_ast`; this
+        // bare-Effect lowering deliberately ignores `multi_target`.
+        TargetedImperativeAst::Fight {
+            target,
+            multi_target: _,
+        } => Effect::Fight {
             target,
             subject: TargetFilter::SelfRef,
         },
@@ -7642,6 +7655,30 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.optional = true;
             clause
         }
+        // CR 115.6: "it fights up to one target creature …" allows zero targets.
+        // The "up to N" cardinality is an ability-level field
+        // (`ParsedEffectClause.multi_target` → `AbilityDefinition.multi_target`
+        // with min=0 via `lower.rs`), not an `Effect::Fight` field. The
+        // bare-Effect lowering chain (`lower_targeted_action_ast`) cannot carry
+        // it, so intercept here where a `ParsedEffectClause` is in scope and
+        // stamp the spec onto the clause — mirroring the `YouMay` /
+        // `PutCounterList` clause-field interception arms above and the
+        // subject-form "up to" path in `subject.rs`. `None` (mandatory "fights
+        // target …") leaves the clause unchanged.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            TargetedImperativeAst::Fight {
+                target,
+                multi_target,
+            },
+        )) => {
+            let mut clause =
+                parsed_clause(lower_targeted_action_ast(TargetedImperativeAst::Fight {
+                    target,
+                    multi_target: multi_target.clone(),
+                }));
+            clause.multi_target = multi_target;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -10864,6 +10901,47 @@ mod tests {
             );
         }
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+    }
+
+    /// CR 115.6: "it fights up to one target creature …" allows zero targets.
+    /// The optional-target cardinality must survive the full effect → clause →
+    /// `AbilityDefinition` lowering as `AbilityDefinition.multi_target` with
+    /// min=0 (`up_to(1)`), since the bare-`Effect::Fight` lowering cannot carry
+    /// it. Building-block test across the optionality axis: "up to one" →
+    /// `up_to(1)`, mandatory → `None`.
+    #[test]
+    fn lower_fight_up_to_one_target_carries_multi_target() {
+        let def = super::super::parse_effect_chain(
+            "it fights up to one target creature defending player controls",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Fight { .. }),
+            "Expected Effect::Fight, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "fight 'up to one target' must carry up_to(1) (min=0)"
+        );
+    }
+
+    /// CR 701.14a: the mandatory "fights target creature" form (no "up to")
+    /// carries NO multi_target — the target is required. Pins the other end of
+    /// the optionality axis so the recovery does not over-apply.
+    #[test]
+    fn lower_fight_mandatory_target_no_multi_target() {
+        let def = super::super::parse_effect_chain("it fights target creature", AbilityKind::Spell);
+        assert!(
+            matches!(*def.effect, Effect::Fight { .. }),
+            "Expected Effect::Fight, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target, None,
+            "mandatory fight target must not be optional"
+        );
     }
 
     #[test]

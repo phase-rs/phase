@@ -8450,9 +8450,17 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        // CR 115.6: preserve "up to N target …" optionality through the AST so
+        // the compound-splitter path lowers it onto the clause's multi_target.
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
-        return Some((TargetedImperativeAst::Fight { target }, rem));
+        return Some((
+            TargetedImperativeAst::Fight {
+                target,
+                multi_target,
+            },
+            rem,
+        ));
     }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
@@ -34883,6 +34891,21 @@ mod tests {
             strip_optional_target_prefix("up to one other target creature or spell");
         assert_eq!(rest, "other target creature or spell");
         assert_eq!(multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    }
+
+    /// CR 115.6: "up to one target creature defending player controls" (Ace,
+    /// Fearless Rebel's Fight leg) must strip to the bare target text and yield
+    /// `up_to(1)` (min=0). Pins the Fight-suffix variant of the optional-target
+    /// combinator.
+    #[test]
+    fn strip_optional_target_prefix_up_to_one_defending_player_controls() {
+        let (rest, multi_target) =
+            strip_optional_target_prefix("up to one target creature defending player controls");
+        assert_eq!(rest, "target creature defending player controls");
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]
