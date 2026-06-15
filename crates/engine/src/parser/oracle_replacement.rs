@@ -540,6 +540,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if nom_primitives::scan_contains(&lower, "would explore")
+        && nom_primitives::scan_contains(&lower, "instead")
+    {
+        if let Some(def) = parse_explore_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+    }
+
     // --- Life-floor damage replacement: "if you control a [filter], damage that would
     // reduce your life total to less than N reduces it to N instead" ---
     // CR 614.1a: Worship-class replacement effect.
@@ -6282,6 +6290,35 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
 ///
 /// Identical to [`parse_life_floor_damage_replacement`] but without the Worship-class
 /// "if you control a [filter]," guard. Dispatched after the conditional arm.
+/// CR 614.1a + CR 701.20: Explore replacement with scry prelude (Twists and Turns).
+fn parse_explore_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if a creature you control would explore, ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("instead you scry 1, then that creature explores")
+        .parse(rest)
+        .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    let scry = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Explore)
+            .execute(scry.sub_ability(explore))
+            .description(original_text.to_string()),
+    )
+}
+
 fn parse_unconditional_life_floor_damage_replacement(
     norm_lower: &str,
 ) -> Option<ReplacementDefinition> {
@@ -12004,6 +12041,17 @@ mod tests {
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
+
+    #[test]
+    fn parses_explore_replacement_with_scry() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead you scry 1, then that creature explores.",
+            "Twists and Turns",
+        )
+        .expect("explore replacement");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+    }
+
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
