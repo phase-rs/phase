@@ -622,13 +622,23 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
 /// CR 509.1b + CR 609.4 + CR 702.28b: A creature without shadow normally can't
 /// block a creature with shadow. This returns `true` when the blocker has a
 /// functioning `CanBlockShadow` static — "~ can block creatures with shadow as
-/// though they didn't have shadow" / "as though it had shadow" — which lifts the
-/// shadow blocker-side restriction for that creature only (Heartwood Dryad, Wall
-/// of Diffusion). Mirrors the `CanAttackWithDefender` lookup: the static is
-/// `affected: SelfRef`, so it is read off the blocker's own active statics.
+/// though they didn't have shadow" / "as though it had shadow" — which lifts
+/// the shadow blocker-side restriction for that affected creature.
+///
+/// Mirrors the `CanAttackWithDefender` lookup: intrinsic self statics are read
+/// from the blocker, and remote affected filters are resolved through the shared
+/// static-ability checker.
 fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
     super::functioning_abilities::active_static_definitions(state, blocker)
         .any(|sd| sd.mode == StaticMode::CanBlockShadow)
+        || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CanBlockShadow,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(blocker.id),
+                ..Default::default()
+            },
+        )
 }
 
 /// CR 509.1b: Static abilities on the blocker (or on another source whose
@@ -4373,9 +4383,6 @@ mod tests {
     /// Discriminating: an identical non-shadow creature WITHOUT the static cannot.
     #[test]
     fn can_block_shadow_static_lets_non_shadow_block_shadow() {
-        use crate::types::ability::{StaticDefinition, TargetFilter};
-        use crate::types::statics::StaticMode;
-
         let mut state = setup();
         let attacker = create_creature(&mut state, PlayerId(0), "Shadow A", 2, 2);
         state
@@ -4402,6 +4409,24 @@ mod tests {
             );
         assert!(validate_blockers(&state, &[(dryad, attacker)]).is_ok());
         assert!(can_block_pair(&state, dryad, attacker));
+
+        // A source whose affected filter matches another creature also grants
+        // that creature the permission; the parser accepts subject-scoped
+        // variants, so runtime must honor `affected` rather than only checking
+        // the blocker's own statics.
+        let standard_bearer = create_creature(&mut state, PlayerId(1), "Shadow Standard", 1, 1);
+        state
+            .objects
+            .get_mut(&standard_bearer)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+        assert!(validate_blockers(&state, &[(plain_blocker, attacker)]).is_ok());
+        assert!(can_block_pair(&state, plain_blocker, attacker));
 
         // The permission does NOT make the Dryad itself blockable-by-anything or
         // change the non-shadow attacker symmetry: a shadow blocker still can't
