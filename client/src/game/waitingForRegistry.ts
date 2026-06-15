@@ -150,6 +150,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "BattleProtectorChoice",
     "NamedChoice",
     "UntapChoice",
+    "ChooseUntapSubset",
     "ExertChoice",
     "EnlistChoice",
     "CompanionReveal",
@@ -167,7 +168,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
  * diagnostic modal to detect orphan WaitingFor states that would otherwise
  * silently hang the game.
  */
-export function isWaitingForHandled(waitingFor: WaitingFor | null | undefined): boolean {
+export function isWaitingForHandled(
+  waitingFor: WaitingFor | null | undefined,
+): boolean {
   if (!waitingFor) return true;
   return HANDLED_WAITING_FOR_TYPES.has(waitingFor.type);
 }
