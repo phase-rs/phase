@@ -5111,6 +5111,67 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// CR 608.2d + CR 113.3 + CR 611.2: Linvala, Shield of Sea Gate's
+    /// activated ability — "{W/U}, Sacrifice ~: Choose hexproof or
+    /// indestructible. Creatures you control gain that ability until end of
+    /// turn." The activated ability's effect chain must prompt a typed
+    /// `Effect::Choose { ChoiceType::Keyword }` and then grant
+    /// `AddChosenKeyword` — never `Effect::Unimplemented`. Confirms the
+    /// chosen-keyword anaphor works in the activated-ability frame as well as
+    /// the trigger frame (Angelic Skirmisher).
+    #[test]
+    fn parse_linvala_shield_activated_choose_then_grant_chosen_keyword() {
+        use crate::types::ability::ChoiceType;
+        let text = "Flying\n{W/U}, Sacrifice Linvala, Shield of Sea Gate: Choose \
+                    hexproof or indestructible. Creatures you control gain that \
+                    ability until end of turn.";
+        let result = parse(
+            text,
+            "Linvala, Shield of Sea Gate",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Angel", "Wizard"],
+        );
+
+        // Collect every effect across all parsed abilities and their sub_ability chains.
+        let mut effects: Vec<&Effect> = Vec::new();
+        for ability in &result.abilities {
+            let mut node = Some(ability);
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+        }
+
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::Keyword { options },
+                    persist: true,
+                } if options.as_slice()
+                    == [Keyword::Hexproof, Keyword::Indestructible]
+            )),
+            "expected a persisting keyword Choose(hexproof|indestructible), got {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| s
+                        .modifications
+                        .contains(&ContinuousModification::AddChosenKeyword))
+            )),
+            "expected an AddChosenKeyword grant, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "no clause may be Unimplemented, got {effects:?}"
+        );
+    }
+
     /// Issue #2385 — the free-cast window class must parse its resolution text to a real
     /// interactive `Effect::FreeCastFromZones` (the free-cast window), NOT get
     /// swallowed into a `GraveyardCastPermission` static with an empty `abilities`

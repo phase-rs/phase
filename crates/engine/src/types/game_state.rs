@@ -6481,6 +6481,18 @@ pub struct TransientContinuousEffect {
     pub modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<StaticCondition>,
+    /// CR 611.2b + CR 110.5d: the concrete object a target-relative
+    /// `ForAsLongAs` duration tracks, captured at resolution time. Distinct
+    /// from `affected` when the modification's recipient and the duration's
+    /// subject diverge — Zygon Infiltrator: the copy modification applies to
+    /// the source, but the duration tracks the copy *target*'s tap state.
+    /// `None` for the common case where the duration tracks `affected` or the
+    /// source. Set only via [`GameState::set_transient_duration_subject`] on the
+    /// TCE that `add_transient_continuous_effect` just created, so all TCE
+    /// construction stays in one authority. Backward-compatible across the
+    /// WASM/multiplayer serialization boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_subject: Option<ObjectId>,
     /// Snapshot of the originating object's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -7081,10 +7093,31 @@ impl GameState {
                 affected,
                 modifications,
                 condition,
+                duration_subject: None,
                 source_name,
             });
         self.layers_dirty.mark_full();
         id
+    }
+
+    /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a
+    /// concrete object resolved at effect-resolution time, on the TCE that
+    /// [`Self::add_transient_continuous_effect`] just created (addressed by its
+    /// returned `id`). Used when the duration's tracked subject diverges from the
+    /// effect's `affected` recipient — Zygon Infiltrator: the copy modification
+    /// applies to the source, but the duration tracks the copy *target*'s tap
+    /// state. Keeps construction in one authority (no second constructor); the
+    /// only divergent caller is `effects/become_copy.rs`. Marks layers dirty so
+    /// the duration re-evaluation picks up the binding.
+    pub fn set_transient_duration_subject(&mut self, id: u64, subject: ObjectId) {
+        if let Some(tce) = self
+            .transient_continuous_effects
+            .iter_mut()
+            .find(|tce| tce.id == id)
+        {
+            tce.duration_subject = Some(subject);
+            self.layers_dirty.mark_full();
+        }
     }
 
     /// CR 614.12a + CR 615.5: Migrate the pre-2026-05-09 audit M4 split-slot

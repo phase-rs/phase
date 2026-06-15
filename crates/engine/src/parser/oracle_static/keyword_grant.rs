@@ -914,6 +914,29 @@ pub(crate) fn push_grant_clause_modifications(
         }
     }
 
+    // CR 608.2d + CR 613.1f: chosen-keyword anaphor — "that ability" / "the
+    // chosen ability" / "the chosen keyword" refers back to a preceding
+    // `Effect::Choose { ChoiceType::Keyword, persist }` clause (Angelic
+    // Skirmisher: "choose first strike, vigilance, or lifelink. Creatures you
+    // control gain that ability ..."; Linvala, Shield of Sea Gate: "choose
+    // hexproof or indestructible. Creatures you control gain that ability
+    // ..."). Emits `AddChosenKeyword`, which reads the granting source's
+    // `ChosenAttribute::Keyword` at layer evaluation — the additive mirror of
+    // `RemoveChosenKeyword` (Urborg / Walking Sponge). Checked before
+    // `map_keyword` so the anaphor is never mis-classified as an unknown
+    // keyword. Builds for the whole "gain the chosen keyword" class.
+    if alt((
+        tag::<_, _, OracleError<'_>>("that ability"),
+        tag("the chosen ability"),
+        tag("the chosen keyword"),
+    ))
+    .parse(part_lower.as_str())
+    .is_ok()
+    {
+        modifications.push(ContinuousModification::AddChosenKeyword);
+        return;
+    }
+
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
         return;

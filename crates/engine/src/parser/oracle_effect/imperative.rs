@@ -3172,12 +3172,18 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // chosen card type via `FilterProp::IsChosenCardType`. Persisting a
             // Labeled choice is also what `ChosenLabelIs` companion conditions
             // rely on (CR 614.12c), so it is uniformly safe.
+            // CR 608.2d + CR 113.3: A `Keyword` choice ("choose first strike,
+            // vigilance, or lifelink") persists so a later "creatures you
+            // control gain that ability" clause can read the typed
+            // `ChosenAttribute::Keyword` via
+            // `ContinuousModification::AddChosenKeyword` at layer evaluation.
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
                     | ChoiceType::CreatureType
                     | ChoiceType::CardType
                     | ChoiceType::Labeled { .. }
+                    | ChoiceType::Keyword { .. }
             ),
             choice_type,
         },
