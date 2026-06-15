@@ -734,13 +734,15 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — the trailing "in your party" is what
         // distinguishes party-size from a controlled-creature count.
         parse_creatures_in_your_party_tail,
-        // CR 400.7 + CR 700.4: entered-this-turn and died-this-turn zone-change
-        // counts share a nested alt to stay within nom's top-level `alt` arity.
-        // The died arm must precede `parse_number_of_controlled_type` so the
-        // leading "creatures" token does not commit to the generic controlled-type arm.
+        // CR 400.7 + CR 700.4 + CR 701.21a: entered-this-turn, died-this-turn,
+        // and sacrificed-this-turn zone-change counts share a nested alt to stay
+        // within nom's top-level `alt` arity (nom 8.0 max: 21 items).
+        // All three arms must precede `parse_number_of_controlled_type` so the
+        // leading type-word token does not commit to the generic controlled-type arm.
         alt((
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
+            parse_number_of_sacrificed_this_turn,
         )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
@@ -2168,6 +2170,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_subtype_died_this_turn,
         parse_for_each_creature_died_this_turn,
+        // CR 701.21a: "[type] you['ve] sacrificed this turn" — event-based count
+        // of sacrifice events. Must precede `parse_for_each_controlled_type` so the
+        // leading type token does not commit to the generic `<type> you control` arm.
+        parse_for_each_sacrificed_this_turn,
         // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
         // control this turn" — destination-agnostic zone-change count, distinct
         // from the graveyard-only "died" arm above.
@@ -2853,6 +2859,60 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
 fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, controller) = parse_creatures_died_this_turn_tail(input)?;
     Ok((rest, creatures_died_this_turn_ref(controller)))
+}
+
+/// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" -> `TargetFilter`.
+/// Shared inner combinator for both `parse_number_of_sacrificed_this_turn` and
+/// `parse_for_each_sacrificed_this_turn`.
+fn parse_sacrificed_this_turn_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    // CR 701.21a: sacrifice moves the permanent directly to its owner's graveyard
+    // (not destroyed — bypasses indestructible and regeneration).
+    let (filter, rest) = parse_type_phrase(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    let (rest, _) = (tag(" you"), opt(tag("'ve")), tag(" sacrificed this turn")).parse(rest)?;
+    Ok((rest, filter))
+}
+
+/// CR 701.21a: "the number of [type] you['ve] sacrificed this turn" →
+/// `QuantityRef::SacrificedThisTurn`. Wired into the nested inner alt of
+/// `parse_number_of_inner` alongside `parse_entered_this_turn_ref` and
+/// `parse_number_of_creatures_died_this_turn`.
+///
+/// Structurally identical to `parse_for_each_sacrificed_this_turn` by convention
+/// (mirrors the `parse_number_of_/parse_for_each_creature_died_this_turn` pair).
+/// If opponent/any-player sacrifice forms are ever added, diverge the logic here.
+fn parse_number_of_sacrificed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, filter) = parse_sacrificed_this_turn_filter(input)?;
+    Ok((
+        rest,
+        QuantityRef::SacrificedThisTurn {
+            player: PlayerScope::Controller,
+            filter,
+        },
+    ))
+}
+
+/// CR 701.21a: "[type] you['ve] sacrificed this turn" in a "for each" context →
+/// `QuantityRef::SacrificedThisTurn`. Separate named fn per the
+/// `parse_number_of_/parse_for_each_creature_died_this_turn` convention.
+///
+/// Structurally identical to `parse_number_of_sacrificed_this_turn` by convention.
+/// If opponent/any-player sacrifice forms are ever added, diverge the logic here.
+fn parse_for_each_sacrificed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, filter) = parse_sacrificed_this_turn_filter(input)?;
+    Ok((
+        rest,
+        QuantityRef::SacrificedThisTurn {
+            player: PlayerScope::Controller,
+            filter,
+        },
+    ))
 }
 
 /// CR 400.7 + CR 603.10a: Parse "creature that left the battlefield under your
