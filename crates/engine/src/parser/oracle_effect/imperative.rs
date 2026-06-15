@@ -9067,7 +9067,7 @@ mod tests {
             let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
             let Some(ZoneCounterImperativeAst::RemoveCounter {
                 counter_type: None,
-                count: -1,
+                count: QuantityExpr::Fixed { value: -1 },
                 target,
             }) = result
             else {

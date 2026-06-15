@@ -10,7 +10,7 @@
 //! the level-up/incubate class generally.
 
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
-use engine::types::ability::{AbilityDefinition, Effect};
+use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr};
 
 fn parse(name: &str, text: &str) -> ParsedAbilities {
     parse_oracle_text(
@@ -54,7 +54,7 @@ fn assert_remove_all_then_transform(effects: &[Effect]) {
             e,
             Effect::RemoveCounter {
                 counter_type: None,
-                count: -1,
+                count: QuantityExpr::Fixed { value: -1 },
                 ..
             }
         )),
