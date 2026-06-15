@@ -2474,6 +2474,17 @@ pub enum FilterProp {
     AnyOf {
         props: Vec<FilterProp>,
     },
+    /// CR 608.2c: Logical negation of a filter property — matches objects for
+    /// which the inner property does NOT hold ("apply the rules of English").
+    /// General recursive combinator mirroring `TargetFilter::Not`,
+    /// `StaticCondition::Not`, `AbilityCondition::Not`, and `TriggerCondition::Not`.
+    /// Composes with the AND-combined `properties` vector, so a negated-verb
+    /// relative clause like "that didn't attack or enter this turn" decomposes
+    /// (De Morgan) into `Not(AttackedThisTurn)` AND `Not(EnteredThisTurn)` rather
+    /// than a bespoke `NotAttacked`/`NotEntered` sibling cluster. Boxed for recursion.
+    Not {
+        prop: Box<FilterProp>,
+    },
     /// CR 700.9: A permanent is modified if it has one or more counters on it
     /// (CR 122), if it is equipped (CR 301.5), or if it is enchanted by an Aura
     /// that is controlled by that permanent's controller (CR 303.4).
@@ -4985,6 +4996,25 @@ pub enum StaticCondition {
     /// CR 110.5b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
+    /// CR 110.5b + CR 110.5d: True when a scope-resolved object is on the
+    /// battlefield AND tapped. Scope-parameterized sibling of `SourceIsTapped`.
+    ///
+    /// `SourceIsTapped` is intentionally retained as the canonical `scope: Source`
+    /// spelling: it lives on three enums (`StaticCondition`, `AbilityCondition`,
+    /// `TriggerCondition`) plus `TriggerCondition::ZoneChangeObjectIsTapped`, so a
+    /// full collapse into `IsTapped { scope: Source }` would be a cross-enum
+    /// rename. This asymmetry (source = `SourceIsTapped`, non-source =
+    /// `IsTapped { scope }`) mirrors the `QuantityRef::Power { scope }` precedent:
+    /// tap status is a single CR 110.5 status category, so the scope axis lies
+    /// wholly within one rule section (no categorical-boundary violation).
+    ///
+    /// The parser emits this only for demonstrative subjects ("for as long as
+    /// THAT creature remains tapped" — Zygon Infiltrator's copy duration, where
+    /// the tracked object is the copy *target*, not the source). Negation is
+    /// `Not { Box::new(IsTapped { scope }) }`.
+    IsTapped {
+        scope: ObjectScope,
+    },
     /// CR 702.171b: True when the source permanent is saddled. Negation via Not { SourceIsSaddled }.
     SourceIsSaddled,
     /// CR 702.62a + CR 611.2b: True when the source object's current controller
@@ -9335,6 +9365,9 @@ fn normalized_filter_prop(prop: FilterProp) -> FilterProp {
         },
         FilterProp::Targets { filter } => FilterProp::Targets {
             filter: Box::new(filter.normalized()),
+        },
+        FilterProp::Not { prop } => FilterProp::Not {
+            prop: Box::new(normalized_filter_prop(*prop)),
         },
         prop => prop,
     }
@@ -14455,6 +14488,16 @@ pub enum ContinuousModification {
     /// same discriminant. Used by Urborg / Walking Sponge: "target creature
     /// loses [chosen ability] until end of turn".
     RemoveChosenKeyword,
+    /// CR 608.2d + CR 613.1f: Grant the chosen keyword (read from the granting
+    /// source's `chosen_attributes`) to the affected object. The additive
+    /// counterpart of `RemoveChosenKeyword`, mirroring the `AddChosenColor` /
+    /// `AddChosenSubtype` chosen-attribute family. Used by the "choose
+    /// [keyword], …; creatures you control gain that ability until end of
+    /// turn" class (Angelic Skirmisher, Linvala, Shield of Sea Gate): a
+    /// preceding `Effect::Choose { ChoiceType::Keyword, persist }` stores the
+    /// selection as `ChosenAttribute::Keyword`, which this modification reads at
+    /// Layer 6 evaluation to install on every recipient.
+    AddChosenKeyword,
     SetColor {
         colors: Vec<ManaColor>,
     },

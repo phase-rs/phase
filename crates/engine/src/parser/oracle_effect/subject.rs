@@ -850,6 +850,27 @@ pub(super) fn parse_subject_application(
             return Some(application);
         }
     }
+    // CR 115.1 + CR 115.1d: "one or more target X" — variable-count targeting
+    // with a minimum of 1 and no upper bound (Dwarven Song / Heaven's Gate /
+    // Sea Kings' Blessing / Sylvan Paradise / Touch of Darkness:
+    // "One or more target creatures become <color> until end of turn"). Mirrors
+    // the unbounded "any number of target" branch above; the only axis of
+    // variation is the minimum count (1 here vs. 0 there).
+    if let Ok((after_prefix, _)) =
+        tag::<_, _, OracleError<'_>>("one or more ").parse(lower.as_str())
+    {
+        if tag::<_, _, OracleError<'_>>("target ")
+            .parse(after_prefix)
+            .is_ok()
+        {
+            let consumed = lower.len() - after_prefix.len();
+            let target_text = &subject[consumed..];
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
+            let mut application = subject_filter_application(filter, true)?;
+            application.multi_target = Some(MultiTargetSpec::unlimited(1));
+            return Some(application);
+        }
+    }
     // CR 115.1d: "one or two target X" / "one, two, or three target X" —
     // bounded-count targeting with a minimum of 1 (Scrollboost:
     // "One or two target creatures each get +2/+2 until end of turn"). Mirrors
@@ -3286,6 +3307,10 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             value((), tag("equipped ")),
             value((), tag("it ")),
             value((), tag("its controller ")),
+            // CR 115.1 + CR 115.1d: "one or more target X" variable-count
+            // subject (Dwarven Song et al.). Dispatched to the multi-target
+            // branch in `parse_subject_application`.
+            value((), tag("one or more ")),
         )),
         alt((
             value((), tag::<_, _, OracleError<'_>>("its owner ")),
@@ -4524,6 +4549,105 @@ mod tests {
         assert!(starts_with_subject_prefix(
             "any number of target creatures each get +1/+1"
         ));
+    }
+
+    // CR 115.1 + CR 115.1d: "one or more target X" variable-count subject tests.
+    // The minimum is 1 (unlike "any number of", min 0); the maximum is unbounded.
+    #[test]
+    fn parse_subject_one_or_more_target_creatures() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("one or more target creatures", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t) if t.type_filters.contains(&TypeFilter::Creature)),
+            "should parse creature filter, got {:?}",
+            app.affected
+        );
+        assert!(app.target.is_some(), "should be targeted");
+        assert_eq!(
+            app.multi_target,
+            Some(MultiTargetSpec::unlimited(1)),
+            "should have unlimited multi_target with min 1"
+        );
+    }
+
+    #[test]
+    fn parse_subject_one_or_more_target_creatures_you_control() {
+        let mut ctx = ParseContext::default();
+        let result =
+            parse_subject_application("one or more target creatures you control", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::You)),
+            "should parse creature + controller, got {:?}",
+            app.affected
+        );
+        assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(1)));
+    }
+
+    #[test]
+    fn starts_with_subject_prefix_one_or_more() {
+        assert!(starts_with_subject_prefix(
+            "one or more target creatures become red until end of turn"
+        ));
+    }
+
+    // CR 105.1 + CR 115.1 + CR 613.1e: end-to-end — the "one or more target
+    // creatures become <color>" class (Dwarven Song / Heaven's Gate / Sea Kings'
+    // Blessing / Sylvan Paradise / Touch of Darkness) parses to a multi-target
+    // (min 1, unbounded) Layer-5 SetColor continuous modification, NOT
+    // Effect::Unimplemented.
+    #[test]
+    fn one_or_more_target_become_color_parses_to_multi_target_setcolor() {
+        use crate::types::mana::ManaColor;
+
+        let cases = [
+            ("Dwarven Song", "red", ManaColor::Red),
+            ("Heaven's Gate", "white", ManaColor::White),
+            ("Sea Kings' Blessing", "blue", ManaColor::Blue),
+            ("Sylvan Paradise", "green", ManaColor::Green),
+            ("Touch of Darkness", "black", ManaColor::Black),
+        ];
+
+        // All five cards are Sorceries; the priority-10 imperative effect-chain
+        // path is gated on the Instant/Sorcery card type in `parse_oracle_ir`.
+        let types = vec!["Sorcery".to_string()];
+        for (card_name, color_word, color) in cases {
+            let text =
+                format!("One or more target creatures become {color_word} until end of turn.");
+            let parsed =
+                crate::parser::oracle::parse_oracle_text(&text, card_name, &[], &types, &[]);
+            let ability = parsed
+                .abilities
+                .iter()
+                .find(|a| {
+                    matches!(
+                        &*a.effect,
+                        Effect::GenericEffect { static_abilities, .. }
+                            if static_abilities.iter().any(|s| s
+                                .modifications
+                                .contains(&ContinuousModification::SetColor {
+                                    colors: vec![color],
+                                }))
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!("{card_name}: expected SetColor GenericEffect, got {parsed:?}")
+                });
+            assert!(
+                !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+                "{card_name}: must not be Unimplemented"
+            );
+            assert_eq!(
+                ability.multi_target,
+                Some(MultiTargetSpec::unlimited(1)),
+                "{card_name}: must carry unbounded min-1 multi-target"
+            );
+        }
     }
 
     // --- Group: prohibition-family restriction predicates ---

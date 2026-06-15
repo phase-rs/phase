@@ -2148,6 +2148,134 @@ mod tests {
         );
     }
 
+    /// Issue #588 (Summon: Good King Mog XII, chapter IV): runtime filter
+    /// evaluation must honor Moogle subtype + you control + Another — not
+    /// blanket every other permanent when the subtype was unknown at parse time.
+    #[test]
+    fn resolve_add_all_each_other_moogle_you_control_issue_588() {
+        let mut state = GameState::new_two_player(42);
+
+        let source = {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Good King Mog XII".to_string(),
+                Zone::Battlefield,
+            );
+            mark_creature(&mut state, id);
+            state.objects.get_mut(&id).unwrap().card_types.subtypes =
+                vec!["Moogle".to_string(), "Saga".to_string()];
+            id
+        };
+
+        let ally_moogle = {
+            let id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Moogle Ally".to_string(),
+                Zone::Battlefield,
+            );
+            mark_creature(&mut state, id);
+            state.objects.get_mut(&id).unwrap().card_types.subtypes = vec!["Moogle".to_string()];
+            id
+        };
+
+        let non_moogle = {
+            let id = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            mark_creature(&mut state, id);
+            id
+        };
+
+        let opp_moogle = {
+            let id = create_object(
+                &mut state,
+                CardId(4),
+                PlayerId(1),
+                "Opponent Moogle".to_string(),
+                Zone::Battlefield,
+            );
+            mark_creature(&mut state, id);
+            state.objects.get_mut(&id).unwrap().card_types.subtypes = vec!["Moogle".to_string()];
+            id
+        };
+
+        let land = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Sunlit Marsh".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let ability = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Moogle".to_string())
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_add_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&ally_moogle]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "other Moogle you control receives two +1/+1 counters"
+        );
+        assert!(
+            !state.objects[&source]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "source excluded by Another"
+        );
+        assert!(
+            !state.objects[&non_moogle]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "non-Moogle creature excluded by subtype filter"
+        );
+        assert!(
+            !state.objects[&opp_moogle]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "opponent Moogle excluded by you control"
+        );
+        assert!(
+            !state.objects[&land]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "land excluded — not a Moogle creature"
+        );
+    }
+
     #[test]
     fn add_counter_increments() {
         let mut state = GameState::new_two_player(42);

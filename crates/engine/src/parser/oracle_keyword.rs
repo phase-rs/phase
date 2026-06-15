@@ -1444,10 +1444,32 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     let (_, (name, rest)) = split_once_on(text, " ").ok()?;
     let rest = rest.trim();
 
-    // Strip "from" preposition (used by protection keywords)
-    let param = tag::<_, _, OracleError<'_>>("from ")
-        .parse(rest)
-        .map_or(rest, |(rem, _)| rem);
+    // CR 702.32a: Fading N.
+    // CR 702.63a: Vanishing N.
+    // CR 702.112a: Renown N.
+    // CR 702.68a: Frenzy N.
+    // Bare-integer count keywords take ONLY a leading integer. The generic
+    // remainder path below would slurp a trailing clause (e.g. "vanishing 3 if
+    // that creature doesn't have vanishing") into the FromStr param, where
+    // `p.parse::<u32>()` fails and silently falls back to the default
+    // (Vanishing(0)). Take only the leading numeric token and discard the
+    // trailing text so "<kw> N <anything>" yields Keyword(N). This mirrors the
+    // Renown/Frenzy/Ripple `parse_number` arms above, except it keeps (rather
+    // than rejects) the count when trailing text follows.
+    // CR 702.63b: Vanishing without a number has no count, so `parse_number`
+    // fails and we fall through to the generic path, preserving today's
+    // Vanishing(0) routing.
+    let param: Cow<'_, str> = if is_numeric_count_keyword(name) {
+        match nom_primitives::parse_number.parse(rest) {
+            Ok((remainder, _)) => Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
+            Err(_) => Cow::Borrowed(rest),
+        }
+    } else {
+        // Strip "from" preposition (used by protection keywords).
+        tag::<_, _, OracleError<'_>>("from ")
+            .parse(rest)
+            .map_or(Cow::Borrowed(rest), |(rem, _)| Cow::Borrowed(rem))
+    };
 
     let colon_form = format!("{name}:{param}");
     let parsed: Keyword = colon_form.parse().unwrap();
@@ -1455,6 +1477,62 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return None;
     }
     Some(parsed)
+}
+
+/// Bare-integer-count keywords whose `FromStr` arm does `p.parse().unwrap_or(N)`
+/// (or wraps the integer in `QuantityExpr::Fixed`) over the parameter string —
+/// see the arms in `types/keywords.rs`. For these the generic normalizer must
+/// take ONLY the leading integer and drop any trailing clause, or the count is
+/// silently lost to the fallback.
+///
+/// CR 702.32a: Fading N.
+/// CR 702.63a: Vanishing N.
+/// CR 702.112a: Renown N.
+/// CR 702.68a: Frenzy N.
+/// CR 702.122a: Crew N.
+fn is_numeric_count_keyword(name: &str) -> bool {
+    // One `tag` per keyword name, grouped into ≤21-element `alt` blocks for
+    // nom's tuple limit. `all_consuming` requires an exact whole-name match so
+    // non-numeric keywords like "protection"/"landwalk" cannot leak into the
+    // numeric branch.
+    all_consuming(alt((
+        alt((
+            tag::<_, _, OracleError<'_>>("rampage"),
+            tag("bushido"),
+            tag("frenzy"),
+            tag("absorb"),
+            tag("fading"),
+            tag("vanishing"),
+            tag("dredge"),
+            tag("modular"),
+            tag("renown"),
+            tag("fabricate"),
+            tag("annihilator"),
+            tag("tribute"),
+            tag("afterlife"),
+        )),
+        alt((
+            tag("casualty"),
+            tag("mobilize"),
+            tag("poisonous"),
+            tag("amplify"),
+            tag("graft"),
+            tag("devour"),
+            tag("toxic"),
+            tag("saddle"),
+            tag("soulshift"),
+            tag("backup"),
+            tag("firebending"),
+            tag("hideaway"),
+            tag("afflict"),
+            // CR 702.122a: "Crew N" — leading integer is the total power
+            // threshold; trailing clauses (e.g. once-per-turn riders) must be
+            // dropped by the generic normalizer like every other count keyword.
+            tag("crew"),
+        )),
+    )))
+    .parse(name)
+    .is_ok()
 }
 
 fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
@@ -2121,6 +2199,62 @@ mod tests {
             "ripple 2 — N is captured"
         );
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+    }
+
+    /// CR 702.63a: Vanishing N.
+    /// CR 702.32a: Fading N.
+    /// CR 702.112a: Renown N.
+    ///
+    /// The numeric-count normalizer must keep the leading integer even when a
+    /// trailing clause follows (e.g. Flesh Duplicate's "vanishing 3 if ..."),
+    /// instead of feeding the whole remainder to FromStr and falling back. This
+    /// tests the building-block class, not a single card.
+    #[test]
+    fn parse_keyword_from_oracle_numeric_count_with_trailing_text() {
+        // Regression: Flesh Duplicate's conditional except-clause grant.
+        assert_eq!(
+            parse_keyword_from_oracle("vanishing 3 if that creature doesn't have vanishing"),
+            Some(Keyword::Vanishing(3)),
+            "trailing 'if ...' clause must not erase the count"
+        );
+        // No-trailing-text form is unchanged.
+        assert_eq!(
+            parse_keyword_from_oracle("vanishing 3"),
+            Some(Keyword::Vanishing(3))
+        );
+        // CR 702.63b: a single-word bare keyword has no space, so the normalizer's
+        // `split_once_on(text, " ")` fails and the line is not recognized here
+        // (bare vanishing reaches the engine via the MTGJSON colon-form path, not
+        // this Oracle-grant normalizer). This is unchanged pre-existing behavior;
+        // the fix must not start spuriously accepting the space-less form.
+        assert_eq!(parse_keyword_from_oracle("vanishing"), None);
+        // Fading shares the normalizer with no dedicated arm — proves the class.
+        assert_eq!(
+            parse_keyword_from_oracle("fading 2 if it's an artifact"),
+            Some(Keyword::Fading(2))
+        );
+        // Renown's dedicated `all_consuming` arm rejects trailing text, so the
+        // trailing-text form falls through to the fixed normalizer.
+        assert_eq!(
+            parse_keyword_from_oracle("renown 2 if it's your turn"),
+            Some(Keyword::Renown(2))
+        );
+        // CR 702.122a: Crew N is also a bare-integer count keyword. A conditional
+        // grant must keep the leading total-power threshold and drop the trailing
+        // clause, exactly like the rest of the class.
+        assert_eq!(
+            parse_keyword_from_oracle("crew 2 if it's an artifact"),
+            Some(Keyword::Crew {
+                power: 2,
+                once_per_turn: None,
+            })
+        );
+        // Non-numeric keyword must NOT be hijacked by the numeric branch: the
+        // "from " preposition strip still produces a protection target.
+        assert!(matches!(
+            parse_keyword_from_oracle("protection from red"),
+            Some(Keyword::Protection(_))
+        ));
     }
 
     #[test]
