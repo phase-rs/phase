@@ -2701,8 +2701,10 @@ fn legal_targets_for_ability_filter(
 }
 
 /// Returns the relative `ControllerRef` (`You` or `TargetPlayer`) embedded in
-/// `filter`, if any. Used by `legal_targets_for_ability_filter` to detect
-/// filters that need per-player re-enumeration against a companion player slot.
+/// `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
+/// build) and `legal_targets_for_selected_slot` (selection-time recompute) to
+/// detect filters that need per-player re-enumeration against the player chosen
+/// in a companion `TargetFilter::Player` slot.
 fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::ability::ControllerRef> {
     use crate::types::ability::ControllerRef;
     match filter {
@@ -2936,16 +2938,6 @@ fn object_targets_only(targets: &[TargetRef]) -> Vec<TargetRef> {
         .collect()
 }
 
-/// True iff `filter` carries a `ControllerRef::You` binding requiring per-
-/// player rebinding at target-resolution time. Thin wrapper over
-/// `relative_controller_kind` for the `You`-specific call sites.
-fn uses_relative_controller_you(filter: &TargetFilter) -> bool {
-    matches!(
-        relative_controller_kind(filter),
-        Some(crate::types::ability::ControllerRef::You)
-    )
-}
-
 /// Substitute every `from`-controller binding in `filter` with `to`. Used to
 /// rewrite `TargetPlayer` → `You` so per-player enumeration through
 /// `find_legal_targets`'s `source_controller` parameter works uniformly.
@@ -3084,25 +3076,46 @@ fn legal_targets_for_selected_slot(
     } else if let Some(targets) = per_opponent_fanout_targets {
         targets
     } else {
-        let controller = if uses_relative_controller_you(&spec.filter) {
+        // CR 109.4 + CR 115.1: A filter scoped to a *relative* controller —
+        // `You` ("creatures you control") or `TargetPlayer` ("creatures that
+        // player controls") — is re-bound to the player chosen in a prior slot
+        // (the companion `TargetFilter::Player` slot, or an `Effect::Choose`).
+        // `relative_filter_controller` reads that player back from
+        // `selected_slots`. For the `TargetPlayer` case the filter is also
+        // rewritten to `You` so `find_legal_targets`' source-controller plumbing
+        // resolves it — at selection time `ability.targets` is still empty, so
+        // filter.rs' `TargetPlayer` lookup (which reads `ability.targets`) would
+        // fail closed and collapse the dependent slot to empty, hanging
+        // legal-action generation. This mirrors the static
+        // `legal_targets_for_ability_filter` path so both agree.
+        let relative_kind = relative_controller_kind(&spec.filter);
+        let controller = if relative_kind.is_some() {
             relative_filter_controller(ability, selected_slots)
         } else {
             ability.controller
         };
+        let enumeration_filter = match relative_kind {
+            Some(ControllerRef::TargetPlayer) => rewrite_relative_controller(
+                &spec.filter,
+                ControllerRef::TargetPlayer,
+                ControllerRef::You,
+            ),
+            _ => spec.filter.clone(),
+        };
 
-        if target_filter_contains_chosen_x_ref(&spec.filter) {
+        if target_filter_contains_chosen_x_ref(&enumeration_filter) {
             if controller == ability.controller {
-                targeting::find_legal_targets_for_ability(state, &spec.filter, ability)
+                targeting::find_legal_targets_for_ability(state, &enumeration_filter, ability)
             } else {
                 targeting::find_legal_targets_for_ability_with_controller(
                     state,
-                    &spec.filter,
+                    &enumeration_filter,
                     ability,
                     controller,
                 )
             }
         } else {
-            targeting::find_legal_targets(state, &spec.filter, controller, ability.source_id)
+            targeting::find_legal_targets(state, &enumeration_filter, controller, ability.source_id)
         }
     };
 
