@@ -64,6 +64,7 @@ pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
 pub mod create_emblem;
+pub mod create_token_copy_from_pool;
 pub mod deal_damage;
 pub mod delayed_trigger;
 pub mod destroy;
@@ -2337,6 +2338,9 @@ pub fn resolve_effect(
         Effect::EpicCopy { .. } => epic::resolve(state, ability, events),
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
+        Effect::CreateTokenCopyFromPool { .. } => {
+            create_token_copy_from_pool::resolve(state, ability, events)
+        }
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),

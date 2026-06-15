@@ -870,6 +870,7 @@ fn finish_pending_cost_or_cast(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         )?;
         return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -1177,6 +1178,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             activation_ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -2037,6 +2039,7 @@ pub(crate) fn handle_exile_materials_for_cost(
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_activated_ability_to_stack(
     state: &mut GameState,
     player: PlayerId,
@@ -2044,12 +2047,85 @@ pub(super) fn push_activated_ability_to_stack(
     ability_index: usize,
     mut resolved: ResolvedAbility,
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
+    // CR 601.2f + CR 601.2h: POSITIVE signal that the caller took the `{X}`-mana
+    // detour, so `remaining_cost` is the unpaid residual non-mana tail. Threaded
+    // from `PendingCast::x_residual_activation` — set ONLY by that detour.
+    x_residual: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // CR 601.2f + CR 601.2h + CR 701.9a: When the X-mana detour ran first
+        // (e.g. the Momir Basic emblem's `{X}, Discard a card` cost), the non-self
+        // "discard a card" sub-cost is still OUTSTANDING here AFTER mana payment,
+        // signalled by `x_residual`. In contrast, the discard-FIRST pre-check
+        // detour in `handle_activate_ability` already paid the discard and resumes
+        // with `x_residual == false` and the ORIGINAL cost — its discard sub-cost
+        // is correctly no-op'd by `pay_ability_cost_for_activation` below. Gating
+        // on the positive `x_residual` signal (not the cost shape) avoids
+        // double-charging the discard on that pre-check path even when the cost is
+        // a BARE `Discard` (which would otherwise fail with an empty hand).
+        if let Some((count, filter)) =
+            super::casting::find_non_self_discard(cost).filter(|_| x_residual)
+        {
+            let count =
+                super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+            let eligible =
+                super::casting::find_eligible_discard_targets(state, player, source_id, filter);
+            if eligible.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard".into(),
+                ));
+            }
+            let mut pending_discard =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_discard.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
+                count,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_discard),
+                },
+            });
+        }
+
+        // CR 118.3 + CR 601.2h: The `{X}`-mana detour (`extract_x_mana_cost` in
+        // `handle_activate_ability`) hoists X-first and leaves the residual tail
+        // here, but ONLY the non-self `Discard` arm above re-surfaces an
+        // interactive cost. A residual non-self SACRIFICE or non-self EXILE would
+        // otherwise fall through to `pay_ability_cost_for_activation`, where both
+        // are silent `Paid` no-ops (they rely on the pre-payment
+        // SacrificeForCost / ExileForCost WaitingFor interception that the X-first
+        // hoist bypassed) — silently SKIPPING the cost. No current card has an
+        // `{X} + non-self-sacrifice/exile` activated ability (corpus scan = zero),
+        // and this was already broken pre-hoist (X→0), so this is not a
+        // regression — but a silent cost-swallow must not ship. Fail LOUDLY here.
+        // A future `{X} + non-self-sacrifice/exile` activated ability must extend
+        // this residual detour with Sacrifice/Exile arms mirroring the Discard arm
+        // above (route to `WaitingFor::PayCost { kind: Sacrifice | ExileFromZone }`
+        // with the residual stored in the resumed pending).
+        if x_residual
+            && (super::casting::find_non_self_sacrifice_cost(cost).is_some()
+                || super::casting::find_non_self_exile(cost).is_some())
+        {
+            debug_assert!(
+                false,
+                "X-residual activation left a non-self sacrifice/exile cost unhandled \
+                 (cost: {cost:?}); extend the residual detour in \
+                 push_activated_ability_to_stack"
+            );
+            return Err(EngineError::ActionNotAllowed(
+                "Unsupported activated-ability cost: {X} combined with a non-self \
+                 sacrifice/exile is not yet implemented"
+                    .into(),
+            ));
+        }
+
         // CR 606.3 + CR 606.5: Capture the symbolic `[−X]` loyalty shape before
         // chosen-X concretization turns it into a fixed counter-removal count.
         let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
@@ -6963,6 +7039,7 @@ pub fn finalize_mana_payment(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -7127,6 +7204,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -7770,6 +7848,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }
     }
 
@@ -11881,6 +11960,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let result = pay_additional_cost(
@@ -12005,6 +12085,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let mut events = Vec::new();
@@ -12098,6 +12179,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -12180,6 +12262,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -12295,6 +12378,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let result = pay_additional_cost(
@@ -14889,6 +14973,66 @@ its replicate cost was paid.)\nDraw a card.";
                 generic: 3,
             },
             "declined offering must leave cost at full {{3}}{{W}}"
+        );
+    }
+
+    /// CR 118.3 + CR 601.2h: A `{X}` + non-self SACRIFICE activated-ability cost
+    /// takes the X-mana detour, leaving the non-self sacrifice as the unpaid
+    /// residual in `push_activated_ability_to_stack`. That function only
+    /// re-surfaces the non-self DISCARD arm; a non-self sacrifice/exile residual
+    /// would otherwise fall through to `pay_ability_cost_for_activation` and be a
+    /// SILENT `Paid` no-op (the cost would be skipped). The guard must instead
+    /// fail LOUDLY. No real card has this cost shape; this guards the shared
+    /// pipeline against a future one. In debug builds the `debug_assert!` panics
+    /// (asserted here); in release builds it is compiled out and the function
+    /// returns `EngineError::ActionNotAllowed` instead, so the cost is never
+    /// silently skipped on either profile.
+    #[test]
+    #[should_panic(expected = "non-self sacrifice/exile cost unhandled")]
+    fn x_residual_non_self_sacrifice_fails_loudly() {
+        let mut state = GameState::new_two_player(42);
+        // A permanent the player could sacrifice — present so the failure is the
+        // unhandled-cost guard, not an empty eligible set.
+        let source = create_object(
+            &mut state,
+            CardId(7_700),
+            PlayerId(0),
+            "X-Sacrifice Source".to_string(),
+            Zone::Battlefield,
+        );
+        let _victim = create_object(
+            &mut state,
+            CardId(7_701),
+            PlayerId(0),
+            "Sac Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        let resolved = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        // The X-mana sub-cost has already been extracted/paid by the detour; the
+        // residual handed to `push_activated_ability_to_stack` is the non-self
+        // sacrifice, flagged as the X-residual path (`x_residual = true`).
+        let residual = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            1,
+        ));
+        let mut events = Vec::new();
+        let _ = push_activated_ability_to_stack(
+            &mut state,
+            PlayerId(0),
+            source,
+            0,
+            resolved,
+            Some(&residual),
+            true,
+            &mut events,
         );
     }
 }

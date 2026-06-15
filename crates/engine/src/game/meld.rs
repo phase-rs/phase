@@ -15,7 +15,7 @@
 //! LAYER-ONLY: it NEVER calls `apply_card_face_to_object` on the survivor (that
 //! would overwrite the survivor's `base_*`, permanently replacing Gisela's
 //! printed identity with Brisela). Instead it builds a [`CopiableValues`] from
-//! the result `CardFace` via [`meld_copiable_values`] and installs it as a
+//! the result `CardFace` via [`copiable_values_from_face`] and installs it as a
 //! layer-1 `CopyValues` continuous effect through
 //! [`merge::install_merge_layer_effect`] — exactly mirroring `merge_object_onto`'s
 //! never-touch-base discipline. On leave, `split_merged_permanent_on_leave`
@@ -34,7 +34,7 @@
 
 use crate::game::game_object::MergeKind;
 use crate::game::merge;
-use crate::game::printed_cards::{meld_copiable_values, printed_ref_from_face};
+use crate::game::printed_cards::{copiable_values_from_face, printed_ref_from_face};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;
@@ -155,7 +155,7 @@ pub fn perform_meld(
     // characteristics BEFORE the ETB-emitting entry below — mirroring
     // `merge_object_onto`'s install-then-observe ordering and the conjure entry
     // path, so the ETB scan sees the melded permanent.
-    let values = meld_copiable_values(&result_face);
+    let values = copiable_values_from_face(&result_face);
     let printed_ref = printed_ref_from_face(&result_face);
     merge::install_merge_layer_effect(
         state,
