@@ -5876,6 +5876,7 @@ fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<Repla
         && !nom_primitives::scan_contains(norm_lower, "tapped for mana")
         && !nom_primitives::scan_contains(norm_lower, "tap a permanent for mana")
         && !nom_primitives::scan_contains(norm_lower, "tap a land for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a basic land for mana")
     {
         return None;
     }
@@ -5922,6 +5923,10 @@ fn parse_mana_multiplier_replacement(
         value(
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             tag("a permanent"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            tag("a basic land"),
         ),
         value(
             TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
@@ -11816,6 +11821,19 @@ mod tests {
         assert_eq!(
             scan_damage_modification("it deals that much damage minus 1 instead"),
             Some(DamageModification::Minus { value: 1 })
+        );
+    }
+
+    #[test]
+    fn parses_basic_land_triple_mana_replacement() {
+        let def = parse_replacement_line(
+            "If you tap a basic land for mana, it produces three times as much of that mana instead.",
+            "Virtue of Strength",
+        )
+        .expect("basic land 3x mana");
+        assert_eq!(
+            def.mana_modification,
+            Some(ManaModification::Multiply { factor: 3 })
         );
     }
 }
