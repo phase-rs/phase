@@ -36,7 +36,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
 
     let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
-        if let WaitingFor::ManifestDreadChoice { player, ref cards } = filtered.waiting_for {
+        if let WaitingFor::ManifestDreadChoice {
+            player, ref cards, ..
+        } = filtered.waiting_for
+        {
             let all_cards: HashSet<ObjectId> = cards.iter().copied().collect();
             if can_view_private_for_player(player) {
                 (all_cards.clone(), all_cards)
@@ -249,11 +252,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
-    if let WaitingFor::ManifestDreadChoice { player, ref cards } = state.waiting_for {
+    if let WaitingFor::ManifestDreadChoice {
+        player,
+        ref cards,
+        source_id,
+    } = state.waiting_for
+    {
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::ManifestDreadChoice {
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                source_id,
             };
         }
     }

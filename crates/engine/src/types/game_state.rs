@@ -3055,6 +3055,7 @@ pub enum WaitingFor {
     ManifestDreadChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+        source_id: ObjectId,
     },
     TriggerTargetSelection {
         player: PlayerId,
@@ -7613,6 +7614,7 @@ mod tests {
         assert!(!WaitingFor::ManifestDreadChoice {
             player: PlayerId(0),
             cards: vec![],
+            source_id: ObjectId(1),
         }
         .accepts_freeform_card_selection());
     }
