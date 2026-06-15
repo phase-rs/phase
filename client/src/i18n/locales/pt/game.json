@@ -1153,6 +1153,12 @@
       "subtitle_other": "Exile {{count}} materiais para criar",
       "subtitleRange": "Exile de {{min}} a {{count}} materiais para criar"
     },
+    "exilePermanent": {
+      "title": "Exile uma permanente",
+      "subtitle_one": "Exile {{count}} permanente que você controla",
+      "subtitle_other": "Exile {{count}} permanentes que você controla",
+      "subtitleRange": "Exile de {{min}} a {{count}} permanentes que você controla"
+    },
     "behold": {
       "title": "Contemplar",
       "subtitleExile": "Exile um permanente ou carta correspondente",

@@ -1153,6 +1153,12 @@
       "subtitle_other": "Exilez {{count}} matériaux pour façonner",
       "subtitleRange": "Exilez de {{min}} à {{count}} matériaux pour façonner"
     },
+    "exilePermanent": {
+      "title": "Exilez un permanent",
+      "subtitle_one": "Exilez {{count}} permanent que vous contrôlez",
+      "subtitle_other": "Exilez {{count}} permanents que vous contrôlez",
+      "subtitleRange": "Exilez de {{min}} à {{count}} permanents que vous contrôlez"
+    },
     "behold": {
       "title": "Contempler",
       "subtitleExile": "Exilez un permanent ou une carte correspondant",
