@@ -386,13 +386,13 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
   },
   {
     format: "Momir",
-    label: "Momir Basic",
+    label: "Momir's Madness",
     short_label: "MOM",
-    description: "60 basic lands, random creature tokens",
+    description: "60 snow basic lands, random creature tokens",
     group: "Multiplayer",
     default_config: {
       format: "Momir",
-      starting_life: 24,
+      starting_life: 20,
       min_players: 2,
       max_players: 2,
       deck_size: 60,
