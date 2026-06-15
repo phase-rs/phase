@@ -10641,6 +10641,37 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     None
 }
 
+/// Parse an activated-ability qualifier phrase for "when you next … or activate
+/// an ability <qualifier>" delayed triggers.
+///
+/// Currently supports:
+/// - "with {x} in its activation cost" — CR 107.3 + CR 601.2f. Produces a
+///   `TargetFilter` containing `FilterProp::HasXInActivationCost`.
+///
+/// Shared with `oracle_effect::try_parse_when_next_event` — exposed as
+/// `pub(crate)` to keep the combinator definition in a single place.
+pub(crate) fn parse_post_activation_modifier(modifier: &str) -> Option<TargetFilter> {
+    use crate::types::ability::{FilterProp, TypedFilter};
+
+    if let Ok((rest, ())) = alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("with {x} in its activation cost"),
+        ),
+        value((), tag("with an {x} in its activation cost")),
+    ))
+    .parse(modifier)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+            ));
+        }
+    }
+
+    None
+}
+
 /// Parse "whenever [subject] draw(s) [possessive] Nth card each turn" into a Drawn trigger
 /// with a NthDrawThisTurn constraint.
 /// Follows the same decomposition pattern as `try_parse_nth_spell_trigger`.
@@ -28009,6 +28040,100 @@ mod tests {
                 other => panic!("expected Typed target, got {other:?}"),
             },
             other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 508.5 / CR 508.5a + CR 701.14a: Ace, Fearless Rebel —
+    /// "…then it fights up to one target creature defending player controls."
+    /// The Fight is the tail of a `then`-sequence sub-ability chain, so it lands
+    /// on a nested `sub_ability`. Both axes must survive: the "up to one" target
+    /// cardinality (`multi_target == up_to(1)`, min=0) AND the defending-player
+    /// scope (`ControllerRef::DefendingPlayer`). Regression guard for the
+    /// dropped optionality (cluster #17) and the landed controller-scope fix.
+    #[test]
+    fn attack_trigger_fight_up_to_one_defending_player_controls() {
+        use crate::types::ability::{Effect, MultiTargetSpec};
+
+        let def = parse_trigger_line(
+            "Whenever Ace attacks, put a +1/+1 counter on Ace, then it fights up to one target creature defending player controls.",
+            "Ace, Fearless Rebel",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_deref().expect("execute ability");
+        // Walk the `then`-sequence chain to the Fight sub-ability.
+        let fight = walk_to_fight_sub_ability(execute);
+        assert_eq!(
+            fight.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "fight leg must carry up-to-one multi_target (min=0)",
+        );
+        match fight.effect.as_ref() {
+            Effect::Fight { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "fight target must scope to the defending player, not null",
+                ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 508.5 / CR 508.5a: the "up to one" optionality and the
+    /// `DefendingPlayer` scope are orthogonal axes — an Or-target Fight must fan
+    /// the scope onto each `Or` disjunct AND retain `up_to(1)`.
+    #[test]
+    fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
+        use crate::types::ability::{Effect, MultiTargetSpec};
+
+        let def = parse_trigger_line(
+            "Whenever Ace attacks, put a +1/+1 counter on Ace, then it fights up to one target artifact or enchantment defending player controls.",
+            "Ace, Fearless Rebel",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_deref().expect("execute ability");
+        let fight = walk_to_fight_sub_ability(execute);
+        assert_eq!(
+            fight.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "or-target fight leg must carry up-to-one multi_target (min=0)",
+        );
+        match fight.effect.as_ref() {
+            Effect::Fight { target, .. } => match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+                    for (i, leg) in filters.iter().enumerate() {
+                        match leg {
+                            TargetFilter::Typed(t) => assert_eq!(
+                                t.controller,
+                                Some(ControllerRef::DefendingPlayer),
+                                "or-leg {i} must scope to the defending player, not null",
+                            ),
+                            other => panic!("or-leg {i} expected Typed, got {other:?}"),
+                        }
+                    }
+                }
+                other => panic!("expected Or target, got {other:?}"),
+            },
+            other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
+    /// Walk a `then`-sequence sub-ability chain to the `Effect::Fight` link.
+    fn walk_to_fight_sub_ability(
+        execute: &crate::types::ability::AbilityDefinition,
+    ) -> &crate::types::ability::AbilityDefinition {
+        use crate::types::ability::Effect;
+        let mut current = execute;
+        loop {
+            if matches!(current.effect.as_ref(), Effect::Fight { .. }) {
+                return current;
+            }
+            current = current
+                .sub_ability
+                .as_deref()
+                .expect("fight link must exist in the sub_ability chain");
         }
     }
 

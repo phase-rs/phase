@@ -8,8 +8,8 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
-    try_parse_double_effect, try_parse_move_counters_from, try_parse_put_counter,
-    try_parse_remove_counter,
+    parse_counter_anaphor, try_parse_double_effect, try_parse_move_counters_from,
+    try_parse_put_counter, try_parse_remove_counter,
 };
 use super::lower::parse_for_each_multiplier_prefix;
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
@@ -1523,11 +1523,17 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("fight ")).parse(input))
     {
-        let (target_text, _) = super::strip_optional_target_prefix(rest);
+        // CR 115.6: "fights up to one target creature …" allows zero targets.
+        // Preserve the optional-target spec through the AST; it is stamped onto
+        // the clause in `lower_imperative_family_ast`.
+        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::Fight { target });
+        return Some(TargetedImperativeAst::Fight {
+            target,
+            multi_target,
+        });
     }
     // CR 722.1: "You control target player during that player's next turn"
     // (Mindslaver). Declarative form — "you" is not stripped as an imperative
@@ -1756,7 +1762,14 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 random_order: false,
             }
         }
-        TargetedImperativeAst::Fight { target } => Effect::Fight {
+        // CR 115.6: the "up to N" target cardinality is an ability-level field
+        // (`ParsedEffectClause.multi_target`), not an `Effect::Fight` field. It is
+        // recovered at the clause layer in `lower_imperative_family_ast`; this
+        // bare-Effect lowering deliberately ignores `multi_target`.
+        TargetedImperativeAst::Fight {
+            target,
+            multi_target: _,
+        } => Effect::Fight {
             target,
             subject: TargetFilter::SelfRef,
         },
@@ -3276,6 +3289,24 @@ pub(super) fn parse_utility_imperative_ast(
             }),
             "copy" => {
                 let rest_lower = &lower[lower.len() - rest.len()..];
+                if tag::<_, _, OracleError<'_>>("that spell or ability")
+                    .parse(rest_lower)
+                    .is_ok()
+                {
+                    let consumed = "that spell or ability".len();
+                    let rem = &rest[consumed..];
+                    let retarget = if super::sequence::recognize_copy_retarget_clause(rem.trim()) {
+                        CopyRetargetPermission::MayChooseNewTargets
+                    } else {
+                        #[cfg(debug_assertions)]
+                        assert_no_compound_remainder(rem, text);
+                        CopyRetargetPermission::KeepOriginalTargets
+                    };
+                    return Some(UtilityImperativeAst::Copy {
+                        target: TargetFilter::TriggeringSource,
+                        retarget,
+                    });
+                }
                 let (target, _rem) = if let Some((target, rem_lower)) =
                     parse_copy_stack_ability_target(rest_lower)
                 {
@@ -7642,6 +7673,30 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.optional = true;
             clause
         }
+        // CR 115.6: "it fights up to one target creature …" allows zero targets.
+        // The "up to N" cardinality is an ability-level field
+        // (`ParsedEffectClause.multi_target` → `AbilityDefinition.multi_target`
+        // with min=0 via `lower.rs`), not an `Effect::Fight` field. The
+        // bare-Effect lowering chain (`lower_targeted_action_ast`) cannot carry
+        // it, so intercept here where a `ParsedEffectClause` is in scope and
+        // stamp the spec onto the clause — mirroring the `YouMay` /
+        // `PutCounterList` clause-field interception arms above and the
+        // subject-form "up to" path in `subject.rs`. `None` (mandatory "fights
+        // target …") leaves the clause unchanged.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            TargetedImperativeAst::Fight {
+                target,
+                multi_target,
+            },
+        )) => {
+            let mut clause =
+                parsed_clause(lower_targeted_action_ast(TargetedImperativeAst::Fight {
+                    target,
+                    multi_target: None,
+                }));
+            clause.multi_target = multi_target;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -7960,21 +8015,33 @@ pub(super) fn parse_zone_counter_ast(
             _ => None,
         };
     }
-    if tag::<_, _, OracleError<'_>>("remove ").parse(lower).is_ok()
-        && nom_primitives::scan_contains(lower, "counter")
-    {
-        return match try_parse_remove_counter(lower, ctx) {
-            Some(Effect::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }) => Some(ZoneCounterImperativeAst::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }),
-            _ => None,
-        };
+    // CR 122.1 + CR 608.2k: route "remove …" to the counter parser when the
+    // clause either names a counter explicitly ("remove a +1/+1 counter from ~")
+    // OR refers to the just-established counters anaphorically. The anaphoric
+    // forms ("remove all of them" / "remove them" — level-up/incubate cards like
+    // Ludevic's Test Subject and Smoldering Egg, where the antecedent is the
+    // trigger's intervening-if "if it has N or more <type> counters on it")
+    // carry no literal "counter" token, so the `scan_contains` anchor alone
+    // would drop them to `Unimplemented`. `parse_counter_anaphor` (the shared
+    // anaphor authority in counter.rs) recognizes that surface against the
+    // post-"remove " remainder so it reaches `try_parse_remove_counter`.
+    if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
+        let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
+            || nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some();
+        if is_counter_remove {
+            return match try_parse_remove_counter(lower, ctx) {
+                Some(Effect::RemoveCounter {
+                    counter_type,
+                    count,
+                    target,
+                }) => Some(ZoneCounterImperativeAst::RemoveCounter {
+                    counter_type,
+                    count,
+                    target,
+                }),
+                _ => None,
+            };
+        }
     }
     // CR 122.5: "move [N] [type] counter(s) from [source] onto/to [target]"
     if tag::<_, _, OracleError<'_>>("move ").parse(lower).is_ok()
@@ -9039,6 +9106,32 @@ mod tests {
                 panic!("{input}: expected Attach, got {result:?}");
             };
             assert_eq!(target, TargetFilter::TriggeringSource, "{input}");
+        }
+    }
+
+    /// CR 122.1 + CR 608.2k: the imperative dispatch gate routes anaphoric
+    /// remove-counter clauses ("remove all of them" / "remove them" — the
+    /// just-referenced counters established by a trigger's intervening-if) to
+    /// the counter parser even though they carry no literal "counter" token.
+    /// Building-block coverage for the level-up/incubate transform class
+    /// (Ludevic's Test Subject, Smoldering Egg) at the dispatch layer.
+    #[test]
+    fn remove_counter_anaphor_routes_through_dispatch_gate() {
+        for input in ["remove all of them", "remove them", "remove those counters"] {
+            let lower = input.to_lowercase();
+            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+            let Some(ZoneCounterImperativeAst::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::Fixed { value: -1 },
+                target,
+            }) = result
+            else {
+                panic!("{input}: expected anaphoric RemoveCounter (count -1), got {result:?}");
+            };
+            assert!(
+                matches!(target, TargetFilter::SelfRef),
+                "{input}: expected SelfRef target, got {target:?}"
+            );
         }
     }
 
@@ -10864,6 +10957,47 @@ mod tests {
             );
         }
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+    }
+
+    /// CR 115.6: "it fights up to one target creature …" allows zero targets.
+    /// The optional-target cardinality must survive the full effect → clause →
+    /// `AbilityDefinition` lowering as `AbilityDefinition.multi_target` with
+    /// min=0 (`up_to(1)`), since the bare-`Effect::Fight` lowering cannot carry
+    /// it. Building-block test across the optionality axis: "up to one" →
+    /// `up_to(1)`, mandatory → `None`.
+    #[test]
+    fn lower_fight_up_to_one_target_carries_multi_target() {
+        let def = super::super::parse_effect_chain(
+            "it fights up to one target creature defending player controls",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Fight { .. }),
+            "Expected Effect::Fight, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "fight 'up to one target' must carry up_to(1) (min=0)"
+        );
+    }
+
+    /// CR 701.14a: the mandatory "fights target creature" form (no "up to")
+    /// carries NO multi_target — the target is required. Pins the other end of
+    /// the optionality axis so the recovery does not over-apply.
+    #[test]
+    fn lower_fight_mandatory_target_no_multi_target() {
+        let def = super::super::parse_effect_chain("it fights target creature", AbilityKind::Spell);
+        assert!(
+            matches!(*def.effect, Effect::Fight { .. }),
+            "Expected Effect::Fight, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target, None,
+            "mandatory fight target must not be optional"
+        );
     }
 
     #[test]

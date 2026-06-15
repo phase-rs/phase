@@ -3903,8 +3903,10 @@ pub(super) fn match_ability_activated(
     else {
         return false;
     };
-    valid_player_matches(trigger, state, *player_id, source_id)
-        && valid_card_matches(trigger, state, *activated_id, source_id)
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return false;
+    }
+    valid_card_matches(trigger, state, *activated_id, source_id)
 }
 
 /// CR 702.26c: Matches when a permanent phases in.
