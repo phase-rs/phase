@@ -1905,6 +1905,86 @@ mod tests {
         );
     }
 
+    /// CR 615.1a + CR 615.5 + CR 122.1 + CR 608.2h: Protean Hydra class — "If
+    /// damage would be dealt to ~, prevent that damage and remove that many
+    /// +1/+1 counters from it." The prevention shield absorbs the damage and
+    /// the rider removes one +1/+1 counter per damage prevented, resolving
+    /// `EventContextAmount` on `Effect::RemoveCounter.count` exactly as the
+    /// Phyrexian Hydra cohort does on `Effect::PutCounter.count`.
+    #[test]
+    fn protean_hydra_prevention_removes_that_many_plus_counters() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PreventionAmount, QuantityExpr, QuantityRef,
+            ReplacementDefinition,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let hydra = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(1),
+            "Protean Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&hydra).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            // Enters with five +1/+1 counters.
+            obj.counters.insert(CounterType::Plus1Plus1, 5);
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::RemoveCounter {
+                            counter_type: Some(CounterType::Plus1Plus1),
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::EventContextAmount,
+                            },
+                            target: TargetFilter::SelfRef,
+                        },
+                    ))
+                    .description("Protean Hydra prevention shield".to_string()),
+            );
+        }
+
+        let ability = make_ability(3, vec![TargetRef::Object(hydra)]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let hydra_obj = state.objects.get(&hydra).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 3, .. })),
+            "expected DamagePrevented event with amount 3, got {events:?}"
+        );
+        assert_eq!(
+            hydra_obj.damage_marked, 0,
+            "prevention must absorb the damage (no marked damage)"
+        );
+        assert_eq!(
+            hydra_obj
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "5 starting counters minus 3 prevented damage = 2 remaining, events: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
+            "must not emit DamageDealt for fully prevented damage"
+        );
+    }
+
     /// CR 615.5: Crumbling Sanctuary-class prevention follow-ups resolve "that
     /// player" from the prevented damage event's target and "that many" from
     /// the prevented damage amount.

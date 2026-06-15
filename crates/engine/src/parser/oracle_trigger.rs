@@ -24190,7 +24190,11 @@ mod tests {
                         "charge".to_string()
                     ))
                 );
-                assert_eq!(*count, -1, "count=-1 is the remove-all sentinel");
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: -1 },
+                    "Fixed(-1) is the remove-all sentinel"
+                );
                 assert!(matches!(target, TargetFilter::SelfRef));
             }
             other => panic!("expected Effect::RemoveCounter, got {other:?}"),
