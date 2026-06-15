@@ -2427,7 +2427,9 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
             CardTypeSetSource::Objects { filter } => {
                 filter_references_target_creature_quantity(filter)
             }
-            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         },
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {

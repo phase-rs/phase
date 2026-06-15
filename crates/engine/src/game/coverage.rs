@@ -1139,6 +1139,22 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             CardTypeSetSource::Objects { filter } => {
                 format!("card types among {}", fmt_target(filter))
             }
+            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+                Some(cause) => {
+                    use crate::types::ability::ThisWayCause;
+                    let verb = match cause {
+                        ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Exiled => "exiled",
+                        ThisWayCause::Milled => "milled",
+                        ThisWayCause::Destroyed => "destroyed",
+                        ThisWayCause::Sacrificed => "sacrificed",
+                        ThisWayCause::Returned => "returned",
+                        ThisWayCause::Bounced => "bounced",
+                    };
+                    format!("card types among cards {verb} this way")
+                }
+                None => "card types among tracked cards".into(),
+            },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ZoneCardCount {

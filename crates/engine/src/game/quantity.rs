@@ -260,7 +260,9 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // is the object-filter variant; zone / linked-exile sources do not.
         QuantityRef::DistinctCardTypes { source } => match source {
             CardTypeSetSource::Objects { .. } => true,
-            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         },
         // Player-level, single-object, history-record, payment, and choice
         // references: unaffected by another object's battlefield entry/exit.
@@ -406,9 +408,12 @@ fn entered_object_perturbs_quantity_ref(
             CardTypeSetSource::Objects { filter } => {
                 matches_target_filter(state, entered.id, filter, ctx)
             }
-            // Zone / linked-exile sources are not battlefield population — the
-            // classifier returns false for them, so they cannot be perturbed.
-            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+            // Zone / linked-exile / tracked-set sources are not battlefield
+            // population — the classifier returns false for them, so they cannot
+            // be perturbed.
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         },
         // CR 700.5: devotion is perturbed iff the entered object's mana cost
         // contributes a symbol for one of the fixed colors. `ChosenColor`'s
@@ -1607,6 +1612,36 @@ fn resolve_ref(
                         if let Some(obj) = state.objects.get(&obj_id) {
                             for ct in &obj.card_types.core_types {
                                 seen.insert(*ct);
+                            }
+                        }
+                    }
+                }
+                // CR 608.2c + CR 205.2a/205.2b: distinct card types among the most
+                // recent chain tracked set. A merged Draw->Discard set is
+                // disambiguated by CAUSE: `Some(cause)` (e.g. Discarded) tallies
+                // only members whose recorded producer action equals the bound
+                // cause; drawn members are unstamped and excluded. `None` counts
+                // every member. Mirrors `FilteredTrackedSetSize`'s set selection
+                // (highest set id) and cause filter (`tracked_set_member_causes`).
+                CardTypeSetSource::TrackedSet { caused_by } => {
+                    if let Some((set_id, ids)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    {
+                        for &oid in ids {
+                            let cause_ok = match caused_by {
+                                None => true,
+                                Some(cause) => state
+                                    .tracked_set_member_causes
+                                    .get(set_id)
+                                    .and_then(|causes| causes.get(&oid))
+                                    .is_some_and(|member_cause| member_cause == cause),
+                            };
+                            if cause_ok {
+                                if let Some(obj) = state.objects.get(&oid) {
+                                    for ct in &obj.card_types.core_types {
+                                        seen.insert(*ct);
+                                    }
+                                }
                             }
                         }
                     }
@@ -10472,6 +10507,167 @@ mod tests {
             count_for(None),
             4,
             "None must count every member of the set (legacy parity)"
+        );
+    }
+
+    /// Occult Epiphany #3307: "Draw X, then discard X. Create a 1/1 Spirit for
+    /// each card type among cards discarded this way." Draw and Discard MERGE
+    /// into one chain tracked set; the token count must be DISTINCT CARD TYPES
+    /// among the DISCARDED members only (drawn members are unstamped and must be
+    /// excluded). CR 608.2c + CR 205.2a/205.2b.
+    #[test]
+    fn distinct_card_types_tracked_set_counts_discarded_members_by_cause() {
+        let mut state = GameState::new_two_player(42);
+        // Two drawn INSTANTS (unstamped) and two discarded CREATURES (stamped
+        // Discarded) merged into a single Draw->Discard chain tracked set.
+        let drawn_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Drawn-A".into(),
+            Zone::Hand,
+        );
+        let drawn_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Drawn-B".into(),
+            Zone::Hand,
+        );
+        let disc_creature_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Disc-Creature-A".into(),
+            Zone::Graveyard,
+        );
+        let disc_creature_b = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Disc-Creature-B".into(),
+            Zone::Graveyard,
+        );
+        let disc_instant = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Disc-Instant".into(),
+            Zone::Graveyard,
+        );
+        for id in [drawn_a, drawn_b, disc_instant] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Instant];
+        }
+        for id in [disc_creature_a, disc_creature_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        // A higher-id (later) set: the resolver must pick THIS merged set, the
+        // highest id, exactly like FilteredTrackedSetSize.
+        state.tracked_object_sets.insert(
+            set_id,
+            vec![
+                drawn_a,
+                drawn_b,
+                disc_creature_a,
+                disc_creature_b,
+                disc_instant,
+            ],
+        );
+        state.chain_tracked_set_id = Some(set_id);
+        // Only the DISCARDED members carry a cause; drawn members are unstamped.
+        let mut causes = HashMap::new();
+        causes.insert(disc_creature_a, ThisWayCause::Discarded);
+        causes.insert(disc_creature_b, ThisWayCause::Discarded);
+        causes.insert(disc_instant, ThisWayCause::Discarded);
+        state.tracked_set_member_causes.insert(set_id, causes);
+
+        let count_for = |caused_by| {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCardTypes {
+                    source: CardTypeSetSource::TrackedSet { caused_by },
+                },
+            };
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999))
+        };
+
+        // The canonical Occult Epiphany reading: distinct card types among the
+        // DISCARDED members = {Creature, Instant} = 2. The two drawn Instants are
+        // unstamped and excluded; the discarded Instant DOES contribute Instant.
+        assert_eq!(
+            count_for(Some(ThisWayCause::Discarded)),
+            2,
+            "distinct card types among discarded members = Creature + Instant (drawn unstamped)"
+        );
+
+        // Discriminating bug check: the OLD behavior (TrackedSetSize) would have
+        // returned 5 (all members); a naive distinct-types-of-WHOLE-set would be
+        // 2 as well but for the wrong reason, so also assert the all-creature
+        // variant differs from the merged-instant variant via the next test.
+        assert_eq!(
+            count_for(None),
+            2,
+            "None counts distinct types of every member: Instant + Creature = 2"
+        );
+    }
+
+    /// Companion to the above: discarding exactly one creature + one instant
+    /// (2 distinct types) yields 2; discarding two creatures (1 distinct type)
+    /// yields 1 — proving the count is DISTINCT TYPES, not member count.
+    #[test]
+    fn distinct_card_types_tracked_set_is_distinct_types_not_member_count() {
+        let mut state = GameState::new_two_player(7);
+        let drawn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Drawn".into(),
+            Zone::Hand,
+        );
+        let cr_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Cr-A".into(),
+            Zone::Graveyard,
+        );
+        let cr_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Cr-B".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&drawn).unwrap().card_types.core_types = vec![CoreType::Sorcery];
+        for id in [cr_a, cr_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![drawn, cr_a, cr_b]);
+        state.chain_tracked_set_id = Some(set_id);
+        let mut causes = HashMap::new();
+        causes.insert(cr_a, ThisWayCause::Discarded);
+        causes.insert(cr_b, ThisWayCause::Discarded);
+        state.tracked_set_member_causes.insert(set_id, causes);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Discarded),
+                },
+            },
+        };
+        // Two discarded CREATURES -> 1 distinct card type (NOT 2 members).
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999)),
+            1,
+            "two discarded creatures share one card type -> 1 token, not 2"
         );
     }
 }

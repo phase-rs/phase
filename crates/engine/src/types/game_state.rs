@@ -3077,6 +3077,8 @@ pub enum WaitingFor {
     ManifestDreadChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+        /// CR 701.62a: resolving ability source for zone-pipeline attribution on
+        /// the chosen manifest entry (Abhorrent Oculus class).
         source_id: ObjectId,
     },
     TriggerTargetSelection {

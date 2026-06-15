@@ -25,8 +25,8 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter, TypeFilter,
-    TypedFilter, ZoneRef,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
+    ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterMatch;
 use crate::types::keywords::Keyword;
@@ -490,7 +490,15 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_distinct_card_types_exiled_with_source,
         parse_linked_exile_mana_value_ref,
         parse_distinct_card_types_in_zone,
-        parse_distinct_card_types_among_objects,
+        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
+        // precede the generic `among <objects>` arm so the chain-tracked-set,
+        // cause-filtered count wins on the "card type among cards" prefix. Nested
+        // with `parse_distinct_card_types_among_objects` to keep the outer `alt`
+        // within nom's tuple arity (nom 8.0 max: 21 items).
+        alt((
+            parse_distinct_card_types_among_tracked_set,
+            parse_distinct_card_types_among_objects,
+        )),
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
         parse_cards_exiled_with_source,
@@ -714,7 +722,14 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
-        parse_distinct_card_types_among_objects,
+        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
+        // precede the generic `among <objects>` arm (same ordering as
+        // `parse_quantity_ref`). Nested with `parse_distinct_card_types_among_objects`
+        // to stay within nom's top-level `alt` arity (nom 8.0 max: 21 items).
+        alt((
+            parse_distinct_card_types_among_tracked_set,
+            parse_distinct_card_types_among_objects,
+        )),
         // CR 201.2 + CR 603.4: "differently named <type-phrase>" — distinct-by-
         // name population count. Must precede `parse_number_of_controlled_type`
         // so the adjective prefix is consumed before the generic typed-filter
@@ -1222,6 +1237,33 @@ fn parse_distinct_card_types_among_objects(input: &str) -> OracleResult<'_, Quan
         &input[consumed..],
         QuantityRef::DistinctCardTypes {
             source: CardTypeSetSource::Objects { filter },
+        },
+    ))
+}
+
+/// CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" -> distinct
+/// card types among the chain tracked set, cause-filtered to <verb> (Occult Epiphany #3307).
+pub(crate) fn parse_distinct_card_types_among_tracked_set(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among cards ").parse(rest)?;
+    let (rest, cause) = alt((
+        value(ThisWayCause::Discarded, tag("discarded")),
+        value(ThisWayCause::Exiled, tag("exiled")),
+        value(ThisWayCause::Milled, tag("milled")),
+        value(ThisWayCause::Destroyed, tag("destroyed")),
+        value(ThisWayCause::Sacrificed, tag("sacrificed")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this way").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::TrackedSet {
+                caused_by: Some(cause),
+            },
         },
     ))
 }
@@ -4801,6 +4843,56 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::Another)));
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_among_cards_discarded_this_way() {
+        // Occult Epiphany #3307: singular "card type" + Discarded cause.
+        let (rest, q) =
+            parse_distinct_card_types_among_tracked_set("card type among cards discarded this way")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Discarded),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_among_cards_exiled_this_way() {
+        // Plural "card types" + Exiled cause.
+        let (rest, q) =
+            parse_distinct_card_types_among_tracked_set("card types among cards exiled this way")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Exiled),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_distinct_card_types_among_tracked_set_via_parse_quantity_ref() {
+        // The combinator must win over `parse_distinct_card_types_among_objects`
+        // when reached through the top-level `parse_quantity_ref` alt chain.
+        let (rest, q) = parse_quantity_ref("card types among cards discarded this way").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Discarded),
+                },
+            }
+        );
     }
 
     #[test]

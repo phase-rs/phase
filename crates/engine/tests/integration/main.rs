@@ -212,6 +212,7 @@ mod issue_2941_vivien_reid;
 mod issue_2943_kayas_wrath;
 mod issue_3127_reveal_otherwise_graveyard;
 mod issue_3245_abhorrent_oculus_manifest_dread;
+mod issue_3311_manifest_dread_land;
 mod issue_3320_peregrine_drake_untap_prompt;
 mod issue_3321_volcanic_spite_optional;
 mod issue_3322_airbend_owner_cast;

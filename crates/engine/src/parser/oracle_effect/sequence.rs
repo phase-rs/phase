@@ -1618,7 +1618,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             ),
         ),
         value((), starts_they_continuous_clause_lower),
-        // Singular anaphoric subjects: "that {creature,permanent,token}" +
+        // Singular anaphoric subjects: "that {creature,land,permanent,token}" +
         // singular-conjugation continuous verb (gains/gets/has/loses).
         // Single-token grants ("create one X token, that token gains haste")
         // are rarer than the plural form but real, so all three subject
@@ -1628,6 +1628,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             (
                 alt((
                     tag("that creature "),
+                    tag("that land "),
                     tag("that permanent "),
                     tag("that token "),
                 )),
@@ -7372,6 +7373,9 @@ mod tests {
         assert!(starts_bare_and_clause("that creature loses flying"));
         assert!(starts_bare_and_clause(
             "that permanent gains indestructible"
+        ));
+        assert!(starts_bare_and_clause(
+            "that land gains indestructible until end of turn"
         ));
         // Token anaphors — "create N tokens. Those tokens gain haste."
         assert!(starts_bare_and_clause("those tokens gain haste"));

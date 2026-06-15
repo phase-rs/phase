@@ -218,6 +218,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If enchanted land would be destroyed, instead {effect}" ---
+    if let Some(def) =
+        parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &normalized, &text)
+    {
+        return Some(def);
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -751,6 +758,66 @@ fn parse_self_enters_pay_cost_replacement(
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+/// CR 614.1a: "instead" marks the enchanted-land destruction event as replaced
+/// by the parsed sacrifice/grant effect chain.
+fn parse_enchanted_land_destroy_sacrifice_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), rest) = nom_on_lower(normalized, norm_lower, |i| {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, _) = tag("enchanted land").parse(i)?;
+        let (i, _) = tag(" would be destroyed, ").parse(i)?;
+        let (i, _) = tag("instead ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let effect_text = rest.trim_end_matches('.');
+    if effect_text.is_empty() {
+        return None;
+    }
+    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    bind_enchanted_land_grant_to_replaced_object(&mut execute);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::AttachedTo)
+            .execute(execute)
+            .description(original_text.to_string()),
+    )
+}
+
+fn bind_enchanted_land_grant_to_replaced_object(def: &mut AbilityDefinition) {
+    // CR 614.1a + CR 608.2c: in "If enchanted land would be destroyed, instead
+    // sacrifice ~ and that land gains ...", "that land" refers to the object
+    // whose destruction is being replaced, not to every land.
+    if let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &mut *def.effect
+    {
+        let mut binds_replaced_land = false;
+        for static_ability in static_abilities {
+            if matches!(
+                static_ability.affected.as_ref(),
+                Some(TargetFilter::Typed(filter))
+                    if filter.type_filters == [TypeFilter::Land]
+            ) {
+                static_ability.affected = Some(TargetFilter::ParentTarget);
+                binds_replaced_land = true;
+            }
+        }
+        if binds_replaced_land {
+            *target = None;
+        }
+    }
+
+    if let Some(sub_ability) = def.sub_ability.as_mut() {
+        bind_enchanted_land_grant_to_replaced_object(sub_ability);
+    }
 }
 
 /// CR 705.1 + CR 614.1a: Krark's Thumb — "If you would flip a coin, instead flip
@@ -11943,6 +12010,46 @@ mod tests {
             scan_damage_modification("it deals that much damage minus 1 instead"),
             Some(DamageModification::Minus { value: 1 })
         );
+    }
+
+    #[test]
+    fn parses_enchanted_land_destroy_sacrifice_indestructible() {
+        let def = parse_replacement_line(
+            "If enchanted land would be destroyed, instead sacrifice ~ and that land gains indestructible until end of turn.",
+            "Harmonious Emergence",
+        )
+        .expect("enchanted land destroy");
+
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+
+        let execute = def.execute.as_ref().expect("replacement execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+
+        let grant = execute.sub_ability.as_ref().expect("indestructible grant");
+        match &*grant.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            } => {
+                assert!(static_abilities.iter().any(|static_ability| {
+                    static_ability.affected == Some(TargetFilter::ParentTarget)
+                        && static_ability.modifications.contains(
+                            &ContinuousModification::AddKeyword {
+                                keyword: Keyword::Indestructible,
+                            },
+                        )
+                }));
+            }
+            other => panic!("expected indestructible grant to enchanted land, got {other:?}"),
+        }
     }
 
     #[test]

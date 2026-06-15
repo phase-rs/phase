@@ -684,6 +684,76 @@ fn type_filter_to_core_type(tf: &TypeFilter) -> Option<CoreType> {
     }
 }
 
+/// Inverse of [`type_filter_to_core_type`]: map a `CoreType` to the `TypeFilter`
+/// the engine uses to gate a present-target filter. Total over the card-type
+/// `CoreType` set; mirrors the explicit arms of `type_filter_to_core_type`.
+fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
+    match core {
+        CoreType::Creature => TypeFilter::Creature,
+        CoreType::Land => TypeFilter::Land,
+        CoreType::Artifact => TypeFilter::Artifact,
+        CoreType::Enchantment => TypeFilter::Enchantment,
+        CoreType::Instant => TypeFilter::Instant,
+        CoreType::Sorcery => TypeFilter::Sorcery,
+        CoreType::Planeswalker => TypeFilter::Planeswalker,
+        CoreType::Battle => TypeFilter::Battle,
+        // CR 110.1: any remaining card type maps to a Subtype-free typed filter
+        // by its name; `Tribal`/`Plane`/etc. fall here and are gated by name.
+        other => TypeFilter::Subtype(format!("{other:?}")),
+    }
+}
+
+/// CR 608.2c + CR 109.2: Convert a *reveal-context* card-type condition into a
+/// *present-target* card-type condition.
+///
+/// `strip_card_type_conditional` emits `RevealedHasCardType{Creature}` for the
+/// anaphoric head "if it's a creature, it ..." because most users of that helper
+/// gate on a card revealed/zone-changed by an earlier instruction (a reveal
+/// context). But the damage-spell class (Disintegrate / Carbonize: "deals N
+/// damage to any target. If it's a creature, it can't be regenerated this turn,
+/// and if it would die this turn, exile it instead.") has NO revealed subject —
+/// the "it" is the spell's chosen damage *target* on the battlefield. Under
+/// CR 109.2 an unqualified card-type description (no "card"/"spell"/zone) refers
+/// to a permanent of that type, i.e. the targeted object. Carrying the raw
+/// `RevealedHasCardType{Creature}` would evaluate ALWAYS-FALSE here (no revealed
+/// id → `evaluate_condition` returns false), silently dropping the riders even
+/// for a creature target. `TargetMatchesFilter{Typed(creature), use_lki:true}`
+/// instead evaluates against the ability's first object target (the damage
+/// target): true for a creature, false for a planeswalker/player.
+///
+/// CR 608.2c (later text — "if it's a creature, it ..." — modifies the earlier
+/// "deals N damage to any target") + CR 109.2 (the object/anaphor "it" is a
+/// permanent of the named type). This is the same conversion the "permanent" arm
+/// of `strip_card_type_conditional` (~786) and `parse_if_it_isnt_a_*` (~3109)
+/// already perform for non-`CoreType` gates; here we extend it to the `CoreType`
+/// gate that a damage anaphor produces.
+///
+/// Returns `None` for any condition that is not a single-`CoreType`
+/// `RevealedHasCardType` with no additional/subtype filter (so non-type gates
+/// fall through unchanged at the call site).
+pub(super) fn card_type_condition_as_target_match(
+    cond: &AbilityCondition,
+) -> Option<AbilityCondition> {
+    let AbilityCondition::RevealedHasCardType {
+        card_types,
+        additional_filter: None,
+        subtype_filter: None,
+    } = cond
+    else {
+        return None;
+    };
+    let [core] = card_types.as_slice() else {
+        return None;
+    };
+    Some(AbilityCondition::TargetMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(core_type_to_type_filter(*core))),
+        // CR 400.7: the damage target may already be dying/changing zones when the
+        // riders evaluate; use last-known information so a creature that is being
+        // destroyed this way still matches.
+        use_lki: true,
+    })
+}
+
 /// CR 608.2c: "If an instant or sorcery card is revealed this way, ..."
 /// (Delver of Secrets class) — gates a sub_ability on the last revealed card's type.
 fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityCondition, String)> {

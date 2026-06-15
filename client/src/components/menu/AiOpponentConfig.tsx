@@ -13,9 +13,14 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
+
+const AI_MENU_CLASS =
+  "min-h-[44px] rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm sm:min-h-0";
+const AI_MENU_LAYOUT = "dropdown" as const;
+const AI_MENU_WRAPPER = "w-full min-w-0";
 
 interface Props {
   selectedFormat?: GameFormat | null;
@@ -215,20 +220,19 @@ export function AiOpponentConfig({
         </div>
         <label className="flex flex-col gap-1">
           <span className="text-xs text-slate-400">{t("aiOpponent.archetype")}</span>
-          <SelectField
-            wrapperClassName="w-full"
-            value={archetypeFilter}
-            onChange={(e) => setArchetypeFilter(e.target.value as AiArchetypeFilter)}
-            className={`w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm font-medium ${archetypeAccent(
+          <MenuSelect
+            ariaLabel={t("aiOpponent.archetype")}
+            label={archetypeFilter}
+            selectedValue={archetypeFilter}
+            items={ARCHETYPE_OPTIONS.map((opt) => ({ value: opt, label: opt }))}
+            onSelect={(value) => setArchetypeFilter(value as AiArchetypeFilter)}
+            menuLayout={AI_MENU_LAYOUT}
+            fitContainer
+            wrapperClassName={AI_MENU_WRAPPER}
+            className={`${AI_MENU_CLASS} font-medium ${archetypeAccent(
               archetypeFilter === "Any" ? null : (archetypeFilter as DeckArchetype),
             )}`}
-          >
-            {ARCHETYPE_OPTIONS.map((opt) => (
-              <option key={opt} value={opt} className="text-white">
-                {opt}
-              </option>
-            ))}
-          </SelectField>
+          />
         </label>
 
         <label className="flex flex-col gap-1">
@@ -320,50 +324,70 @@ function AiSeatPanel({
     ? t("aiOpponent.cedhToggle.badge")
     : t(`aiDifficulty.levels.${seat.difficulty}`);
 
+  const formatDeckLabel = (candidate: AiDeckCandidate): string => {
+    const suffix = [sourceLabel(candidate), candidate.archetype, candidate.coveragePct != null ? `${candidate.coveragePct}%` : null]
+      .filter(Boolean)
+      .join(" · ");
+    return suffix ? `${candidate.name} — ${suffix}` : candidate.name;
+  };
+
+  const randomDeckLabel = t("aiOpponent.deckRandomCount", { count: filteredDecks.length });
+  const deckMenuItems = useMemo(
+    () => [
+      { value: AI_DECK_RANDOM, label: randomDeckLabel },
+      ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
+    ],
+    [deckOptions, randomDeckLabel],
+  );
+  const selectedDeckLabel =
+    effectiveSelection === AI_DECK_RANDOM
+      ? randomDeckLabel
+      : (deckMenuItems.find((item) => item.value === effectiveSelection)?.label ?? randomDeckLabel);
+
+  const difficultyItems = useMemo(
+    () =>
+      AI_DIFFICULTIES.map((item) => ({
+        value: item.id,
+        label: t(`aiDifficulty.levels.${item.id}`),
+      })),
+    [t],
+  );
+  const selectedDifficultyLabel =
+    difficultyItems.find((item) => item.value === seat.difficulty)?.label ??
+    t(`aiDifficulty.levels.${seat.difficulty}`);
+
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
-        <SelectField
-          wrapperClassName="w-full"
-          value={effectiveSelection}
-          onChange={(e) => onDeckChange(e.target.value as AiDeckSelection)}
-          className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
-        >
-          <option value={AI_DECK_RANDOM}>{t("aiOpponent.deckRandomCount", { count: filteredDecks.length })}</option>
-          {deckOptions.map((d) => {
-            const suffix = [sourceLabel(d), d.archetype, d.coveragePct != null ? `${d.coveragePct}%` : null]
-              .filter(Boolean)
-              .join(" · ");
-            return (
-              <option key={d.id} value={d.id}>
-                {d.name}
-                {suffix ? ` — ${suffix}` : ""}
-              </option>
-            );
-          })}
-        </SelectField>
+        <MenuSelect
+          ariaLabel={t("aiOpponent.deck")}
+          label={selectedDeckLabel}
+          selectedValue={effectiveSelection}
+          items={deckMenuItems}
+          onSelect={(value) => onDeckChange(value as AiDeckSelection)}
+          menuLayout={AI_MENU_LAYOUT}
+          fitContainer
+          wrapperClassName={AI_MENU_WRAPPER}
+          className={`${AI_MENU_CLASS} text-white`}
+        />
       </label>
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>
         <div className="relative">
-          <SelectField
-            wrapperClassName="w-full"
-            value={seat.difficulty}
-            onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
+          <MenuSelect
+            ariaLabel={t("aiOpponent.difficulty")}
+            label={selectedDifficultyLabel}
+            selectedValue={seat.difficulty}
+            items={difficultyItems}
+            onSelect={(value) => onDifficultyChange(value as AIDifficulty)}
             disabled={cedhMode}
-            aria-disabled={cedhMode}
-            className={`w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white ${
-              cedhMode ? "cursor-not-allowed opacity-50" : ""
-            }`}
-          >
-            {AI_DIFFICULTIES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {t(`aiDifficulty.levels.${item.id}`)}
-              </option>
-            ))}
-          </SelectField>
+            menuLayout={AI_MENU_LAYOUT}
+            fitContainer
+            wrapperClassName={AI_MENU_WRAPPER}
+            className={`${AI_MENU_CLASS} text-white ${cedhMode ? "cursor-not-allowed opacity-50" : ""}`}
+          />
           {cedhMode && (
             <span
               aria-label="cEDH"

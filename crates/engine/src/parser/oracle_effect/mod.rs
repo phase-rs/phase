@@ -16486,6 +16486,134 @@ pub(crate) fn parse_effect_chain_ir(
                 )
             })
         {
+            // CR 608.2c + CR 109.2 + CR 614.1a: Disintegrate / Carbonize print a
+            // CONDITIONAL rider gated on "if it's a creature, it" (the damage
+            // targets "any target", so the regen prohibition + die-exile only
+            // apply when the target is a creature), with both riders in one
+            // sentence: "If it's a creature, it can't be regenerated this turn,
+            // and if it would die this turn, exile it instead." `starts_prefix_clause`
+            // keeps the leading-"if" sentence as one chunk; COMPOSE the existing
+            // building blocks (no byte math, no string dispatch): strip the
+            // card-type conditional, convert the CoreType gate into a present-
+            // target match (the "it" is the damage target, not a revealed card —
+            // see card_type_condition_as_target_match), split the regen vs exile
+            // clauses on ", and ", validate the regen segment, and build both
+            // riders carrying that condition. Push CantBeRegenerated FIRST and
+            // DieExile SECOND so `append_to_deepest_sub_ability` nests them
+            // DealDamage -> CantBeRegenerated -> AddTargetReplacement (CR 614.8:
+            // exile-instead is a destruction-replacement layered after the regen
+            // prohibition). Pre-empts both the unconditional damage-rider arm and
+            // the generic `strip_card_type_conditional` fallthrough below.
+            //
+            // CR 109.2: the unqualified "it's a creature" anaphor refers to the
+            // permanent the spell targeted. CR 608.2c: later text ("if it's a
+            // creature, it ...") modifies the earlier "deals N damage to any
+            // target". The condition is carried on each rider's
+            // `AbilityDefinition.condition` (evaluated per sub_ability at
+            // resolution; skipped when false; the empty-target sub inherits the
+            // parent's chosen targets so `TargetMatchesFilter` resolves the damage
+            // target). The SpecialClause lowering arms move the def as-is, so the
+            // condition must be stamped on the DEF, not the ClauseIr.
+            let conditional_regen_matched = 'conditional_regen: {
+                let regen_body = normalized_text.trim_end_matches('.').trim();
+                let (Some(card_type_cond), remainder) = strip_card_type_conditional(regen_body)
+                else {
+                    break 'conditional_regen false;
+                };
+                let Some(creature_match) = card_type_condition_as_target_match(&card_type_cond)
+                else {
+                    break 'conditional_regen false;
+                };
+                // Strip the leading "it " anaphor that `strip_card_type_conditional`
+                // leaves on the remainder ("it can't be regenerated ...").
+                let Ok((after_it, _)) =
+                    tag::<_, _, OracleError<'_>>("it ").parse(remainder.as_str())
+                else {
+                    break 'conditional_regen false;
+                };
+                // Split regen vs exile on ", and " (no byte math).
+                let Ok((_, (regen_seg, exile_seg))) =
+                    nom_primitives::split_once_on(after_it, ", and ")
+                else {
+                    break 'conditional_regen false;
+                };
+                // Validate the (now-bounded) regen segment with the all_consuming
+                // predicate; bail if it isn't "can't be regenerated [this turn]".
+                if subject::parse_cant_be_regenerated_predicate(regen_seg.trim()).is_err() {
+                    break 'conditional_regen false;
+                }
+                // All-or-nothing for the two-rider grammar: parse the die-exile
+                // rider BEFORE pushing anything. If the second segment is not a
+                // die-exile rider (e.g. "..., and draw a card."), fall through to
+                // normal parsing rather than keep the regen rider and silently
+                // swallow the tail.
+                let Some(mut exile_def) = try_parse_die_exile_rider(exile_seg.trim(), kind) else {
+                    break 'conditional_regen false;
+                };
+                // Both riders parsed. Build the regen rider and stamp the
+                // creature-gate condition; push it first.
+                let mut regen_def = subject::build_cant_be_regenerated_rider(
+                    kind,
+                    &subject::cant_be_regenerated_tracked_set_application(),
+                );
+                regen_def.condition = Some(creature_match.clone());
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::unimplemented(
+                        "cant_be_regenerated_rider_placeholder",
+                        "",
+                    )),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::CantBeRegeneratedRider(Box::new(regen_def))),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                // Stamp the same creature-gate condition on the die-exile rider
+                // (it swallowed the leading "if " during parse) and push it second.
+                exile_def.condition = Some(creature_match);
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::unimplemented("die_exile_rider_placeholder", "")),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::DieExileRider(Box::new(exile_def))),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                true
+            };
+            if conditional_regen_matched {
+                continue;
+            }
             if let Some(rider_def) = subject::try_parse_cant_be_regenerated_damage_rider(
                 normalized_text.trim_end_matches('.').trim(),
                 kind,
@@ -32459,6 +32587,419 @@ mod tests {
         assert!(
             !has_unimplemented(&def),
             "Incinerate must parse with no Unimplemented clause: {def:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #3343: conditional ("if it's a creature") regen rider + die-exile
+    // -----------------------------------------------------------------------
+
+    /// Walk a def's sub_ability/else_ability chain, returning true if any node
+    /// satisfies `pred`.
+    #[cfg(test)]
+    fn chain_any(
+        def: &crate::types::ability::AbilityDefinition,
+        pred: &dyn Fn(&crate::types::ability::AbilityDefinition) -> bool,
+    ) -> bool {
+        pred(def)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(|d| chain_any(d, pred))
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(|d| chain_any(d, pred))
+    }
+
+    #[cfg(test)]
+    fn chain_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+        chain_any(def, &|d| matches!(&*d.effect, Effect::Unimplemented { .. }))
+    }
+
+    #[cfg(test)]
+    fn chain_has_cant_be_regenerated_rider(def: &crate::types::ability::AbilityDefinition) -> bool {
+        use crate::types::statics::StaticMode;
+        chain_any(def, &|d| {
+            matches!(
+                &*d.effect,
+                Effect::GenericEffect {
+                    static_abilities,
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: Some(TargetFilter::TrackedSet { id: TrackedSetId(0) }),
+                } if static_abilities.first().is_some_and(|sd| {
+                    matches!(sd.mode, StaticMode::CantBeRegenerated)
+                        && sd.affected == Some(TargetFilter::ParentTarget)
+                })
+            )
+        })
+    }
+
+    #[cfg(test)]
+    fn chain_has_add_target_replacement(def: &crate::types::ability::AbilityDefinition) -> bool {
+        chain_any(def, &|d| {
+            matches!(&*d.effect, Effect::AddTargetReplacement { .. })
+        })
+    }
+
+    #[cfg(test)]
+    fn chain_has_change_zone_exile(def: &crate::types::ability::AbilityDefinition) -> bool {
+        use crate::types::zones::Zone;
+        chain_any(def, &|d| {
+            matches!(
+                &*d.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Issue #3343 / CR 608.2c + CR 701.19c: Disintegrate — "Disintegrate deals
+    /// X damage to any target. If it's a creature, it can't be regenerated this
+    /// turn, and if it would die this turn, exile it instead." The conditional
+    /// regen rider must produce a `CantBeRegenerated` GenericEffect (bound to the
+    /// damage clause's TrackedSet) AND the die-exile rider must produce an
+    /// AddTargetReplacement — with NO Unimplemented anywhere.
+    #[test]
+    fn conditional_cant_be_regenerated_disintegrate() {
+        let def = parse_effect_chain(
+            "Disintegrate deals X damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "root must be DealDamage, got {:?}",
+            def.effect
+        );
+        assert!(
+            chain_has_cant_be_regenerated_rider(&def),
+            "expected a CantBeRegenerated rider (TrackedSet(0)/ParentTarget/EOT) in the chain: {def:?}"
+        );
+        assert!(
+            chain_has_add_target_replacement(&def),
+            "expected the die-exile rider to lower to AddTargetReplacement: {def:?}"
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "no Unimplemented clause may remain: {def:?}"
+        );
+    }
+
+    /// Issue #3343 / CR 608.2c + CR 701.19c: Carbonize — same rider shape with a
+    /// fixed-3 damage clause ("Carbonize deals 3 damage to any target.").
+    #[test]
+    fn conditional_cant_be_regenerated_carbonize() {
+        let def = parse_effect_chain(
+            "Carbonize deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "root must be DealDamage Fixed{{value:3}}, got {:?}",
+            def.effect
+        );
+        assert!(
+            chain_has_cant_be_regenerated_rider(&def),
+            "expected a CantBeRegenerated rider in the chain: {def:?}"
+        );
+        assert!(
+            chain_has_add_target_replacement(&def),
+            "expected an AddTargetReplacement (die-exile) in the chain: {def:?}"
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "no Unimplemented clause may remain: {def:?}"
+        );
+    }
+
+    /// Issue #3343: boundary-split proof — the second sentence (one chunk under
+    /// `starts_prefix_clause`) must split into BOTH riders, and the exile clause
+    /// must be an AddTargetReplacement, NOT a degenerate `ChangeZone { Exile }`
+    /// (the pre-fix bug routed it through `strip_card_type_conditional`).
+    #[test]
+    fn conditional_cant_be_regenerated_boundary_split_proof() {
+        let def = parse_effect_chain(
+            "Disintegrate deals X damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            chain_has_cant_be_regenerated_rider(&def),
+            "both riders must be present: missing CantBeRegenerated: {def:?}"
+        );
+        assert!(
+            chain_has_add_target_replacement(&def),
+            "both riders must be present: missing AddTargetReplacement: {def:?}"
+        );
+        assert!(
+            !chain_has_change_zone_exile(&def),
+            "exile-instead must be AddTargetReplacement, not a degenerate ChangeZone {{ Exile }}: {def:?}"
+        );
+    }
+
+    /// Collect every node in the def chain satisfying `pred` (the rider defs we
+    /// want to inspect `.condition` on). Mirrors `chain_any` but returns refs.
+    #[cfg(test)]
+    fn chain_collect<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        pred: &dyn Fn(&crate::types::ability::AbilityDefinition) -> bool,
+        out: &mut Vec<&'a crate::types::ability::AbilityDefinition>,
+    ) {
+        if pred(def) {
+            out.push(def);
+        }
+        if let Some(d) = def.sub_ability.as_deref() {
+            chain_collect(d, pred, out);
+        }
+        if let Some(d) = def.else_ability.as_deref() {
+            chain_collect(d, pred, out);
+        }
+    }
+
+    /// The exact condition the conditional damage-form must carry on BOTH riders:
+    /// the "it's a creature" gate converted from a reveal-context CoreType into a
+    /// present-target match against the spell's chosen damage target (CR 109.2 +
+    /// CR 608.2c). NOT `None`, NOT `RevealedHasCardType` (which evaluates
+    /// always-false for a damage spell and would silently drop the riders).
+    #[cfg(test)]
+    fn expected_creature_target_match() -> AbilityCondition {
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            use_lki: true,
+        }
+    }
+
+    /// Assert a parsed damage-form def carries the creature-gate condition on BOTH
+    /// the CantBeRegenerated rider def AND the AddTargetReplacement (die-exile)
+    /// rider def — explicitly NOT `None` and NOT `RevealedHasCardType`. This is the
+    /// discriminator the rejected impl failed (it emitted `condition: None`).
+    #[cfg(test)]
+    fn assert_both_riders_carry_creature_condition(def: &crate::types::ability::AbilityDefinition) {
+        use crate::types::statics::StaticMode;
+        let expected = expected_creature_target_match();
+
+        let mut regen = Vec::new();
+        chain_collect(
+            def,
+            &|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities
+                            .first()
+                            .is_some_and(|sd| matches!(sd.mode, StaticMode::CantBeRegenerated))
+                )
+            },
+            &mut regen,
+        );
+        assert_eq!(
+            regen.len(),
+            1,
+            "expected exactly one CantBeRegenerated rider def: {def:?}"
+        );
+        let regen_cond = regen[0].condition.as_ref();
+        assert!(
+            regen_cond.is_some(),
+            "CantBeRegenerated rider condition must NOT be None (the rejected bug): {:?}",
+            regen[0]
+        );
+        assert!(
+            !matches!(
+                regen_cond,
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ),
+            "CantBeRegenerated rider condition must NOT be RevealedHasCardType \
+             (always-false for a damage spell): {regen_cond:?}"
+        );
+        assert_eq!(
+            regen_cond,
+            Some(&expected),
+            "CantBeRegenerated rider must carry TargetMatchesFilter{{Typed(creature), use_lki:true}}"
+        );
+
+        let mut exile = Vec::new();
+        chain_collect(
+            def,
+            &|d| matches!(&*d.effect, Effect::AddTargetReplacement { .. }),
+            &mut exile,
+        );
+        assert_eq!(
+            exile.len(),
+            1,
+            "expected exactly one AddTargetReplacement (die-exile) rider def: {def:?}"
+        );
+        let exile_cond = exile[0].condition.as_ref();
+        assert!(
+            exile_cond.is_some(),
+            "die-exile rider condition must NOT be None (the rejected bug): {:?}",
+            exile[0]
+        );
+        assert!(
+            !matches!(
+                exile_cond,
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ),
+            "die-exile rider condition must NOT be RevealedHasCardType: {exile_cond:?}"
+        );
+        assert_eq!(
+            exile_cond,
+            Some(&expected),
+            "die-exile rider must carry TargetMatchesFilter{{Typed(creature), use_lki:true}}"
+        );
+    }
+
+    /// GAP 3 (maintainer's #3): the discriminating parser test the rejected impl
+    /// lacked. Both riders must carry the "if it's a creature" gate as a
+    /// present-target match — this FAILS if `condition` is `None` (the rejected
+    /// bug) or a raw `RevealedHasCardType`. Covers Disintegrate AND Carbonize.
+    #[test]
+    fn conditional_cant_be_regenerated_condition_carried_disintegrate() {
+        let def = parse_effect_chain(
+            "Disintegrate deals X damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert_both_riders_carry_creature_condition(&def);
+    }
+
+    #[test]
+    fn conditional_cant_be_regenerated_condition_carried_carbonize() {
+        let def = parse_effect_chain(
+            "Carbonize deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert_both_riders_carry_creature_condition(&def);
+    }
+
+    /// GAP 3 grammar-class proof: a SYNTHETIC card (not Disintegrate/Carbonize)
+    /// in the same grammar class parses to the same gated shape — both riders,
+    /// condition carried, no Unimplemented. Proves we matched the class, not a
+    /// card name.
+    #[test]
+    fn conditional_cant_be_regenerated_grammar_class_synthetic() {
+        let def = parse_effect_chain(
+            "Foo deals 2 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "root must be DealDamage, got {:?}",
+            def.effect
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "no Unimplemented clause may remain: {def:?}"
+        );
+        assert_both_riders_carry_creature_condition(&def);
+    }
+
+    /// Maintainer #3376: the conditional rider branch is ALL-OR-NOTHING for the
+    /// two-rider grammar. When the second segment after ", and " is NOT a
+    /// die-exile rider (here "..., and draw a card."), the branch must NOT keep
+    /// the regen rider and swallow the tail — it must fall through to normal
+    /// parsing so "draw a card" survives.
+    #[test]
+    fn conditional_cant_be_regenerated_non_die_exile_tail_not_swallowed() {
+        let def = parse_effect_chain(
+            "Foo deals 2 damage to any target. If it's a creature, it can't be regenerated this turn, and draw a card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            !chain_has_cant_be_regenerated_rider(&def),
+            "the two-rider branch must not match without a die-exile tail, so no \
+             regen rider should be attached: {def:?}"
+        );
+        assert!(
+            chain_any(&def, &|d| matches!(&*d.effect, Effect::Draw { .. })),
+            "the 'draw a card' tail must be preserved, not swallowed: {def:?}"
+        );
+    }
+
+    /// GAP 3 RUNTIME discrimination (minimal level): the carried condition itself
+    /// must evaluate FALSE against a planeswalker-target ability and TRUE against
+    /// a creature-target ability. This is the runtime semantics that prove the
+    /// riders are skipped for a planeswalker (so it dies normally / is not exiled)
+    /// and applied for a creature. A raw `RevealedHasCardType` condition would
+    /// evaluate FALSE for BOTH (no revealed id), which is the silent-wrong bug.
+    #[test]
+    fn conditional_creature_gate_evaluates_per_target_type() {
+        use crate::game::effects::evaluate_condition;
+        use crate::game::zones;
+        use crate::types::ability::{ResolvedAbility, TargetRef};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        // The exact condition the parser stamps on the riders.
+        let cond = expected_creature_target_match();
+
+        let mut state = GameState::new_two_player(42);
+
+        // A creature on the battlefield.
+        let creature = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // A planeswalker on the battlefield.
+        let planeswalker = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Test Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+
+        // Ability targeting the CREATURE → condition TRUE (riders apply).
+        let creature_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            evaluate_condition(&cond, &state, &creature_ability),
+            "creature-target damage ability: 'if it's a creature' must be TRUE"
+        );
+
+        // Ability targeting the PLANESWALKER → condition FALSE (riders skipped:
+        // it goes to the graveyard normally, no regen lock, no exile-instead).
+        let pw_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(planeswalker)],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &pw_ability),
+            "planeswalker-target damage ability: 'if it's a creature' must be FALSE"
         );
     }
 

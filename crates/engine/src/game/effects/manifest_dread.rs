@@ -111,11 +111,14 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::ManifestDreadChoice {
-                player: p, cards, ..
+                player: p,
+                cards,
+                source_id,
             } => {
                 assert_eq!(*p, player);
                 assert_eq!(cards.len(), 2);
                 assert_eq!(*cards, top_2);
+                assert_eq!(*source_id, ObjectId(100));
             }
             other => panic!("Expected ManifestDreadChoice, got {:?}", other),
         }
