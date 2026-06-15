@@ -897,7 +897,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-  const isSacrifice = data.zone === "Battlefield" && data.destination == null;
+  const isTapUntapChoice = data.effect_kind === "Untap" || data.effect_kind === "Tap";
+  const isSacrifice = data.zone === "Battlefield" && data.destination == null && !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
@@ -926,13 +927,17 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   if (!objects) return null;
 
   const isTopdeck = data.effect_kind === "PutAtLibraryPosition";
-  const mode: EffectZoneMode = isSacrifice
-    ? "Sacrifice"
-    : isTopdeck
-      ? "Topdeck"
-      : data.destination === "Hand"
-        ? "Hand"
-        : "Battlefield";
+  const mode: EffectZoneMode = isTapUntapChoice
+    ? data.effect_kind === "Untap"
+      ? "Untap"
+      : "Tap"
+    : isSacrifice
+      ? "Sacrifice"
+      : isTopdeck
+        ? "Topdeck"
+        : data.destination === "Hand"
+          ? "Hand"
+          : "Battlefield";
   const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
   const selectedOrder = isTopdeck ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) => formatTopdeckOrderLabel(index, t));
