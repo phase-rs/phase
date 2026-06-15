@@ -1427,16 +1427,6 @@ fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {
         ),
         value((), preceded(tag("have "), parse_keyword_name)),
         value((), preceded(tag("lose "), parse_keyword_name)),
-        value(
-            (),
-            preceded(
-                tag("get "),
-                preceded(
-                    opt(tag("an additional ")),
-                    nom_primitives::parse_pt_modifier,
-                ),
-            ),
-        ),
     ))
     .parse(input)
 }
@@ -7403,8 +7393,9 @@ mod tests {
     /// Formation / Overseer of Vault 76 ("put a +1/+1 counter on each [of
     /// those] creature[s] and they gain vigilance until end of turn") and the
     /// multi-keyword list form must all split so the conjunct reaches the
-    /// subject-predicate parser. The pronoun pairs with all four plural-stem
-    /// continuous verbs.
+    /// subject-predicate parser. The bare pronoun stays scoped to keyword
+    /// predicates; P/T `they get ...` forms can carry conditional riders that
+    /// need a separate condition-capable parser path.
     #[test]
     fn bare_and_clause_starts_on_they_anaphoric_continuous_subject() {
         assert!(starts_bare_and_clause(
@@ -7413,13 +7404,13 @@ mod tests {
         assert!(starts_bare_and_clause(
             "they gain vigilance, indestructible, and haste until end of turn"
         ));
-        assert!(starts_bare_and_clause("they get +1/+1 until end of turn"));
         assert!(starts_bare_and_clause("they have flying"));
         assert!(starts_bare_and_clause("they lose flying"));
         // Guard: a bare "they" noun-phrase continuation (no continuous verb)
         // must NOT split — e.g. "destroy target creature and they ..." never
         // occurs, but a non-continuous tail must stay un-split here.
         assert!(!starts_bare_and_clause("they attack this turn"));
+        assert!(!starts_bare_and_clause("they get +1/+1 until end of turn"));
         assert!(!starts_bare_and_clause("they lose 6 life"));
     }
 
