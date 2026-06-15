@@ -4463,6 +4463,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // CR 122.1 + CR 608.2d: targeted per-kind add-OR-remove choice — "for each
+    // kind of counter on target permanent, put another counter of that kind on
+    // it or remove one from it" (Dramatist's Puppet, Quarry Hauler). Must precede
+    // the generic `for each` splitter, which would drop the "target permanent"
+    // and the per-kind choice.
+    if let Some(clause) = try_parse_for_each_counter_kind_adjust_target(text) {
+        return clause;
+    }
+
     // "for each" patterns: "draw a card for each [filter]", etc.
     if let Some(clause) = try_parse_for_each_effect(text, ctx) {
         return clause;
@@ -7943,6 +7952,153 @@ fn try_parse_proliferate_target(text: &str) -> Option<Effect> {
     }
 
     Some(Effect::ProliferateTarget { target })
+}
+
+/// CR 122.1 + CR 608.2d: "For each kind of counter on target permanent, put
+/// another counter of that kind on it or remove one from it." — a per-counter-
+/// kind add-OR-remove choice forced on a single chosen target (Dramatist's
+/// Puppet, Quarry Hauler). Unlike `try_parse_proliferate_target` (which always
+/// adds) the controller chooses, kind by kind, whether to add another counter of
+/// that kind or remove one of that kind.
+///
+/// Lowers to the proven Bribe-Taker counter-kind loop machinery, but targeted:
+/// the clause designates "target permanent" via an `Effect::TargetOnly` parent
+/// (which surfaces the target slot), and a sub-ability carries the iteration and
+/// the choice:
+///   - `repeat_for: DistinctCounterKindsAmong { filter: ParentTarget }` — one
+///     iteration per distinct counter kind already on the chosen permanent. The
+///     `repeat_for` loop resolves the kind set against the inherited target and
+///     rebinds each tagged branch to the iterated kind (CR 609.3 + CR 608.2c).
+///   - `Effect::ChooseOneOf { chooser: Controller, branches: [PutCounter,
+///     RemoveCounter] }` — both branches act on `ParentTarget` (the same chosen
+///     permanent) and are tagged `RebindToIteratedKind`, so each iteration's
+///     prompt offers "add one of THIS kind" vs "remove one of THIS kind"
+///     (CR 608.2d resolution choice).
+///
+/// Both "put … or remove …" and "remove … or put …" word orders are accepted so
+/// the class is not pinned to one card's phrasing. The placeholder counter type
+/// on each branch is a don't-care — the loop overwrites it every iteration.
+fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    // Consume the leading "for each kind of counter on " phrase, then read the
+    // designated target with the shared target parser ("target permanent").
+    let (_, after_on) = nom_on_lower(text, &lower, |i| {
+        value((), tag::<_, _, E>("for each kind of counter on ")).parse(i)
+    })?;
+    let (target, remainder) = parse_target(after_on);
+    // A concrete target filter is required so a target slot is requested; bare
+    // `Any` would silently skip targeting.
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+
+    // The tail enumerates the two per-kind options joined by " or ". "it"
+    // anaphors the chosen target on both sides; the counter kind ("of that
+    // kind" / "one") is the per-iteration kind, bound by the loop.
+    let rem_lower = remainder
+        .trim_start_matches([',', ' '])
+        .to_lowercase()
+        .trim_end_matches(['.', ' '])
+        .to_string();
+
+    // CR 608.2d: each option is an independent leaf. Parse them as two
+    // alternatives in either printed order — the choice itself (which to apply)
+    // is the resolution-time decision.
+    fn parse_add_option(input: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            alt((
+                tag("put another counter of that kind on it"),
+                tag("put one more counter of that kind on it"),
+            )),
+        )
+        .parse(input)
+    }
+    fn parse_remove_option(input: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            alt((
+                tag("remove one from it"),
+                tag("remove a counter of that kind from it"),
+                tag("remove one of those counters from it"),
+            )),
+        )
+        .parse(input)
+    }
+
+    let rem = rem_lower.as_str();
+    let rem = if let Ok((rest, _)) = parse_add_option(rem) {
+        let (rest, _) = tag::<_, _, E>(" or ").parse(rest).ok()?;
+        let (rest, _) = parse_remove_option(rest).ok()?;
+        rest
+    } else {
+        let (rest, _) = parse_remove_option(rem).ok()?;
+        let (rest, _) = tag::<_, _, E>(" or ").parse(rest).ok()?;
+        let (rest, _) = parse_add_option(rest).ok()?;
+        rest
+    };
+    if !rem.trim().is_empty() {
+        return None;
+    }
+
+    // CR 608.2d: the two per-kind branches both act on the chosen permanent
+    // (`ParentTarget`, inherited from the `TargetOnly` parent) and are rebound to
+    // the current iterated kind by the `repeat_for` loop. The placeholder counter
+    // type is a don't-care.
+    let add_branch = AbilityDefinition {
+        description: Some("put another counter of that kind".to_string()),
+        iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+        )
+    };
+    let remove_branch = AbilityDefinition {
+        description: Some("remove a counter of that kind".to_string()),
+        iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: 1,
+                target: TargetFilter::ParentTarget,
+            },
+        )
+    };
+
+    // Sub-ability: the per-kind choice, driven once per distinct kind on the
+    // chosen permanent.
+    let mut choice_sub = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![add_branch, remove_branch],
+        },
+    );
+    choice_sub.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCounterKindsAmong {
+            filter: TargetFilter::ParentTarget,
+        },
+    });
+
+    Some(ParsedEffectClause {
+        // CR 115.1: `TargetOnly` surfaces the "target permanent" slot; the chosen
+        // permanent is inherited by the sub-ability's `ParentTarget` references.
+        effect: Effect::TargetOnly { target },
+        duration: None,
+        sub_ability: Some(Box::new(choice_sub)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
 }
 
 fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
@@ -16697,15 +16853,22 @@ pub(crate) fn parse_effect_chain_ir(
         // `parse_effect_clause` claims it. The generic `for each` strip would
         // otherwise lift the counter-kind iteration into `repeat_for` and drop
         // the target, leaving an Unimplemented "give … counter" body.
-        let (repeat_for, text, for_each_reference_target) =
-            if try_parse_proliferate_target(&text).is_some() {
-                (None, text, None)
-            } else {
-                let reference_target = for_each_clause_target_controller_filter(&text);
-                let (repeat_for, text) = strip_for_each_prefix(&text);
-                let reference_target = repeat_for.as_ref().and(reference_target);
-                (repeat_for, text, reference_target)
-            };
+        // CR 122.1 + CR 608.2d: the same intact-clause requirement applies to the
+        // targeted per-kind add-OR-remove choice ("for each kind of counter on
+        // target permanent, put another counter of that kind on it or remove one
+        // from it" — Dramatist's Puppet, Quarry Hauler), whose target and choice
+        // would likewise be dropped by the generic strip.
+        let (repeat_for, text, for_each_reference_target) = if try_parse_proliferate_target(&text)
+            .is_some()
+            || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
+        {
+            (None, text, None)
+        } else {
+            let reference_target = for_each_clause_target_controller_filter(&text);
+            let (repeat_for, text) = strip_for_each_prefix(&text);
+            let reference_target = repeat_for.as_ref().and(reference_target);
+            (repeat_for, text, reference_target)
+        };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -19647,6 +19810,148 @@ mod tests {
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
+    }
+
+    /// CR 122.1 + CR 608.2d: targeted per-kind add-OR-remove choice — the
+    /// Dramatist's Puppet / Quarry Hauler class. "for each kind of counter on
+    /// target permanent, put another counter of that kind on it or remove one
+    /// from it" must lower to a `TargetOnly` parent (surfacing the "target
+    /// permanent" slot) plus a sub-ability carrying a `ChooseOneOf` add/remove
+    /// choice driven once per distinct kind on the chosen permanent — NOT
+    /// `Unimplemented`.
+    #[test]
+    fn for_each_counter_kind_adjust_target_choice() {
+        let mut ctx = ParseContext::default();
+        let def = parse_effect_chain_with_context(
+            "for each kind of counter on target permanent, put another counter of that kind on it or remove one from it.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+
+        // Parent: TargetOnly with a concrete (non-Any) target so a target slot
+        // is requested.
+        let target = match &*def.effect {
+            Effect::TargetOnly { target } => {
+                assert_ne!(
+                    *target,
+                    TargetFilter::Any,
+                    "TargetOnly must carry a concrete permanent filter so a target slot is built"
+                );
+                target.clone()
+            }
+            other => panic!("expected TargetOnly parent, got {other:?}"),
+        };
+        assert!(
+            def.effect.target_filter().is_some(),
+            "the clause must surface a target filter"
+        );
+        assert_eq!(target, def.effect.target_filter().cloned().unwrap());
+
+        // Sub-ability: the per-kind choice driven by the DistinctCounterKindsAmong
+        // loop over the chosen target (ParentTarget).
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("adjust-target clause must carry a choice sub-ability");
+        match &sub.repeat_for {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong { filter },
+            }) => assert_eq!(
+                *filter,
+                TargetFilter::ParentTarget,
+                "iteration source must resolve against the chosen target"
+            ),
+            other => panic!("expected DistinctCounterKindsAmong repeat_for, got {other:?}"),
+        }
+        match &*sub.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::Controller);
+                assert_eq!(branches.len(), 2, "add and remove branches");
+                // Both branches are dynamic (rebind to the iterated kind) and act
+                // on the chosen permanent.
+                let mut saw_add = false;
+                let mut saw_remove = false;
+                for branch in branches {
+                    assert_eq!(
+                        branch.iteration_kind_binding,
+                        Some(IterationKindBinding::RebindToIteratedKind),
+                        "every branch must rebind to the iterated kind"
+                    );
+                    match &*branch.effect {
+                        Effect::PutCounter { target, .. } => {
+                            assert_eq!(*target, TargetFilter::ParentTarget);
+                            saw_add = true;
+                        }
+                        Effect::RemoveCounter { target, count, .. } => {
+                            assert_eq!(*target, TargetFilter::ParentTarget);
+                            assert_eq!(*count, 1, "remove exactly one counter of that kind");
+                            saw_remove = true;
+                        }
+                        other => panic!("expected Put/RemoveCounter branch, got {other:?}"),
+                    }
+                }
+                assert!(saw_add && saw_remove, "both add and remove options present");
+            }
+            other => panic!("expected ChooseOneOf sub-effect, got {other:?}"),
+        }
+    }
+
+    /// Word-order independence (build for the class): "remove one from it or put
+    /// another counter of that kind on it" parses to the same structure.
+    #[test]
+    fn for_each_counter_kind_adjust_target_remove_first_order() {
+        let mut ctx = ParseContext::default();
+        let def = parse_effect_chain_with_context(
+            "for each kind of counter on target creature, remove one from it or put another counter of that kind on it.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::TargetOnly { .. }),
+            "reverse word order must still produce a TargetOnly clause, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.as_ref().expect("choice sub-ability");
+        assert!(matches!(
+            &sub.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong { .. }
+            })
+        ));
+        assert!(matches!(&*sub.effect, Effect::ChooseOneOf { .. }));
+    }
+
+    /// CR 603.2: the full Dramatist's Puppet / Quarry Hauler card — an
+    /// enters-the-battlefield trigger whose body is the targeted per-kind
+    /// add/remove choice. Confirms the trigger surfaces the body (not
+    /// Unimplemented) and the target rides on the trigger's execute body.
+    #[test]
+    fn dramatists_puppet_etb_targeted_counter_adjust() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When this creature enters, for each kind of counter on target permanent, put another counter of that kind on it or remove one from it.",
+            "Dramatist's Puppet",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("should produce the enters trigger");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger has an execute body");
+        assert!(
+            matches!(&*execute.effect, Effect::TargetOnly { .. }),
+            "ETB trigger body must be the targeted counter-adjust TargetOnly clause, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("trigger body must carry the choice sub-ability");
+        assert!(matches!(&*sub.effect, Effect::ChooseOneOf { .. }));
     }
 
     /// CR 608.2c (issue #503): "exile ~, then return him to the battlefield

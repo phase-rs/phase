@@ -3470,8 +3470,16 @@ fn rebind_iterated_counter_kind(
             if branch.iteration_kind_binding
                 == Some(crate::types::ability::IterationKindBinding::RebindToIteratedKind)
             {
-                if let Effect::PutCounter { counter_type, .. } = branch.effect.as_mut() {
-                    *counter_type = kind.clone();
+                // CR 122.1: rebind both the add (`PutCounter`) and remove
+                // (`RemoveCounter`) leaves to the iterated kind. Dramatist's
+                // Puppet / Quarry Hauler offer a per-kind add-OR-remove choice,
+                // so the remove branch must also track the current kind.
+                match branch.effect.as_mut() {
+                    Effect::PutCounter { counter_type, .. } => *counter_type = kind.clone(),
+                    Effect::RemoveCounter { counter_type, .. } => {
+                        *counter_type = Some(kind.clone())
+                    }
+                    _ => {}
                 }
             }
         }
@@ -16932,6 +16940,153 @@ mod tests {
         assert_eq!(
             state.waiting_for, initial_waiting,
             "empty counter set must not prompt"
+        );
+    }
+
+    /// CR 122.1 + CR 608.2d: Dramatist's Puppet / Quarry Hauler end-to-end — a
+    /// `TargetOnly` parent plus a per-kind add-OR-remove `ChooseOneOf` driven by
+    /// `repeat_for: DistinctCounterKindsAmong { ParentTarget }` over the chosen
+    /// permanent. Discriminating: the kind set must resolve against the chosen
+    /// TARGET (not the battlefield), and the remove branch must rebind to the
+    /// iterated kind. Two kinds on the target; the deterministic sort by
+    /// `as_str` is ["P1P1", "lore"], so iteration 0 (Plus1Plus1) ADDS and
+    /// iteration 1 (Lore) REMOVES.
+    #[test]
+    fn targeted_counter_adjust_add_and_remove_per_kind() {
+        use crate::game::engine::apply;
+        use crate::types::ability::{IterationKindBinding, PlayerFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quarry Hauler".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // The chosen target permanent carries TWO distinct counter kinds.
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+            obj.counters.insert(CounterType::Lore, 1);
+        }
+
+        let add_branch = AbilityDefinition {
+            iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                },
+            )
+        };
+        let remove_branch = AbilityDefinition {
+            iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RemoveCounter {
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    count: 1,
+                    target: TargetFilter::ParentTarget,
+                },
+            )
+        };
+
+        let mut choice_sub = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![add_branch, remove_branch],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        choice_sub.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::ParentTarget,
+            },
+        });
+
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Permanent],
+                    controller: None,
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(choice_sub));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Iteration 0 (Plus1Plus1 — sorts first): surface the branch choice, ADD.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "iteration 0 must surface the per-kind add/remove choice, got {:?}",
+            state.waiting_for
+        );
+        let r = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseBranch { index: 0 }, // add
+        )
+        .unwrap();
+        events.extend(r.events);
+
+        // Iteration 1 (Lore): surface again, then REMOVE.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "iteration 1 must surface its own per-kind choice, got {:?}",
+            state.waiting_for
+        );
+        let r = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseBranch { index: 1 }, // remove
+        )
+        .unwrap();
+        events.extend(r.events);
+
+        let obj = state.objects.get(&target).unwrap();
+        // Plus1Plus1: started at 2, ADD one of THAT kind → 3 (rebind binds P1P1).
+        assert_eq!(
+            obj.counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "adding the P1P1 iteration must add a P1P1 counter (rebind)"
+        );
+        // Lore: started at 1, REMOVE one of THAT kind → 0 (rebind binds Lore).
+        assert_eq!(
+            obj.counters.get(&CounterType::Lore).copied().unwrap_or(0),
+            0,
+            "removing the Lore iteration must remove a LORE counter (rebind)"
         );
     }
 

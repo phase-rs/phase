@@ -1318,15 +1318,30 @@ fn evaluate_oathbreaker(
     }
 }
 
-/// Momir Basic deck legality: exactly 60 cards in the main deck, every one a
-/// basic land (CR 205.4 Basic supertype + CR 305 Land core type), no sideboard,
-/// no command-zone cards. CR 100.2a's basic-land exception means the 60 copies
-/// of basics are legal despite the four-copy default.
+/// CR 305.6: the five basic land types (Plains/Island/Swamp/Mountain/Forest).
+/// "Wastes" is the basic colorless land but is NOT a basic land type, so
+/// Snow-Covered Wastes is naturally excluded from the Momir's Madness deck by
+/// requiring a subtype in this set.
+const BASIC_LAND_TYPES: [&str; 5] = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
+
+/// Momir's Madness format deck rule: the deck is fixed at exactly 12 copies of
+/// each of the five snow basic lands (Snow-Covered Plains/Island/Swamp/Mountain/
+/// Forest), totaling 60, with nothing else. Players cannot adjust this ratio.
+///
+/// A "snow basic land" is identified by typed checks (CR 205.4a Snow + Basic
+/// supertypes, CR 305 Land core type, and a CR 305.6 basic land type subtype) —
+/// never by matching printed card names. Snow-Covered Wastes is excluded because
+/// its subtype is "Wastes", which is not a basic land type (CR 305.6). This is a
+/// format-construction rule, not a Comprehensive Rule; CR 100.2a's basic-land
+/// copy exception is what makes the 12-of-each copies legal despite the
+/// four-copy default.
 fn evaluate_momir(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     unknown_cards: &BTreeSet<String>,
 ) -> CompatibilityCheck {
+    const EXPECTED_PER_TYPE: usize = 12;
+
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -1335,13 +1350,15 @@ fn evaluate_momir(
 
     if request.main_deck.len() != 60 {
         reasons.push(format!(
-            "Momir Basic decks must have exactly 60 cards (found {})",
+            "Momir's Madness decks must have exactly 60 cards (found {})",
             request.main_deck.len()
         ));
     }
 
-    // CR 205.4 + CR 305: every main-deck card must be a basic land.
-    let mut non_basic = BTreeSet::new();
+    // Tally snow-basic copies per basic land type; collect anything that is not a
+    // snow basic land of a CR 305.6 basic land type.
+    let mut per_type: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut non_snow_basic = BTreeSet::new();
     for name in request.main_deck.iter().map(String::as_str) {
         if unknown_cards.contains(name) {
             continue;
@@ -1350,25 +1367,54 @@ fn evaluate_momir(
         let Some(face) = db.get_face_by_name(resolved) else {
             continue;
         };
-        let is_basic_land = face.card_type.supertypes.contains(&Supertype::Basic)
+        // CR 205.4a + CR 305: Snow + Basic supertypes on a Land.
+        let is_snow_basic_land = face.card_type.supertypes.contains(&Supertype::Snow)
+            && face.card_type.supertypes.contains(&Supertype::Basic)
             && face.card_type.core_types.contains(&CoreType::Land);
-        if !is_basic_land {
-            non_basic.insert(face.name.clone());
+        // CR 305.6: must carry one of the five basic land type subtypes
+        // (excludes Snow-Covered Wastes, whose subtype is "Wastes").
+        let basic_type = is_snow_basic_land
+            .then(|| {
+                BASIC_LAND_TYPES.into_iter().find(|bt| {
+                    face.card_type
+                        .subtypes
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(bt))
+                })
+            })
+            .flatten();
+        match basic_type {
+            Some(bt) => *per_type.entry(bt).or_insert(0) += 1,
+            None => {
+                non_snow_basic.insert(face.name.clone());
+            }
         }
     }
-    if !non_basic.is_empty() {
+    if !non_snow_basic.is_empty() {
         reasons.push(summarize_cards(
-            "Momir Basic decks may only contain basic lands",
-            &non_basic,
+            "Momir's Madness decks may only contain the five snow basic lands \
+             (Snow-Covered Plains/Island/Swamp/Mountain/Forest)",
+            &non_snow_basic,
             6,
         ));
     }
 
+    // The ratio is fixed: exactly 12 of each of the five snow basic types.
+    for bt in BASIC_LAND_TYPES {
+        let count = per_type.get(bt).copied().unwrap_or(0);
+        if count != EXPECTED_PER_TYPE {
+            reasons.push(format!(
+                "Momir's Madness decks must contain exactly {EXPECTED_PER_TYPE} \
+                 copies of Snow-Covered {bt} (found {count})"
+            ));
+        }
+    }
+
     if !request.sideboard.is_empty() {
-        reasons.push("Momir Basic does not use a sideboard".to_string());
+        reasons.push("Momir's Madness does not use a sideboard".to_string());
     }
     if !request.commander.is_empty() || !request.signature_spell.is_empty() {
-        reasons.push("Momir Basic does not use command-zone cards".to_string());
+        reasons.push("Momir's Madness does not use command-zone cards".to_string());
     }
 
     CompatibilityCheck {
@@ -2683,6 +2729,66 @@ mod tests {
                 "non_ability_text": null, "flavor_name": null,
                 "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
                 "color_override": null, "color_identity": ["Black"], "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "snow-covered plains": {
+                "name": "Snow-Covered Plains",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": ["Plains"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "snow-covered island": {
+                "name": "Snow-Covered Island",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": ["Island"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "snow-covered swamp": {
+                "name": "Snow-Covered Swamp",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": ["Swamp"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "snow-covered mountain": {
+                "name": "Snow-Covered Mountain",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": ["Mountain"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "snow-covered forest": {
+                "name": "Snow-Covered Forest",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": ["Forest"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "snow-covered wastes": {
+                "name": "Snow-Covered Wastes",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic", "Snow"], "core_types": ["Land"], "subtypes": ["Wastes"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
                 "legalities": { "standard": "legal", "commander": "legal" }
             }
         })
@@ -4899,55 +5005,173 @@ mod tests {
         }
     }
 
+    /// The fixed Momir's Madness deck: 12 copies of each of the five snow basic
+    /// lands (no Snow-Covered Wastes), totaling 60.
+    fn momir_madness_deck() -> Vec<String> {
+        let mut deck = Vec::with_capacity(60);
+        for name in [
+            "Snow-Covered Plains",
+            "Snow-Covered Island",
+            "Snow-Covered Swamp",
+            "Snow-Covered Mountain",
+            "Snow-Covered Forest",
+        ] {
+            deck.extend(expand(name, 12));
+        }
+        deck
+    }
+
     #[test]
-    fn momir_sixty_basics_passes() {
+    fn momir_madness_snow_basics_pass() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        let request = momir_request(expand("Plains", 60));
+        let request = momir_request(momir_madness_deck());
         let check = evaluate_momir(&db, &request, &BTreeSet::new());
         assert!(
             check.compatible,
-            "60 basic lands must be a legal Momir deck, reasons: {:?}",
+            "12x each of the five snow basics must be a legal Momir's Madness deck, reasons: {:?}",
             check.reasons
         );
     }
 
     #[test]
-    fn momir_wrong_count_fails() {
+    fn momir_madness_regular_basics_fail() {
+        // 60 regular (non-snow) Plains must be rejected — Momir's Madness
+        // requires snow basics, not ordinary basics.
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        for count in [59usize, 61] {
-            let check = evaluate_momir(
-                &db,
-                &momir_request(expand("Plains", count)),
-                &BTreeSet::new(),
-            );
+        let check = evaluate_momir(&db, &momir_request(expand("Plains", 60)), &BTreeSet::new());
+        assert!(
+            !check.compatible,
+            "60 regular (non-snow) basics must be rejected"
+        );
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|r| r.contains("only contain the five snow basic lands")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn momir_madness_wrong_per_type_count_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        // 11 Plains + 13 Island + 12 each of the other three = 60 total, but the
+        // fixed 12-per-type ratio is broken.
+        let mut deck = expand("Snow-Covered Plains", 11);
+        deck.extend(expand("Snow-Covered Island", 13));
+        deck.extend(expand("Snow-Covered Swamp", 12));
+        deck.extend(expand("Snow-Covered Mountain", 12));
+        deck.extend(expand("Snow-Covered Forest", 12));
+        assert_eq!(deck.len(), 60);
+        let check = evaluate_momir(&db, &momir_request(deck), &BTreeSet::new());
+        assert!(!check.compatible, "an off-ratio deck must be rejected");
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|r| r.contains("exactly 12") && r.contains("Plains")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn momir_madness_missing_type_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        // 15 each of four types = 60 total, but Forest is entirely absent. This is
+        // the "iterate over expected types, not present types" guard: a naive
+        // per-present-type check would pass this (every present type is off-ratio
+        // too, but the danger is a 12-each-of-four + 12-extra shape; here the rule
+        // must reject because Forest's count resolves to 0 != 12.
+        let mut deck = expand("Snow-Covered Plains", 15);
+        deck.extend(expand("Snow-Covered Island", 15));
+        deck.extend(expand("Snow-Covered Swamp", 15));
+        deck.extend(expand("Snow-Covered Mountain", 15));
+        assert_eq!(deck.len(), 60);
+        let check = evaluate_momir(&db, &momir_request(deck), &BTreeSet::new());
+        assert!(
+            !check.compatible,
+            "a deck missing one of the five snow basic types must be rejected"
+        );
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|r| r.contains("exactly 12") && r.contains("Forest")),
+            "reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn momir_madness_count_off_total_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        for delta in [-1i32, 1] {
+            let mut deck = momir_madness_deck();
+            if delta > 0 {
+                deck.push("Snow-Covered Plains".to_string());
+            } else {
+                deck.pop();
+            }
+            let check = evaluate_momir(&db, &momir_request(deck), &BTreeSet::new());
             assert!(
                 !check.compatible,
-                "a {count}-card Momir deck must be rejected"
+                "a deck off the 60-card total (delta {delta}) must be rejected"
             );
             assert!(check.reasons.iter().any(|r| r.contains("exactly 60")));
         }
     }
 
     #[test]
-    fn momir_non_basic_fails() {
+    fn momir_madness_snow_covered_wastes_fails() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        let mut deck = expand("Plains", 59);
-        deck.push("Legal Standard".to_string()); // non-basic
+        // Swap one Snow-Covered Plains for a Snow-Covered Wastes: still snow +
+        // basic + land, but "Wastes" is not a basic land type (CR 305.6).
+        let mut deck = expand("Snow-Covered Wastes", 1);
+        deck.extend(expand("Snow-Covered Plains", 11));
+        deck.extend(expand("Snow-Covered Island", 12));
+        deck.extend(expand("Snow-Covered Swamp", 12));
+        deck.extend(expand("Snow-Covered Mountain", 12));
+        deck.extend(expand("Snow-Covered Forest", 12));
+        assert_eq!(deck.len(), 60);
+        let check = evaluate_momir(&db, &momir_request(deck), &BTreeSet::new());
+        assert!(!check.compatible, "Snow-Covered Wastes must be rejected");
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|r| r.contains("only contain the five snow basic lands")),
+            "Snow-Covered Wastes must be flagged as a non-snow-basic-type card; reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn momir_madness_non_basic_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut deck = expand("Snow-Covered Plains", 11);
+        deck.extend(expand("Snow-Covered Island", 12));
+        deck.extend(expand("Snow-Covered Swamp", 12));
+        deck.extend(expand("Snow-Covered Mountain", 12));
+        deck.extend(expand("Snow-Covered Forest", 12));
+        deck.push("Legal Standard".to_string()); // non-basic, total 60
+        assert_eq!(deck.len(), 60);
         let check = evaluate_momir(&db, &momir_request(deck), &BTreeSet::new());
         assert!(!check.compatible, "a non-basic card must be rejected");
         assert!(check
             .reasons
             .iter()
-            .any(|r| r.contains("only contain basic lands")));
+            .any(|r| r.contains("only contain the five snow basic lands")));
     }
 
     #[test]
-    fn momir_non_empty_sideboard_fails() {
+    fn momir_madness_non_empty_sideboard_fails() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        let mut request = momir_request(expand("Plains", 60));
-        request.sideboard = vec!["Plains".to_string()];
+        let mut request = momir_request(momir_madness_deck());
+        request.sideboard = vec!["Snow-Covered Plains".to_string()];
         let check = evaluate_momir(&db, &request, &BTreeSet::new());
-        assert!(!check.compatible, "Momir has no sideboard");
+        assert!(!check.compatible, "Momir's Madness has no sideboard");
         assert!(check.reasons.iter().any(|r| r.contains("sideboard")));
     }
 }
