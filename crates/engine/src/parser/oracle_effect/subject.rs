@@ -266,8 +266,29 @@ fn try_parse_subject_continuous_clause(
     if let Some(clause) = try_parse_additive_type_continuous_clause(subject, predicate, ctx) {
         return Some(clause);
     }
-    let application = parse_subject_application(subject, ctx)?;
+    let application = parse_continuous_anaphoric_subject_application(subject)
+        .or_else(|| parse_subject_application(subject, ctx))?;
     build_continuous_clause(application, predicate, ctx)
+}
+
+fn parse_continuous_anaphoric_subject_application(subject: &str) -> Option<SubjectApplication> {
+    let lower = subject.to_lowercase();
+    // CR 608.2c: In a subject-predicate continuous clause, "that
+    // {creature,land,permanent,token}" refers back to the object established by
+    // an earlier instruction. Keep this narrower than `parse_subject_application`
+    // so standalone subject parsing can still return a typed filter.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("that creature"),
+        tag("that land"),
+        tag("that permanent"),
+        tag("that token"),
+    )))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(TargetFilter::ParentTarget, false);
+    }
+    None
 }
 
 fn additive_type_subject_application(
@@ -978,16 +999,10 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // "those creatures" / "those lands" / "that land" — anaphoric reference to
-    // previous targets. Maps to ParentTarget so the restriction applies to the
-    // same objects.
+    // "those creatures" / "those lands" — anaphoric reference to previous
+    // targets. Maps to ParentTarget so the restriction applies to the same
+    // objects.
     if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
-        return subject_filter_application(TargetFilter::ParentTarget, false);
-    }
-    if all_consuming(tag::<_, _, OracleError<'_>>("that land"))
-        .parse(lower.as_str())
-        .is_ok()
-    {
         return subject_filter_application(TargetFilter::ParentTarget, false);
     }
     if all_consuming(preceded(
