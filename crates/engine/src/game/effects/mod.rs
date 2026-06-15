@@ -17006,7 +17006,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::RemoveCounter {
                     counter_type: Some(CounterType::Plus1Plus1),
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::ParentTarget,
                 },
             )

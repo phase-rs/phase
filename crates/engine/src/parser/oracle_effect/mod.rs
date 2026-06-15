@@ -8066,7 +8066,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
             AbilityKind::Spell,
             Effect::RemoveCounter {
                 counter_type: Some(CounterType::Plus1Plus1),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
             },
         )
@@ -19884,7 +19884,11 @@ mod tests {
                         }
                         Effect::RemoveCounter { target, count, .. } => {
                             assert_eq!(*target, TargetFilter::ParentTarget);
-                            assert_eq!(*count, 1, "remove exactly one counter of that kind");
+                            assert_eq!(
+                                *count,
+                                QuantityExpr::Fixed { value: 1 },
+                                "remove exactly one counter of that kind"
+                            );
                             saw_remove = true;
                         }
                         other => panic!("expected Put/RemoveCounter branch, got {other:?}"),
