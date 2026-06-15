@@ -35,6 +35,7 @@ use crate::types::ability::{
     ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
     TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
@@ -5925,7 +5926,13 @@ fn parse_mana_multiplier_replacement(
             tag("a permanent"),
         ),
         value(
-            TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Basic,
+                    }]),
+            ),
             tag("a basic land"),
         ),
         value(
@@ -11835,6 +11842,14 @@ mod tests {
             def.mana_modification,
             Some(ManaModification::Multiply { factor: 3 })
         );
+        let Some(TargetFilter::Typed(filter)) = def.valid_card else {
+            panic!("basic land replacement should carry a typed source filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Basic,
+        }));
     }
 }
 
