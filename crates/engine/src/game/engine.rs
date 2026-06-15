@@ -21297,6 +21297,50 @@ mod crew_tests {
         );
     }
 
+    /// CR 702.122c: regression — the legal-action enumerator must measure crew
+    /// contribution through `object_crew_power_contribution`, exactly like the
+    /// activation gate and announcement validator. A Pilot-style creature whose
+    /// raw power is below the crew cost but whose adjusted power meets it must
+    /// still produce a `CrewVehicle` legal action; otherwise the controller is
+    /// offered an empty action set in the `CrewVehicle` state and hangs.
+    /// (Reproduces the reported Deathless Pilot / Hulldrifter Crew-3 stall.)
+    #[test]
+    fn crew_vehicle_legal_actions_account_for_power_delta_contribution() {
+        let (mut state, vehicle_id, creature_a, creature_b) = setup_crew_scenario();
+        // Tap the 3/3 so the only eligible crewer is the 2/2 Pilot, mirroring
+        // the report where the sole eligible creature is sub-threshold by raw
+        // power but meets Crew 3 via "+2 greater".
+        state.objects.get_mut(&creature_a).unwrap().tapped = true;
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::PowerDelta { delta: 2 },
+                    actions: vec![CrewAction::Crew],
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        let actions = crate::ai_support::legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::CrewVehicle { creature_ids, .. } if creature_ids == &vec![creature_b]
+            )),
+            "Crew-3 with only a power-2 Pilot (+2 delta) must offer a crew action, got {actions:?}"
+        );
+    }
+
     /// CR 702.122c: "using its toughness rather than its power" (Giant Ox)
     /// substitutes toughness for power, and the modifier applies only to the
     /// named keyword actions (crew-only here, not saddle).

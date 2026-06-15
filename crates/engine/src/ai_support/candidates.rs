@@ -3972,6 +3972,7 @@ fn crew_vehicle_candidates(
         player,
         eligible_creatures,
         crew_power as i32,
+        crate::types::statics::CrewAction::Crew,
         |creature_ids| GameAction::CrewVehicle {
             vehicle_id,
             creature_ids,
@@ -3994,6 +3995,7 @@ fn saddle_mount_candidates(
         player,
         eligible_creatures,
         saddle_power as i32,
+        crate::types::statics::CrewAction::Saddle,
         |creature_ids| GameAction::SaddleMount {
             mount_id,
             creature_ids,
@@ -4010,6 +4012,7 @@ fn minimal_power_subset_candidates<F>(
     player: PlayerId,
     eligible_creatures: &[crate::types::identifiers::ObjectId],
     threshold: i32,
+    action: crate::types::statics::CrewAction,
     wrap: F,
 ) -> Vec<CandidateAction>
 where
@@ -4017,14 +4020,25 @@ where
 {
     const MAX_CANDIDATES: usize = 20;
 
+    // CR 702.122c / 702.171a: a creature's contribution toward the crew/saddle
+    // threshold may be modified ("as though its power were N greater" / "using
+    // its toughness rather than its power"). The activation gate and the
+    // announcement validator both measure power via `object_crew_power_contribution`,
+    // so the candidate enumerator must use the same authority — measuring raw
+    // `power` here disagrees with those seams and yields zero valid covers for
+    // Pilot-style creatures (e.g. Deathless Pilot, "crews as though its power
+    // were 2 greater"), hanging the controller with an empty legal-action set.
     let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
         eligible_creatures
             .iter()
-            .filter_map(|&id| {
-                state
-                    .objects
-                    .get(&id)
-                    .map(|o| (id, o.power.unwrap_or(0).max(0)))
+            .filter(|&&id| state.objects.contains_key(&id))
+            .map(|&id| {
+                (
+                    id,
+                    crate::game::static_abilities::object_crew_power_contribution(
+                        state, id, action,
+                    ),
+                )
             })
             .collect();
     // Ascending-power sort with id tie-break makes enumeration deterministic
