@@ -13650,11 +13650,42 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::Word)
     } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
         Some(ChoiceType::Artist)
+    } else if let Some(options) = try_parse_keyword_choice(rest) {
+        // CR 608.2d: "choose [keyword], [keyword], or [keyword]" — a typed
+        // keyword enumeration (Angelic Skirmisher's "first strike, vigilance,
+        // or lifelink"; Linvala, Shield of Sea Gate's "hexproof or
+        // indestructible"). Recognized BEFORE the generic labeled fallback so
+        // the chosen value persists as a typed `ChosenAttribute::Keyword` that
+        // `ContinuousModification::AddChosenKeyword` ("creatures you control
+        // gain that ability") can read at layer evaluation.
+        Some(ChoiceType::Keyword { options })
     } else {
         // Generic "X or Y" / "X, Y, or Z" / "W, X, Y, or Z" labeled choice —
         // must come AFTER all specific patterns above.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 608.2d + CR 113.3: Parse a typed keyword enumeration following "choose "
+/// ("first strike, vigilance, or lifelink", "hexproof or indestructible") into
+/// its `Keyword` option list.
+///
+/// Reuses `try_parse_labeled_choice`'s structural Oxford-comma / "or" splitting
+/// (the canonical N-ary disjunction grammar) and then maps every label through
+/// the shared single-keyword parser `parse_keyword_from_oracle`. Returns `None`
+/// unless **every** label maps to a real keyword — partial matches fall through
+/// to the generic labeled-choice handler so non-keyword disjunctions are
+/// unaffected. Building for the class: any "choose <kw>, <kw>, or <kw>" line,
+/// not the two cards that motivate it.
+fn try_parse_keyword_choice(rest: &str) -> Option<Vec<Keyword>> {
+    let labels = try_parse_labeled_choice(rest)?;
+    let keywords: Vec<Keyword> = labels
+        .iter()
+        .map(|label| {
+            crate::parser::oracle_keyword::parse_keyword_from_oracle(&label.to_lowercase())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(keywords)
 }
 
 /// Try to parse a labeled choice ("X or Y", "X, Y, or Z", "W, X, Y, or Z", ...) into
@@ -43405,6 +43436,47 @@ mod tests {
                     "Land".to_string(),
                     "Non-aura enchantment".to_string(),
                 ]
+            })
+        );
+    }
+
+    /// CR 608.2d + CR 113.3: A "choose <kw>, <kw>, or <kw>" line whose labels
+    /// are all real keywords must parse to a typed `ChoiceType::Keyword` option
+    /// list (Angelic Skirmisher), NOT the opaque-string `Labeled` form — the
+    /// typed list is what persists as `ChosenAttribute::Keyword` for a later
+    /// `AddChosenKeyword` grant to read.
+    #[test]
+    fn keyword_choice_ternary_first_strike_vigilance_lifelink() {
+        assert_eq!(
+            super::try_parse_named_choice("choose first strike, vigilance, or lifelink"),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+            })
+        );
+    }
+
+    /// CR 608.2d: Binary keyword choice (Linvala, Shield of Sea Gate —
+    /// "hexproof or indestructible").
+    #[test]
+    fn keyword_choice_binary_hexproof_indestructible() {
+        assert_eq!(
+            super::try_parse_named_choice("choose hexproof or indestructible"),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::Hexproof, Keyword::Indestructible],
+            })
+        );
+    }
+
+    /// Discriminating: a disjunction whose labels are NOT all keywords must
+    /// fall through to the generic `Labeled` handler — the keyword recognizer
+    /// only fires when every option maps to a real keyword. "Creature" / "land"
+    /// are card types, not keywords.
+    #[test]
+    fn keyword_choice_falls_through_for_non_keyword_labels() {
+        assert_eq!(
+            super::try_parse_named_choice("choose left or right"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Left".to_string(), "Right".to_string()],
             })
         );
     }

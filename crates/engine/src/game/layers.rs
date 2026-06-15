@@ -3375,6 +3375,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
@@ -3517,7 +3518,7 @@ fn apply_continuous_effect_filtered(
     // chosen-attribute scoping refactor.
     let chosen_keyword = if matches!(
         effect.modification,
-        ContinuousModification::RemoveChosenKeyword
+        ContinuousModification::RemoveChosenKeyword | ContinuousModification::AddChosenKeyword
     ) {
         state
             .objects
@@ -3784,6 +3785,27 @@ fn apply_continuous_effect_filtered(
                     obj.trigger_definitions.retain(|trigger| {
                         !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, kw)
                     });
+                }
+            }
+            // CR 608.2d + CR 613.1f: Grant the *exact* keyword chosen at
+            // resolution time (read off the source's `chosen_attributes`
+            // above). The additive mirror of `RemoveChosenKeyword` — installs
+            // the keyword and its keyword-derived triggers (e.g. lifelink's
+            // lifegain hook) onto each recipient, matching the plain
+            // `AddKeyword` arm. Used by "choose [keyword]; creatures you
+            // control gain that ability until end of turn" (Angelic
+            // Skirmisher, Linvala, Shield of Sea Gate). If the source has no
+            // stored chosen keyword (e.g. the static is gathered before the
+            // choose effect has resolved), this is a no-op rather than a panic,
+            // mirroring `AddChosenColor` / `RemoveChosenKeyword`.
+            ContinuousModification::AddChosenKeyword => {
+                if let Some(kw) = chosen_keyword.as_ref() {
+                    if !obj.keywords.contains(kw) {
+                        obj.keywords.push(kw.clone());
+                    }
+                    for trigger in KeywordTriggerInstaller::triggers_for(kw) {
+                        obj.trigger_definitions.push(trigger);
+                    }
                 }
             }
             ContinuousModification::RemoveAllAbilities => {

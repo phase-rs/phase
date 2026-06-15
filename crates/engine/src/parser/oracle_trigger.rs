@@ -28664,6 +28664,76 @@ mod tests {
         }
     }
 
+    /// CR 608.2d + CR 113.3 + CR 611.2: Angelic Skirmisher — "At the beginning
+    /// of each combat, choose first strike, vigilance, or lifelink. Creatures
+    /// you control gain that ability until end of turn." The trigger execute
+    /// chain must (a) prompt a typed `Effect::Choose { ChoiceType::Keyword }`
+    /// with `persist: true`, then (b) grant `AddChosenKeyword` to creatures you
+    /// control — never `Effect::Unimplemented`.
+    #[test]
+    fn parse_angelic_skirmisher_choose_then_grant_chosen_keyword() {
+        use crate::types::ability::ChoiceType;
+        use crate::types::keywords::Keyword;
+
+        let def = parse_trigger_line(
+            "At the beginning of each combat, choose first strike, vigilance, or \
+             lifelink. Creatures you control gain that ability until end of turn.",
+            "Angelic Skirmisher",
+        );
+        let execute = def
+            .execute
+            .expect("Angelic Skirmisher trigger must have an execute");
+        let chain = ability_chain(&execute);
+
+        // (a) The choose clause is a persisting typed keyword choice.
+        let choose = chain
+            .iter()
+            .find_map(|node| match &*node.effect {
+                Effect::Choose {
+                    choice_type,
+                    persist,
+                } => Some((choice_type.clone(), *persist)),
+                _ => None,
+            })
+            .expect("expected an Effect::Choose in the chain");
+        assert_eq!(
+            choose.0,
+            ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+            },
+            "choose clause must be a typed keyword choice"
+        );
+        assert!(
+            choose.1,
+            "keyword choice must persist for the grant to read"
+        );
+
+        // (b) The grant clause adds the chosen keyword to creatures you control.
+        let granted_chosen = chain.iter().any(|node| match &*node.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().any(|sdef| {
+                sdef.modifications
+                    .contains(&ContinuousModification::AddChosenKeyword)
+            }),
+            _ => false,
+        });
+        assert!(
+            granted_chosen,
+            "expected an AddChosenKeyword grant, chain: {:?}",
+            chain.iter().map(|n| &n.effect).collect::<Vec<_>>()
+        );
+
+        // Nothing in the chain may be Unimplemented.
+        for node in &chain {
+            assert!(
+                !matches!(&*node.effect, Effect::Unimplemented { .. }),
+                "no clause may be Unimplemented, got {:?}",
+                node.effect
+            );
+        }
+    }
+
     /// Walk an ability chain (effect + every `sub_ability`) collecting a
     /// reference to each `AbilityDefinition` node so tests can inspect both the
     /// effect and the per-node `condition`.

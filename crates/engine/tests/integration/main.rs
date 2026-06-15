@@ -216,6 +216,7 @@ mod issue_3323_nexus_of_fate_extra_turn;
 mod issue_3324_haunted_one;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
+mod issue_544_krark_clan_ironworks_auto_pass;
 mod issue_564_wishclaw_talisman_control;
 mod issue_565_birthing_ritual_end_step_trigger;
 mod issue_566_ragavan_dash_cast;

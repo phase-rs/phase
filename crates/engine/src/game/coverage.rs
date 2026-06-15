@@ -2855,6 +2855,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
         // keyword chosen at resolution time.
         ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),
+        // CR 608.2d + CR 613.1f: Angelic Skirmisher / Linvala, Shield of Sea
+        // Gate — grant the keyword chosen at resolution time.
+        ContinuousModification::AddChosenKeyword => "add chosen keyword".into(),
         ContinuousModification::SetColor { colors } => {
             let c: Vec<_> = colors
                 .iter()
