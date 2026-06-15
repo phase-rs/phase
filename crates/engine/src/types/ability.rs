@@ -1948,7 +1948,7 @@ pub enum DelayedTriggerCondition {
 pub struct MultiTargetSpec {
     #[serde(
         serialize_with = "serialize_multi_target_min",
-        deserialize_with = "deserialize_multi_target_min"
+        deserialize_with = "deserialize_quantity_expr_or_int"
     )]
     pub min: QuantityExpr,
     /// `None` means "any number" (unlimited). CR 115.1d.
@@ -2021,20 +2021,32 @@ where
     }
 }
 
-fn deserialize_multi_target_min<'de, D>(deserializer: D) -> Result<QuantityExpr, D::Error>
+/// Deserialize a [`QuantityExpr`] field that may appear either as the typed
+/// tagged form (`{"type":"Fixed","value":N}` / `{"type":"Ref",...}`) or as a
+/// bare integer (`N`).
+///
+/// The bare-int form is the legacy `i32` serialization that predates the
+/// `i32 → QuantityExpr` migration of several `count`/`min` fields
+/// (`MultiTargetSpec.min`, `Effect::RemoveCounter.count`). Accepting it keeps
+/// already-generated `card-data.json` exports and the committed integration
+/// fixture (`tests/fixtures/integration_cards.json`) loadable without forcing a
+/// full card-data regeneration in lockstep with every such migration. New
+/// emissions serialize through the default tagged form, matching
+/// `Effect::PutCounter.count`.
+fn deserialize_quantity_expr_or_int<'de, D>(deserializer: D) -> Result<QuantityExpr, D::Error>
 where
     D: Deserializer<'de>,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum MultiTargetMin {
+    enum QuantityOrInt {
         Fixed(i32),
         Expr(QuantityExpr),
     }
 
-    match MultiTargetMin::deserialize(deserializer)? {
-        MultiTargetMin::Fixed(value) => Ok(QuantityExpr::Fixed { value }),
-        MultiTargetMin::Expr(expr) => Ok(expr),
+    match QuantityOrInt::deserialize(deserializer)? {
+        QuantityOrInt::Fixed(value) => Ok(QuantityExpr::Fixed { value }),
+        QuantityOrInt::Expr(expr) => Ok(expr),
     }
 }
 
@@ -6832,7 +6844,17 @@ pub enum Effect {
         /// The literal `QuantityExpr::Fixed { value: -1 }` is the legacy
         /// "remove all" sentinel — `resolve_remove` keys off `< 0` to strip
         /// every counter of the named type (Vampire Hexmage).
-        #[serde(default = "default_quantity_one")]
+        ///
+        /// Deserializes with `deserialize_quantity_expr_or_int` so the legacy
+        /// bare-int `i32` form (`"count":1` / `"count":-1`) emitted before this
+        /// field's `i32 → QuantityExpr` migration still loads from
+        /// already-generated `card-data.json` exports and the committed
+        /// integration fixture. Serialization stays the default tagged form,
+        /// matching `Effect::PutCounter.count`.
+        #[serde(
+            default = "default_quantity_one",
+            deserialize_with = "deserialize_quantity_expr_or_int"
+        )]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -15074,6 +15096,83 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After the `Effect::RemoveCounter.count` migration from `i32` to
+    /// `QuantityExpr`, the field must (a) round-trip the typed `Fixed`/`Ref`
+    /// forms and (b) still deserialize the legacy bare-int `i32` shape emitted
+    /// by `card-data.json` exports and the committed integration fixture that
+    /// predate the migration. Without the back-compat deserializer, loading
+    /// those files panics (the abundance integration regression, #3344).
+    #[test]
+    fn remove_counter_count_serde_round_trips_and_accepts_legacy_int() {
+        // Typed Fixed: serializes to the tagged form, round-trips.
+        let fixed = Effect::RemoveCounter {
+            counter_type: Some(CounterType::Plus1Plus1),
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+        };
+        let fixed_json = serde_json::to_value(&fixed).unwrap();
+        assert_eq!(
+            fixed_json["count"],
+            serde_json::json!({ "type": "Fixed", "value": 3 }),
+            "Fixed count must serialize as the tagged form, matching PutCounter",
+        );
+        assert_eq!(serde_json::from_value::<Effect>(fixed_json).unwrap(), fixed);
+
+        // The "remove all" sentinel (-1) round-trips identically.
+        let remove_all = Effect::RemoveCounter {
+            counter_type: Some(CounterType::Time),
+            count: QuantityExpr::Fixed { value: -1 },
+            target: TargetFilter::SelfRef,
+        };
+        let remove_all_json = serde_json::to_value(&remove_all).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Effect>(remove_all_json).unwrap(),
+            remove_all,
+        );
+
+        // Dynamic Ref (Protean Hydra "remove that many +1/+1 counters")
+        // round-trips through the tagged form.
+        let dynamic = Effect::RemoveCounter {
+            counter_type: Some(CounterType::Plus1Plus1),
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Any,
+        };
+        let dynamic_json = serde_json::to_value(&dynamic).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Effect>(dynamic_json).unwrap(),
+            dynamic
+        );
+
+        // Back-compat: the legacy bare-int form deserializes to `Fixed`.
+        let legacy: Effect = serde_json::from_str(
+            r#"{"type":"RemoveCounter","counter_type":"time","count":1,"target":{"type":"SelfRef"}}"#,
+        )
+        .expect("legacy bare-int RemoveCounter count must deserialize");
+        assert_eq!(
+            legacy,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Time),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        );
+
+        // The legacy "remove all" sentinel (-1) also deserializes from bare int.
+        let legacy_all: Effect = serde_json::from_str(
+            r#"{"type":"RemoveCounter","counter_type":"charge","count":-1,"target":{"type":"SelfRef"}}"#,
+        )
+        .expect("legacy bare-int -1 RemoveCounter count must deserialize");
+        assert!(matches!(
+            legacy_all,
+            Effect::RemoveCounter {
+                count: QuantityExpr::Fixed { value: -1 },
+                ..
+            }
+        ));
+    }
 
     /// #506: `AbilityCost::consumes_source` classifies a self-discard cost
     /// (cycling, Channel) as source-consuming so the UI confirms a lone such
