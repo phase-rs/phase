@@ -2629,6 +2629,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("attacking".into(), "yes".into()));
             }
         }
+        Effect::CreateTokenCopyFromPool {
+            mv,
+            mv_bound,
+            selection,
+            ..
+        } => {
+            d.push(("mv".into(), format!("{mv:?} {}", fmt_quantity(mv_bound))));
+            d.push(("selection".into(), format!("{selection:?}")));
+        }
         Effect::ExploreAll { filter } => {
             d.push(("filter".into(), fmt_target(filter)));
         }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::SeedableRng;
@@ -1630,6 +1630,17 @@ pub struct PendingCast {
     /// the generic amount they will pay at `finalize_cast`.
     #[serde(default)]
     pub assist_state: AssistState,
+    /// CR 601.2f + CR 601.2h: POSITIVE signal that this pending activation took
+    /// the `{X}`-mana detour (`extract_x_mana_cost` ran first), so its
+    /// `activation_cost` is the RESIDUAL non-mana tail that has NOT yet been
+    /// paid. `push_activated_ability_to_stack` re-surfaces a non-self discard
+    /// sub-cost only when this is set — the discard-FIRST detour leaves it
+    /// `false` because it already paid the discard before resuming. Set ONLY by
+    /// the X-residual detour in `handle_activate_ability`. Skipped on the wire
+    /// only when `false`; serialized when `true` so an activation paused
+    /// mid-payment keeps the signal across a multiplayer save/restore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub x_residual_activation: bool,
 }
 
 fn default_origin_zone() -> Zone {
@@ -1681,6 +1692,7 @@ impl PendingCast {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }
     }
 
@@ -6135,6 +6147,22 @@ pub struct GameState {
     #[serde(skip)]
     pub card_face_registry: Arc<HashMap<String, CardFace>>,
 
+    /// Momir Basic selection index: mana value -> sorted creature face names.
+    /// CR 707.2 + CR 202.3: the random-token pool, keyed by mana value so the
+    /// emblem's `{X}` ability can pick a creature with mana value X. Built only
+    /// when `format == Momir` (see `rehydrate_card_db_metadata`); empty
+    /// otherwise. Skipped in serialization and rebuilt deterministically per peer
+    /// from the loaded card DB.
+    #[serde(skip)]
+    pub momir_pool: BTreeMap<i32, Vec<String>>,
+
+    /// Momir Basic hydration map: lowercase creature name -> `CardFace`. The
+    /// resolver reads this (NEVER `card_face_registry`, which is conjure-scoped
+    /// and misses most creatures) to build the copy token. Skipped in
+    /// serialization; rebuilt with `momir_pool`.
+    #[serde(skip)]
+    pub momir_pool_faces: Arc<HashMap<String, CardFace>>,
+
     /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
     /// Skipped in serialization — runtime context only.
     #[serde(skip)]
@@ -6917,6 +6945,8 @@ impl GameState {
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),
+            momir_pool: BTreeMap::new(),
+            momir_pool_faces: Arc::new(HashMap::new()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
@@ -7688,6 +7718,7 @@ mod tests {
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
+                x_residual_activation: false,
             })
         }
 
@@ -8019,6 +8050,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

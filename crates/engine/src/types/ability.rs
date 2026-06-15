@@ -7355,6 +7355,45 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
+    /// CR 707.2 + CR 111.1 + CR 701.9a (analogous): Create a token that's a copy
+    /// of a creature card chosen from a format-defined pool whose mana value
+    /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
+    /// Basic emblem ("Create a token that's a copy of a creature card with mana
+    /// value X chosen at random"). The pool is the engine's creature corpus
+    /// (`GameState::momir_pool` / `momir_pool_faces`). `selection` chooses how a
+    /// candidate is picked from the matching set: `Random` (CR 701.9a is the
+    /// discard keyword action; the random *selection* here is analogous to the
+    /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the
+    /// `mv` comparator also expresses "copy a creature card with mana value N or
+    /// less" (Oko-style) via `Comparator::LE`.
+    CreateTokenCopyFromPool {
+        /// CR 109.4: player who creates (and controls) the token. Defaults to
+        /// the resolving ability's controller. Mirrors `CopyTokenOf.owner`.
+        #[serde(default = "default_target_filter_controller")]
+        owner: TargetFilter,
+        /// Additional filter applied to the hydrated face beyond "is a creature
+        /// card" (the pool is already creature-only). Defaults to `Any`.
+        #[serde(default = "default_target_filter_any")]
+        type_filter: TargetFilter,
+        /// CR 202.3: comparator relating a candidate's mana value to `mv_bound`.
+        /// Momir uses `EQ` (exact match); `LE`/`GE` express threshold variants.
+        mv: Comparator,
+        /// CR 202.3: the mana-value bound. For Momir this is `Variable { "X" }`
+        /// (the chosen X paid for the ability).
+        mv_bound: QuantityExpr,
+        /// CR 701.9a (analogous) / CR 608.2d: how a candidate is selected from
+        /// the matching set — `Random` (Momir) or `Chosen`.
+        selection: CardSelectionMode,
+        /// CR 707.10: number of tokens to create. Defaults to one.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        /// Token enters the battlefield tapped.
+        #[serde(default)]
+        tapped: bool,
+        /// CR 508.4: token enters the battlefield attacking.
+        #[serde(default)]
+        enters_attacking: bool,
+    },
     /// CR 702.116a: Myriad creates one tapped attacking copy token for each
     /// opponent other than the defending player for the source creature, then
     /// exiles those tokens at end of combat.
@@ -9664,6 +9703,10 @@ impl Effect {
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
+            // CR 109.4: owner/type_filter are non-targeting resolution-time
+            // filters; the copy source is chosen from the format pool, not
+            // declared as a target.
+            | Effect::CreateTokenCopyFromPool { .. }
             | Effect::Myriad
             // CR 702.141a: opponents and per-opponent attack binding are chosen
             // by the effect, not declared as targets.
@@ -9829,6 +9872,7 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
             | Effect::Discard { count, .. }
@@ -10029,6 +10073,7 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
             | Effect::Discard { count, .. }
@@ -10279,6 +10324,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::EpicCopy { .. } => "EpicCopy",
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
+        Effect::CreateTokenCopyFromPool { .. } => "CreateTokenCopyFromPool",
         Effect::Myriad => "Myriad",
         Effect::Encore => "Encore",
         Effect::Meld { .. } => "Meld",
@@ -10482,6 +10528,7 @@ pub enum EffectKind {
     EpicCopy,
     CastCopyOfCard,
     CopyTokenOf,
+    CreateTokenCopyFromPool,
     Myriad,
     Encore,
     Meld,
@@ -10686,6 +10733,7 @@ impl From<&Effect> for EffectKind {
             Effect::EpicCopy { .. } => EffectKind::EpicCopy,
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
+            Effect::CreateTokenCopyFromPool { .. } => EffectKind::CreateTokenCopyFromPool,
             Effect::Myriad => EffectKind::Myriad,
             Effect::Encore => EffectKind::Encore,
             Effect::Meld { .. } => EffectKind::Meld,

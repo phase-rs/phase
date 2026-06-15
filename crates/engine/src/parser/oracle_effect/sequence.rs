@@ -3770,6 +3770,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CopySpell { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::Meld { .. }
