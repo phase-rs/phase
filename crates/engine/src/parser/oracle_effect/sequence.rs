@@ -1415,6 +1415,32 @@ pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
     starts_bare_and_clause_lower(&lower)
 }
 
+fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("they ").parse(input)?;
+    alt((
+        value(
+            (),
+            preceded(
+                tag("gain "),
+                alt((value((), parse_keyword_name), value((), tag("\"")))),
+            ),
+        ),
+        value((), preceded(tag("have "), parse_keyword_name)),
+        value((), preceded(tag("lose "), parse_keyword_name)),
+        value(
+            (),
+            preceded(
+                tag("get "),
+                preceded(
+                    opt(tag("an additional ")),
+                    nom_primitives::parse_pt_modifier,
+                ),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -1566,11 +1592,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // "loses" are the singular conjugations. Safe to split: an anaphoric
         // noun phrase followed by a conjugated continuous-modification verb
         // cannot be a continuation noun phrase.
-        // Plural anaphoric subjects: "those {creatures,permanents,tokens}" /
-        // the bare plural pronoun "they" + plural-stem continuous verb. Nested-
-        // prefix form (CLAUDE.md "Nest nom combinators by prefix dispatch") so
-        // subject ∈ {4 phrases} and verb ∈ {gain,get,have,lose} compose without
-        // enumerating all 16 tuples, and the overall `alt(...)` arity stays
+        // Plural anaphoric subjects: "those {creatures,permanents,tokens}" +
+        // plural-stem continuous verb. Nested-prefix form (CLAUDE.md "Nest
+        // nom combinators by prefix dispatch") so subject ∈ {3 phrases} and
+        // verb ∈ {gain,get,have,lose} compose without enumerating all 12
+        // tuples, and the overall `alt(...)` arity stays
         // under nom's 21-tuple limit. The first inner `tag` binds the error
         // type for the rest of the tree.
         //
@@ -1597,11 +1623,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
                     tag::<_, _, OracleError<'_>>("those creatures "),
                     tag("those permanents "),
                     tag("those tokens "),
-                    tag("they "),
                 )),
                 alt((tag("gain "), tag("get "), tag("have "), tag("lose "))),
             ),
         ),
+        value((), starts_they_continuous_clause_lower),
         // Singular anaphoric subjects: "that {creature,permanent,token}" +
         // singular-conjugation continuous verb (gains/gets/has/loses).
         // Single-token grants ("create one X token, that token gains haste")
@@ -7393,6 +7419,7 @@ mod tests {
         // must NOT split — e.g. "destroy target creature and they ..." never
         // occurs, but a non-continuous tail must stay un-split here.
         assert!(!starts_bare_and_clause("they attack this turn"));
+        assert!(!starts_bare_and_clause("they lose 6 life"));
     }
 
     /// CR 702: "The same is true for <keyword list>." — Odric, Lunarch
