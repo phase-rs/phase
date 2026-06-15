@@ -547,6 +547,16 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
+        // CR 110.5b + CR 611.2b: a target/recipient-scoped tap condition must
+        // route through the recipient-eval path so the captured `duration_subject`
+        // (the copy target) binds — relying on the `_ => false` default would
+        // route `Target` to the source binding and reintroduce the bug.
+        // `Source`-scoped (never emitted; spelled `SourceIsTapped`) stays source-bound.
+        StaticCondition::IsTapped { scope } => matches!(
+            scope,
+            crate::types::ability::ObjectScope::Target
+                | crate::types::ability::ObjectScope::Recipient
+        ),
         _ => false,
     }
 }
@@ -636,6 +646,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        // Tap status is per-object state, never board-population-dependent —
+        // non-population exactly like `SourceIsTapped`.
+        | StaticCondition::IsTapped { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
@@ -754,6 +767,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        // An entering object cannot perturb a per-object tap gate — `false`
+        // exactly like `SourceIsTapped`.
+        | StaticCondition::IsTapped { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
@@ -953,6 +969,29 @@ fn evaluate_condition_with_context(
         // Callous Oppressor dying while tapped) fails this predicate and any
         // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
         StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 110.5b + CR 110.5d: scope-parameterized tap check (the non-source
+        // sibling of `SourceIsTapped`). Resolve the scope to a concrete object,
+        // then reuse the same zone-guarded battlefield tap predicate. The parser
+        // only ever emits `scope: Target` (the demonstrative "that creature
+        // remains tapped" case — Zygon Infiltrator), bound at resolution time to
+        // the copy target via `duration_subject` and surfaced here as the
+        // `recipient_id`. `Recipient` resolves identically. `Source` is spelled
+        // `SourceIsTapped` and never reaches this arm; the remaining scopes are
+        // never produced for a duration tap condition, so they fail safely.
+        StaticCondition::IsTapped { scope } => match scope {
+            crate::types::ability::ObjectScope::Source => {
+                eval_source_is_tapped_on_battlefield(state, source_id)
+            }
+            crate::types::ability::ObjectScope::Target
+            | crate::types::ability::ObjectScope::Recipient => {
+                recipient_id.is_some_and(|id| eval_source_is_tapped_on_battlefield(state, id))
+            }
+            crate::types::ability::ObjectScope::EventSource
+            | crate::types::ability::ObjectScope::EventTarget
+            | crate::types::ability::ObjectScope::CostPaidObject
+            | crate::types::ability::ObjectScope::Anaphoric
+            | crate::types::ability::ObjectScope::Demonstrative => false,
+        },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
         StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
             obj.zone == crate::types::zones::Zone::Battlefield && obj.is_saddled
@@ -2654,7 +2693,19 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
     // tracks the controlled/granted creature's counters rather than the source.
     match (&tce.affected, condition_uses_recipient_context(condition)) {
         (TargetFilter::SpecificObject { id }, true) => {
-            evaluate_condition_with_recipient(state, condition, tce.controller, tce.source_id, *id)
+            // CR 611.2b: a target-relative duration tracks the captured
+            // `duration_subject` (the copy target for BecomeCopy — Zygon
+            // Infiltrator) when it diverges from `affected`; otherwise the
+            // affected object (Shield Broker's recipient-relative control
+            // duration, where the recipient IS the tracked object).
+            let recipient = tce.duration_subject.unwrap_or(*id);
+            evaluate_condition_with_recipient(
+                state,
+                condition,
+                tce.controller,
+                tce.source_id,
+                recipient,
+            )
         }
         _ => evaluate_condition(state, condition, tce.controller, tce.source_id),
     }
@@ -8583,6 +8634,7 @@ mod tests {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
+                duration_subject: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -8614,6 +8666,7 @@ mod tests {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
+                duration_subject: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];

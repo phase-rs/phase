@@ -2759,6 +2759,11 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceIsMonstrous
+        // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
+        // target-relative tap condition (Zygon Infiltrator's copy duration). It
+        // is never produced as an intervening-if, so there is no
+        // `TriggerCondition` equivalent — lowering returns `None`.
+        | StaticCondition::IsTapped { .. }
         // CR 702.171b: the saddled designation has no intervening-if
         // (`TriggerCondition`) equivalent.
         | StaticCondition::SourceIsSaddled

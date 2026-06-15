@@ -2531,6 +2531,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
         | StaticCondition::SourceHasDealtDamage
+        // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
+        // target-relative tap condition (Zygon Infiltrator's copy duration), not
+        // an effect-resolution gate — no `AbilityCondition` equivalent.
+        | StaticCondition::IsTapped { .. }
         | StaticCondition::None => None,
     }
 }

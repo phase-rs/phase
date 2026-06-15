@@ -5758,6 +5758,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
         StaticCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        StaticCondition::IsTapped { .. } => ("IsTapped", Handled),
         StaticCondition::SourceIsSaddled => ("SourceIsSaddled", Handled),
         StaticCondition::SourceControllerEquals { .. } => ("SourceControllerEquals", Handled),
         StaticCondition::Unrecognized { .. } => ("Unrecognized", Handled),
