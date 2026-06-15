@@ -154,7 +154,7 @@ describe("BattlefieldZoneOverflow", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
     window.matchMedia = ((query: string) => ({
-      matches: query === "(hover: hover)",
+      matches: query === "(hover: hover)" || query === "(any-hover: hover)",
       media: query,
       onchange: null,
       addEventListener: vi.fn(),

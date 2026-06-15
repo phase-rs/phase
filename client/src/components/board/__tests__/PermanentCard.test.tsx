@@ -140,7 +140,7 @@ function renderPermanent(validTargetObjectIds = new Set<number>()) {
 describe("PermanentCard attachments", () => {
   beforeEach(() => {
     window.matchMedia = ((query: string) => ({
-      matches: query === "(hover: hover)",
+      matches: query === "(hover: hover)" || query === "(any-hover: hover)",
       media: query,
       onchange: null,
       addEventListener: vi.fn(),
