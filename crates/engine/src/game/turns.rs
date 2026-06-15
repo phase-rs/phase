@@ -947,8 +947,34 @@ pub fn untap_choice_candidates(state: &GameState, player: PlayerId) -> Vec<Objec
     // (or in absence of) those choices. Members already in `candidates` are not
     // duplicated.
     use crate::game::filter::{matches_target_filter, FilterContext};
+    use crate::types::ability::ContinuousModification;
     let ctx = FilterContext::neutral();
+    // Pre-compute transient CantUntap ids (mirrors execute_untap_with_choices).
+    let transient_cant_untap: HashSet<ObjectId> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|e| {
+            e.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantUntap,
+                    }
+                )
+            })
+        })
+        .filter_map(|e| {
+            if let crate::types::ability::TargetFilter::SpecificObject { id } = &e.affected {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect();
     for (filter, max) in max_untap_restrictions(state) {
+        // Exclude permanents that cannot untap anyway (CantUntap intrinsic or
+        // transient): presenting them as choices is misleading because the player
+        // cannot select them to untap regardless of the cap decision.
         let group: Vec<ObjectId> = state
             .battlefield
             .iter()
@@ -959,6 +985,15 @@ pub fn untap_choice_candidates(state: &GameState, player: PlayerId) -> Vec<Objec
                     .get(id)
                     .is_some_and(|obj| obj.controller == player && obj.tapped)
                     && matches_target_filter(state, *id, &filter, &ctx)
+                    && !transient_cant_untap.contains(id)
+                    && !super::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantUntap,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    )
             })
             .collect();
         if group.len() as u32 > max {

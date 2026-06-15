@@ -1437,9 +1437,13 @@ impl Hash for StaticMode {
             StaticMode::MustAttackPlayer { player } => player.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
-            // CR 502.3: filter is a non-Hash TargetFilter — hash only the cap so
-            // distinct caps don't collide; the filter rides discriminant only.
-            StaticMode::MaxUntapPerType { max, .. } => max.hash(state),
+            // CR 502.3: filter is a non-Hash TargetFilter; hash the enum
+            // discriminant alongside the cap so creature/artifact/land caps
+            // with the same max don't collide.
+            StaticMode::MaxUntapPerType { filter, max } => {
+                std::mem::discriminant(filter).hash(state);
+                max.hash(state);
+            }
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
             StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
