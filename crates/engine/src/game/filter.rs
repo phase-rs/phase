@@ -15,6 +15,7 @@ use crate::types::ability::{
     PtStat, PtValueScope, QuantityExpr, ResolvedAbility, SharedQuality, SharedQualityRelation,
     TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
+use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
@@ -849,6 +850,67 @@ pub fn matches_target_filter_including_phased_out(
         ctx.scoped_iteration_player,
         ControllerLookup::LiveOnly,
     )
+}
+
+/// CR 205: Evaluate a `TargetFilter`'s STATIC characteristics against a bare
+/// `CardFace` — a printed card definition with no battlefield object, controller,
+/// or game-state context (e.g. a card outside the game, or a pool entry hydrated
+/// for `Effect::CreateTokenCopyFromPool`). Only context-free predicates are
+/// honored (card types, subtypes, supertypes); any filter component that needs a
+/// live object (controller scope, counters, combat state, LKI) cannot match a
+/// face and yields `false`. Use the object-based `matches_target_filter` family
+/// instead whenever an `ObjectId` exists.
+pub(crate) fn matches_target_filter_against_face(face: &CardFace, filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::None => false,
+        TargetFilter::Typed(typed) => {
+            typed.controller.is_none()
+                && typed
+                    .type_filters
+                    .iter()
+                    .all(|type_filter| matches_type_filter_against_face(face, type_filter))
+                && typed.properties.iter().all(|property| match property {
+                    FilterProp::HasSupertype { value } => face.card_type.supertypes.contains(value),
+                    _ => false,
+                })
+        }
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| matches_target_filter_against_face(face, inner)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|inner| matches_target_filter_against_face(face, inner)),
+        TargetFilter::Not { filter } => !matches_target_filter_against_face(face, filter),
+        _ => false,
+    }
+}
+
+/// CR 205: Evaluate a single `TypeFilter` against a bare `CardFace`'s printed
+/// card type line (core types, subtypes, supertypes). Context-free counterpart
+/// to the object-based type checks in `filter_inner_for_object`.
+pub(crate) fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Creature => face.card_type.core_types.contains(&CoreType::Creature),
+        TypeFilter::Land => face.card_type.core_types.contains(&CoreType::Land),
+        TypeFilter::Artifact => face.card_type.core_types.contains(&CoreType::Artifact),
+        TypeFilter::Enchantment => face.card_type.core_types.contains(&CoreType::Enchantment),
+        TypeFilter::Instant => face.card_type.core_types.contains(&CoreType::Instant),
+        TypeFilter::Sorcery => face.card_type.core_types.contains(&CoreType::Sorcery),
+        TypeFilter::Planeswalker => face.card_type.core_types.contains(&CoreType::Planeswalker),
+        TypeFilter::Battle => face.card_type.core_types.contains(&CoreType::Battle),
+        TypeFilter::Permanent => face
+            .card_type
+            .core_types
+            .iter()
+            .any(|card_type| card_type.is_permanent_type()),
+        TypeFilter::Card | TypeFilter::Any => true,
+        TypeFilter::Non(inner) => !matches_type_filter_against_face(face, inner),
+        TypeFilter::Subtype(subtype) => face.card_type.subtypes.contains(subtype),
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .any(|inner| matches_type_filter_against_face(face, inner)),
+    }
 }
 
 /// CR 109.5 + CR 400.3: In owner-scoped zones (hand, library, graveyard),

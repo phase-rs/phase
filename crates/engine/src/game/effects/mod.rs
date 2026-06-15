@@ -64,6 +64,7 @@ pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
 pub mod create_emblem;
+pub mod create_token_copy_from_pool;
 pub mod deal_damage;
 pub mod delayed_trigger;
 pub mod destroy;
@@ -2337,6 +2338,9 @@ pub fn resolve_effect(
         Effect::EpicCopy { .. } => epic::resolve(state, ability, events),
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
+        Effect::CreateTokenCopyFromPool { .. } => {
+            create_token_copy_from_pool::resolve(state, ability, events)
+        }
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve(state, ability, events),
@@ -2840,6 +2844,24 @@ fn affected_objects_from_events(
             .iter()
             .filter_map(|event| match event {
                 GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        // CR 608.2c + CR 701.19c: damage publishes the damaged objects so a
+        // downstream "<noun> dealt damage this way can't be regenerated"
+        // sub-ability binds to exactly those creatures (Incinerate/Flamebreak/
+        // Jaya Ballard, Task Mage). Object targets only — a player carries no
+        // regen shield and the static is inert on players. CR 120.3/120.6: only
+        // creatures actually dealt a nonzero amount were "dealt damage this way"
+        // (fully-prevented damage doesn't count), so require `amount > 0`.
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    target: TargetRef::Object(id),
+                    amount,
+                    ..
+                } if *amount > 0 => Some(*id),
                 _ => None,
             })
             .collect(),

@@ -414,7 +414,11 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
 /// `base_*` — each component returns as its own front face on leave (CR 712.21).
 /// Parameterized over any result face (a building block, not a per-card path);
 /// mirrors `apply_card_face_to_object`'s field derivations without writing base.
-pub(crate) fn meld_copiable_values(result_face: &CardFace) -> CopiableValues {
+///
+/// Also used by `CreateTokenCopyFromPool` (Momir Basic) to build copiable values
+/// for a creature card chosen from the format pool, which exists only as a
+/// `CardFace` (no battlefield object to read via `compute_current_copiable_values`).
+pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValues {
     CopiableValues {
         name: result_face.name.clone(),
         mana_cost: result_face.mana_cost.clone(),
@@ -855,6 +859,10 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
+        // owner/type_filter are TargetFilters; no nested ability carrier and the
+        // copy source comes from the format pool, so this is a leaf for conjure
+        // collection.
+        | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::ExileHaunting { .. }
@@ -1158,6 +1166,37 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // game is restored from a persisted snapshot, deadlocking the session.
     if state.all_card_names.is_empty() {
         state.all_card_names = db.card_names().into();
+    }
+
+    // CR 707.2 + CR 202.3: Build the Momir Basic random-token pool. Gated on the
+    // format AND emptiness: `rehydrate_card_db_metadata` also runs on the
+    // mid-game debug-spawn path (engine-wasm), so without the emptiness guard we
+    // would rescan the full creature corpus on every spawn. The deserialize case
+    // is covered — `format_config` is serialized, so a peer deserializing a Momir
+    // game sees `format == Momir && momir_pool.is_empty()` and rebuilds the same
+    // pool from its own copy of the card DB (the keys are sorted, so the index is
+    // deterministic across peers).
+    if state.format_config.format == crate::types::format::GameFormat::Momir
+        && state.momir_pool.is_empty()
+    {
+        let mut pool: std::collections::BTreeMap<i32, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut faces: HashMap<String, CardFace> = HashMap::new();
+        for face in db
+            .face_index
+            .values()
+            .filter(|face| face.card_type.core_types.contains(&CoreType::Creature))
+        {
+            let mv = face.mana_cost.mana_value() as i32;
+            pool.entry(mv).or_default().push(face.name.clone());
+            faces.insert(face.name.to_lowercase(), face.clone());
+        }
+        // Deterministic selection order regardless of DB iteration order.
+        for names in pool.values_mut() {
+            names.sort();
+        }
+        state.momir_pool = pool;
+        state.momir_pool_faces = std::sync::Arc::new(faces);
     }
 }
 

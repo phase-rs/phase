@@ -16124,6 +16124,61 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 608.2c + CR 701.19c: "[noun] dealt damage this way can't be
+        // regenerated this turn." — a separate-sentence regen rider on the
+        // preceding damage clause (Incinerate, Flamebreak, Jaya Ballard, Task
+        // Mage). Attaches as that clause's sub_ability so the damage clause
+        // publishes its struck-object set, which the rider's CantBeRegenerated
+        // static binds to via `TrackedSet`. Guarded on a preceding damage clause
+        // so the targeted/anaphor regen forms (Hurr Jackal, Lim-Dûl's Cohort)
+        // keep their standalone in-chain dispatch.
+        if clauses
+            .iter()
+            .rev()
+            .find(|clause| !clause.absorbed_by_followup)
+            .is_some_and(|clause| {
+                matches!(
+                    &clause.parsed.effect,
+                    Effect::DealDamage { .. } | Effect::DamageAll { .. }
+                )
+            })
+        {
+            if let Some(rider_def) = subject::try_parse_cant_be_regenerated_damage_rider(
+                normalized_text.trim_end_matches('.').trim(),
+                kind,
+            ) {
+                clauses.push(ClauseIr {
+                    // Structural sentinel: replaced during lowering by the
+                    // SpecialClause attach (mirrors the DieExileRider placeholder).
+                    parsed: parsed_clause(Effect::unimplemented(
+                        "cant_be_regenerated_rider_placeholder",
+                        "",
+                    )),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::CantBeRegeneratedRider(Box::new(rider_def))),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
         if is_free_cast_exile_instead_rider(rider_lower.trim_end_matches('.').trim()) {
             if let Some(previous) = clauses.iter_mut().rev().find(|clause| {
                 !clause.absorbed_by_followup
@@ -31437,6 +31492,157 @@ mod tests {
             sd.affected,
             Some(TargetFilter::ParentTarget),
             "the 'that creature' anaphor must resolve to ParentTarget"
+        );
+    }
+
+    /// CR 608.2c + CR 701.19c: Incinerate — "Incinerate deals 3 damage to any
+    /// target. A creature dealt damage this way can't be regenerated this turn."
+    /// The regen sentence is a damage-anaphor rider: it attaches as a sub-ability
+    /// of the parent DealDamage clause and binds to the published `TrackedSet`,
+    /// NOT a fresh target.
+    #[test]
+    fn cant_be_regenerated_damage_rider_incinerate() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Incinerate deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "parent must be DealDamage, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("regen rider must attach as a sub-ability of the damage clause");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*sub.effect
+        else {
+            panic!("expected GenericEffect rider, got {:?}", sub.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(
+            *target,
+            Some(TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }),
+            "rider must bind to the damage clause's published tracked set"
+        );
+        let sd = static_abilities
+            .first()
+            .expect("expected CantBeRegenerated static");
+        assert!(
+            matches!(&sd.mode, StaticMode::CantBeRegenerated),
+            "expected CantBeRegenerated, got {:?}",
+            sd.mode
+        );
+        assert_eq!(
+            sd.affected,
+            Some(TargetFilter::ParentTarget),
+            "static affected resolves the TrackedSet via ParentTarget at runtime"
+        );
+    }
+
+    /// CR 608.2c + CR 701.19c: Flamebreak — "Flamebreak deals 3 damage to each
+    /// creature without flying and each player. Creatures dealt damage this way
+    /// can't be regenerated this turn." Parent is DamageAll; the PLURAL anaphor
+    /// ("creatures dealt damage this way") routes to the same TrackedSet rider.
+    #[test]
+    fn cant_be_regenerated_damage_rider_flamebreak_plural() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Flamebreak deals 3 damage to each creature without flying and each player. Creatures dealt damage this way can't be regenerated this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DamageAll { .. }),
+            "parent must be DamageAll, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("plural regen rider must attach as a sub-ability of DamageAll");
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected GenericEffect rider, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            *target,
+            Some(TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }),
+        );
+        assert!(matches!(
+            static_abilities.first().map(|sd| &sd.mode),
+            Some(StaticMode::CantBeRegenerated)
+        ));
+    }
+
+    /// CR 608.2c + CR 701.19c: Jaya Ballard, Task Mage mode 2 — "{1}{R}, {T},
+    /// Discard a card: Jaya Ballard deals 3 damage to any target. A creature
+    /// dealt damage this way can't be regenerated this turn." The activated
+    /// ability's effect body has the same damage-anaphor rider shape.
+    #[test]
+    fn cant_be_regenerated_damage_rider_jaya_ballard() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Jaya Ballard deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "parent must be DealDamage, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("regen rider must attach as a sub-ability");
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected GenericEffect rider, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            *target,
+            Some(TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }),
+        );
+        assert!(matches!(
+            static_abilities.first().map(|sd| &sd.mode),
+            Some(StaticMode::CantBeRegenerated)
+        ));
+    }
+
+    /// CR 701.19c: Full-card flip — Incinerate's regen clause must NOT fall to
+    /// an Unimplemented effect anywhere in its resolved chain.
+    #[test]
+    fn incinerate_full_card_has_no_unimplemented_regen_clause() {
+        let def = parse_effect_chain(
+            "Incinerate deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+            AbilityKind::Spell,
+        );
+        fn has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+            matches!(&*def.effect, Effect::Unimplemented { .. })
+                || def.sub_ability.as_deref().is_some_and(has_unimplemented)
+                || def.else_ability.as_deref().is_some_and(has_unimplemented)
+        }
+        assert!(
+            !has_unimplemented(&def),
+            "Incinerate must parse with no Unimplemented clause: {def:?}"
         );
     }
 

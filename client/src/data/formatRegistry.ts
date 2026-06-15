@@ -384,6 +384,27 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       allow_debug_actions: false,
     },
   },
+  {
+    format: "Momir",
+    label: "Momir Basic",
+    short_label: "MOM",
+    description: "60 basic lands, random creature tokens",
+    group: "Multiplayer",
+    default_config: {
+      format: "Momir",
+      starting_life: 24,
+      min_players: 2,
+      max_players: 2,
+      deck_size: 60,
+      singleton: false,
+      command_zone: true,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      allow_debug_actions: false,
+    },
+  },
 ];
 
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {

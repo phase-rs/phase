@@ -1284,6 +1284,76 @@ fn prevent_damage_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
         .find(|f| !matches!(f, TargetFilter::ParentTargetSlot { .. }))
 }
 
+/// CR 120.3a + CR 603.7c: Constrain a companion `ControllerRef::TargetPlayer`
+/// slot to the damaged player(s) of the triggering damage event.
+///
+/// "Whenever … deals combat damage to a player, [destroy/goad] target creature
+/// that player controls" binds "that player" to the player the event damaged,
+/// not to a free choice. While the trigger declares its targets on the stack,
+/// `current_trigger_event` is not yet set (it is populated at resolution), so
+/// the damaged player is read from `pending_trigger_event_batch`.
+///
+/// Returns `None` — preserving the unconstrained all-players slot — unless every
+/// event in the batch is damage dealt to a player. That keeps genuine
+/// free-choice "target player" filters (the `PutCounterAll` "each creature
+/// target player controls" spell shape, ETB triggers that target a player)
+/// unconstrained: those carry no damage-to-player event here.
+fn damaged_player_targets_for_companion_slot(state: &GameState) -> Option<Vec<TargetRef>> {
+    let batch = &state.pending_trigger_event_batch;
+    if batch.is_empty() {
+        return None;
+    }
+    let mut players: Vec<TargetRef> = Vec::new();
+    for event in batch {
+        let is_damage_to_player = matches!(
+            event,
+            crate::types::events::GameEvent::CombatDamageDealtToPlayer { .. }
+                | crate::types::events::GameEvent::DamageDealt {
+                    target: TargetRef::Player(_),
+                    ..
+                }
+        );
+        if !is_damage_to_player {
+            return None;
+        }
+        if let Some(pid) = targeting::extract_player_from_event(event, state) {
+            let target = TargetRef::Player(pid);
+            if !players.contains(&target) {
+                players.push(target);
+            }
+        }
+    }
+    (!players.is_empty()).then_some(players)
+}
+
+/// Legal targets for the companion `TargetFilter::Player` slot — the player
+/// whose permanents a `ControllerRef::TargetPlayer` ("that player controls")
+/// filter scopes to. Single authority shared by the static slot build
+/// (`collect_target_slots`) and the dynamic selection-time recompute
+/// (`legal_targets_for_selected_slot`); the two MUST agree or selection-time
+/// recomputation would re-offer every player and reintroduce the hang.
+///
+/// For a damage-to-player trigger the slot is bound to the damaged player(s) of
+/// the triggering event (CR 120.3a). Gated on `source_incarnation` (carried only
+/// by triggered abilities) so a stale event batch never constrains a spell's
+/// genuine free-choice "target player". Otherwise every legal player is offered.
+fn companion_target_player_legal_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    ability
+        .source_incarnation
+        .and_then(|_| damaged_player_targets_for_companion_slot(state))
+        .unwrap_or_else(|| {
+            targeting::find_legal_targets(
+                state,
+                &TargetFilter::Player,
+                ability.controller,
+                ability.source_id,
+            )
+        })
+}
+
 fn collect_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1449,12 +1519,19 @@ fn collect_target_slots(
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && ability_needs_companion_target_player_slot(ability)
         {
-            let player_targets = targeting::find_legal_targets(
-                state,
-                &TargetFilter::Player,
-                ability.controller,
-                ability.source_id,
-            );
+            // CR 120.3a + CR 603.7c: For a damage-to-player trigger ("…deals
+            // combat damage to a player, [destroy/goad] target creature that
+            // player controls"), "that player" is the DAMAGED player carried by
+            // the triggering event — not a free choice among every player at the
+            // table. In two-player games an all-players slot happens to work
+            // (one opponent), but in multiplayer it offers wrong players (and
+            // even the source's controller), and the dependent creature slot
+            // ("creatures that player controls") then has no satisfiable
+            // combination, collapsing legal-action generation to empty and
+            // hanging the controller. Bind the companion slot to the damaged
+            // player(s) when this is a damage-to-player trigger. Shared with the
+            // selection-time recompute so both paths agree.
+            let player_targets = companion_target_player_legal_targets(state, ability);
             if player_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
@@ -2636,8 +2713,10 @@ fn legal_targets_for_ability_filter(
 }
 
 /// Returns the relative `ControllerRef` (`You` or `TargetPlayer`) embedded in
-/// `filter`, if any. Used by `legal_targets_for_ability_filter` to detect
-/// filters that need per-player re-enumeration against a companion player slot.
+/// `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
+/// build) and `legal_targets_for_selected_slot` (selection-time recompute) to
+/// detect filters that need per-player re-enumeration against the player chosen
+/// in a companion `TargetFilter::Player` slot.
 fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::ability::ControllerRef> {
     use crate::types::ability::ControllerRef;
     match filter {
@@ -2987,6 +3066,20 @@ fn legal_targets_for_selected_slot(
     prior_specs: &[TargetSlotSpec],
     selected_slots: &[Option<TargetRef>],
 ) -> Vec<TargetRef> {
+    // CR 120.3a + CR 603.7c: The companion `TargetFilter::Player` slot for a
+    // damage-to-player trigger binds "that player" to the damaged player carried
+    // by the triggering event, not a free choice among every player. This is the
+    // selection-time recompute that feeds legal-action generation; without it the
+    // slot would be re-offered as all players (overriding the static slot built
+    // in `collect_target_slots`) and the dependent "creatures that player
+    // controls" slot would have no satisfiable combination, hanging the
+    // controller in multiplayer. The constraint itself is gated inside the
+    // helper, so non-damage-trigger Player slots still offer every player.
+    if matches!(spec.filter, TargetFilter::Player)
+        && ability_needs_companion_target_player_slot(ability)
+    {
+        return companion_target_player_legal_targets(state, ability);
+    }
     // Each branch computes the raw legal set into `legal`; the per-instance
     // distinctness filter (CR 601.2c + CR 115.3) is then applied ONCE at the
     // single tail return. For single-target / separate-instance / early-return
@@ -3012,6 +3105,18 @@ fn legal_targets_for_selected_slot(
     } else if let Some(targets) = per_opponent_fanout_targets {
         targets
     } else {
+        // CR 109.4 + CR 115.1: A filter scoped to a *relative* controller —
+        // `You` ("creatures you control") or `TargetPlayer` ("creatures that
+        // player controls") — is re-bound to the player chosen in a prior slot
+        // (the companion `TargetFilter::Player` slot, or an `Effect::Choose`).
+        // `relative_filter_controller` reads that player back from
+        // `selected_slots`. For the `TargetPlayer` case the filter is also
+        // rewritten to `You` so `find_legal_targets`' source-controller plumbing
+        // resolves it — at selection time `ability.targets` is still empty, so
+        // filter.rs' `TargetPlayer` lookup (which reads `ability.targets`) would
+        // fail closed and collapse the dependent slot to empty, hanging
+        // legal-action generation. This mirrors the static
+        // `legal_targets_for_ability_filter` path so both agree.
         let relative_kind = relative_controller_kind(&spec.filter);
         let controller = if relative_kind.is_some() {
             relative_filter_controller(ability, selected_slots)
@@ -4686,6 +4791,133 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
     use crate::types::{FormatConfig, GameAction};
+
+    /// Issue: Alela, Cunning Conqueror hung the controller in a 4-player game.
+    /// "Whenever one or more Faeries you control deal combat damage to a player,
+    /// goad target creature that player controls" surfaces a companion
+    /// `TargetPlayer` slot to bind the goad target's "that player controls"
+    /// filter. The slot was populated with every player at the table (the
+    /// source's own controller included), so the dependent creature slot had no
+    /// satisfiable combination and legal-action generation collapsed to empty,
+    /// hanging the AI. CR 120.3a + CR 603.7c: "that player" is the damaged
+    /// player carried by the triggering event, so the companion slot must offer
+    /// only that player. Two-player games masked this (a single opponent).
+    #[test]
+    fn companion_target_player_slot_binds_to_damaged_player() {
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new(FormatConfig::duel_commander(), 4, 7);
+        let alela = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(3),
+            "Alela, Cunning Conqueror".to_string(),
+            Zone::Battlefield,
+        );
+        // The damaged player (0) controls a creature — a legal goad target.
+        let hydra = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Managorger Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&hydra)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        // A non-damaged player (2) also controls a creature — it must NOT be
+        // reachable, because the companion slot is bound to player 0 only.
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(2),
+            "Doc Aurlock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // The pending trigger's event batch: combat damage dealt to player 0.
+        state.pending_trigger_event_batch = vec![GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(0),
+            source_amounts: vec![],
+            total_damage: 11,
+        }];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Goad {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![],
+            alela,
+            PlayerId(3),
+        );
+        // Triggered abilities carry a source incarnation; the constraint is
+        // gated on it so only triggers (not spells) read the pending event batch.
+        ability.source_incarnation = Some(1);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots build");
+
+        // Static slot: the companion player slot must list ONLY the damaged
+        // player — not all four players.
+        let player_slot = slots
+            .iter()
+            .find(|s| {
+                !s.legal_targets.is_empty()
+                    && s.legal_targets
+                        .iter()
+                        .all(|t| matches!(t, TargetRef::Player(_)))
+            })
+            .expect("companion player slot present");
+        assert_eq!(
+            player_slot.legal_targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "static companion slot must bind to the damaged player, not all players"
+        );
+
+        // Dynamic path: this is what feeds legal-action generation and is where
+        // the hang actually occurred. Slot 0 (the player) must recompute to ONLY
+        // the damaged player — a prior version constrained the static slot but
+        // re-offered all players here, so the dependent slot 1 had no satisfiable
+        // combination and legal actions collapsed to empty.
+        let slot0 =
+            build_target_selection_progress_for_ability(&state, &ability, &slots, &[], 0, vec![])
+                .expect("slot 0 progress");
+        assert_eq!(
+            slot0.current_legal_targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "dynamic slot 0 must offer only the damaged player"
+        );
+
+        // Slot 1 after choosing the damaged player: the goad target is that
+        // player's creature (the Hydra), never a non-damaged player's creature.
+        let slot1 = build_target_selection_progress_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            1,
+            vec![Some(TargetRef::Player(PlayerId(0)))],
+        )
+        .expect("slot 1 progress");
+        assert_eq!(
+            slot1.current_legal_targets,
+            vec![TargetRef::Object(hydra)],
+            "goad target must be the damaged player's creature only"
+        );
+    }
+
     /// Issue #478 regression: a delayed-trigger return effect
     /// (`ChangeZone { target: ParentTarget }`) carries a resolution-time
     /// *snapshot* in `targets`, not a player-chosen target. CR 608.2b's

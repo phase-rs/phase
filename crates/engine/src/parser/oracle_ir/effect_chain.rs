@@ -57,6 +57,12 @@ pub(crate) enum SpecialClause {
     OtherwiseFallback(Box<AbilityDefinition>),
     /// CR 614.1a + CR 514.2: Die-exile-rider — attach as sub_ability on previous def.
     DieExileRider(Box<AbilityDefinition>),
+    /// CR 608.2c + CR 701.19c: "[noun] dealt damage this way can't be
+    /// regenerated this turn." — a separate-sentence regen rider that attaches
+    /// as a sub_ability on the previous damage clause (Incinerate, Flamebreak,
+    /// Jaya Ballard, Task Mage). Carries a `GenericEffect{CantBeRegenerated}`
+    /// whose `target: TrackedSet` binds to the damage clause's published set.
+    CantBeRegeneratedRider(Box<AbilityDefinition>),
     /// CR 608.2c: Dig-instead alternative — replace previous Dig with conditional alternative.
     DigInsteadAlt(Box<AbilityDefinition>),
     /// CR 608.2e: Generic instead clause — attach to previous def as sub_ability.

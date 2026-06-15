@@ -1318,6 +1318,74 @@ fn evaluate_oathbreaker(
     }
 }
 
+/// Momir Basic deck legality: exactly 60 cards in the main deck, every one a
+/// basic land (CR 205.4 Basic supertype + CR 305 Land core type), no sideboard,
+/// no command-zone cards. CR 100.2a's basic-land exception means the 60 copies
+/// of basics are legal despite the four-copy default.
+fn evaluate_momir(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+) -> CompatibilityCheck {
+    let mut reasons = Vec::new();
+
+    if !unknown_cards.is_empty() {
+        reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+
+    if request.main_deck.len() != 60 {
+        reasons.push(format!(
+            "Momir Basic decks must have exactly 60 cards (found {})",
+            request.main_deck.len()
+        ));
+    }
+
+    // CR 205.4 + CR 305: every main-deck card must be a basic land.
+    let mut non_basic = BTreeSet::new();
+    for name in request.main_deck.iter().map(String::as_str) {
+        if unknown_cards.contains(name) {
+            continue;
+        }
+        let resolved = resolve_card_name(db, name);
+        let Some(face) = db.get_face_by_name(resolved) else {
+            continue;
+        };
+        let is_basic_land = face.card_type.supertypes.contains(&Supertype::Basic)
+            && face.card_type.core_types.contains(&CoreType::Land);
+        if !is_basic_land {
+            non_basic.insert(face.name.clone());
+        }
+    }
+    if !non_basic.is_empty() {
+        reasons.push(summarize_cards(
+            "Momir Basic decks may only contain basic lands",
+            &non_basic,
+            6,
+        ));
+    }
+
+    if !request.sideboard.is_empty() {
+        reasons.push("Momir Basic does not use a sideboard".to_string());
+    }
+    if !request.commander.is_empty() || !request.signature_spell.is_empty() {
+        reasons.push("Momir Basic does not use command-zone cards".to_string());
+    }
+
+    CompatibilityCheck {
+        compatible: reasons.is_empty(),
+        reasons,
+    }
+}
+
+fn quick_momir_check(db: &CardDatabase, request: &DeckCompatibilityRequest) -> QuickCheckResult {
+    let unknown_cards = collect_unknown_cards(db, request);
+    let check = evaluate_momir(db, request, &unknown_cards);
+    QuickCheckResult {
+        reason: check.reasons.into_iter().next(),
+        unknown_cards,
+    }
+}
+
 fn quick_oathbreaker_check(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1382,6 +1450,7 @@ fn evaluate_selected_format_summary(
         ),
         GameFormat::TinyLeaders => quick_tiny_leaders_check(db, request),
         GameFormat::Oathbreaker => quick_oathbreaker_check(db, request),
+        GameFormat::Momir => quick_momir_check(db, request),
         GameFormat::Brawl | GameFormat::HistoricBrawl => quick_brawl_check(
             db,
             request,
@@ -1744,6 +1813,13 @@ fn evaluate_selected_format(
         }
         GameFormat::Oathbreaker => {
             let check = evaluate_oathbreaker(db, request, unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        GameFormat::Momir => {
+            let check = evaluate_momir(db, request, unknown_cards);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }
@@ -4809,5 +4885,69 @@ mod tests {
             "restricted card must not be flagged as illegal; reasons: {:?}",
             result.selected_format_reasons
         );
+    }
+
+    fn momir_request(main: Vec<String>) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Momir),
+            selected_match_type: None,
+            summary_only: false,
+        }
+    }
+
+    #[test]
+    fn momir_sixty_basics_passes() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = momir_request(expand("Plains", 60));
+        let check = evaluate_momir(&db, &request, &BTreeSet::new());
+        assert!(
+            check.compatible,
+            "60 basic lands must be a legal Momir deck, reasons: {:?}",
+            check.reasons
+        );
+    }
+
+    #[test]
+    fn momir_wrong_count_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        for count in [59usize, 61] {
+            let check = evaluate_momir(
+                &db,
+                &momir_request(expand("Plains", count)),
+                &BTreeSet::new(),
+            );
+            assert!(
+                !check.compatible,
+                "a {count}-card Momir deck must be rejected"
+            );
+            assert!(check.reasons.iter().any(|r| r.contains("exactly 60")));
+        }
+    }
+
+    #[test]
+    fn momir_non_basic_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut deck = expand("Plains", 59);
+        deck.push("Legal Standard".to_string()); // non-basic
+        let check = evaluate_momir(&db, &momir_request(deck), &BTreeSet::new());
+        assert!(!check.compatible, "a non-basic card must be rejected");
+        assert!(check
+            .reasons
+            .iter()
+            .any(|r| r.contains("only contain basic lands")));
+    }
+
+    #[test]
+    fn momir_non_empty_sideboard_fails() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut request = momir_request(expand("Plains", 60));
+        request.sideboard = vec!["Plains".to_string()];
+        let check = evaluate_momir(&db, &request, &BTreeSet::new());
+        assert!(!check.compatible, "Momir has no sideboard");
+        assert!(check.reasons.iter().any(|r| r.contains("sideboard")));
     }
 }

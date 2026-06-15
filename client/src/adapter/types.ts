@@ -47,7 +47,8 @@ export type GameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
-  | "Limited";
+  | "Limited"
+  | "Momir";
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
