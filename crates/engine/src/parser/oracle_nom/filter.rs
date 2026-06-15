@@ -70,7 +70,8 @@ pub fn parse_enters_origin_zone(input: &str) -> OracleResult<'_, Zone> {
 
 /// Parse a zone owner/controller qualifier following a zone filter.
 ///
-/// Matches "you control", "an opponent controls", "you own", "you don't control".
+/// Matches "you control", "an opponent controls", "your opponents control",
+/// "you don't control", "target player controls", "defending player controls".
 pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
     alt((
         value(ControllerRef::You, tag("you control")),
@@ -83,6 +84,16 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
         // (see `collect_target_slots` in `game/ability_utils.rs`) so the player
         // is selected as part of target declaration.
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 508.5 / CR 508.5a: "defending player controls" — the controller
+        // scope is the defending player (or that player's planeswalker
+        // controller / battle protector) the attacking creature is attacking.
+        // Resolved per attacker at runtime by
+        // `combat::defending_player_for_attacker`. Shares no prefix with the
+        // arms above, so dispatch order is not load-bearing.
+        value(
+            ControllerRef::DefendingPlayer,
+            tag("defending player controls"),
+        ),
     ))
     .parse(input)
 }
@@ -636,6 +647,22 @@ mod tests {
         let (rest2, c2) = parse_zone_controller("you don't control").unwrap();
         assert_eq!(c2, ControllerRef::Opponent);
         assert_eq!(rest2, "");
+    }
+
+    // CR 508.5 / CR 508.5a: "defending player controls" scopes the filter
+    // controller to the defending player for attack-trigger targets (Kogla,
+    // The Tarrasque, ~42 cards). Class-level combinator behavior, not one card.
+    #[test]
+    fn test_parse_zone_controller_defending_player() {
+        let (rest, c) = parse_zone_controller("defending player controls").unwrap();
+        assert_eq!(c, ControllerRef::DefendingPlayer);
+        assert_eq!(rest, "");
+
+        // Remainder preservation: the new arm consumes only the qualifier and
+        // does not over-consume trailing text.
+        let (rest2, c2) = parse_zone_controller("defending player controls and ").unwrap();
+        assert_eq!(c2, ControllerRef::DefendingPlayer);
+        assert_eq!(rest2, " and ");
     }
 
     #[test]

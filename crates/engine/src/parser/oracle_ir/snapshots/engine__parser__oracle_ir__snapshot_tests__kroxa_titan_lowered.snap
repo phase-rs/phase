@@ -127,17 +127,46 @@ expression: "&lowered"
   "extractedKeywords": [
     {
       "Escape": {
-        "cost": {
-          "type": "Cost",
-          "shards": [
-            "Black",
-            "Black",
-            "Red",
-            "Red"
-          ],
-          "generic": 0
-        },
-        "exile_count": 5
+        "type": "NonMana",
+        "data": {
+          "type": "Composite",
+          "costs": [
+            {
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [
+                  "Black",
+                  "Black",
+                  "Red",
+                  "Red"
+                ],
+                "generic": 0
+              }
+            },
+            {
+              "type": "Exile",
+              "count": 5,
+              "zone": "Graveyard",
+              "filter": {
+                "type": "Typed",
+                "type_filters": [
+                  "Card"
+                ],
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "Another"
+                  },
+                  {
+                    "type": "InZone",
+                    "zone": "Graveyard"
+                  }
+                ]
+              }
+            }
+          ]
+        }
       }
     }
   ]

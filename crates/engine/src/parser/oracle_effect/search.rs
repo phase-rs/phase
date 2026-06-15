@@ -2075,6 +2075,8 @@ fn filter_prop_is_zone(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::InZone { .. } | FilterProp::InAnyZone { .. } => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_is_zone),
+        // CR 608.2c: Negation wraps the inner prop's zone reference — recurse (mirrors AnyOf).
+        FilterProp::Not { prop } => filter_prop_is_zone(prop),
         _ => false,
     }
 }

@@ -1746,7 +1746,7 @@ mod tests {
     fn remove_plus_counter_is_harmful() {
         let effect = Effect::RemoveCounter {
             counter_type: Some(CounterType::Plus1Plus1),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
@@ -1756,7 +1756,7 @@ mod tests {
     fn remove_minus_counter_is_beneficial() {
         let effect = Effect::RemoveCounter {
             counter_type: Some(CounterType::Minus1Minus1),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);

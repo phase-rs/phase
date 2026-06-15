@@ -116,6 +116,24 @@ pub enum BestowCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.138a + CR 118.9 + CR 601.2f-h: Escape cost — an alternative cost paid
+/// to cast a card from the graveyard (CR 702.138a). Almost always a compound
+/// cost: a mana sub-cost plus "Exile N other cards from your graveyard". A few
+/// cards add further sub-costs (e.g. Lunar Hatchling: "Exile a land you control,
+/// Exile five other cards from your graveyard"). Mirrors
+/// `EvokeCost`/`FlashbackCost`/`BestowCost` so the compound cost composes through
+/// `AbilityCost::Composite` and is split at runtime by `split_escape_cost_components`
+/// (casting.rs): the mana sub-cost is paid via the normal mana flow (CR 601.2g)
+/// and the residual exile sub-cost(s) via `pay_additional_cost` (CR 601.2h).
+/// Exiling permanents/cards as a cost is CR 701.13 (exile), NOT CR 701.21
+/// (sacrifice) — no sacrifice/death triggers fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EscapeCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -615,12 +633,13 @@ pub enum Keyword {
     /// CR 702.119a-c: Emerge is an alternative cost paid by sacrificing a
     /// creature and reducing the emerge cost by that creature's mana value.
     Emerge(ManaCost),
-    /// CR 702.138: Escape — cast from graveyard for an alternative cost,
-    /// exiling N other cards from your graveyard as an additional cost.
-    Escape {
-        cost: ManaCost,
-        exile_count: u32,
-    },
+    /// CR 702.138a: Escape — cast from graveyard for an alternative cost. The
+    /// compound escape cost (mana sub-cost plus one or more exile sub-costs) is
+    /// modeled by `EscapeCost` and split at runtime by
+    /// `split_escape_cost_components` (casting.rs): the mana portion is paid via
+    /// the normal mana flow and the residual exile sub-cost(s) via
+    /// `pay_additional_cost`.
+    Escape(EscapeCost),
     /// CR 702.180: Harmonize {cost} — cast from graveyard for harmonize cost,
     /// tap up to one creature to reduce cost by its power, exile on resolution.
     Harmonize(ManaCost),
@@ -1091,7 +1110,7 @@ impl Keyword {
             Keyword::Ninjutsu(_) => KeywordKind::Ninjutsu,
             Keyword::Sneak(_) => KeywordKind::Sneak,
             Keyword::Mutate(_) => KeywordKind::Mutate,
-            Keyword::Escape { .. } => KeywordKind::Escape,
+            Keyword::Escape(_) => KeywordKind::Escape,
             Keyword::Morph(_) => KeywordKind::Morph,
             Keyword::Megamorph(_) => KeywordKind::Megamorph,
             Keyword::Mayhem(_) => KeywordKind::Mayhem,
@@ -1236,7 +1255,7 @@ impl Keyword {
                 | Keyword::Sneak(_)
                 | Keyword::Ninjutsu(_)
                 | Keyword::Mutate(_)
-                | Keyword::Escape { .. }
+                | Keyword::Escape(_)
                 | Keyword::Foretell(_)
                 | Keyword::Plot(_)
                 | Keyword::Miracle(_)
@@ -1827,10 +1846,14 @@ impl FromStr for Keyword {
                 "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
                 "escape" => {
-                    return Ok(Keyword::Escape {
-                        cost: parse_keyword_mana_cost(p),
-                        exile_count: 0,
-                    })
+                    // CR 702.138a: MTGJSON's keywords array carries only the bare
+                    // escape mana cost. This placeholder (mana sub-cost, no exile
+                    // residual) is overwritten by the Oracle parser with the real
+                    // compound `EscapeCost::NonMana`. With no residual it is
+                    // rejected by `effective_escape_data` until overwritten.
+                    return Ok(Keyword::Escape(EscapeCost::Mana(parse_keyword_mana_cost(
+                        p,
+                    ))));
                 }
                 "evoke" => return Ok(Keyword::Evoke(EvokeCost::Mana(parse_keyword_mana_cost(p)))),
                 "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
@@ -2626,13 +2649,11 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
         "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
-        // CR 702.138: MTGJSON provides bare "Escape" with no structured cost data.
-        // Placeholder values — the Oracle parser overwrites with real cost/exile_count.
+        // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
+        // Placeholder (mana sub-cost, no exile residual) — the Oracle parser
+        // overwrites with the real compound `EscapeCost::NonMana`.
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
-        "Escape" => Ok(Keyword::Escape {
-            cost: ManaCost::default(),
-            exile_count: 0,
-        }),
+        "Escape" => Ok(Keyword::Escape(EscapeCost::Mana(ManaCost::default()))),
         "Evoke" => {
             // Accept both legacy ManaCost format and new EvokeCost tagged format.
             if let Ok(ev_cost) = serde_json::from_value::<EvokeCost>(data.clone()) {

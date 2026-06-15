@@ -26,7 +26,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
-    ConvokeMode, GameState, PendingCast, WaitingFor,
+    ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -2525,6 +2525,29 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                 runner
                     .act(GameAction::DecideOptionalCost { pay })
                     .expect("DecideOptionalCost must be accepted");
+            }
+            // CR 605.3b + CR 608.2d: complete a mana-color choice during effect
+            // resolution (Vexing Puzzlebox: add one mana of any color, then roll
+            // a d20). Default policy picks the first legal option deterministically.
+            WaitingFor::ChooseManaColor { choice: prompt, .. } => {
+                let mana_choice = match prompt {
+                    ManaChoicePrompt::SingleColor { options } => {
+                        ManaChoice::SingleColor(*options.first().unwrap_or(&ManaType::Colorless))
+                    }
+                    ManaChoicePrompt::AnyCombination { count, options } => {
+                        let color = *options.first().unwrap_or(&ManaType::Colorless);
+                        ManaChoice::Combination(vec![color; *count])
+                    }
+                    ManaChoicePrompt::Combination { options } => {
+                        ManaChoice::Combination(options.first().cloned().unwrap_or_default())
+                    }
+                };
+                runner
+                    .act(GameAction::ChooseManaColor {
+                        choice: mana_choice,
+                        count: 1,
+                    })
+                    .expect("ChooseManaColor must be accepted");
             }
             WaitingFor::Priority { .. } => {
                 if runner.state.stack.is_empty() {

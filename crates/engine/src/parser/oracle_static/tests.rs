@@ -1118,6 +1118,28 @@ fn continuous_mods_decompose_becomes_compound_type_phrase() {
     );
 }
 
+/// CR 608.2d + CR 613.1f: "gain that ability" / "the chosen ability" / "the
+/// chosen keyword" is a chosen-keyword anaphor referring back to a preceding
+/// `Effect::Choose { ChoiceType::Keyword }` clause (Angelic Skirmisher,
+/// Linvala, Shield of Sea Gate). It must lower to `AddChosenKeyword`, NOT a
+/// bare `AddKeyword` (the chosen value is unknown at parse time) and NOT a
+/// silent drop. Builds for the whole "gain the chosen keyword" class.
+#[test]
+fn continuous_mods_grant_chosen_keyword_anaphor() {
+    for phrase in [
+        "gain that ability",
+        "gain the chosen ability",
+        "gain the chosen keyword",
+    ] {
+        let mods = parse_continuous_modifications(phrase);
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddChosenKeyword],
+            "expected AddChosenKeyword for {phrase:?}, got {mods:?}"
+        );
+    }
+}
+
 #[test]
 fn continuous_mods_replace_creature_subtypes_for_bare_becomes_clause() {
     let mods = parse_continuous_modifications("gets +3/+3 and becomes a Bear Berserker");
@@ -3756,6 +3778,59 @@ fn static_can_attack_despite_defender_self_unconditional() {
     assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_block_shadow_as_though_they_didnt_have_shadow() {
+    // CR 509.1b + CR 702.28b: Heartwood Dryad phrasing. After card-name
+    // normalization the subject is `~`.
+    let def =
+        parse_static_line("~ can block creatures with shadow as though they didn't have shadow.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn static_block_shadow_as_though_it_had_shadow() {
+    // CR 509.1b + CR 702.28b: Wall of Diffusion phrasing — same block-legality
+    // outcome, different "as though" clause; both map to CanBlockShadow.
+    let def =
+        parse_static_line("~ can block creatures with shadow as though it had shadow.").unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_block_shadow_as_though_keeps_subject_scope() {
+    // CR 509.1b + CR 609.4 + CR 702.28b: subject-scoped as-though permissions
+    // must keep their affected filter; runtime resolves this through
+    // `check_static_ability` against the blocker.
+    let def = parse_static_line(
+        "Creatures you control can block creatures with shadow as though they didn't have shadow.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::CanBlockShadow);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_block_shadow_does_not_match_plain_shadow_grant() {
+    // Discriminating: a plain shadow keyword grant must NOT parse to CanBlockShadow.
+    let parsed = parse_static_line("~ has shadow.");
+    assert!(
+        !matches!(
+            parsed.as_ref().map(|d| &d.mode),
+            Some(StaticMode::CanBlockShadow)
+        ),
+        "plain shadow grant must not become CanBlockShadow: {parsed:?}"
+    );
 }
 
 #[test]

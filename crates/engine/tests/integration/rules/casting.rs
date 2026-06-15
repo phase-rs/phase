@@ -8,7 +8,7 @@ use engine::types::ability::{
 };
 use engine::types::game_state::{CastOfferKind, CastingVariant, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{EscapeCost, Keyword};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 /// Helper: advance past TargetSelection if present, return the resulting WaitingFor.
@@ -409,13 +409,23 @@ fn setup_escape_scenario(
             shards: vec![ManaCostShard::Green],
             generic: 0,
         })
-        .with_keyword(Keyword::Escape {
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::Green],
-                generic: 0,
+        .with_keyword(Keyword::Escape(EscapeCost::NonMana(
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::Green],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Exile {
+                        count: 2,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
             },
-            exile_count: 2,
-        })
+        )))
         .id();
 
     let mut runner = scenario.build();
@@ -555,6 +565,239 @@ fn escape_full_casting_flow() {
     }
 }
 
+/// CR 702.138a + CR 601.2h + CR 701.13 (WHO cluster #9 — Lunar Hatchling): a
+/// multi-clause escape additional cost ("Exile a land you control, Exile five
+/// other cards from your graveyard") must pay BOTH exile clauses, one at a time,
+/// before the spell reaches the stack. The Composite peels the battlefield
+/// land-exile clause first (`ExilePermanent`), then on resume the graveyard clause
+/// (`ExileFromZone{Graveyard}`). Both selections must complete before the cast.
+#[test]
+fn escape_multi_clause_exiles_land_then_graveyard_cards() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // A green land that taps for the escape mana cost.
+    scenario.add_basic_land(P0, ManaColor::Green);
+    // A SECOND land that is the "exile a land you control" cost fodder.
+    let cost_land = scenario.add_basic_land(P0, ManaColor::Green);
+
+    // Land-you-control filter for the battlefield exile clause.
+    let land_you_control = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Land],
+        controller: Some(engine::types::ability::ControllerRef::You),
+        properties: vec![],
+    });
+
+    // Lunar-Hatchling-shaped escape: {G}, exile a land you control, exile 2
+    // other graveyard cards (count reduced from 5 for a compact fixture).
+    let escape_id = scenario
+        .add_creature_to_hand(P0, "Multi Escape", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .with_keyword(Keyword::Escape(EscapeCost::NonMana(
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::Green],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(land_you_control),
+                    },
+                    AbilityCost::Exile {
+                        count: 2,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
+            },
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    let escape_card_id = runner.state().objects[&escape_id].card_id;
+
+    // Move the escape creature to the graveyard.
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        escape_id,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+
+    // Two OTHER graveyard cards to pay the graveyard exile clause.
+    let mut filler = Vec::new();
+    for i in 0..2 {
+        let card_id = CardId(runner.state().next_object_id);
+        let id = engine::game::zones::create_object(
+            runner.state_mut(),
+            card_id,
+            P0,
+            format!("GY Filler {i}"),
+            Zone::Graveyard,
+        );
+        filler.push(id);
+    }
+
+    // Cast from the graveyard.
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: escape_id,
+            card_id: escape_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("CastSpell should succeed");
+
+    // FIRST: the battlefield land-exile clause (ExilePermanent), mandatory count 1.
+    let WaitingFor::PayCost {
+        kind: PayCostKind::ExilePermanent { .. },
+        choices: ref land_choices,
+        count,
+        min_count,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "Expected PayCost ExilePermanent (land clause) first, got {:?}",
+            result.waiting_for
+        );
+    };
+    assert_eq!(count, 1, "land-exile clause is count 1");
+    assert_eq!(min_count, 1, "land-exile clause is mandatory");
+    assert!(
+        land_choices.contains(&cost_land),
+        "the controlled land must be an eligible choice"
+    );
+    assert!(
+        !land_choices.contains(&escape_id),
+        "the spell being cast must not be exilable as its own cost"
+    );
+
+    // Select the land to exile.
+    let result2 = runner
+        .act(GameAction::SelectCards {
+            cards: vec![cost_land],
+        })
+        .expect("land exile selection should succeed");
+
+    // SECOND: the graveyard-exile clause (ExileFromZone{Graveyard}), count 2.
+    assert!(
+        matches!(
+            result2.waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Graveyard,
+                },
+                count: 2,
+                ..
+            }
+        ),
+        "Expected PayCost ExileFromZone(Graveyard) after land exile, got {:?}",
+        result2.waiting_for
+    );
+
+    // Select the two graveyard cards.
+    let result3 = runner
+        .act(GameAction::SelectCards {
+            cards: vec![filler[0], filler[1]],
+        })
+        .expect("graveyard exile selection should succeed");
+
+    // Mana auto-taps {G}; the spell goes to the stack.
+    assert!(
+        matches!(result3.waiting_for, WaitingFor::Priority { .. }),
+        "Expected Priority after both exile clauses, got {:?}",
+        result3.waiting_for
+    );
+    assert_eq!(runner.state().objects[&cost_land].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&filler[0]].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&filler[1]].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "escape spell should be on the stack"
+    );
+}
+
+/// CR 702.138a: a multi-clause escape is NOT castable when the player controls
+/// no land to pay the "Exile a land you control" clause, even with enough
+/// graveyard cards for the graveyard clause.
+#[test]
+fn escape_multi_clause_not_castable_without_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // No lands at all on the battlefield — the "Exile a land you control" clause
+    // is unpayable. The escape mana sub-cost is free (NoCost) so the only
+    // affordability failure is the land-exile clause itself.
+
+    let land_you_control = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Land],
+        controller: Some(engine::types::ability::ControllerRef::You),
+        properties: vec![],
+    });
+
+    let escape_id = scenario
+        .add_creature_to_hand(P0, "Multi Escape NoLand", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        })
+        .with_keyword(Keyword::Escape(EscapeCost::NonMana(
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::NoCost,
+                    },
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(land_you_control),
+                    },
+                    AbilityCost::Exile {
+                        count: 2,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
+            },
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        escape_id,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+    // Two OTHER graveyard cards (graveyard clause is satisfiable; only the land clause fails).
+    for i in 0..2 {
+        let card_id = CardId(runner.state().next_object_id);
+        engine::game::zones::create_object(
+            runner.state_mut(),
+            card_id,
+            P0,
+            format!("GY Filler {i}"),
+            Zone::Graveyard,
+        );
+    }
+
+    // The player controls no land to exile for the land-exile clause, so the
+    // escape additional cost is not payable (CR 601.2h: all costs must be
+    // payable). The affordability gate must reject it from the castable set.
+    let castable = engine::game::casting::spell_objects_available_to_cast(runner.state(), P0);
+    assert!(
+        !castable.contains(&escape_id),
+        "escape must NOT be castable when the player controls no land to exile"
+    );
+}
+
 /// Regression: CastingVariant must survive the ManaPayment detour.
 /// When escape cost contains X, pay_and_push_adventure enters ManaPayment.
 /// The pending_cast must preserve CastingVariant::Escape.
@@ -573,13 +816,23 @@ fn escape_variant_preserved_through_mana_payment() {
             shards: vec![ManaCostShard::X, ManaCostShard::Green],
             generic: 0,
         })
-        .with_keyword(Keyword::Escape {
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::X, ManaCostShard::Green],
-                generic: 0,
+        .with_keyword(Keyword::Escape(EscapeCost::NonMana(
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::Green],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Exile {
+                        count: 2,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
             },
-            exile_count: 2,
-        })
+        )))
         .id();
 
     let mut runner = scenario.build();
