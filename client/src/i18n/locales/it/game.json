@@ -1153,6 +1153,12 @@
       "subtitle_other": "Esilia {{count}} materiali per fabbricare",
       "subtitleRange": "Esilia da {{min}} a {{count}} materiali per fabbricare"
     },
+    "exilePermanent": {
+      "title": "Esilia un permanente",
+      "subtitle_one": "Esilia {{count}} permanente che controlli",
+      "subtitle_other": "Esilia {{count}} permanenti che controlli",
+      "subtitleRange": "Esilia da {{min}} a {{count}} permanenti che controlli"
+    },
     "behold": {
       "title": "Contemplare",
       "subtitleExile": "Esilia un permanente o una carta corrispondente",

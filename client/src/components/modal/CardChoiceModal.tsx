@@ -2340,9 +2340,36 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
       return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
     case "ExileMaterials":
       return <CraftMaterialsModal data={data} />;
+    case "ExilePermanent":
+      return <ExilePermanentForCostModal data={data} />;
     case "ExileFromManaZone":
       return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
   }
+}
+
+// CR 601.2h + CR 701.13: Exile a battlefield permanent you control as an
+// additional/alternative casting cost (Food Chain class; Lunar Hatchling's
+// escape "Exile a land you control"). Reuses the generic `ExileForCostModal`
+// primitive (same as Craft / Behold / ExileFromZone). The cost is a mandatory
+// fixed-count exile (`min_count == count`); the engine supplies the eligible
+// battlefield permanents in `choices`.
+function ExilePermanentForCostModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  const exact = data.min_count === data.count;
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      minCount={data.min_count}
+      title={t("cardChoice.exilePermanent.title")}
+      subtitle={
+        exact
+          ? t("cardChoice.exilePermanent.subtitle", { count: data.count })
+          : t("cardChoice.exilePermanent.subtitleRange", { min: data.min_count, count: data.count })
+      }
+      confirmLabel={t("cardChoice.badges.exile")}
+    />
+  );
 }
 
 // CR 702.167a/b: Craft materials exile. Reuses the generic `ExileForCostModal`

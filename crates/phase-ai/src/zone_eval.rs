@@ -124,7 +124,7 @@ pub(crate) fn has_recursion_keyword(obj: &engine::game::game_object::GameObject)
     obj.keywords.iter().any(|kw| {
         matches!(
             kw,
-            Keyword::Flashback(..) | Keyword::Escape { .. } | Keyword::Unearth(..)
+            Keyword::Flashback(..) | Keyword::Escape(_) | Keyword::Unearth(..)
         )
     })
 }
