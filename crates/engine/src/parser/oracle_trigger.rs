@@ -2751,6 +2751,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
+        // CR 509.1b: recipient-scoped block-evasion gate; no intervening-if
+        // (`TriggerCondition`) equivalent — lowering returns `None`.
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking

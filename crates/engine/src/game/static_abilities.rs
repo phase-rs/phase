@@ -757,6 +757,58 @@ pub(crate) fn transient_grants_static_mode_to_player(
     false
 }
 
+/// CR 611.1 + CR 611.3: Object-scoped counterpart to
+/// [`transient_grants_static_mode_to_player`]. Scan
+/// `state.transient_continuous_effects` for an effect that grants
+/// `AddStaticMode { mode }` and whose typed/filter `affected` matches
+/// `object_id` (e.g. a spell granting "creatures your opponents control don't
+/// untap during their controllers' next untap steps"). Honors the same
+/// `ForAsLongAs` duration and explicit `condition` gates as the player sibling.
+///
+/// `SpecificObject { id }` affecteds are intentionally NOT matched here: those
+/// are an exact-id lookup that callers already cover directly. This query exists
+/// to cover the filter-scoped class (`Typed` / `AnyOf` / `SelfRef` resolved
+/// against the source, etc.) that an exact-id scan misses. Mirrors the
+/// `matches_target_filter` source-context resolution used by
+/// `triggered_cause_sacrifice_or_exile_muzzled`.
+pub(crate) fn transient_grants_static_mode_to_object(
+    state: &GameState,
+    object_id: ObjectId,
+    mode: &StaticMode,
+) -> bool {
+    for tce in &state.transient_continuous_effects {
+        // Exact-id and player-scoped affecteds are handled by the dedicated
+        // SpecificObject / SpecificPlayer paths; this query owns the rest.
+        if matches!(
+            tce.affected,
+            TargetFilter::SpecificObject { .. } | TargetFilter::SpecificPlayer { .. }
+        ) {
+            continue;
+        }
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        let grants_mode = tce.modifications.iter().any(|m| {
+            matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
+        });
+        if !grants_mode {
+            continue;
+        }
+        let ctx = FilterContext::from_source(state, tce.source_id);
+        if matches_target_filter(state, object_id, &tce.affected, &ctx) {
+            return true;
+        }
+    }
+    false
+}
+
 /// CR 609.4b: Check if a player has the "spend mana as any color" static active.
 /// Scans battlefield and command zone for `StaticMode::SpendManaAsAnyColor`
 /// whose affected filter matches the given player.

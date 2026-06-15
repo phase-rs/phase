@@ -4,11 +4,13 @@
 //! `layers.rs` (StaticCondition), `triggers.rs` (TriggerCondition),
 //! `effects/mod.rs` (AbilityCondition), and `replacement.rs` (ReplacementCondition).
 
+use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::triggers::AttackTargetFilter;
 use crate::types::zones::Zone;
 
 /// CR 122.1: True when `obj` has at least `minimum` (and at most `maximum` if specified)
@@ -80,6 +82,59 @@ pub(crate) fn eval_source_is_attacking(state: &GameState, source_id: ObjectId) -
         .combat
         .as_ref()
         .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == source_id))
+}
+
+/// CR 509.1b + CR 506.2 + CR 108.3: True when the recipient creature
+/// (`attacker_id`, the per-object subject of the gating continuous effect) is
+/// currently attacking a target permitted by `target`, evaluated relative to the
+/// creature's OWNER (CR 108.3), not its controller. Realizes "attacking its
+/// owner [or a permanent its owner controls]" for the conditional-evasion class
+/// (e.g. Become the Pilot). Not attacking → false; no combat → false.
+pub(crate) fn eval_recipient_attacking_owner_target(
+    state: &GameState,
+    attacker_id: ObjectId,
+    target: &AttackTargetFilter,
+) -> bool {
+    let Some(attacker) = state.objects.get(&attacker_id) else {
+        return false;
+    };
+    // CR 108.3: owner != controller — the donate/evasion class hinges on the
+    // OWNER, who may not control the creature.
+    let owner = attacker.owner;
+    let Some(combat) = state.combat.as_ref() else {
+        return false;
+    };
+    let Some(info) = combat.attackers.iter().find(|a| a.object_id == attacker_id) else {
+        // Not an attacking creature → the exception cannot be met.
+        return false;
+    };
+
+    // CR 506.2: a creature attacks a player, a planeswalker they control, or a
+    // battle they protect. "Owner-controlled permanent" therefore resolves to a
+    // planeswalker/battle whose controller is the owner.
+    let attacks_owner_player =
+        || matches!(info.attack_target, AttackTarget::Player(p) if p == owner);
+    let attacks_owner_permanent = || match info.attack_target {
+        AttackTarget::Planeswalker(pw) | AttackTarget::Battle(pw) => {
+            state.objects.get(&pw).map(|o| o.controller) == Some(owner)
+        }
+        AttackTarget::Player(_) => false,
+    };
+
+    match target {
+        // Bare "attacking its owner" = attacking the owning player directly.
+        AttackTargetFilter::Owner => attacks_owner_player(),
+        // "its owner or a permanent its owner controls".
+        AttackTargetFilter::OwnerOrPlaneswalker => {
+            attacks_owner_player() || attacks_owner_permanent()
+        }
+        // Not produced by the block-evasion parser path. Kept explicit (no
+        // wildcard) so future widening is compiler-flagged.
+        AttackTargetFilter::Player
+        | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::PlayerOrPlaneswalker
+        | AttackTargetFilter::Battle => false,
+    }
 }
 
 /// CR 725.1: True when no player holds the monarch designation.

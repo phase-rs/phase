@@ -727,6 +727,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 502.3: bounded untap-subset selection under a MaxUntapPerType cap
+        // (Smoke / Stoic Angel / Damping Field). The active player chooses which
+        // `max` of `group` untap. Offer the cap-saturating choice — untap the
+        // first `max` members — as the single AI candidate; untapping fewer is
+        // never advantageous to the AI, and the engine validates `len() <= max`.
+        // Search may still enumerate alternative subsets via legal-actions if a
+        // richer policy is wired later; this guarantees the AI never wedges.
+        WaitingFor::ChooseUntapSubset { player, group, max } => {
+            let chosen: Vec<ObjectId> = group.iter().copied().take(*max).collect();
+            vec![candidate(
+                GameAction::SelectCards { cards: chosen },
+                TacticalClass::Utility,
+                Some(*player),
+            )]
+        }
         // CR 508.1g + CR 701.43d: exert-as-attack is optional — offer both
         // paying the exert cost and declining so search can weigh the linked
         // "when you do" payoff against losing the next untap.
