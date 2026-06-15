@@ -627,4 +627,40 @@ mod tests {
             other => panic!("expected PlayFromExile grant on TrackedSet, got {other:?}"),
         }
     }
+
+    /// Issue #588: Good King Mog XII chapter IV mass counter placement must
+    /// lower to PutCounterAll scoped to other Moogles you control.
+    #[test]
+    fn good_king_mog_chapter_four_counters_other_moogles_issue_588() {
+        use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TypeFilter};
+        use crate::types::counter::CounterType;
+
+        let lines = vec!["IV — Put two +1/+1 counters on each other Moogle you control."];
+        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Summon: Good King Mog XII");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().expect("chapter IV execute");
+        match &*exec.effect {
+            Effect::PutCounterAll {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("expected Typed target, got {target:?}");
+                };
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Moogle")),
+                    "Moogle subtype must survive saga chapter lowering, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected PutCounterAll, got {other:?}"),
+        }
+    }
 }

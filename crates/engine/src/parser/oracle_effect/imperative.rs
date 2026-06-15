@@ -8,8 +8,8 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
-    try_parse_double_effect, try_parse_move_counters_from, try_parse_put_counter,
-    try_parse_remove_counter,
+    parse_counter_anaphor, try_parse_double_effect, try_parse_move_counters_from,
+    try_parse_put_counter, try_parse_remove_counter,
 };
 use super::lower::parse_for_each_multiplier_prefix;
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
@@ -1523,11 +1523,17 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("fight ")).parse(input))
     {
-        let (target_text, _) = super::strip_optional_target_prefix(rest);
+        // CR 115.6: "fights up to one target creature …" allows zero targets.
+        // Preserve the optional-target spec through the AST; it is stamped onto
+        // the clause in `lower_imperative_family_ast`.
+        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::Fight { target });
+        return Some(TargetedImperativeAst::Fight {
+            target,
+            multi_target,
+        });
     }
     // CR 722.1: "You control target player during that player's next turn"
     // (Mindslaver). Declarative form — "you" is not stripped as an imperative
@@ -1756,7 +1762,14 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 random_order: false,
             }
         }
-        TargetedImperativeAst::Fight { target } => Effect::Fight {
+        // CR 115.6: the "up to N" target cardinality is an ability-level field
+        // (`ParsedEffectClause.multi_target`), not an `Effect::Fight` field. It is
+        // recovered at the clause layer in `lower_imperative_family_ast`; this
+        // bare-Effect lowering deliberately ignores `multi_target`.
+        TargetedImperativeAst::Fight {
+            target,
+            multi_target: _,
+        } => Effect::Fight {
             target,
             subject: TargetFilter::SelfRef,
         },
@@ -1791,15 +1804,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 cost,
                 cast_transformed: false,
                 constraint: None,
-                // CR 611.2a: bound to the ability controller by
-                // `grant_permission::resolve`.
+                // CR 611.2a: airbend grants cast permission to each exiled
+                // object's owner, not the airbender's controller.
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
                 exile_instead_of_graveyard_on_resolve: false,
             },
             target,
-            grantee: Default::default(),
+            grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
         },
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
     }
@@ -3172,12 +3185,18 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // chosen card type via `FilterProp::IsChosenCardType`. Persisting a
             // Labeled choice is also what `ChosenLabelIs` companion conditions
             // rely on (CR 614.12c), so it is uniformly safe.
+            // CR 608.2d + CR 113.3: A `Keyword` choice ("choose first strike,
+            // vigilance, or lifelink") persists so a later "creatures you
+            // control gain that ability" clause can read the typed
+            // `ChosenAttribute::Keyword` via
+            // `ContinuousModification::AddChosenKeyword` at layer evaluation.
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
                     | ChoiceType::CreatureType
                     | ChoiceType::CardType
                     | ChoiceType::Labeled { .. }
+                    | ChoiceType::Keyword { .. }
             ),
             choice_type,
         },
@@ -3270,6 +3289,24 @@ pub(super) fn parse_utility_imperative_ast(
             }),
             "copy" => {
                 let rest_lower = &lower[lower.len() - rest.len()..];
+                if tag::<_, _, OracleError<'_>>("that spell or ability")
+                    .parse(rest_lower)
+                    .is_ok()
+                {
+                    let consumed = "that spell or ability".len();
+                    let rem = &rest[consumed..];
+                    let retarget = if super::sequence::recognize_copy_retarget_clause(rem.trim()) {
+                        CopyRetargetPermission::MayChooseNewTargets
+                    } else {
+                        #[cfg(debug_assertions)]
+                        assert_no_compound_remainder(rem, text);
+                        CopyRetargetPermission::KeepOriginalTargets
+                    };
+                    return Some(UtilityImperativeAst::Copy {
+                        target: TargetFilter::TriggeringSource,
+                        retarget,
+                    });
+                }
                 let (target, _rem) = if let Some((target, rem_lower)) =
                     parse_copy_stack_ability_target(rest_lower)
                 {
@@ -6989,16 +7026,59 @@ fn try_parse_lose_all_player_counters(text: &str, lower: &str) -> Option<Effect>
     None
 }
 
+/// CR 107.17: Count a leading run of consecutive `{tk}` ticket symbols, each of
+/// which represents one ticket counter. Returns the count when the input begins
+/// with at least one `{tk}` glyph and the only remaining text is a sentence
+/// terminator (so "{tk}{tk}" and "{tk}{tk}." match, but "{tk} for each ..." or
+/// a `{tk}` activation cost does not — those carry trailing clauses this player
+/// counter parser must not swallow). Mirrors the `{tk}`-counting idiom in
+/// `oracle_keyword::strip_ticket_activation_cost_prefix`.
+fn count_ticket_symbols(rest: &str) -> Option<u32> {
+    let mut remaining = rest;
+    let mut count = 0u32;
+    while let Ok((next, _)) = tag::<_, _, OracleError<'_>>("{tk}").parse(remaining) {
+        count += 1;
+        remaining = next;
+    }
+    if count == 0 {
+        return None;
+    }
+    // Only a trailing terminator may remain; any other text means this is not a
+    // bare "you get {TK}…" instruction (e.g. an activation cost or larger clause).
+    let tail = remaining
+        .trim_start()
+        .trim_end_matches(['.', ';', ','])
+        .trim();
+    tail.is_empty().then_some(count)
+}
+
 /// CR 122.1: Parse "get/gets a/an/N [type] counter(s)" into a GivePlayerCounter AST.
 /// Handles patterns like:
 /// - "get a poison counter"
 /// - "gets two experience counters"
 /// - "get ten rad counters"
+/// - "get {TK}{TK}" (CR 107.17 ticket symbol form; see `count_ticket_symbols`)
 fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
     // Strip "get/gets " prefix
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
         .parse(lower)
         .ok()?;
+
+    // CR 107.17: The ticket symbol is {TK}; it represents one ticket counter.
+    // Unfinity cards write "you get N ticket counters" as N repeated `{TK}`
+    // glyphs (e.g. "you get {TK}{TK}{TK}"). Each glyph is one ticket counter, so
+    // count the run of consecutive `{tk}` symbols and emit a Ticket player
+    // counter of that size. This must precede the word-form "counter(s)" suffix
+    // check below because the symbol form carries no "counter" noun. The branch
+    // returns None on the no-symbol case and falls through to the word form.
+    if let Some(count) = count_ticket_symbols(rest) {
+        return Some(ImperativeFamilyAst::GivePlayerCounter {
+            counter_kind: PlayerCounterKind::Ticket,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        });
+    }
 
     // Must end with "counter" or "counters"
     let (before_counter, plural) = if let Some(s) = rest.strip_suffix(" counters") {
@@ -7593,6 +7673,30 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.optional = true;
             clause
         }
+        // CR 115.6: "it fights up to one target creature …" allows zero targets.
+        // The "up to N" cardinality is an ability-level field
+        // (`ParsedEffectClause.multi_target` → `AbilityDefinition.multi_target`
+        // with min=0 via `lower.rs`), not an `Effect::Fight` field. The
+        // bare-Effect lowering chain (`lower_targeted_action_ast`) cannot carry
+        // it, so intercept here where a `ParsedEffectClause` is in scope and
+        // stamp the spec onto the clause — mirroring the `YouMay` /
+        // `PutCounterList` clause-field interception arms above and the
+        // subject-form "up to" path in `subject.rs`. `None` (mandatory "fights
+        // target …") leaves the clause unchanged.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            TargetedImperativeAst::Fight {
+                target,
+                multi_target,
+            },
+        )) => {
+            let mut clause =
+                parsed_clause(lower_targeted_action_ast(TargetedImperativeAst::Fight {
+                    target,
+                    multi_target: None,
+                }));
+            clause.multi_target = multi_target;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -7911,21 +8015,33 @@ pub(super) fn parse_zone_counter_ast(
             _ => None,
         };
     }
-    if tag::<_, _, OracleError<'_>>("remove ").parse(lower).is_ok()
-        && nom_primitives::scan_contains(lower, "counter")
-    {
-        return match try_parse_remove_counter(lower, ctx) {
-            Some(Effect::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }) => Some(ZoneCounterImperativeAst::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }),
-            _ => None,
-        };
+    // CR 122.1 + CR 608.2k: route "remove …" to the counter parser when the
+    // clause either names a counter explicitly ("remove a +1/+1 counter from ~")
+    // OR refers to the just-established counters anaphorically. The anaphoric
+    // forms ("remove all of them" / "remove them" — level-up/incubate cards like
+    // Ludevic's Test Subject and Smoldering Egg, where the antecedent is the
+    // trigger's intervening-if "if it has N or more <type> counters on it")
+    // carry no literal "counter" token, so the `scan_contains` anchor alone
+    // would drop them to `Unimplemented`. `parse_counter_anaphor` (the shared
+    // anaphor authority in counter.rs) recognizes that surface against the
+    // post-"remove " remainder so it reaches `try_parse_remove_counter`.
+    if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
+        let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
+            || nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some();
+        if is_counter_remove {
+            return match try_parse_remove_counter(lower, ctx) {
+                Some(Effect::RemoveCounter {
+                    counter_type,
+                    count,
+                    target,
+                }) => Some(ZoneCounterImperativeAst::RemoveCounter {
+                    counter_type,
+                    count,
+                    target,
+                }),
+                _ => None,
+            };
+        }
     }
     // CR 122.5: "move [N] [type] counter(s) from [source] onto/to [target]"
     if tag::<_, _, OracleError<'_>>("move ").parse(lower).is_ok()
@@ -8990,6 +9106,32 @@ mod tests {
                 panic!("{input}: expected Attach, got {result:?}");
             };
             assert_eq!(target, TargetFilter::TriggeringSource, "{input}");
+        }
+    }
+
+    /// CR 122.1 + CR 608.2k: the imperative dispatch gate routes anaphoric
+    /// remove-counter clauses ("remove all of them" / "remove them" — the
+    /// just-referenced counters established by a trigger's intervening-if) to
+    /// the counter parser even though they carry no literal "counter" token.
+    /// Building-block coverage for the level-up/incubate transform class
+    /// (Ludevic's Test Subject, Smoldering Egg) at the dispatch layer.
+    #[test]
+    fn remove_counter_anaphor_routes_through_dispatch_gate() {
+        for input in ["remove all of them", "remove them", "remove those counters"] {
+            let lower = input.to_lowercase();
+            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+            let Some(ZoneCounterImperativeAst::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::Fixed { value: -1 },
+                target,
+            }) = result
+            else {
+                panic!("{input}: expected anaphoric RemoveCounter (count -1), got {result:?}");
+            };
+            assert!(
+                matches!(target, TargetFilter::SelfRef),
+                "{input}: expected SelfRef target, got {target:?}"
+            );
         }
     }
 
@@ -10376,6 +10518,83 @@ mod tests {
         );
     }
 
+    /// CR 107.17: Each `{TK}` glyph is one ticket counter. "get {tk}{tk}" → 2.
+    /// Building-block test: exercises the symbol-counting branch across counts.
+    #[test]
+    fn parse_player_counter_ticket_symbols() {
+        for (text, expected) in [
+            ("get {tk}", 1),
+            ("get {tk}{tk}", 2),
+            ("get {tk}{tk}{tk}", 3),
+            ("gets {tk}{tk}.", 2),
+        ] {
+            match try_parse_player_counter(text) {
+                Some(ImperativeFamilyAst::GivePlayerCounter {
+                    counter_kind,
+                    count,
+                }) => {
+                    assert_eq!(
+                        counter_kind,
+                        PlayerCounterKind::Ticket,
+                        "{text:?} should be a Ticket counter"
+                    );
+                    assert!(
+                        matches!(count, QuantityExpr::Fixed { value } if value == expected),
+                        "{text:?} should give {expected} ticket counters, got {count:?}"
+                    );
+                }
+                other => panic!("Expected GivePlayerCounter for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The symbol branch must not swallow a `{TK}` activation cost or a larger
+    /// clause: only a bare "get {TK}…" with an optional terminator may match.
+    #[test]
+    fn parse_player_counter_ticket_symbols_reject_trailing_clause() {
+        assert!(
+            try_parse_player_counter("get {tk} for each creature you control").is_none(),
+            "Trailing 'for each ...' clause must not parse as a bare ticket grant"
+        );
+        // No leading ticket symbol — falls through to the word form (and fails
+        // there, since there is no counter noun), so the symbol branch is inert.
+        assert!(
+            count_ticket_symbols("a poison counter").is_none(),
+            "Non-symbol input must not be counted as ticket symbols"
+        );
+    }
+
+    /// End-to-end (CR 107.17): real Unfinity oracle text that was previously
+    /// Unimplemented now parses to a Ticket player counter. Representative cards:
+    /// Blorbian Buddy ("you get {TK}"), Stiltstrider/Prize Wall ("you get
+    /// {TK}{TK}"), Ticketomaton ("you get {TK}{TK}{TK}").
+    #[test]
+    fn parse_effect_you_get_ticket_symbols_end_to_end() {
+        for (oracle, expected) in [
+            ("You get {TK}", 1),
+            ("You get {TK}{TK}", 2),
+            ("You get {TK}{TK}{TK}", 3),
+        ] {
+            match super::super::parse_effect(oracle) {
+                Effect::GivePlayerCounter {
+                    counter_kind,
+                    count,
+                    target,
+                } => {
+                    assert_eq!(counter_kind, PlayerCounterKind::Ticket);
+                    assert_eq!(target, TargetFilter::Controller);
+                    assert!(
+                        matches!(count, QuantityExpr::Fixed { value } if value == expected),
+                        "{oracle:?} should give {expected} tickets, got {count:?}"
+                    );
+                }
+                other => panic!(
+                    "{oracle:?} should parse to GivePlayerCounter, not {other:?} (regression: was Unimplemented)"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn parse_additional_phase_phase() {
         let text = "there is an additional combat phase after this phase";
@@ -10738,6 +10957,47 @@ mod tests {
             );
         }
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+    }
+
+    /// CR 115.6: "it fights up to one target creature …" allows zero targets.
+    /// The optional-target cardinality must survive the full effect → clause →
+    /// `AbilityDefinition` lowering as `AbilityDefinition.multi_target` with
+    /// min=0 (`up_to(1)`), since the bare-`Effect::Fight` lowering cannot carry
+    /// it. Building-block test across the optionality axis: "up to one" →
+    /// `up_to(1)`, mandatory → `None`.
+    #[test]
+    fn lower_fight_up_to_one_target_carries_multi_target() {
+        let def = super::super::parse_effect_chain(
+            "it fights up to one target creature defending player controls",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Fight { .. }),
+            "Expected Effect::Fight, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "fight 'up to one target' must carry up_to(1) (min=0)"
+        );
+    }
+
+    /// CR 701.14a: the mandatory "fights target creature" form (no "up to")
+    /// carries NO multi_target — the target is required. Pins the other end of
+    /// the optionality axis so the recovery does not over-apply.
+    #[test]
+    fn lower_fight_mandatory_target_no_multi_target() {
+        let def = super::super::parse_effect_chain("it fights target creature", AbilityKind::Spell);
+        assert!(
+            matches!(*def.effect, Effect::Fight { .. }),
+            "Expected Effect::Fight, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target, None,
+            "mandatory fight target must not be optional"
+        );
     }
 
     #[test]

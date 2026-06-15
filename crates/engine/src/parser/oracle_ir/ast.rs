@@ -815,6 +815,12 @@ pub(crate) enum TargetedImperativeAst {
     },
     Fight {
         target: TargetFilter,
+        /// CR 115.6: "up to N target …" cardinality (min=0) preserved from
+        /// `strip_optional_target_prefix`; `None` for the mandatory "fights
+        /// target …" form. Lowered onto `ParsedEffectClause.multi_target` in
+        /// `lower_imperative_family_ast`, never onto `Effect::Fight` (the spec
+        /// is an ability-level target-count axis, not an effect field).
+        multi_target: Option<MultiTargetSpec>,
     },
     GainControl {
         target: TargetFilter,
@@ -1251,7 +1257,7 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
     RemoveCounter {
         counter_type: Option<CounterType>,
-        count: i32,
+        count: QuantityExpr,
         target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.

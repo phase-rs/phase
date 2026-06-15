@@ -1602,6 +1602,16 @@ pub(super) fn strip_optional_effect_prefix(
                 (None, Some(PlayerFilter::Opponent)),
                 tag("target opponent may "),
             ),
+            // CR 506.2 + CR 608.2d + CR 121.3a: "Defending player may have you
+            // draw a card" (Shakedown Heavy) — on an attack trigger, the
+            // defending player is the may-actor who decides whether the
+            // controller performs the granted action. CR 121.3a: the chooser
+            // need not be the player who draws. Parallels the targeted-opponent
+            // arm above; the actor scope is the attack's defending player.
+            value(
+                (None, Some(PlayerFilter::DefendingPlayer)),
+                tag("defending player may "),
+            ),
             // CR 608.2d: "That creature's controller may have this artifact deal …"
             // (Requiem Monolith) — the targeted creature's controller chooses.
             value(
@@ -5231,6 +5241,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
@@ -5323,6 +5334,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
@@ -5524,6 +5536,11 @@ fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&st
                 .into_iter()
                 .map(|p| apply_where_x_to_filter_prop(p, where_x_expression))
                 .collect(),
+        },
+        // CR 608.2c: Descend into the negated inner prop so X-substitution
+        // reaches it (mirrors the AnyOf transform).
+        FilterProp::Not { prop } => FilterProp::Not {
+            prop: Box::new(apply_where_x_to_filter_prop(*prop, where_x_expression)),
         },
         other => other,
     }
