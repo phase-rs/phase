@@ -259,10 +259,13 @@ pub fn turn_face_up(
 /// 2. Moves it to the battlefield
 /// 3. Applies face-down 2/2 creature overrides
 /// 4. Stores originals in `back_face` for later turn-face-up
+///
+/// `source_id` is the spell or ability source responsible for the manifest entry.
 pub fn manifest_card(
     state: &mut GameState,
     _player: PlayerId,
     object_id: ObjectId,
+    source_id: ObjectId,
     profile: crate::types::ability::FaceDownProfile,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
@@ -288,7 +291,7 @@ pub fn manifest_card(
     // resumes face down with nothing left for this helper to do.
     match super::zone_pipeline::move_object(
         state,
-        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
+        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, source_id)
             .face_down(profile),
         events,
     ) {
@@ -343,6 +346,7 @@ pub fn manifest(
         state,
         player,
         object_id,
+        object_id,
         crate::types::ability::FaceDownProfile::vanilla_2_2(),
         events,
     )
@@ -360,6 +364,7 @@ pub fn cloak(
     manifest_card(
         state,
         player,
+        object_id,
         object_id,
         crate::types::ability::FaceDownProfile::cloaked_2_2(),
         events,

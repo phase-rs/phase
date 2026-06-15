@@ -2431,6 +2431,27 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 506.5: A creature is attacking alone if it's attacking but no other
+/// creatures are. This reads live combat (the sole declared attacker); callers
+/// that must survive the attacker leaving combat (CR 506.4) capture the result
+/// into the zone-change snapshot at zone-exit per the look-back rule CR 603.10a.
+pub fn attacking_alone(state: &GameState, object_id: ObjectId) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.attackers.len() == 1 && combat.attackers[0].object_id == object_id
+    })
+}
+
+/// CR 506.5: A creature is blocking alone if it's blocking but no other
+/// creatures are. `blocker_to_attacker` is keyed by blocker id (one entry per
+/// distinct declared blocker), so a single entry that contains `object_id`
+/// means it is the only blocker in combat. Like `attacking_alone`, this reads
+/// live combat; look-back callers snapshot the result (CR 603.10a).
+pub fn blocking_alone(state: &GameState, object_id: ObjectId) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.blocker_to_attacker.len() == 1 && combat.blocker_to_attacker.contains_key(&object_id)
+    })
+}
+
 /// CR 302.6: Returns true iff this creature can't attack or pay `{T}`/`{Q}`
 /// costs due to summoning sickness — i.e., it has NOT been continuously under
 /// its controller's control since that player's most recent turn began.
@@ -4287,6 +4308,52 @@ mod tests {
         let combat = state.combat.as_ref().unwrap();
         assert_eq!(combat.blocker_assignments[&attacker], vec![blocker]);
         assert_eq!(combat.blocker_to_attacker[&blocker], vec![attacker]);
+    }
+
+    /// CR 506.5: the sole declared attacker is "attacking alone"; a co-attacker
+    /// makes neither attacker alone.
+    #[test]
+    fn attacking_alone_authority() {
+        let mut state = setup();
+        let solo = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(solo, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(attacking_alone(&state, solo));
+
+        let other = create_creature(&mut state, PlayerId(0), "Wolf", 3, 3);
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(solo, PlayerId(1)),
+                AttackerInfo::attacking_player(other, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+        assert!(!attacking_alone(&state, solo));
+        assert!(!attacking_alone(&state, other));
+    }
+
+    /// CR 506.5: the sole declared blocker is "blocking alone"; a co-blocker
+    /// makes neither blocker alone.
+    #[test]
+    fn blocking_alone_authority() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let solo = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        let mut events = Vec::new();
+        declare_blockers(&mut state, &[(solo, attacker)], &mut events).unwrap();
+        assert!(blocking_alone(&state, solo));
+
+        let second = create_creature(&mut state, PlayerId(1), "Guard", 1, 3);
+        let mut events = Vec::new();
+        declare_blockers(&mut state, &[(second, attacker)], &mut events).unwrap();
+        assert!(!blocking_alone(&state, solo));
+        assert!(!blocking_alone(&state, second));
     }
 
     #[test]

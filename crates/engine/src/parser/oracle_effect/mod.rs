@@ -602,6 +602,64 @@ fn extract_when_next_spell_filter(payload: &str) -> Option<TargetFilter> {
     })
 }
 
+const WHEN_NEXT_OR_ACTIVATE_ABILITY: &str = " or activate an ability ";
+
+/// CR 603.7: Parse a disjunctive delayed-trigger condition of the form
+/// "cast a <spell-qualifier> or activate an ability <activation-qualifier>".
+/// Each branch lowers into a normal `TriggerDefinition` filter via the shared
+/// spell/activation post-modifier combinators.
+fn try_parse_when_next_spell_or_activate_disjunction(
+    condition_fragment: &str,
+) -> Option<(TargetFilter, TargetFilter)> {
+    use nom::bytes::complete::{tag, take_until};
+    use nom::Parser;
+
+    let (rest, spell_part) = take_until::<_, _, OracleError<'_>>(WHEN_NEXT_OR_ACTIVATE_ABILITY)
+        .parse(condition_fragment.trim())
+        .ok()?;
+    let (activation_part, _) = tag::<_, _, OracleError<'_>>(WHEN_NEXT_OR_ACTIVATE_ABILITY)
+        .parse(rest)
+        .ok()?;
+    let spell_filter = extract_when_next_spell_filter(spell_part.trim())?;
+    let ability_filter =
+        crate::parser::oracle_trigger::parse_post_activation_modifier(activation_part.trim())?;
+    Some((spell_filter, ability_filter))
+}
+
+fn build_when_next_delayed_trigger(
+    mode: crate::types::triggers::TriggerMode,
+    valid_card: TargetFilter,
+    inner: AbilityDefinition,
+    or_branch: Option<(crate::types::triggers::TriggerMode, TargetFilter)>,
+) -> ParsedEffectClause {
+    let mut trigger_def = crate::types::ability::TriggerDefinition::new(mode);
+    trigger_def.valid_card = Some(valid_card);
+    trigger_def.valid_target = Some(TargetFilter::Controller);
+    let or_trigger = or_branch.map(|(or_mode, or_filter)| {
+        let mut alt = crate::types::ability::TriggerDefinition::new(or_mode);
+        alt.valid_card = Some(or_filter);
+        alt.valid_target = Some(TargetFilter::Controller);
+        Box::new(alt)
+    });
+    ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(trigger_def),
+                or_trigger,
+            },
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    }
+}
+
 /// CR 603.7: Parse "when you next cast a [type] spell [post-spell modifier] this turn, [effect]"
 /// delayed triggers. Creates a one-shot delayed trigger that fires once on the next matching
 /// SpellCast event.
@@ -627,14 +685,6 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     // — e.g. "creature spell" (type only), "instant or sorcery spell" (disjunction),
     // "spell with {x} in its mana cost" (post only).
     let condition_fragment = &before_this_turn.lower[matched_prefix.len()..];
-    let combined_filter = extract_when_next_spell_filter(condition_fragment)?;
-
-    // Build a SpellCast trigger definition with the combined filter
-    let mut trigger_def = crate::types::ability::TriggerDefinition::new(TriggerMode::SpellCast);
-    trigger_def.valid_card = Some(combined_filter);
-    // "when YOU next cast" — scope to the source's controller.
-    trigger_def.valid_target = Some(TargetFilter::Controller);
-
     let effect_text = after.original;
     let effect_lower = after.lower;
 
@@ -645,10 +695,32 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         parse_effect_chain(effect_text, AbilityKind::Spell)
     };
 
+    if let Some((spell_filter, ability_filter)) =
+        try_parse_when_next_spell_or_activate_disjunction(condition_fragment)
+    {
+        use crate::types::triggers::TriggerMode;
+
+        return Some(build_when_next_delayed_trigger(
+            TriggerMode::SpellCast,
+            spell_filter,
+            inner,
+            Some((TriggerMode::AbilityActivated, ability_filter)),
+        ));
+    }
+
+    let combined_filter = extract_when_next_spell_filter(condition_fragment)?;
+
+    // Build a SpellCast trigger definition with the combined filter
+    let mut trigger_def = crate::types::ability::TriggerDefinition::new(TriggerMode::SpellCast);
+    trigger_def.valid_card = Some(combined_filter);
+    // "when YOU next cast" — scope to the source's controller.
+    trigger_def.valid_target = Some(TargetFilter::Controller);
+
     Some(ParsedEffectClause {
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
+                or_trigger: None,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -1272,6 +1344,7 @@ fn try_parse_inline_delayed_trigger(
     {
         DelayedTriggerCondition::WhenNextEvent {
             trigger: Box::new(trigger),
+            or_trigger: None,
         }
     } else {
         match scan_delayed_condition_kind(condition_text) {
@@ -8450,9 +8523,17 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        // CR 115.6: preserve "up to N target …" optionality through the AST so
+        // the compound-splitter path lowers it onto the clause's multi_target.
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
-        return Some((TargetedImperativeAst::Fight { target }, rem));
+        return Some((
+            TargetedImperativeAst::Fight {
+                target,
+                multi_target,
+            },
+            rem,
+        ));
     }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
@@ -19138,6 +19219,38 @@ pub(crate) fn parse_dynamic_energy_unless_cost(input: &str) -> Option<QuantityEx
     Some(QuantityExpr::Ref { qty })
 }
 
+/// CR 400.1: A for-each subject that lives in a zone OTHER than the
+/// battlefield (graveyard, library, exile, hand) cannot be faithfully counted
+/// by the shared `parse_for_each_clause` building block: its "named X in
+/// <zone>" / "<filter> in <zone>" handling swallows the zone phrase into the
+/// preceding name/filter and then defaults the count to the battlefield
+/// (e.g. Rune Snag's "card named Rune Snag in each graveyard" becomes
+/// `Named{name:"rune snag in each graveyard"}` counted on the battlefield).
+/// Rather than emit a silently-wrong dynamic cost, the unless-for-each arm
+/// declines (returns `None`) when such an off-battlefield zone keyword is
+/// present, leaving the card honestly gapped (flat cost + SwallowedClause
+/// warning) until the shared name/zone parser is fixed.
+///
+/// Scans at word boundaries (CLAUDE.md word-boundary idiom) so only complete
+/// zone tokens match — never "party"/"battlefield"/"control", which belong to
+/// faithfully-modeled battlefield subjects (Concerted Defense's "creature in
+/// your party", Spell Stutter's "Faerie you control") and must keep flipping
+/// to a correct dynamic cost.
+fn for_each_clause_references_offbattlefield_zone(clause: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(clause, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("graveyards"),
+            tag("graveyard"),
+            tag("libraries"),
+            tag("library"),
+            tag("exile"),
+            tag("hand"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 pub(crate) fn parse_unless_for_each_payment(
     after_cost: &str,
     cost: &ManaCost,
@@ -19147,6 +19260,65 @@ pub(crate) fn parse_unless_for_each_payment(
     };
     if !shards.is_empty() || *generic == 0 {
         return None;
+    }
+
+    // CR 118.12 + CR 118.12a: "unless [a player] pays {N} plus an additional {M}
+    // for each <filter>" — the interposed " plus an additional {M}" increment
+    // sits between the base {N} and the " for each " per-each clause. Recognize
+    // this infix BEFORE the bare " for each " arm so the dynamic per-each term is
+    // not dropped (otherwise the whole remainder fails to start with " for each "
+    // and parsing falls through to a flat generic cost). Emits
+    // `Sum[Fixed{N}, per_each]` where `per_each` mirrors the bare-arm collapse:
+    // {M}==1 stays a plain `Ref`, otherwise a `Multiply{factor: M}`. The
+    // `ControllerRef` is supplied by the filter text itself ("you control" →
+    // `ControllerRef::You`; the default is `ControllerRef::ScopedPlayer`) — not
+    // hard-coded here.
+    if let Ok((clause, (_, increment, _))) = (
+        tag::<_, _, OracleError<'_>>(" plus an additional "),
+        nom_primitives::parse_mana_cost,
+        tag::<_, _, OracleError<'_>>(" for each "),
+    )
+        .parse(after_cost)
+    {
+        let ManaCost::Cost {
+            shards: m_shards,
+            generic: m_generic,
+        } = increment
+        else {
+            return None;
+        };
+        if !m_shards.is_empty() || m_generic == 0 {
+            return None;
+        }
+        // CR 400.1: an off-battlefield-zone for-each subject (e.g. Rune Snag's
+        // "card named Rune Snag in each graveyard") is mis-modeled by the shared
+        // `parse_for_each_clause` — it folds the zone phrase into the name and
+        // counts on the battlefield. `parse_for_each_clause` returns a wrong
+        // `Some` here (not `None`), so the `?` below does NOT protect us. Decline
+        // explicitly so parsing falls through to the flat cost and the card keeps
+        // its honest SwallowedClause/DynamicQty gap until the shared parser is fixed.
+        if for_each_clause_references_offbattlefield_zone(clause) {
+            return None;
+        }
+        let qty = parse_for_each_clause(clause.trim())?;
+        let per_each = if m_generic == 1 {
+            QuantityExpr::Ref { qty }
+        } else {
+            QuantityExpr::Multiply {
+                factor: i32::try_from(m_generic).ok()?,
+                inner: Box::new(QuantityExpr::Ref { qty }),
+            }
+        };
+        return Some(AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed {
+                        value: i32::try_from(*generic).ok()?,
+                    },
+                    per_each,
+                ],
+            },
+        });
     }
 
     let (_, clause) = preceded(
@@ -23398,6 +23570,207 @@ mod tests {
             "unless payment should multiply the discarded-this-way tracked-set count, \
              got {:?}",
             unless_pay.cost
+        );
+    }
+
+    // Issue #3308: "unless pays {N} plus an additional {M} for each <filter>" —
+    // the interposed " plus an additional {M}" must not drop the dynamic per-each
+    // term. Spell Stutter ("{2} plus an additional {1} for each Faerie you
+    // control") lowers to Sum[Fixed{2}, Ref{ObjectCount{Faerie, controller:You}}]
+    // (NOT a flat Mana{generic:2}). The "you control" in the filter text supplies
+    // ControllerRef::You.
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_spell_stutter() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {2} plus an additional {1} for each Faerie you control",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        let AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum { exprs },
+        } = &unless_pay.cost
+        else {
+            panic!("expected ManaDynamic Sum, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(exprs.len(), 2, "Sum should have base + per-each: {exprs:?}");
+        assert_eq!(
+            exprs[0],
+            QuantityExpr::Fixed { value: 2 },
+            "base {{2}} term"
+        );
+        // {M}==1 → plain Ref (no Multiply collapse), per-each = Faerie you control.
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &exprs[1]
+        else {
+            panic!("expected Ref ObjectCount per-each, got {:?}", exprs[1]);
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed Faerie filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "\"you control\" must bind ControllerRef::You: {tf:?}"
+        );
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Faerie")),
+            "filter should match Faerie subtype: {tf:?}"
+        );
+    }
+
+    // Issue #3308: Concerted Defense — "{1} plus an additional {1} for each
+    // creature in your party" lowers to Sum[Fixed{1}, Ref{PartySize}] (the real
+    // shape parse_for_each_clause yields for "creature in your party"), proving
+    // the second affected card flips to a CORRECT dynamic form, not flat.
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_concerted_defense() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {1} plus an additional {1} for each creature in your party",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        let AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum { exprs },
+        } = &unless_pay.cost
+        else {
+            panic!("expected ManaDynamic Sum, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(exprs.len(), 2, "Sum should have base + per-each: {exprs:?}");
+        assert_eq!(exprs[0], QuantityExpr::Fixed { value: 1 }, "base {{1}}");
+        assert!(
+            matches!(
+                &exprs[1],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PartySize { .. }
+                }
+            ),
+            "per-each should be the party-size count, got {:?}",
+            exprs[1]
+        );
+    }
+
+    // Issue #3308 GAP A — Rune Snag's "card named Rune Snag in each graveyard"
+    // for-each subject lives OFF the battlefield, where the shared
+    // `parse_for_each_clause` mis-models it (it folds " in each graveyard" into
+    // the card name and counts on the battlefield, yielding a silently-wrong
+    // dynamic cost). The off-battlefield-zone honesty guard
+    // (`for_each_clause_references_offbattlefield_zone`) declines that case, so
+    // the unless-for-each arm returns None and parsing falls through to the flat
+    // cost: Rune Snag STAYS GAPPED as a static `Mana{generic:2}` (the announced
+    // {2} base), preserving its honest SwallowedClause/DynamicQty warning until
+    // the shared name/zone parser is fixed. (Spell Stutter / Concerted Defense
+    // reference battlefield subjects and still flip to a correct dynamic cost.)
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_rune_snag_offbattlefield_zone_stays_gapped(
+    ) {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        // The guard declines → fall through to the flat-cost fallthrough, which
+        // constructs `AbilityCost::Mana { cost: ManaCost::Cost { shards: [], generic: 2 } }`
+        // from the parsed base {2}. NOT a ManaDynamic.
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 2 }
+                } if shards.is_empty()
+            ),
+            "off-battlefield-zone for-each must stay gapped as flat Mana{{generic:2}}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // Issue #3308 no-regression: a flat "unless pays {3}" (no for-each, no
+    // "plus an additional") must still yield a flat static Mana{generic:3} —
+    // the new infix arm must not capture plain costs.
+    #[test]
+    fn effect_counter_unless_pays_flat_generic_stays_static() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {3}",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 3 }
+                } if shards.is_empty()
+            ),
+            "flat unless-cost should stay static Mana{{generic:3}}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // Issue #3308 GAP A — full-card swallow/parse-warning check. Spell Stutter
+    // and Concerted Defense are single-clause counterspells; once the dynamic
+    // per-each term is captured there must be NO remaining swallowed-clause /
+    // unimplemented warning (so CI's card-data coverage gate stays green).
+    // Concerted Defense's "(Your party consists of ...)" reminder text is
+    // stripped before parsing and must not surface a warning.
+    #[test]
+    fn issue_3308_full_card_parse_has_no_swallow_warnings() {
+        let instant = ["Instant".to_string()];
+        for (name, text) in [
+            (
+                "Spell Stutter",
+                "Counter target spell unless its controller pays {2} plus an additional {1} for each Faerie you control.",
+            ),
+            (
+                "Concerted Defense",
+                "Counter target spell unless its controller pays {1} plus an additional {1} for each creature in your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)",
+            ),
+        ] {
+            let r = crate::parser::parse_oracle_text(text, name, &[], &instant, &[]);
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
+            assert!(
+                matches!(*r.abilities[0].effect, Effect::Counter { .. }),
+                "{name}: expected Counter, got {:?}",
+                r.abilities[0].effect
+            );
+            assert!(
+                r.parse_warnings.is_empty(),
+                "{name}: clean flip must leave no swallow/unimplemented warning, got {:?}",
+                r.parse_warnings
+            );
+        }
+    }
+
+    // Issue #3308 GAP A — honest gap preserved. Rune Snag's off-battlefield
+    // for-each subject is declined by the honesty guard, so its full-card parse
+    // must STILL surface a SwallowedClause/DynamicQty warning (the dynamic
+    // "for each card named Rune Snag in each graveyard" increment is not
+    // faithfully captured). This is the coverage-honest counterpart to the
+    // no-warnings test above: a correct dynamic flip would clear the warning,
+    // but a silently-wrong flip must not — the gap stays visible to CI.
+    #[test]
+    fn issue_3308_rune_snag_keeps_swallow_warning() {
+        let instant = ["Instant".to_string()];
+        let r = crate::parser::parse_oracle_text(
+            "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard.",
+            "Rune Snag",
+            &[],
+            &instant,
+            &[],
+        );
+        assert!(
+            r.parse_warnings.iter().any(|warning| matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "DynamicQty"
+            )),
+            "Rune Snag's off-battlefield for-each must keep a DynamicQty swallow warning, got {:?}",
+            r.parse_warnings
         );
     }
 
@@ -32260,7 +32633,7 @@ mod tests {
         );
         match e {
             Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::WhenNextEvent { trigger },
+                condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
                 uses_tracked_set: false,
                 ..
             } => {
@@ -34883,6 +35256,21 @@ mod tests {
             strip_optional_target_prefix("up to one other target creature or spell");
         assert_eq!(rest, "other target creature or spell");
         assert_eq!(multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    }
+
+    /// CR 115.6: "up to one target creature defending player controls" (Ace,
+    /// Fearless Rebel's Fight leg) must strip to the bare target text and yield
+    /// `up_to(1)` (min=0). Pins the Fight-suffix variant of the optional-target
+    /// combinator.
+    #[test]
+    fn strip_optional_target_prefix_up_to_one_defending_player_controls() {
+        let (rest, multi_target) =
+            strip_optional_target_prefix("up to one target creature defending player controls");
+        assert_eq!(rest, "target creature defending player controls");
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]
@@ -43826,7 +44214,11 @@ mod tests {
         else {
             panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
         };
-        let DelayedTriggerCondition::WhenNextEvent { trigger } = condition else {
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } = condition
+        else {
             panic!("expected WhenNextEvent, got {:?}", condition);
         };
         assert_eq!(
@@ -43842,10 +44234,130 @@ mod tests {
             Some(&expected),
             "valid_card must carry HasXInManaCost filter"
         );
+        assert!(
+            or_trigger.is_none(),
+            "single-branch when-next-cast must not carry or_trigger"
+        );
         // Scoped to the source's controller — "when YOU next cast".
         assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
         // Inner effect should parse as a draw.
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
+    }
+
+    /// CR 603.7 + CR 707.10: Magus Lucea Kane Psychic Stimulus delayed copy.
+    #[test]
+    fn magus_lucea_kane_psychic_stimulus_parses_delayed_copy() {
+        use crate::types::ability::{
+            CopyRetargetPermission, DelayedTriggerCondition, FilterProp, TypedFilter,
+        };
+        let def = parse_effect_chain(
+            "When you next cast a spell with {X} in its mana cost or activate an ability with {X} in its activation cost this turn, copy that spell or ability. You may choose new targets for the copy.",
+            AbilityKind::Activated,
+        );
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*def.effect
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } = condition
+        else {
+            panic!("expected WhenNextEvent, got {:?}", condition);
+        };
+        assert_eq!(
+            trigger.valid_card.as_ref(),
+            Some(&TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+            )),
+        );
+        let alt = or_trigger
+            .as_ref()
+            .expect("Magus disjunction must use or_trigger, not chained sub_abilities");
+        assert_eq!(
+            alt.mode,
+            crate::types::triggers::TriggerMode::AbilityActivated
+        );
+        assert_eq!(
+            alt.valid_card.as_ref(),
+            Some(&TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+            )),
+        );
+        assert!(
+            matches!(
+                *effect.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::TriggeringSource,
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "expected CopySpell on triggering source, got {:?}",
+            effect.effect
+        );
+    }
+
+    /// CR 603.7: disjunctive when-next conditions compose spell and activation
+    /// qualifiers through the shared post-modifier combinators rather than an
+    /// exact full-clause string match.
+    #[test]
+    fn when_next_spell_or_activate_disjunction_composes_spell_type_filter() {
+        use crate::types::ability::{DelayedTriggerCondition, FilterProp, TypedFilter};
+        let def = parse_effect_chain(
+            "When you next cast a creature spell with {X} in its mana cost or activate an ability with {X} in its activation cost this turn, copy that spell or ability.",
+            AbilityKind::Activated,
+        );
+        let Effect::CreateDelayedTrigger { condition, .. } = &*def.effect else {
+            panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } = condition
+        else {
+            panic!("expected WhenNextEvent, got {:?}", condition);
+        };
+        assert_eq!(
+            trigger.valid_card.as_ref(),
+            Some(&TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+                    ),
+                ],
+            }),
+        );
+        let alt = or_trigger
+            .as_ref()
+            .expect("disjunctive when-next must carry or_trigger");
+        assert_eq!(
+            alt.valid_card.as_ref(),
+            Some(&TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+            )),
+        );
+    }
+
+    /// CR 605.1a: Magus tap ability remains a mana ability; the delayed copy
+    /// clause resolves inline on the mana-ability path.
+    #[test]
+    fn magus_lucea_kane_tap_ability_is_mana_ability() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Psychic Stimulus — {T}: Add {C}{C}. When you next cast a spell with {X} in its mana cost or activate an ability with {X} in its activation cost this turn, copy that spell or ability. You may choose new targets for the copy.",
+            "Magus Lucea Kane",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let ability = parsed.abilities.last().expect("tap ability");
+        assert!(
+            crate::game::mana_abilities::is_mana_ability(ability),
+            "Psychic Stimulus must remain a mana ability per CR 605.1"
+        );
     }
 
     /// CR 201.2: "Destroy target nonland permanent and all other permanents

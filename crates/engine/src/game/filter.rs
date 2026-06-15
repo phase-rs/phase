@@ -151,6 +151,8 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -195,6 +197,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -348,6 +351,8 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -392,6 +397,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -2512,6 +2518,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
         FilterProp::HasManaAbility
@@ -2547,6 +2554,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -2868,6 +2877,10 @@ fn matches_filter_prop(
         // CR 509.1h: Unblocked = attacking creature that was never assigned blockers.
         // unblocked_attackers checks the permanent `blocked` flag, not the current blocker list.
         FilterProp::Unblocked => combat::unblocked_attackers(state).contains(&object_id),
+        // CR 506.5: sole attacker / sole blocker against live combat. Look-back
+        // callers route through the zone-change snapshot arm instead.
+        FilterProp::AttackingAlone => combat::attacking_alone(state, object_id),
+        FilterProp::BlockingAlone => combat::blocking_alone(state, object_id),
         FilterProp::Tapped => obj.tapped,
         // CR 702.171b: Matches permanents with the saddled designation.
         FilterProp::IsSaddled => obj.is_saddled,
@@ -2938,6 +2951,12 @@ fn matches_filter_prop(
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
         FilterProp::HasXInManaCost => crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        // CR 107.3 + CR 601.2f: "{X} in its activation cost" — consult the
+        // pending activation record for the matched source object. Composes with
+        // typed type/controller filters via `TargetFilter::And`/`Or`.
+        FilterProp::HasXInActivationCost => {
+            crate::game::casting_costs::pending_activation_cost_has_x(state, object_id)
+        }
         // CR 605.1: Delegate to the single mana-ability classifier instead of
         // duplicating the definition at the filter layer.
         FilterProp::HasManaAbility => obj
@@ -3664,6 +3683,10 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
+        // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker status as of the
+        // zone change, captured by `capture_combat_status` before combat removal.
+        FilterProp::AttackingAlone => record.combat_status.attacking_alone,
+        FilterProp::BlockingAlone => record.combat_status.blocking_alone,
         FilterProp::HasAttachment {
             kind,
             controller,
@@ -3764,6 +3787,7 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
         // CR 113.1 + CR 113.3: Zone-change records do not snapshot all
@@ -4936,6 +4960,54 @@ mod tests {
         assert!(
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
+        );
+    }
+
+    /// CR 107.3 + CR 601.2f: `FilterProp::HasXInActivationCost` consults the
+    /// pending activation record and composes with typed filters via `And`.
+    #[test]
+    fn pending_activation_has_x_in_activation_cost_composes_with_type_filter() {
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter as Tf,
+            TypedFilter,
+        };
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "X Activator");
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: Tf::Controller,
+            },
+        );
+        ability.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X],
+            },
+        });
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
+            .push(ability);
+        state.pending_activations.push((source, 0));
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+                ),
+            ],
+        };
+        assert!(
+            matches_target_filter(&state, source, &filter, source),
+            "creature source with pending X activation must match composed filter"
+        );
+        state.pending_activations.clear();
+        assert!(
+            !matches_target_filter(&state, source, &filter, source),
+            "without pending activation, HasXInActivationCost must fail"
         );
     }
 
@@ -8440,6 +8512,8 @@ mod tests {
                 attacking: true,
                 blocking: false,
                 blocked: false,
+                attacking_alone: true,
+                blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
@@ -8449,6 +8523,8 @@ mod tests {
                 attacking: false,
                 blocking: true,
                 blocked: false,
+                attacking_alone: false,
+                blocking_alone: true,
                 defending_player: None,
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
@@ -8478,6 +8554,54 @@ mod tests {
             &FilterProp::Blocking,
             &state,
             &blocking_record,
+            &source_ctx,
+        ));
+
+        // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker look-back reads
+        // the captured `attacking_alone` / `blocking_alone` snapshot. The
+        // attacking-alone record matches AttackingAlone but not BlockingAlone,
+        // and vice versa for the blocking-alone record.
+        assert!(zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::BlockingAlone,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::BlockingAlone,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+        // CR 506.5 boundary: a record where the creature attacked but NOT alone
+        // (co-attacker present at zone-exit) must fail AttackingAlone.
+        let attacked_with_company = ZoneChangeRecord {
+            combat_status: ZoneChangeCombatStatus {
+                attacking: true,
+                blocking: false,
+                blocked: false,
+                attacking_alone: false,
+                blocking_alone: false,
+                defending_player: Some(PlayerId(0)),
+            },
+            ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &attacked_with_company,
             &source_ctx,
         ));
     }
