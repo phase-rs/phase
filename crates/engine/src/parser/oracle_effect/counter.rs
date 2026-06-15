@@ -1,4 +1,4 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space1;
@@ -567,6 +567,35 @@ fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> Qua
     }
 }
 
+/// CR 608.2k + CR 122.1: Anaphoric reference to "the just-referenced counters".
+///
+/// Recognizes the bare-pronoun / deictic phrases that refer back to a set of
+/// counters established earlier in the same ability (a cost, or a trigger's
+/// intervening-if condition like "if it has six or more level counters on it"):
+///   - deictic: "those counters" / "its counters" / "this {type}'s counters"
+///   - bare object pronoun: "them" / "all of them" (CR 608.2k pronoun anaphor)
+///
+/// This is the single authority for the remove-counter anaphor surface — both
+/// `try_parse_remove_counter` (to build the effect) and the imperative dispatch
+/// gate (to route the clause here despite the absence of the literal word
+/// "counter") delegate to it, so the phrase list never drifts between the two.
+pub(super) fn parse_counter_anaphor(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("all of them"),
+            tag("those counters"),
+            tag("its counters"),
+            tag("this creature's counters"),
+            tag("this artifact's counters"),
+            tag("this enchantment's counters"),
+            tag("this permanent's counters"),
+            tag("them"),
+        )),
+    )
+    .parse(input)
+}
+
 pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // "remove N {type} counter(s) from {target}" or "remove all counters from {target}"
     // CR 122.1: Counter type is optional — "remove all counters" removes every type.
@@ -577,28 +606,11 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // clause refers to counters on the ability source (the antecedent
     // established earlier in the same ability's cost or trigger condition,
     // e.g., "if there are four or more charge counters on it, remove those
-    // counters and transform it"). Covers the full anaphor class:
-    //   - "those counters" / "its counters" / "this {creature,artifact,...}'s counters"
-    //   - bare object pronoun "them" / "all of them" (CR 608.2k pronoun anaphor)
-    // Sentinel count -1 with empty counter_type tells the runtime resolver to
-    // strip every counter on the source. Mirrors `try_parse_move_counters`'
-    // anaphor handling.
-    if let Some(((), _)) = nom_on_lower(after_remove, after_remove, |i| {
-        value(
-            (),
-            alt((
-                tag("all of them"),
-                tag("those counters"),
-                tag("its counters"),
-                tag("this creature's counters"),
-                tag("this artifact's counters"),
-                tag("this enchantment's counters"),
-                tag("this permanent's counters"),
-                tag("them"),
-            )),
-        )
-        .parse(i)
-    }) {
+    // counters and transform it"). Sentinel count -1 with empty counter_type
+    // tells the runtime resolver to strip every counter on the source. Mirrors
+    // `try_parse_move_counters`' anaphor handling. The anaphor surface is owned
+    // by `parse_counter_anaphor` so the dispatch gate and this builder agree.
+    if nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some() {
         return Some(Effect::RemoveCounter {
             counter_type: None,
             count: -1,
