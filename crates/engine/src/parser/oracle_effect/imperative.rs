@@ -8,8 +8,8 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
-    try_parse_double_effect, try_parse_move_counters_from, try_parse_put_counter,
-    try_parse_remove_counter,
+    parse_counter_anaphor, try_parse_double_effect, try_parse_move_counters_from,
+    try_parse_put_counter, try_parse_remove_counter,
 };
 use super::lower::parse_for_each_multiplier_prefix;
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
@@ -7997,21 +7997,33 @@ pub(super) fn parse_zone_counter_ast(
             _ => None,
         };
     }
-    if tag::<_, _, OracleError<'_>>("remove ").parse(lower).is_ok()
-        && nom_primitives::scan_contains(lower, "counter")
-    {
-        return match try_parse_remove_counter(lower, ctx) {
-            Some(Effect::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }) => Some(ZoneCounterImperativeAst::RemoveCounter {
-                counter_type,
-                count,
-                target,
-            }),
-            _ => None,
-        };
+    // CR 122.1 + CR 608.2k: route "remove …" to the counter parser when the
+    // clause either names a counter explicitly ("remove a +1/+1 counter from ~")
+    // OR refers to the just-established counters anaphorically. The anaphoric
+    // forms ("remove all of them" / "remove them" — level-up/incubate cards like
+    // Ludevic's Test Subject and Smoldering Egg, where the antecedent is the
+    // trigger's intervening-if "if it has N or more <type> counters on it")
+    // carry no literal "counter" token, so the `scan_contains` anchor alone
+    // would drop them to `Unimplemented`. `parse_counter_anaphor` (the shared
+    // anaphor authority in counter.rs) recognizes that surface against the
+    // post-"remove " remainder so it reaches `try_parse_remove_counter`.
+    if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
+        let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
+            || nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some();
+        if is_counter_remove {
+            return match try_parse_remove_counter(lower, ctx) {
+                Some(Effect::RemoveCounter {
+                    counter_type,
+                    count,
+                    target,
+                }) => Some(ZoneCounterImperativeAst::RemoveCounter {
+                    counter_type,
+                    count,
+                    target,
+                }),
+                _ => None,
+            };
+        }
     }
     // CR 122.5: "move [N] [type] counter(s) from [source] onto/to [target]"
     if tag::<_, _, OracleError<'_>>("move ").parse(lower).is_ok()
@@ -9076,6 +9088,32 @@ mod tests {
                 panic!("{input}: expected Attach, got {result:?}");
             };
             assert_eq!(target, TargetFilter::TriggeringSource, "{input}");
+        }
+    }
+
+    /// CR 122.1 + CR 608.2k: the imperative dispatch gate routes anaphoric
+    /// remove-counter clauses ("remove all of them" / "remove them" — the
+    /// just-referenced counters established by a trigger's intervening-if) to
+    /// the counter parser even though they carry no literal "counter" token.
+    /// Building-block coverage for the level-up/incubate transform class
+    /// (Ludevic's Test Subject, Smoldering Egg) at the dispatch layer.
+    #[test]
+    fn remove_counter_anaphor_routes_through_dispatch_gate() {
+        for input in ["remove all of them", "remove them", "remove those counters"] {
+            let lower = input.to_lowercase();
+            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+            let Some(ZoneCounterImperativeAst::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::Fixed { value: -1 },
+                target,
+            }) = result
+            else {
+                panic!("{input}: expected anaphoric RemoveCounter (count -1), got {result:?}");
+            };
+            assert!(
+                matches!(target, TargetFilter::SelfRef),
+                "{input}: expected SelfRef target, got {target:?}"
+            );
         }
     }
 
