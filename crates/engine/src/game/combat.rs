@@ -619,6 +619,28 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
         .is_some()
 }
 
+/// CR 509.1b + CR 609.4 + CR 702.28b: A creature without shadow normally can't
+/// block a creature with shadow. This returns `true` when the blocker has a
+/// functioning `CanBlockShadow` static — "~ can block creatures with shadow as
+/// though they didn't have shadow" / "as though it had shadow" — which lifts
+/// the shadow blocker-side restriction for that affected creature.
+///
+/// Mirrors the `CanAttackWithDefender` lookup: intrinsic self statics are read
+/// from the blocker, and remote affected filters are resolved through the shared
+/// static-ability checker.
+fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
+    super::functioning_abilities::active_static_definitions(state, blocker)
+        .any(|sd| sd.mode == StaticMode::CanBlockShadow)
+        || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CanBlockShadow,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(blocker.id),
+                ..Default::default()
+            },
+        )
+}
+
 /// CR 509.1b: Static abilities on the blocker (or on another source whose
 /// `affected` filter matches the blocker) that restrict which attackers it
 /// may block — e.g. "This creature can block only creatures with flying."
@@ -906,7 +928,9 @@ pub fn validate_blockers_for_player(
         // and cannot block creatures without shadow.
         let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
         let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
-        if attacker_has_shadow && !blocker_has_shadow {
+        // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
+        // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
+        if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
             return Err(format!(
                 "{:?} cannot block {:?} (shadow can only be blocked by shadow)",
                 blocker_id, attacker_id
@@ -2407,6 +2431,27 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 506.5: A creature is attacking alone if it's attacking but no other
+/// creatures are. This reads live combat (the sole declared attacker); callers
+/// that must survive the attacker leaving combat (CR 506.4) capture the result
+/// into the zone-change snapshot at zone-exit per the look-back rule CR 603.10a.
+pub fn attacking_alone(state: &GameState, object_id: ObjectId) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.attackers.len() == 1 && combat.attackers[0].object_id == object_id
+    })
+}
+
+/// CR 506.5: A creature is blocking alone if it's blocking but no other
+/// creatures are. `blocker_to_attacker` is keyed by blocker id (one entry per
+/// distinct declared blocker), so a single entry that contains `object_id`
+/// means it is the only blocker in combat. Like `attacking_alone`, this reads
+/// live combat; look-back callers snapshot the result (CR 603.10a).
+pub fn blocking_alone(state: &GameState, object_id: ObjectId) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat.blocker_to_attacker.len() == 1 && combat.blocker_to_attacker.contains_key(&object_id)
+    })
+}
+
 /// CR 302.6: Returns true iff this creature can't attack or pay `{T}`/`{Q}`
 /// costs due to summoning sickness — i.e., it has NOT been continuously under
 /// its controller's control since that player's most recent turn began.
@@ -2704,7 +2749,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }
     let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
     let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
-    if attacker_has_shadow && !blocker_has_shadow {
+    // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
+    // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
+    if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
         return false;
     }
     if !attacker_has_shadow && blocker_has_shadow {
@@ -4263,6 +4310,52 @@ mod tests {
         assert_eq!(combat.blocker_to_attacker[&blocker], vec![attacker]);
     }
 
+    /// CR 506.5: the sole declared attacker is "attacking alone"; a co-attacker
+    /// makes neither attacker alone.
+    #[test]
+    fn attacking_alone_authority() {
+        let mut state = setup();
+        let solo = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(solo, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(attacking_alone(&state, solo));
+
+        let other = create_creature(&mut state, PlayerId(0), "Wolf", 3, 3);
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(solo, PlayerId(1)),
+                AttackerInfo::attacking_player(other, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+        assert!(!attacking_alone(&state, solo));
+        assert!(!attacking_alone(&state, other));
+    }
+
+    /// CR 506.5: the sole declared blocker is "blocking alone"; a co-blocker
+    /// makes neither blocker alone.
+    #[test]
+    fn blocking_alone_authority() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let solo = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        let mut events = Vec::new();
+        declare_blockers(&mut state, &[(solo, attacker)], &mut events).unwrap();
+        assert!(blocking_alone(&state, solo));
+
+        let second = create_creature(&mut state, PlayerId(1), "Guard", 1, 3);
+        let mut events = Vec::new();
+        declare_blockers(&mut state, &[(second, attacker)], &mut events).unwrap();
+        assert!(!blocking_alone(&state, solo));
+        assert!(!blocking_alone(&state, second));
+    }
+
     #[test]
     fn has_potential_attackers_with_valid_creature() {
         let mut state = setup();
@@ -4350,6 +4443,70 @@ mod tests {
 
         // Shadow creature can't block non-shadow attacker
         assert!(validate_blockers(&state, &[(shadow_blocker, attacker)]).is_err());
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.28b: Heartwood Dryad / Wall of Diffusion —
+    /// a non-shadow creature with `CanBlockShadow` may block a shadow attacker.
+    /// Discriminating: an identical non-shadow creature WITHOUT the static cannot.
+    #[test]
+    fn can_block_shadow_static_lets_non_shadow_block_shadow() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow A", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        // Plain non-shadow blocker: cannot block the shadow attacker.
+        let plain_blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        assert!(validate_blockers(&state, &[(plain_blocker, attacker)]).is_err());
+        assert!(!can_block_pair(&state, plain_blocker, attacker));
+
+        // Non-shadow blocker with CanBlockShadow: now allowed by both seams.
+        let dryad = create_creature(&mut state, PlayerId(1), "Heartwood Dryad", 2, 2);
+        state
+            .objects
+            .get_mut(&dryad)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::SelfRef),
+            );
+        assert!(validate_blockers(&state, &[(dryad, attacker)]).is_ok());
+        assert!(can_block_pair(&state, dryad, attacker));
+
+        // A source whose affected filter matches another creature also grants
+        // that creature the permission; the parser accepts subject-scoped
+        // variants, so runtime must honor `affected` rather than only checking
+        // the blocker's own statics.
+        let standard_bearer = create_creature(&mut state, PlayerId(1), "Shadow Standard", 1, 1);
+        state
+            .objects
+            .get_mut(&standard_bearer)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+        assert!(validate_blockers(&state, &[(plain_blocker, attacker)]).is_ok());
+        assert!(can_block_pair(&state, plain_blocker, attacker));
+
+        // The permission does NOT make the Dryad itself blockable-by-anything or
+        // change the non-shadow attacker symmetry: a shadow blocker still can't
+        // block a non-shadow attacker (the other CR 702.28b half is untouched).
+        let normal_attacker = create_creature(&mut state, PlayerId(0), "Grizzly", 2, 2);
+        let shadow_blocker = create_creature(&mut state, PlayerId(1), "Shadow B", 2, 2);
+        state
+            .objects
+            .get_mut(&shadow_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+        assert!(validate_blockers(&state, &[(shadow_blocker, normal_attacker)]).is_err());
     }
 
     #[test]

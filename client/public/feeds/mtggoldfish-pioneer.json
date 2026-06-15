@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-14T00:00:00Z",
+  "updated": "2026-06-15T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -802,125 +802,6 @@
       ]
     },
     {
-      "name": "Selesnya Company",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Abandoned Air Temple"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Branchloft Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Ouroboroid"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
-        },
-        {
-          "count": 2,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 3,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 3,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
-        },
-        {
-          "count": 1,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        }
-      ]
-    },
-    {
       "name": "Dimir Aggro",
       "author": "MTGGoldfish",
       "colors": [
@@ -1048,6 +929,125 @@
         {
           "count": 2,
           "name": "Path of Peril"
+        }
+      ]
+    },
+    {
+      "name": "Selesnya Company",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Branchloft Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 3,
+          "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
+        },
+        {
+          "count": 1,
+          "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
         }
       ]
     },
@@ -1215,16 +1215,96 @@
       "name": "Hidden Strings",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "R"
+        "B",
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 3,
+          "name": "Arboreal Grazer"
+        },
+        {
           "count": 4,
-          "name": "Sleight of Hand"
+          "name": "Vizier of Tumbling Sands"
+        },
+        {
+          "count": 2,
+          "name": "Formidable Speaker"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 2,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Omniscience"
+        },
+        {
+          "count": 4,
+          "name": "Hidden Strings"
+        },
+        {
+          "count": 2,
+          "name": "Sylvan Scrying"
+        },
+        {
+          "count": 2,
+          "name": "Bala Ged Recovery"
+        },
+        {
+          "count": 4,
+          "name": "Pore Over the Pages"
+        },
+        {
+          "count": 1,
+          "name": "Peer into the Abyss"
+        },
+        {
+          "count": 2,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Vibrance"
+        },
+        {
+          "count": 2,
+          "name": "Llanowar Wastes"
+        },
+        {
+          "count": 4,
+          "name": "Lotus Field"
+        },
+        {
+          "count": 1,
+          "name": "Behold the Beyond"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 2,
+          "name": "Temple of Malady"
+        },
+        {
+          "count": 1,
+          "name": "Lier, Disciple of the Drowned"
+        },
+        {
+          "count": 1,
+          "name": "Zagoth Triome"
         },
         {
           "count": 4,
@@ -1232,133 +1312,69 @@
         },
         {
           "count": 4,
-          "name": "Hidden Strings"
+          "name": "Blooming Marsh"
         },
         {
           "count": 1,
-          "name": "Dig Through Time"
-        },
-        {
-          "count": 4,
-          "name": "Pore Over the Pages"
-        },
-        {
-          "count": 4,
-          "name": "Lotus Field"
-        },
-        {
-          "count": 2,
-          "name": "Flashback"
+          "name": "Atraxa, Grand Unifier"
         },
         {
           "count": 3,
-          "name": "Riverglide Pathway"
+          "name": "Emergent Ultimatum"
         },
         {
           "count": 1,
-          "name": "Wish"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 1,
-          "name": "Island"
+          "name": "Lair of the Hydra"
         },
         {
           "count": 2,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Lindblum, Industrial Regency"
-        },
-        {
-          "count": 4,
-          "name": "Flow State"
-        },
-        {
-          "count": 3,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Expedition Map"
-        },
-        {
-          "count": 3,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 1,
-          "name": "Lier, Disciple of the Drowned"
+          "name": "Shoot the Sheriff"
         }
       ],
       "sideboard": [
         {
+          "count": 2,
+          "name": "Culling Ritual"
+        },
+        {
           "count": 1,
-          "name": "Niv-Mizzet, Parun"
+          "name": "Tear Asunder"
+        },
+        {
+          "count": 1,
+          "name": "Atraxa, Grand Unifier"
         },
         {
           "count": 2,
-          "name": "Anger of the Gods"
+          "name": "Voyaging Satyr"
         },
         {
           "count": 1,
-          "name": "Vivi Ornitier"
-        },
-        {
-          "count": 1,
-          "name": "Divide by Zero"
+          "name": "Nezahal, Primal Tide"
         },
         {
           "count": 2,
-          "name": "Spider-Sense"
+          "name": "Formidable Speaker"
         },
         {
           "count": 1,
-          "name": "Sphinx of the Final Word"
+          "name": "Grand Abolisher"
+        },
+        {
+          "count": 2,
+          "name": "Ultima"
         },
         {
           "count": 1,
-          "name": "Improvisation Capstone"
+          "name": "Kaervek, the Spiteful"
         },
         {
           "count": 1,
-          "name": "Firebending Lesson"
+          "name": "Zacama, Primal Calamity"
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Lier, Disciple of the Drowned"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
+          "name": "Abrupt Decay"
         }
       ]
     }

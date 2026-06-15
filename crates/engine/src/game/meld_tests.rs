@@ -475,6 +475,7 @@ fn meld_renamed_non_meld_partner_is_noop() {
                 name: "Bruna, the Fading Light".to_string(),
             }],
             condition: None,
+            duration_subject: None,
             source_name: String::new(),
         });
     crate::game::layers::flush_layers(&mut state);

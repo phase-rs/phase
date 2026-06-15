@@ -2813,7 +2813,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         Action::RemoveACounterOfTypeFromPermanent(ct, target) => Effect::RemoveCounter {
             counter_type: Some(counter_type_name(ct)),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: convert_permanent(target)?,
         },
 

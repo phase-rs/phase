@@ -2236,6 +2236,55 @@ pub(crate) fn parse_activate_abilities_as_though_haste(
     )
 }
 
+/// CR 509.1b + CR 609.4 + CR 702.28b: parse "<subject> can block creatures with
+/// shadow as though <they didn't have shadow | it had shadow>" into a
+/// `StaticMode::CanBlockShadow` on `affected`.
+///
+/// Captures both printed phrasings of the same block-legality outcome — Heartwood
+/// Dryad ("... as though they didn't have shadow") and Wall of Diffusion ("... as
+/// though it had shadow"). Mirrors `parse_can_attack_despite_defender`: locate the
+/// `"can block creatures with shadow as though"` phrase at a word boundary with
+/// `scan_split_at_phrase`, verify the tail with an `alt()` of the two forms, then
+/// resolve the subject via `parse_continuous_subject_filter`. Returns `None`
+/// (graceful fall-through) when the phrase is absent, the tail doesn't match, or
+/// the subject can't be resolved — so unrelated shadow lines never match here.
+pub(crate) fn parse_block_shadow_as_though(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let (subject_prefix, _) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        tag::<_, _, VE>("can block creatures with shadow as though").parse(i)
+    })?;
+
+    // Verify the trailing clause: " they didn't have shadow" (Heartwood Dryad)
+    // or " it had shadow" (Wall of Diffusion). Both lift the same CR 702.28b
+    // blocker-side restriction; the `alt()` keeps the two phrasings on one axis.
+    let after_phrase =
+        &tp.lower[subject_prefix.len() + "can block creatures with shadow as though".len()..];
+    let (rest, _) = alt((
+        tag::<_, _, VE>(" they didn't have shadow"),
+        tag::<_, _, VE>(" it had shadow"),
+    ))
+    .parse(after_phrase)
+    .ok()?;
+    let (rest, _) = opt(tag::<_, _, VE>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // Subject text = original slice for correct case preservation.
+    let subject_original = tp.original[..subject_prefix.len()].trim();
+    let affected = parse_continuous_subject_filter(subject_original)?;
+
+    Some(
+        StaticDefinition::new(StaticMode::CanBlockShadow)
+            .affected(affected)
+            .description(description.to_string()),
+    )
+}
+
 /// CR 508.1d / CR 509.1c: Parse subject-scoped "attack/block each combat if able" patterns.
 ///
 /// Handles "All creatures attack each combat if able", "Creatures you control attack each

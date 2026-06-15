@@ -2869,6 +2869,79 @@ mod tests {
     }
 
     #[test]
+    fn mana_with_roll_die_sub_remains_mana_ability() {
+        // CR 605.1: mana abilities remain mana abilities regardless of other
+        // generated effects (Vexing Puzzlebox rolls a d20 inline).
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+        )));
+        assert!(is_mana_ability(&def));
+    }
+
+    #[test]
+    fn resolve_mana_ability_sub_chain_emits_die_rolled() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1011),
+            PlayerId(0),
+            "Vexing Puzzlebox".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+        )));
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, source, PlayerId(0), &def, &mut events, None).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRolled {
+                    sides: 20,
+                    result: Some(_),
+                    ..
+                }
+            )),
+            "RollDie sub_ability must resolve inline after mana production"
+        );
+    }
+
+    #[test]
+    fn mana_with_mana_sub_remains_mana_ability() {
+        let mut def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })));
+        assert!(is_mana_ability(&def));
+    }
+
+    #[test]
     fn resolve_mana_ability_produces_mana_and_taps() {
         let mut state = GameState::new_two_player(42);
         let obj_id = create_object(

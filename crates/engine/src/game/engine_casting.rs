@@ -275,6 +275,29 @@ pub(super) fn handle_exile_for_cost(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_permanent_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    filter: Option<TargetFilter>,
+    pending_cast: PendingCast,
+    count: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_permanent_for_cost(
+        state,
+        player,
+        filter,
+        pending_cast,
+        count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_exile_materials_for_cost(
     state: &mut GameState,
     player: PlayerId,

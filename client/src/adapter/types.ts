@@ -303,6 +303,12 @@ export type PayCostKind =
   // `materials` is the engine-side `TargetFilter` the choices were drawn from;
   // the modal only renders `choices`, so it is opaque pass-through here.
   | { type: "ExileMaterials"; materials: unknown }
+  // CR 601.2h + CR 701.13: Exile a battlefield permanent you control as an
+  // additional/alternative cost (Food Chain class; Lunar Hatchling's escape
+  // "Exile a land you control"). `filter` is the engine-side
+  // `Option<TargetFilter>` the choices were drawn from; the modal only renders
+  // `choices`, so it is opaque pass-through here.
+  | { type: "ExilePermanent"; filter: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
   | { type: "RemoveCounter"; counter_type: CounterMatch; count: number; selection: CounterCostSelection }
   | { type: "TapCreatures" }

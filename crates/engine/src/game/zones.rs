@@ -813,6 +813,11 @@ fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCo
         attacking: attacker.is_some(),
         blocking: combat.blocker_to_attacker.contains_key(&object_id),
         blocked: attacker.is_some_and(|attacker| attacker.blocked),
+        // CR 506.5 + CR 603.10a: snapshot the sole-attacker / sole-blocker
+        // status via the shared combat authority so it cannot diverge from the
+        // live `FilterProp::AttackingAlone` / `BlockingAlone` evaluation.
+        attacking_alone: crate::game::combat::attacking_alone(state, object_id),
+        blocking_alone: crate::game::combat::blocking_alone(state, object_id),
         defending_player: attacker.map(|attacker| attacker.defending_player),
     }
 }

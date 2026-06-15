@@ -131,6 +131,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         }
         // Disjunctive composite: recurse.
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_uses_object_population),
+        // CR 608.2c: Negation does not change WHICH game state the inner prop
+        // reads, so the population dependency is the inner prop's — recurse.
+        FilterProp::Not { prop } => filter_prop_uses_object_population(prop),
         // Intentional leaf-false. These are candidate-local, stack-relative,
         // single-object, or carry no QuantityExpr threshold, so a board entry/exit
         // cannot change whether a pre-existing object satisfies them.
@@ -148,6 +151,8 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -324,6 +329,11 @@ fn entered_object_perturbs_filter_prop(
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| entered_object_perturbs_filter_prop(state, entered_id, ctx, p)),
+        // CR 608.2c: Negation reads the same game state as the inner prop, so an
+        // entry perturbs the negated prop iff it perturbs the inner — recurse.
+        FilterProp::Not { prop } => {
+            entered_object_perturbs_filter_prop(state, entered_id, ctx, prop)
+        }
         // Identical enumeration to the leaf-false arm of
         // `filter_prop_uses_object_population` — candidate-local, stack-relative,
         // single-object, or threshold-free, so a board entry cannot perturb them.
@@ -340,6 +350,8 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -2514,6 +2526,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| spell_record_matches_property(record, p)),
+        // CR 608.2c: Logical negation — recurse under the same snapshot and invert.
+        FilterProp::Not { prop } => !spell_record_matches_property(record, prop),
         // CR 111.1: Spell-cast records only track cast spells. Tokens are
         // permanents, so token identity is false and nontoken identity is true
         // for this snapshot shape.
@@ -2537,6 +2551,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -2858,6 +2874,10 @@ fn matches_filter_prop(
         // CR 509.1h: Unblocked = attacking creature that was never assigned blockers.
         // unblocked_attackers checks the permanent `blocked` flag, not the current blocker list.
         FilterProp::Unblocked => combat::unblocked_attackers(state).contains(&object_id),
+        // CR 506.5: sole attacker / sole blocker against live combat. Look-back
+        // callers route through the zone-change snapshot arm instead.
+        FilterProp::AttackingAlone => combat::attacking_alone(state, object_id),
+        FilterProp::BlockingAlone => combat::blocking_alone(state, object_id),
         FilterProp::Tapped => obj.tapped,
         // CR 702.171b: Matches permanents with the saddled designation.
         FilterProp::IsSaddled => obj.is_saddled,
@@ -3196,6 +3216,8 @@ fn matches_filter_prop(
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| matches_filter_prop(p, state, obj, object_id, source)),
+        // CR 608.2c: Logical negation — the object matches iff the inner prop does NOT.
+        FilterProp::Not { prop } => !matches_filter_prop(prop, state, obj, object_id, source),
         // CR 509.1b: Object's power is strictly greater than the source object's power.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -3652,6 +3674,10 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
+        // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker status as of the
+        // zone change, captured by `capture_combat_status` before combat removal.
+        FilterProp::AttackingAlone => record.combat_status.attacking_alone,
+        FilterProp::BlockingAlone => record.combat_status.blocking_alone,
         FilterProp::HasAttachment {
             kind,
             controller,
@@ -3722,6 +3748,10 @@ fn zone_change_record_matches_property(
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| zone_change_record_matches_property(p, state, record, source)),
+        // CR 608.2c: Logical negation — recurse under the same record and invert.
+        FilterProp::Not { prop } => {
+            !zone_change_record_matches_property(prop, state, record, source)
+        }
 
         // -------- Group 4: not-yet-supported (known conservative gaps) --------
         // These could be snapshotted (e.g. suspected status, damage-dealt-this-turn)
@@ -6487,6 +6517,75 @@ mod tests {
         assert!(!matches_target_filter(&state, neither, &filter, attacker));
     }
 
+    /// CR 608.2c: `FilterProp::Not` building block — a single negated prop
+    /// matches exactly the objects for which the inner prop does NOT hold.
+    #[test]
+    fn not_attacked_this_turn_matches_only_non_attackers() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker");
+        let idle = add_creature(&mut state, PlayerId(0), "Idle");
+        state.creatures_attacked_this_turn.insert(attacker);
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            }]));
+
+        assert!(!matches_target_filter(&state, attacker, &filter, attacker));
+        assert!(matches_target_filter(&state, idle, &filter, attacker));
+    }
+
+    /// De Morgan: `[Not(Attacked), Not(Entered)]` AND-combines, so it matches
+    /// only the creature that neither attacked nor entered this turn — the
+    /// exact narrowing The Fifth Doctor's relative clause requires.
+    /// NOTE: `add_creature` (via `create_object`) stamps
+    /// `entered_battlefield_turn = Some(turn)`, so the pre-existing "veteran"
+    /// and "attacker" have that field cleared to `None`; only the newcomer
+    /// keeps the current-turn stamp.
+    #[test]
+    fn not_attacked_and_not_entered_matches_only_idle_veteran() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker");
+        let newcomer = add_creature(&mut state, PlayerId(0), "Newcomer");
+        let veteran = add_creature(&mut state, PlayerId(0), "Veteran");
+        state.creatures_attacked_this_turn.insert(attacker);
+        // Veteran and attacker are pre-existing — they did NOT enter this turn.
+        state
+            .objects
+            .get_mut(&veteran)
+            .unwrap()
+            .entered_battlefield_turn = None;
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .entered_battlefield_turn = None;
+        // Newcomer entered this turn (already stamped by create_object).
+        assert_eq!(
+            state
+                .objects
+                .get(&newcomer)
+                .unwrap()
+                .entered_battlefield_turn,
+            Some(state.turn_number)
+        );
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn),
+            },
+            FilterProp::Not {
+                prop: Box::new(FilterProp::EnteredThisTurn),
+            },
+        ]));
+
+        // Attacker: attacked → excluded. Newcomer: entered → excluded.
+        // Veteran: neither → the only match.
+        assert!(!matches_target_filter(&state, attacker, &filter, attacker));
+        assert!(!matches_target_filter(&state, newcomer, &filter, attacker));
+        assert!(matches_target_filter(&state, veteran, &filter, attacker));
+    }
+
     #[test]
     fn normalize_contextual_filter_without_parent_targets_rewrites_not_parent_to_any() {
         let filter = TargetFilter::Not {
@@ -8355,6 +8454,8 @@ mod tests {
                 attacking: true,
                 blocking: false,
                 blocked: false,
+                attacking_alone: true,
+                blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
@@ -8364,6 +8465,8 @@ mod tests {
                 attacking: false,
                 blocking: true,
                 blocked: false,
+                attacking_alone: false,
+                blocking_alone: true,
                 defending_player: None,
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
@@ -8393,6 +8496,54 @@ mod tests {
             &FilterProp::Blocking,
             &state,
             &blocking_record,
+            &source_ctx,
+        ));
+
+        // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker look-back reads
+        // the captured `attacking_alone` / `blocking_alone` snapshot. The
+        // attacking-alone record matches AttackingAlone but not BlockingAlone,
+        // and vice versa for the blocking-alone record.
+        assert!(zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::BlockingAlone,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::BlockingAlone,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+        // CR 506.5 boundary: a record where the creature attacked but NOT alone
+        // (co-attacker present at zone-exit) must fail AttackingAlone.
+        let attacked_with_company = ZoneChangeRecord {
+            combat_status: ZoneChangeCombatStatus {
+                attacking: true,
+                blocking: false,
+                blocked: false,
+                attacking_alone: false,
+                blocking_alone: false,
+                defending_player: Some(PlayerId(0)),
+            },
+            ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &attacked_with_company,
             &source_ctx,
         ));
     }

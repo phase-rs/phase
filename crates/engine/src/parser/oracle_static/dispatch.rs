@@ -266,6 +266,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 509.1b + CR 609.4 + CR 702.28b: "<subject> can block creatures with shadow
+    // as though they didn't have shadow" / "... as though it had shadow" — per-source
+    // permission to block shadow attackers (Heartwood Dryad, Wall of Diffusion).
+    if let Some(def) = parse_block_shadow_as_though(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous

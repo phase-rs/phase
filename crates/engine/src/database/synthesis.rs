@@ -6305,7 +6305,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -6429,7 +6429,7 @@ fn build_battlefield_upkeep_counter_removal_trigger(
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(counter_type.clone()),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -6472,7 +6472,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Fade),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     )
@@ -9166,7 +9166,7 @@ pub fn synthesize_impending(face: &mut CardFace) {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -10270,6 +10270,74 @@ mod cycling_synthesis_tests {
         ));
         let shuffle = put_in_hand.sub_ability.as_ref().expect("shuffle");
         assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    /// Issue #629: Production `build_oracle_face` must synthesize cycling and
+    /// retain the when-you-cycle trigger for sorceries whose Oracle text prints
+    /// a spell effect before the cycling keyword line.
+    #[test]
+    fn build_oracle_face_fractured_sanity_synthesizes_cycling_and_trigger() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        use crate::types::ability::AbilityTag;
+
+        let oracle = "Each opponent mills fourteen cards.\n\
+                      Cycling {1}{U} ({1}{U}, Discard this card: Draw a card.)\n\
+                      When you cycle this card, each opponent mills four cards.";
+        let mtgjson = AtomicCard {
+            name: "Fractured Sanity".to_string(),
+            mana_cost: Some("{3}{U}".to_string()),
+            colors: vec!["U".to_string()],
+            color_identity: vec!["U".to_string()],
+            text: Some(oracle.to_string()),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Sorcery".to_string()),
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: Some(vec!["Cycling".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 4.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("fractured-sanity-test".to_string()),
+                scryfall_id: Some("fractured-sanity-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        let cycling = face
+            .abilities
+            .iter()
+            .find(|a| a.ability_tag == Some(AbilityTag::Cycling))
+            .expect("synthesized cycling ability with AbilityTag::Cycling");
+        assert_eq!(cycling.activation_zone, Some(Zone::Hand));
+        assert!(
+            face.triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::Cycled && t.execute.is_some()),
+            "when-you-cycle trigger must survive synthesis"
+        );
+        assert!(matches!(&*face.abilities[0].effect, Effect::Mill { .. }));
+        assert!(
+            !face.abilities.iter().any(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name.contains("Cycling")
+                )
+            }),
+            "cycling line must not become an Unimplemented spell ability"
+        );
     }
 }
 
@@ -22718,7 +22786,7 @@ mod fading_vanishing_tests {
             removal.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::RemoveCounter {
                 counter_type: Some(CounterType::Fade),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             })
         ));
@@ -22777,7 +22845,7 @@ mod fading_vanishing_tests {
             removal.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::RemoveCounter {
                 counter_type: Some(CounterType::Time),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             })
         ));
