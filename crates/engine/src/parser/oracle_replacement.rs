@@ -396,9 +396,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
 
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
     if nom_primitives::scan_contains(&lower, "would lose life") {
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string()),
-        );
+        let mut def =
+            ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string());
+        if nom_primitives::scan_contains(&lower, "lose twice that much life instead")
+            || nom_primitives::scan_contains(&lower, "loses twice that much life instead")
+        {
+            def = def.quantity_modification(QuantityModification::Double);
+        }
+        if nom_primitives::scan_contains(&lower, "an opponent would lose life")
+            || nom_primitives::scan_contains(&lower, "opponent would lose life")
+        {
+            def.valid_player = Some(ReplacementPlayerScope::Opponent);
+        }
+        return Some(def);
     }
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
@@ -7397,7 +7407,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::LoseLife);
-        assert!(def.description.is_some());
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Double)
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
     }
 
     #[test]
