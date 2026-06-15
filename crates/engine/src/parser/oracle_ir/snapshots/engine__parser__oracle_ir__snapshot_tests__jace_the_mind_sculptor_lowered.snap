@@ -168,7 +168,7 @@ expression: "&lowered"
       "kind": "Activated",
       "effect": {
         "type": "ChangeZoneAll",
-        "origin": null,
+        "origin": "Library",
         "destination": "Exile",
         "target": {
           "type": "Typed",
@@ -176,7 +176,16 @@ expression: "&lowered"
             "Card"
           ],
           "controller": null,
-          "properties": []
+          "properties": [
+            {
+              "type": "Owned",
+              "controller": "TargetPlayer"
+            },
+            {
+              "type": "InZone",
+              "zone": "Library"
+            }
+          ]
         }
       },
       "cost": {

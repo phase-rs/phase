@@ -5314,6 +5314,8 @@ enum ZoneQual {
     Opponent,
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
+    /// "target player's " — produces `Owned{TargetPlayer}`.
+    TargetPlayer,
     /// "their " — produces `Owned{ScopedPlayer}`; in an each-player iteration
     /// the third-person possessive binds to the iterated player.
     Their,
@@ -5368,6 +5370,8 @@ pub(crate) fn scan_zone_phrase(
 /// - Opponent possessive: "from an opponent's graveyard", "from each opponent's graveyard"
 ///   → `[Owned{Opponent}, InZone]` so stolen creatures that died are still matched by owner.
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
+/// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
+///   so the card selection is constrained by the companion player target.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -5434,6 +5438,18 @@ fn parse_zone_suffix_nom(
             None,
         ),
         ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+        // CR 108.3 + CR 109.4 + CR 115.1: Non-battlefield zone membership is
+        // owner-keyed. "target player's graveyard" constrains selected cards
+        // by ownership relative to the chosen target player, not by controller.
+        ZoneQual::TargetPlayer => (
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                },
+                FilterProp::InZone { zone },
+            ],
+            None,
+        ),
         // CR 110.1 + CR 108.3: a graveyard/hand/library card is not a permanent
         // and has no controller — membership is keyed by owner. CR 109.5:
         // "their" in an each-player iteration binds to the iterated player
@@ -5460,6 +5476,7 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
+        value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
         value(
             ZoneQual::OtherPoss,

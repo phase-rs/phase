@@ -128,6 +128,18 @@ fn any_immediate_threat(state: &GameState, ai_player: PlayerId) -> bool {
     if life_ratio < 0.4 {
         return true;
     }
+    // CR 508.1a: only the active player declares attackers, and CR 514.2: every
+    // "until end of turn" effect ends at the cleanup step. So an opponent's
+    // standing board can deal combat damage to the AI only on the *opponent's*
+    // turn — a protective grant activated on the AI's own turn (e.g. "discard a
+    // card: ~ gains indestructible until end of turn") expires before those
+    // creatures can ever attack, making board pressure no reason to react.
+    // Board pressure is therefore an immediate threat only when the AI is not
+    // the active player; on the AI's own turn the only reactive triggers are the
+    // stack signals above (removal / mass-removal already on the stack).
+    if state.active_player == ai_player {
+        return false;
+    }
     state.players.iter().any(|p| {
         if p.id == ai_player || p.is_eliminated {
             return false;
@@ -283,6 +295,7 @@ mod tests {
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, StaticDefinition, TypedFilter,
     };
+    use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::zones::Zone;
@@ -666,6 +679,67 @@ mod tests {
             },
         });
 
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_threat_present");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    /// Opponent creature strong enough that `threat_level` crosses
+    /// `THREAT_FLOOR` on board presence alone (power saturates `board_score`).
+    fn strong_opponent_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Big Threat".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(14);
+        obj.toughness = Some(14);
+        id
+    }
+
+    /// Regression (reported bug): the "discard a card: ~ gains indestructible
+    /// until end of turn. Tap it." defenders (Seasoned Hallowblade, Guardian of
+    /// New Benalia, Witch-king of Angmar, …) were activated on the AI's OWN turn
+    /// against a merely-standing opponent board — discarding a card and tapping
+    /// the creature to protect against nothing. `threat_level` is turn-agnostic
+    /// board strength, so a developed opponent board waived the no-threat
+    /// penalty even though (CR 508.1a) those creatures can't attack until the
+    /// opponent's turn and (CR 514.2) the grant expires at cleanup first. Board
+    /// pressure must count as an immediate threat only on the opponent's turn.
+    #[test]
+    fn board_pressure_not_a_threat_on_ai_own_turn() {
+        let mut state = GameState::new_two_player(42);
+        let opp = PlayerId(1);
+        strong_opponent_creature(&mut state, opp);
+        // Sanity: the opponent board really does cross the threat floor, so the
+        // turn ownership is the only thing distinguishing the two cases below.
+        assert!(threat_level(&state, AI, opp) >= THREAT_FLOOR);
+
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+
+        // AI's own turn: board pressure must NOT waive the no-threat penalty.
+        state.active_player = AI;
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_threat");
+                assert_eq!(delta, NO_THREAT_PENALTY);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+
+        // Opponent's turn: the same board IS an immediate threat → allowed.
+        state.active_player = opp;
         match activate_verdict(&state, id) {
             PolicyVerdict::Score { delta, reason } => {
                 assert_eq!(reason.kind, "reactive_self_protection_threat_present");

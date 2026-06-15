@@ -175,7 +175,7 @@ expression: "&ir"
         "kind": "Activated",
         "effect": {
           "type": "ChangeZoneAll",
-          "origin": null,
+          "origin": "Library",
           "destination": "Exile",
           "target": {
             "type": "Typed",
@@ -183,7 +183,16 @@ expression: "&ir"
               "Card"
             ],
             "controller": null,
-            "properties": []
+            "properties": [
+              {
+                "type": "Owned",
+                "controller": "TargetPlayer"
+              },
+              {
+                "type": "InZone",
+                "zone": "Library"
+              }
+            ]
           }
         },
         "cost": {

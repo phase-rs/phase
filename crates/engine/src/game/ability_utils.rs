@@ -2096,11 +2096,23 @@ fn attach_side_needs_target_slot(filter: &TargetFilter, is_attachment: bool) -> 
 }
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
-/// it has `controller == Some(ControllerRef::TargetPlayer)`.
+/// it binds to `ControllerRef::TargetPlayer`.
 pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter { controller, .. }) => {
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
             matches!(controller, Some(ControllerRef::TargetPlayer))
+                || properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Owned {
+                            controller: ControllerRef::TargetPlayer,
+                        }
+                    )
+                })
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_references_target_player)
@@ -2711,7 +2723,15 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
         TargetFilter::Typed(tf) => match tf.controller {
             Some(ControllerRef::You) => Some(ControllerRef::You),
             Some(ControllerRef::TargetPlayer) => Some(ControllerRef::TargetPlayer),
-            _ => None,
+            _ => tf.properties.iter().find_map(|prop| match prop {
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                } => Some(ControllerRef::You),
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                } => Some(ControllerRef::TargetPlayer),
+                _ => None,
+            }),
         },
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().find_map(relative_controller_kind)
@@ -2947,9 +2967,18 @@ fn rewrite_relative_controller(
     to: crate::types::ability::ControllerRef,
 ) -> TargetFilter {
     match filter {
-        TargetFilter::Typed(tf) if tf.controller == Some(from.clone()) => {
+        TargetFilter::Typed(tf) => {
             let mut new_tf = tf.clone();
-            new_tf.controller = Some(to);
+            if new_tf.controller == Some(from.clone()) {
+                new_tf.controller = Some(to.clone());
+            }
+            for prop in &mut new_tf.properties {
+                if let FilterProp::Owned { controller } = prop {
+                    if *controller == from {
+                        *controller = to.clone();
+                    }
+                }
+            }
             TargetFilter::Typed(new_tf)
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
@@ -7375,6 +7404,92 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// CR 108.3 + CR 109.4 + CR 115.1: "target player's graveyard" is an
+    /// ownership constraint on a non-battlefield zone. The `Owned{TargetPlayer}`
+    /// filter must still surface the companion player target before the object
+    /// target so target legality can bind to the chosen player.
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_target_player_owned_filter() {
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let your_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Your Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        let opp_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        for c in [your_card, opp_card] {
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::TargetPlayer,
+            },
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+        ]));
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: filter.clone(),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "expected companion player slot plus card target slot"
+        );
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+
+        let mut resolved = ability.clone();
+        resolved.targets = vec![TargetRef::Player(PlayerId(1))];
+        let ctx = FilterContext::from_ability(&resolved);
+        assert!(
+            matches_target_filter(&state, opp_card, &filter, &ctx),
+            "chosen player's graveyard card should match"
+        );
+        assert!(
+            !matches_target_filter(&state, your_card, &filter, &ctx),
+            "other player's graveyard card should not match"
+        );
     }
 
     #[test]
