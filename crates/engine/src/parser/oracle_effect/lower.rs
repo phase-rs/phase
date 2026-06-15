@@ -1602,6 +1602,16 @@ pub(super) fn strip_optional_effect_prefix(
                 (None, Some(PlayerFilter::Opponent)),
                 tag("target opponent may "),
             ),
+            // CR 506.2 + CR 608.2d + CR 121.3a: "Defending player may have you
+            // draw a card" (Shakedown Heavy) — on an attack trigger, the
+            // defending player is the may-actor who decides whether the
+            // controller performs the granted action. CR 121.3a: the chooser
+            // need not be the player who draws. Parallels the targeted-opponent
+            // arm above; the actor scope is the attack's defending player.
+            value(
+                (None, Some(PlayerFilter::DefendingPlayer)),
+                tag("defending player may "),
+            ),
             // CR 608.2d: "That creature's controller may have this artifact deal …"
             // (Requiem Monolith) — the targeted creature's controller chooses.
             value(
