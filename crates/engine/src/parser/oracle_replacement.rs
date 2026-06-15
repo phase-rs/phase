@@ -489,6 +489,11 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
+
+    if let Some(def) = parse_energy_get_replacement(&lower, &text) {
+        return Some(def);
+    }
+
     if nom_primitives::scan_contains(&lower, "counters would be put on")
         || nom_primitives::scan_contains(&lower, "counter would be put on")
         || nom_primitives::scan_contains(&lower, "would put one or more counters")
@@ -5009,6 +5014,24 @@ fn token_description_to_spec(
 /// applier saturates at 0 because counters are markers per CR 122.1 — you
 /// can't put a negative number of markers on a permanent — and the
 /// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
+/// CR 107.14 + CR 614.1a: Izzet Generatorium — additional {E} on would-get events.
+fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    all_consuming(value(
+        (),
+        (
+            tag::<_, _, OracleError<'_>>("if you would get one or more {e}, "),
+            tag("you get an additional {e} instead."),
+        ),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .quantity_modification(QuantityModification::Plus { value: 1 })
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
+}
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
@@ -11850,6 +11873,21 @@ mod tests {
         assert!(filter.properties.contains(&FilterProp::HasSupertype {
             value: Supertype::Basic,
         }));
+    }
+
+    #[test]
+    fn parses_energy_get_additional_replacement() {
+        let def = parse_replacement_line(
+            "If you would get one or more {E}, you get an additional {E} instead.",
+            "Izzet Generatorium",
+        )
+        .expect("energy get replacement");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
 }
 
