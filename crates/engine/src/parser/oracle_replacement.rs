@@ -400,6 +400,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if nom_primitives::scan_contains(&norm_lower, "double all damage") {
+        if let Some(def) = parse_global_damage_double_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+    }
+
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
     // CR 614.1a: Damage boost/reduction replacement effects.
     if nom_primitives::scan_contains(&lower, "would deal")
@@ -6103,6 +6109,71 @@ fn parse_colorless_mana(input: &str) -> super::oracle_nom::error::OracleResult<'
         tag::<_, _, OracleError<'_>>("colorless mana"),
     )
     .parse(input)
+}
+
+/// CR 614.1a: Global "Double all damage … would deal" doublers.
+fn parse_global_damage_double_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, rest) = split_once_on_lower(original_text, norm_lower, "double all damage ")?;
+    let (source_filter, tail) = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("~ would deal").parse(rest)
+    {
+        (Some(TargetFilter::SelfRef), rest)
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("that permanent sources you control would deal").parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("that creature sources you control would deal").parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("that sources you control would deal").parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(
+        "that sources you control of the chosen type would deal",
+    )
+    .parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else {
+        return None;
+    };
+    if !tail.trim_end_matches('.').trim().is_empty()
+        && !nom_primitives::scan_contains(tail, "instead")
+    {
+        return None;
+    }
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_modification(DamageModification::Double)
+        .description(original_text.to_string());
+    if let Some(sf) = source_filter {
+        def = def.damage_source_filter(sf);
+    }
+    Some(def)
 }
 
 /// CR 614.1d: Parse "enters tapped unless a player has N or less life" (bond lands).
@@ -12004,6 +12075,17 @@ mod tests {
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
+
+    #[test]
+    fn parses_global_damage_double_sources_you_control() {
+        let def = parse_replacement_line(
+            "Double all damage that sources you control of the chosen type would deal.",
+            "Collective Inferno",
+        )
+        .expect("global doubler");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+    }
+
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
