@@ -218,6 +218,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if nom_primitives::scan_contains(&norm_lower, "enchanted land would be destroyed") {
+        if let Some(def) = parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -5090,6 +5096,27 @@ fn token_description_to_spec(
 /// can't put a negative number of markers on a permanent — and the
 /// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
 /// CR 107.14 + CR 614.1a: Izzet Generatorium — additional {E} on would-get events.
+/// CR 614.1a: Harmonious Emergence destroy → sacrifice aura + indestructible until EOT.
+fn parse_enchanted_land_destroy_sacrifice_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if enchanted land would be destroyed, ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("instead ").parse(rest).ok()?;
+    let effect_text = rest.trim_end_matches('.');
+    if effect_text.is_empty() {
+        return None;
+    }
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::AttachedTo)
+            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .description(original_text.to_string()),
+    )
+}
+
 fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     all_consuming(value(
         (),
@@ -12004,6 +12031,18 @@ mod tests {
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
+
+    #[test]
+    fn parses_enchanted_land_destroy_sacrifice_indestructible() {
+        let def = parse_replacement_line(
+            "If enchanted land would be destroyed, instead sacrifice ~ and that land gains indestructible until end of turn.",
+            "Harmonious Emergence",
+        )
+        .expect("enchanted land destroy");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert!(def.execute.is_some());
+    }
+
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
