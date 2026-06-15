@@ -6995,16 +6995,59 @@ fn try_parse_lose_all_player_counters(text: &str, lower: &str) -> Option<Effect>
     None
 }
 
+/// CR 107.17: Count a leading run of consecutive `{tk}` ticket symbols, each of
+/// which represents one ticket counter. Returns the count when the input begins
+/// with at least one `{tk}` glyph and the only remaining text is a sentence
+/// terminator (so "{tk}{tk}" and "{tk}{tk}." match, but "{tk} for each ..." or
+/// a `{tk}` activation cost does not — those carry trailing clauses this player
+/// counter parser must not swallow). Mirrors the `{tk}`-counting idiom in
+/// `oracle_keyword::strip_ticket_activation_cost_prefix`.
+fn count_ticket_symbols(rest: &str) -> Option<u32> {
+    let mut remaining = rest;
+    let mut count = 0u32;
+    while let Ok((next, _)) = tag::<_, _, OracleError<'_>>("{tk}").parse(remaining) {
+        count += 1;
+        remaining = next;
+    }
+    if count == 0 {
+        return None;
+    }
+    // Only a trailing terminator may remain; any other text means this is not a
+    // bare "you get {TK}…" instruction (e.g. an activation cost or larger clause).
+    let tail = remaining
+        .trim_start()
+        .trim_end_matches(['.', ';', ','])
+        .trim();
+    tail.is_empty().then_some(count)
+}
+
 /// CR 122.1: Parse "get/gets a/an/N [type] counter(s)" into a GivePlayerCounter AST.
 /// Handles patterns like:
 /// - "get a poison counter"
 /// - "gets two experience counters"
 /// - "get ten rad counters"
+/// - "get {TK}{TK}" (CR 107.17 ticket symbol form; see `count_ticket_symbols`)
 fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
     // Strip "get/gets " prefix
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
         .parse(lower)
         .ok()?;
+
+    // CR 107.17: The ticket symbol is {TK}; it represents one ticket counter.
+    // Unfinity cards write "you get N ticket counters" as N repeated `{TK}`
+    // glyphs (e.g. "you get {TK}{TK}{TK}"). Each glyph is one ticket counter, so
+    // count the run of consecutive `{tk}` symbols and emit a Ticket player
+    // counter of that size. This must precede the word-form "counter(s)" suffix
+    // check below because the symbol form carries no "counter" noun. The branch
+    // returns None on the no-symbol case and falls through to the word form.
+    if let Some(count) = count_ticket_symbols(rest) {
+        return Some(ImperativeFamilyAst::GivePlayerCounter {
+            counter_kind: PlayerCounterKind::Ticket,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        });
+    }
 
     // Must end with "counter" or "counters"
     let (before_counter, plural) = if let Some(s) = rest.strip_suffix(" counters") {
@@ -10380,6 +10423,83 @@ mod tests {
             result.is_none(),
             "Should NOT parse unknown counter type as player counter"
         );
+    }
+
+    /// CR 107.17: Each `{TK}` glyph is one ticket counter. "get {tk}{tk}" → 2.
+    /// Building-block test: exercises the symbol-counting branch across counts.
+    #[test]
+    fn parse_player_counter_ticket_symbols() {
+        for (text, expected) in [
+            ("get {tk}", 1),
+            ("get {tk}{tk}", 2),
+            ("get {tk}{tk}{tk}", 3),
+            ("gets {tk}{tk}.", 2),
+        ] {
+            match try_parse_player_counter(text) {
+                Some(ImperativeFamilyAst::GivePlayerCounter {
+                    counter_kind,
+                    count,
+                }) => {
+                    assert_eq!(
+                        counter_kind,
+                        PlayerCounterKind::Ticket,
+                        "{text:?} should be a Ticket counter"
+                    );
+                    assert!(
+                        matches!(count, QuantityExpr::Fixed { value } if value == expected),
+                        "{text:?} should give {expected} ticket counters, got {count:?}"
+                    );
+                }
+                other => panic!("Expected GivePlayerCounter for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The symbol branch must not swallow a `{TK}` activation cost or a larger
+    /// clause: only a bare "get {TK}…" with an optional terminator may match.
+    #[test]
+    fn parse_player_counter_ticket_symbols_reject_trailing_clause() {
+        assert!(
+            try_parse_player_counter("get {tk} for each creature you control").is_none(),
+            "Trailing 'for each ...' clause must not parse as a bare ticket grant"
+        );
+        // No leading ticket symbol — falls through to the word form (and fails
+        // there, since there is no counter noun), so the symbol branch is inert.
+        assert!(
+            count_ticket_symbols("a poison counter").is_none(),
+            "Non-symbol input must not be counted as ticket symbols"
+        );
+    }
+
+    /// End-to-end (CR 107.17): real Unfinity oracle text that was previously
+    /// Unimplemented now parses to a Ticket player counter. Representative cards:
+    /// Blorbian Buddy ("you get {TK}"), Stiltstrider/Prize Wall ("you get
+    /// {TK}{TK}"), Ticketomaton ("you get {TK}{TK}{TK}").
+    #[test]
+    fn parse_effect_you_get_ticket_symbols_end_to_end() {
+        for (oracle, expected) in [
+            ("You get {TK}", 1),
+            ("You get {TK}{TK}", 2),
+            ("You get {TK}{TK}{TK}", 3),
+        ] {
+            match super::super::parse_effect(oracle) {
+                Effect::GivePlayerCounter {
+                    counter_kind,
+                    count,
+                    target,
+                } => {
+                    assert_eq!(counter_kind, PlayerCounterKind::Ticket);
+                    assert_eq!(target, TargetFilter::Controller);
+                    assert!(
+                        matches!(count, QuantityExpr::Fixed { value } if value == expected),
+                        "{oracle:?} should give {expected} tickets, got {count:?}"
+                    );
+                }
+                other => panic!(
+                    "{oracle:?} should parse to GivePlayerCounter, not {other:?} (regression: was Unimplemented)"
+                ),
+            }
+        }
     }
 
     #[test]

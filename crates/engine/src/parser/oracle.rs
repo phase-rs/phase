@@ -3246,6 +3246,23 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
+            // CR 702.29a/e + CR 702.27a: Keyword-cost lines (cycling, flashback,
+            // suspend, …) are not spell resolution instructions. Without this
+            // guard, a sorcery whose Oracle text prints a spell effect followed
+            // by a cycling line (Fractured Sanity, Decree of Justice) routes
+            // "Cycling {cost}" through the spell catch-all and produces an
+            // `Unimplemented` spell ability instead of extracting the keyword
+            // for `synthesize_cycling`. Continuation-line protection already
+            // lives in `is_spell_resolution_instruction_line`; this covers the
+            // case where the keyword-cost line is its own main-loop iteration.
+            if is_keyword_cost_line(&lower) {
+                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            }
+
             // B7: Strip ability-word prefix and attach condition for spell effects.
             let mut spell_body_lines = Vec::new();
             let mut spell_description_lines = Vec::new();
@@ -10037,6 +10054,44 @@ mod tests {
             !has_unimplemented,
             "Typecycling keyword line should not produce Unimplemented effects"
         );
+    }
+
+    /// Issue #629: Sorcery whose Oracle text prints a spell effect then a cycling
+    /// line must extract `Keyword::Cycling` and a `TriggerMode::Cycled` trigger,
+    /// not mis-route the cycling line through the spell catch-all.
+    #[test]
+    fn fractured_sanity_sorcery_cycling_line_not_spell_effect() {
+        use crate::types::triggers::TriggerMode;
+
+        let oracle = "Each opponent mills fourteen cards.\n\
+                      Cycling {1}{U} ({1}{U}, Discard this card: Draw a card.)\n\
+                      When you cycle this card, each opponent mills four cards.";
+        let r = parse_with_keyword_names(oracle, "Fractured Sanity", &[], &["Sorcery"], &[]);
+        assert!(
+            r.extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Cycling(_))),
+            "cycling line must extract Keyword::Cycling"
+        );
+        assert!(
+            !r.abilities.iter().any(|a| {
+                matches!(
+                    *a.effect,
+                    crate::types::ability::Effect::Unimplemented { .. }
+                )
+            }),
+            "cycling line must not become an Unimplemented spell ability"
+        );
+        let cycle_trigger = r
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Cycled)
+            .expect("must parse when-you-cycle-this-card trigger");
+        assert!(cycle_trigger.execute.is_some());
+        assert!(matches!(
+            &*r.abilities[0].effect,
+            crate::types::ability::Effect::Mill { .. }
+        ));
     }
 
     #[test]
