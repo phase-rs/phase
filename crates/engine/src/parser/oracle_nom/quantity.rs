@@ -1887,13 +1887,6 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // event. Distinct from "that damage" (different article+verb) and
         // "damage dealt this way" (PreviousEffectAmount).
         value(QuantityRef::EventContextAmount, tag("the damage dealt")),
-        // CR 706.2: "the result" of a die roll is the final number after
-        // modifiers. It flows through the same EventContextAmount channel as
-        // the other back-references (As Luck Would Have It, Hammer Jammer, Jumbo
-        // Imp, Feisty Stegosaurus). The resolver reads
-        // `die_result_this_resolution`; the semantic twin
-        // `oracle_quantity::parse_cda_quantity` already maps this phrase.
-        value(QuantityRef::EventContextAmount, tag("the result")),
         value(
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -4956,26 +4949,6 @@ mod tests {
         // CR 603.7c: bare "the damage dealt" form maps to EventContextAmount.
         let (rest, q) = parse_quantity_ref("the damage dealt").unwrap();
         assert_eq!(q, QuantityRef::EventContextAmount);
-        assert_eq!(rest, "");
-
-        // CR 706.2: "the result" of a die roll — the result amount flows through
-        // the same EventContextAmount channel (As Luck Would Have It, Hammer
-        // Jammer, Jumbo Imp, Feisty Stegosaurus, ~24 cards). Mirrors the
-        // semantic twin in oracle_quantity::parse_cda_quantity.
-        let (rest, q) = parse_quantity_ref("the result").unwrap();
-        assert_eq!(q, QuantityRef::EventContextAmount);
-        assert_eq!(rest, "");
-
-        // Full "equal to the result" clause as it appears in counter-entry
-        // ("a number of +1/+1 counters on it equal to the result") and life
-        // gain phrasings must resolve to the same ref, not Unimplemented.
-        let (rest, q) = parse_equal_to("equal to the result").unwrap();
-        assert_eq!(
-            q,
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            }
-        );
         assert_eq!(rest, "");
 
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();

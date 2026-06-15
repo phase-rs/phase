@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
 use nom::combinator::{eof, peek, value};
 use nom::sequence::terminated;
@@ -328,7 +328,7 @@ pub(super) fn try_parse_put_counter<'a>(
             //   eager: "a number of counters equal to X ..." (counter type absent
             //          or implicit — rare in practice)
             //   trailing: "a number of {type} counters equal to X ..." (Gruff class)
-            match nom_quantity::parse_equal_to(after_phrase) {
+            match parse_counter_equal_to(after_phrase) {
                 Ok((rest, qty)) => {
                     let rest = rest.strip_prefix(' ').unwrap_or(rest);
                     (qty, rest, false, false)
@@ -372,7 +372,7 @@ pub(super) fn try_parse_put_counter<'a>(
     //   post-target: "a number of +1/+1 counters on ~ equal to that creature's power" (Vincent Valentine)
     // Try consuming "equal to" here; if absent, defer to post-target resolution.
     let (mut count_expr, after_counter_word, dynamic_deferred) = if dynamic_pending {
-        match nom_quantity::parse_equal_to(after_counter_word) {
+        match parse_counter_equal_to(after_counter_word) {
             Ok((after_clause, qty)) => {
                 // allow-noncombinator: whitespace trim after nom combinator result, not dispatch
                 let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
@@ -399,7 +399,7 @@ pub(super) fn try_parse_put_counter<'a>(
     // the clause wasn't found before "on {target}" and must appear here.
     if dynamic_deferred {
         let trimmed = remainder.trim_start();
-        match nom_quantity::parse_equal_to(trimmed) {
+        match parse_counter_equal_to(trimmed) {
             Ok((after_clause, qty)) => {
                 count_expr = if rebind_deferred_to_placement_object {
                     rebind_post_target_counter_quantity(qty, trimmed, &target)
@@ -466,6 +466,57 @@ fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)
     // of returning an empty post-suffix remainder.
     let count = parse_for_each_multiplier_prefix(remainder)?;
     Some((count, ""))
+}
+
+/// CR 122.1 + CR 706.2: Parse a dynamic counter-count "equal to {qty}" clause,
+/// covering both the typed-quantity grammar and the event-context back-references
+/// that grammar does not reach on its own.
+///
+/// The nom `parse_equal_to` combinator handles every typed `QuantityRef`
+/// (object counts, power/toughness, life refs, …). It does NOT recognize the
+/// die-roll / coin-flip back-reference "the result" (CR 706.2) — that phrase is
+/// owned by `parse_event_context_quantity`, the single authority for anaphoric
+/// event-context amounts ("that much", "that many", "the result"). The
+/// equivalent token-creation and life-gain paths already fall back to
+/// `parse_event_context_quantity` after their primary quantity parse
+/// (`token.rs` count-expression resolution, `imperative.rs::parse_life_equal_quantity`);
+/// the counter path is the remaining gap, so it gets the same fallback here
+/// rather than leaking "the result" into the shared `parse_quantity_ref` leaf
+/// (which would break the `parse_cda_quantity` "returns None for the bare
+/// die-result phrase" invariant the where-X binding relies on).
+///
+/// Inputs reaching here always begin with the literal "equal to " (the three
+/// call sites guard on it). The event-context fallback isolates the post-"equal
+/// to " phrase up to the first clause boundary so a trailing clause (", then …")
+/// stays in the returned remainder, mirroring nom's consume-and-remainder
+/// contract.
+fn parse_counter_equal_to(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    // Typed-quantity grammar first; it owns proper remainder handling.
+    if let Ok((rest, qty)) = nom_quantity::parse_equal_to(input) {
+        return Ok((rest, qty));
+    }
+
+    // CR 706.2: event-context back-reference fallback ("equal to the result").
+    let (after_equal, _) = tag("equal to ").parse(input)?;
+    // Isolate the quantity phrase from any trailing clause via a nom combinator
+    // (take everything up to the first clause separator). Event-context phrases
+    // are short and clause-final in the counter templates that reach this
+    // fallback; the tail after the separator is preserved as the remainder so a
+    // following clause (", then …") is never swallowed.
+    let (_, phrase) =
+        take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
+    let phrase = phrase.trim_end();
+    match crate::parser::oracle_quantity::parse_event_context_quantity(phrase) {
+        // Remainder starts immediately after the consumed phrase (before any
+        // trailing whitespace), preserving the original clause boundary.
+        Some(qty) => Ok((&after_equal[phrase.len()..], qty)),
+        None => Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
 }
 
 /// CR 122.1: Consume the "a number of " prefix used in dynamic counter-count
@@ -2100,5 +2151,87 @@ mod tests {
         assert_eq!(counter_type, CounterType::Keyword(KeywordKind::FirstStrike));
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         assert!(matches!(target, TargetFilter::Typed { .. }));
+    }
+
+    /// CR 122.1 + CR 706.2: `parse_counter_equal_to` still handles the typed
+    /// quantity grammar (here a self-power object ref) with the correct
+    /// remainder — the event-context fallback must not regress the primary path.
+    #[test]
+    fn counter_equal_to_typed_quantity_unchanged() {
+        let (rest, qty) = parse_counter_equal_to("equal to its power then draw").unwrap();
+        assert!(matches!(qty, QuantityExpr::Ref { .. }));
+        // "its power" is consumed; the trailing clause survives in the remainder.
+        assert_eq!(rest, " then draw", "trailing clause must survive: {rest:?}");
+    }
+
+    /// CR 706.2: the die-roll / coin-flip back-reference "the result" routes
+    /// through the `parse_event_context_quantity` fallback to `EventContextAmount`
+    /// — the typed `parse_equal_to` grammar does not reach it, and it must NOT be
+    /// added to the shared `parse_quantity_ref` leaf (that would break the
+    /// `parse_cda_quantity` "returns None for the bare die-result phrase"
+    /// invariant the where-X binding depends on).
+    #[test]
+    fn counter_equal_to_the_result_binds_event_context_amount() {
+        let (rest, qty) = parse_counter_equal_to("equal to the result").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// The event-context fallback preserves a trailing clause as the remainder,
+    /// matching nom's consume-and-remainder contract (so downstream
+    /// for-each / conditional clauses are not silently swallowed).
+    #[test]
+    fn counter_equal_to_the_result_preserves_trailing_clause() {
+        let (rest, qty) = parse_counter_equal_to("equal to the result, then draw a card").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+        assert_eq!(rest, ", then draw a card");
+    }
+
+    /// End-to-end counter-entry (deferred post-target placement): "put +1/+1
+    /// counters on it equal to the result" must build a `PutCounter` bound to
+    /// `EventContextAmount`, never `Unimplemented`. This is the class the PR
+    /// targets (die-roll cards that pump via counters).
+    #[test]
+    fn put_counter_on_it_equal_to_the_result_binds_event_context_amount() {
+        let input = "put +1/+1 counters on it equal to the result";
+        let (effect, _rem, _multi) =
+            try_parse_put_counter(input, input, &mut default_ctx()).expect("must parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+    }
+
+    /// Sibling shape: the "a number of {type} counters … equal to the result"
+    /// phrasing must bind the same ref via the eager / pre-target path.
+    #[test]
+    fn put_a_number_of_counters_equal_to_the_result_binds_event_context_amount() {
+        let input = "put a number of +1/+1 counters on it equal to the result";
+        let (effect, _rem, _multi) =
+            try_parse_put_counter(input, input, &mut default_ctx()).expect("must parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
     }
 }
