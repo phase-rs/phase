@@ -3258,9 +3258,9 @@ pub(crate) fn parse_oracle_ir(
             if is_keyword_cost_line(&lower) {
                 if let Some(kw) = parse_keyword_from_oracle(&lower) {
                     result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
             }
 
             // B7: Strip ability-word prefix and attach condition for spell effects.
