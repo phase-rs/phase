@@ -13140,6 +13140,31 @@ pub enum ReplacementCondition {
     /// "enters with an indestructible counter on it if you cast it from your
     /// hand"). Evaluated against `GameObject.cast_from_zone`.
     CastFromZone { zone: Zone },
+    /// CR 614.1d + CR 601: Gates a replacement on how the *entering* object
+    /// (the event's `affected_object_id`) arrived — NOT the replacement source.
+    /// Both halves reference the entering object, which distinguishes this from
+    /// `CastFromZone` (which reads the replacement's `source_id`; for a global
+    /// floating install that source is the sentinel `ObjectId(0)`, so
+    /// `CastFromZone` cannot express entering-object origin).
+    ///
+    /// `origin_constraint` reuses the engine's canonical from-zone primitive
+    /// (`OriginConstraint`) to test the event's `from` field — the "would enter
+    /// from <zone>" half (CR 614.1d). Because `ProposedEvent::ZoneChange.from`
+    /// is a non-optional `Zone`, the evaluator wraps it as `Some(from)` before
+    /// delegating to `OriginConstraint::matches_from`.
+    ///
+    /// `cast_origin`, when `Some(zone)`, additionally matches when the entering
+    /// object was cast from `zone` (`GameObject.cast_from_zone == Some(zone)`)
+    /// and thus physically enters from the Stack — the "or after being cast from
+    /// <zone>" half (CR 601) that `OriginConstraint` cannot express because it
+    /// only inspects `from`, never `cast_from_zone`. The two halves are
+    /// OR-combined. Covers Don't Blink's "if one or more creatures would enter
+    /// from exile or after being cast from exile" in a single leaf.
+    EnteredFromZone {
+        origin_constraint: OriginConstraint,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_origin: Option<Zone>,
+    },
     /// CR 207.2c (Raid ability word) + CR 614.1c: "if you attacked this turn"
     /// — replacement applies only when the controller attacked with a
     /// creature earlier this turn. Evaluated against
@@ -13310,6 +13335,21 @@ impl OriginConstraint {
     /// compact for the common no-restriction case.
     pub fn is_any(&self) -> bool {
         matches!(self, OriginConstraint::Any)
+    }
+
+    /// CR 111.1 + CR 400.1: Does an object that moved from `from` satisfy this
+    /// source-zone constraint? `from = None` (CR 111.1 direct creation / token
+    /// entry, where the object had no prior zone) matches only `Any`; any
+    /// constraint naming a specific source zone cannot match a `None` origin.
+    /// Single authority shared by the zone-change trigger matcher and the
+    /// `ReplacementCondition::EnteredFromZone` physical-entry half.
+    pub fn matches_from(&self, from: &Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => from == &Some(*z),
+            OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
+            OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
     }
 }
 
@@ -15242,6 +15282,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 111.1 + CR 400.1: the shared `OriginConstraint::matches_from` predicate
+    /// (used by both the zone-change trigger matcher and the `EnteredFromZone`
+    /// replacement condition's physical half). Verifies the `None` origin case
+    /// (CR 111.1 direct/token creation) the `Some()` wrap protects against, plus
+    /// every variant axis.
+    #[test]
+    fn origin_constraint_matches_from_predicate() {
+        use crate::types::zones::Zone;
+        // Equals: exact source-zone match; None never matches a specific zone.
+        let eq = OriginConstraint::Equals(Zone::Exile);
+        assert!(eq.matches_from(&Some(Zone::Exile)));
+        assert!(!eq.matches_from(&Some(Zone::Hand)));
+        assert!(!eq.matches_from(&None));
+        // NotEquals: any named source except this; None does not match.
+        let ne = OriginConstraint::NotEquals(Zone::Battlefield);
+        assert!(ne.matches_from(&Some(Zone::Exile)));
+        assert!(!ne.matches_from(&Some(Zone::Battlefield)));
+        assert!(!ne.matches_from(&None));
+        // OneOf: membership only.
+        let one_of = OriginConstraint::OneOf(vec![Zone::Graveyard, Zone::Library]);
+        assert!(one_of.matches_from(&Some(Zone::Graveyard)));
+        assert!(one_of.matches_from(&Some(Zone::Library)));
+        assert!(!one_of.matches_from(&Some(Zone::Exile)));
+        assert!(!one_of.matches_from(&None));
+        // Any: matches everything, including the None direct-creation origin.
+        assert!(OriginConstraint::Any.matches_from(&None));
+        assert!(OriginConstraint::Any.matches_from(&Some(Zone::Battlefield)));
+    }
 
     /// #506: `AbilityCost::consumes_source` classifies a self-discard cost
     /// (cycling, Channel) as source-consuming so the UI confirms a lone such

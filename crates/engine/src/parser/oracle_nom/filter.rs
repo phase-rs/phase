@@ -68,6 +68,30 @@ pub fn parse_enters_origin_zone(input: &str) -> OracleResult<'_, Zone> {
     .parse(input)
 }
 
+/// Parse a *bare* zone name with NO preposition lead-in: "exile",
+/// "a graveyard", "their graveyard", "a library", "their library", "the stack".
+///
+/// Companion to [`parse_zone_filter`] (which requires an "in/on/of/from <zone>"
+/// preposition) and [`parse_enters_origin_zone`] (which requires the "from
+/// <zone>" suffix). Use this ONLY where the preposition lead-in is supplied
+/// separately by the caller AND that lead-in is not a bare "from " — e.g.
+/// "or after being cast from <zone>", where `parse_enters_origin_zone`'s bundled
+/// `tag("from exile")` does not fit because the grammatical lead-in is "being
+/// cast from ". For the plain "would enter from <zone>" suffix, prefer
+/// [`parse_enters_origin_zone`] directly. Composed in the same
+/// `value(Zone::X, tag(...))` idiom as [`parse_zone_filter`].
+pub fn parse_zone_word(input: &str) -> OracleResult<'_, Zone> {
+    alt((
+        value(Zone::Exile, tag("exile")),
+        value(Zone::Graveyard, tag("a graveyard")),
+        value(Zone::Graveyard, tag("their graveyard")),
+        value(Zone::Library, tag("a library")),
+        value(Zone::Library, tag("their library")),
+        value(Zone::Stack, tag("the stack")),
+    ))
+    .parse(input)
+}
+
 /// Parse a zone owner/controller qualifier following a zone filter.
 ///
 /// Matches "you control", "an opponent controls", "your opponents control",
