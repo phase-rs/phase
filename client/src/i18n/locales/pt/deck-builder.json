@@ -5,6 +5,8 @@
     "reset": "Redefinir",
     "textPlaceholder": "Buscar cartas...",
     "allTypes": "Todos os tipos",
+    "cardType": "Tipo de carta",
+    "browseFormatFilter": "Legal no formato",
     "cmcMax": "CMC máx.:",
     "sets": "Coleções",
     "addSetPlaceholder": "Adicionar código da coleção...",

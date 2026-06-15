@@ -11,6 +11,7 @@ pub mod aristocrats;
 pub mod commitment;
 pub mod control;
 pub mod landfall;
+pub mod lifegain;
 pub mod mana_ramp;
 pub mod plus_one_counters;
 pub mod spellslinger_prowess;
@@ -24,6 +25,7 @@ pub use aggro_pressure::AggroPressureFeature;
 pub use aristocrats::AristocratsFeature;
 pub use control::ControlFeature;
 pub use landfall::LandfallFeature;
+pub use lifegain::LifegainFeature;
 pub use mana_ramp::ManaRampFeature;
 pub use plus_one_counters::PlusOneCountersFeature;
 pub use spellslinger_prowess::SpellslingerProwessFeature;
@@ -46,6 +48,7 @@ pub struct DeckFeatures {
     pub archetype: DeckArchetype,
     pub strategy: StrategyProfile,
     pub landfall: LandfallFeature,
+    pub lifegain: LifegainFeature,
     pub mana_ramp: ManaRampFeature,
     pub tribal: TribalFeature,
     pub control: ControlFeature,
@@ -82,6 +85,7 @@ impl DeckFeatures {
             archetype,
             strategy,
             landfall: landfall::detect(deck),
+            lifegain: lifegain::detect(deck),
             mana_ramp: mana_ramp::detect(deck),
             tribal: tribal::detect(deck),
             control: control::detect(deck),

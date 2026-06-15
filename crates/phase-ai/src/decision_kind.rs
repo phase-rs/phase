@@ -34,6 +34,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
+        // CR 502.3: the bounded untap-subset selection under a MaxUntapPerType
+        // cap is a mechanical untap-step choice; route it to the same catch-all
+        // bucket as the optional-decline UntapChoice.
+        WaitingFor::ChooseUntapSubset { .. } => DecisionKind::ActivateAbility,
         // CR 508.1g: exert-as-attack is part of the attack declaration; route it
         // to the attack policy population.
         WaitingFor::ExertChoice { .. } | WaitingFor::EnlistChoice { .. } => {

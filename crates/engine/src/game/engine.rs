@@ -3435,10 +3435,66 @@ fn apply_action(
                     chosen_not_to_untap: declined,
                 }
             } else {
+                // CR 502.3: Declines are recorded; now either surface the
+                // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
+                // cap is over its limit after declines) or untap + advance. The
+                // bridge advances the phase itself when it untaps, so only
+                // resume `auto_advance` when no subset prompt was raised.
                 let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
-                turns::execute_untap_with_choices(state, &mut events, &skipped);
-                turns::advance_phase(state, &mut events);
-                turns::auto_advance(state, &mut events)
+                match turns::begin_untap_or_subset_prompt(state, &mut events, skipped) {
+                    Some(prompt) => prompt,
+                    None => turns::auto_advance(state, &mut events),
+                }
+            }
+        }
+        // CR 502.3: The active player directly determines which permanents untap
+        // under a MaxUntapPerType cap (Smoke / Stoic Angel / Damping Field). The
+        // chosen subset (`SelectCards`) must be a subset of the prompted `group`
+        // and no larger than `max`; the unchosen complement is folded into the
+        // declines and held tapped. Then the untap executes and the phase
+        // advances. The enforcement clamp inside `execute_untap_with_choices`
+        // remains as a safety net for any selection that slips past validation.
+        (
+            WaitingFor::ChooseUntapSubset { player, group, max },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if chosen.len() > *max {
+                return Err(EngineError::InvalidAction(format!(
+                    "Untap subset selects {} permanents but the cap allows {max}",
+                    chosen.len()
+                )));
+            }
+            let chosen_set: std::collections::HashSet<ObjectId> = chosen.iter().copied().collect();
+            if chosen_set.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Untap subset contains duplicate permanents".to_string(),
+                ));
+            }
+            if let Some(bad) = chosen.iter().find(|id| !group.contains(id)) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Untap subset object {bad:?} is not in the over-cap group"
+                )));
+            }
+            // CR 502.3: the complement of the chosen set within the prompted
+            // group stays tapped. Combine with the declines stashed from the
+            // preceding optional-decline prompt.
+            let mut skipped: std::collections::HashSet<ObjectId> =
+                std::mem::take(&mut state.pending_untap_declines)
+                    .into_iter()
+                    .collect();
+            for id in group {
+                if !chosen_set.contains(id) {
+                    skipped.insert(*id);
+                }
+            }
+            match turns::begin_untap_or_subset_prompt(state, &mut events, skipped) {
+                Some(prompt) => prompt,
+                None => turns::auto_advance(state, &mut events),
             }
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
@@ -21238,6 +21294,50 @@ mod crew_tests {
         assert!(
             result.is_ok(),
             "power 2 + delta 2 = 4 should satisfy Crew 3: {result:?}"
+        );
+    }
+
+    /// CR 702.122c: regression — the legal-action enumerator must measure crew
+    /// contribution through `object_crew_power_contribution`, exactly like the
+    /// activation gate and announcement validator. A Pilot-style creature whose
+    /// raw power is below the crew cost but whose adjusted power meets it must
+    /// still produce a `CrewVehicle` legal action; otherwise the controller is
+    /// offered an empty action set in the `CrewVehicle` state and hangs.
+    /// (Reproduces the reported Deathless Pilot / Hulldrifter Crew-3 stall.)
+    #[test]
+    fn crew_vehicle_legal_actions_account_for_power_delta_contribution() {
+        let (mut state, vehicle_id, creature_a, creature_b) = setup_crew_scenario();
+        // Tap the 3/3 so the only eligible crewer is the 2/2 Pilot, mirroring
+        // the report where the sole eligible creature is sub-threshold by raw
+        // power but meets Crew 3 via "+2 greater".
+        state.objects.get_mut(&creature_a).unwrap().tapped = true;
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::PowerDelta { delta: 2 },
+                    actions: vec![CrewAction::Crew],
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        let actions = crate::ai_support::legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::CrewVehicle { creature_ids, .. } if creature_ids == &vec![creature_b]
+            )),
+            "Crew-3 with only a power-2 Pilot (+2 delta) must offer a crew action, got {actions:?}"
         );
     }
 

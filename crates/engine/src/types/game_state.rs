@@ -2674,6 +2674,28 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen_not_to_untap: Vec<ObjectId>,
     },
+    /// CR 502.3: "the active player determines which permanents they control
+    /// will untap." When a `StaticMode::MaxUntapPerType` cap (Smoke /
+    /// Stoic Angel / Damping Field / Winter Orb class) leaves more than `max`
+    /// matching tapped permanents eligible to untap, the active player must
+    /// directly choose the bounded subset that untaps — this is a REQUIRED
+    /// bounded selection, NOT the per-permanent optional decline modeled by
+    /// `UntapChoice` (which is the "you may choose not to untap" Vedalken
+    /// Shackles class). `group` is the over-cap set of eligible permanents
+    /// (after declines / CantUntap have been removed); the player answers with
+    /// `GameAction::SelectCards { cards }` naming up to `max` members of `group`
+    /// to untap. The complement of the chosen set stays tapped. Enforcement in
+    /// `turns::execute_untap_with_choices` keeps a deterministic clamp purely as
+    /// a safety net for malformed selections.
+    ChooseUntapSubset {
+        player: PlayerId,
+        /// The over-cap eligible permanents the player chooses among. All are
+        /// tapped, controlled by `player`, match the cap's filter, and can
+        /// legally untap (no CantUntap). `group.len() > max`.
+        group: Vec<ObjectId>,
+        /// CR 502.3 cap: the player may untap at most this many of `group`.
+        max: usize,
+    },
     /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
     /// pay the optional "exert this creature as it attacks" cost on each
     /// attacker that has an exert-as-attack ability and hasn't been exerted this
@@ -4078,6 +4100,7 @@ impl WaitingFor {
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
+            WaitingFor::ChooseUntapSubset { .. } => "ChooseUntapSubset",
             WaitingFor::ExertChoice { .. } => "ExertChoice",
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
@@ -4214,6 +4237,7 @@ impl WaitingFor {
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::UntapChoice { player, .. }
+            | WaitingFor::ChooseUntapSubset { player, .. }
             | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
@@ -6359,6 +6383,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_step_trigger_resume: Option<Phase>,
 
+    /// CR 502.3: Transient untap-step carry. When a `MaxUntapPerType` cap
+    /// (Smoke / Stoic Angel / Damping Field) raises `WaitingFor::ChooseUntapSubset`,
+    /// the permanents the active player already chose not to untap (from the
+    /// preceding `UntapChoice` optional-decline prompt) are stashed here so the
+    /// subset resolution can fold the unchosen complement in alongside them when
+    /// it executes the untap. Cleared as soon as the subset prompt resolves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_untap_declines: Vec<ObjectId>,
+
     /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7004,6 +7037,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             deferred_step_trigger_resume: None,
+            pending_untap_declines: Vec::new(),
             current_trigger_event: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
@@ -8305,6 +8339,21 @@ mod tests {
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, deserialized);
         assert!(json.contains("\"EffectZoneChoice\""));
+    }
+
+    /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip
+    /// so the human-play transport can present it (and reload it) verbatim.
+    #[test]
+    fn choose_untap_subset_roundtrips() {
+        let wf = WaitingFor::ChooseUntapSubset {
+            player: PlayerId(0),
+            group: vec![ObjectId(2), ObjectId(3), ObjectId(4)],
+            max: 1,
+        };
+        let json = serde_json::to_string(&wf).unwrap();
+        let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
+        assert_eq!(wf, deserialized);
+        assert!(json.contains("\"ChooseUntapSubset\""));
     }
 
     // ---------------------------------------------------------------------

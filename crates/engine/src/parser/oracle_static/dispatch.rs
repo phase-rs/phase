@@ -39,6 +39,33 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 502.3: Trailing "during their untap step(s)" clause of the
+/// max-untap restriction (Smoke / Damping Field / Winter Orb class). The
+/// canonical printing uses the plural possessive "their untap steps", but the
+/// apostrophe and the singular form are admitted so the combinator covers
+/// reprints and the "during each player's untap step" wording without a flat
+/// alt of full sentences.
+fn parse_during_their_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            space1,
+            tag("during "),
+            alt((
+                tag("their"),
+                tag("each player's"),
+                tag("each player\u{2019}s"),
+            )),
+            space1,
+            tag("untap step"),
+            opt(tag("s")),
+            opt(tag(".")),
+            space0,
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -469,6 +496,37 @@ pub(crate) fn parse_static_line_inner(
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string()),
         );
+    }
+
+    // --- "Players can't untap more than one <type> during their untap steps." ---
+    // CR 502.3: Smoke / Damping Field / Imi Statue / Stoic Angel / Winter Orb
+    // class — a global cap on the untap turn-based action. The count and the
+    // permanent-type filter are parsed compositionally (number combinator +
+    // `parse_type_phrase`), so one branch covers every cap N and every
+    // permanent type (creature, artifact, nonbasic land, …). The cap rides
+    // inline on `StaticMode::MaxUntapPerType` because the restriction applies
+    // to whoever is the active player, not the source's controller.
+    if let Some(rest) = nom_tag_tp(&tp, "players can't untap more than ") {
+        // The cap count and the type filter are both case-insensitive
+        // (`parse_type_phrase` lowercases internally and produces a typed,
+        // name-free filter), so the lowercase remainder is the canonical input
+        // for the whole tail — no original-case offset arithmetic needed.
+        if let Ok((after_count, count)) = nom_primitives::parse_number(rest.lower) {
+            let (filter, remainder) = parse_type_phrase(after_count.trim_start());
+            // `remainder` is already lowercase, so the suffix combinator runs
+            // directly without the `nom_on_lower` case bridge.
+            let suffix_ok = parse_during_their_untap_step_suffix(remainder).is_ok();
+            // Require a real permanent-type filter (parse_type_phrase returns a
+            // typed filter for "creature"/"artifact"/"nonbasic land"); a bare
+            // generic permanent with no narrowing would over-broaden.
+            let has_type = matches!(&filter, TargetFilter::Typed(_));
+            if suffix_ok && has_type {
+                return Some(
+                    StaticDefinition::new(StaticMode::MaxUntapPerType { filter, max: count })
+                        .description(text.to_string()),
+                );
+            }
+        }
     }
 
     // --- "Untap all <type> you control during each other player's untap step." ---

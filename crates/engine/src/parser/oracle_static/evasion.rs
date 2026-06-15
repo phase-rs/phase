@@ -1217,6 +1217,23 @@ fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<StaticCondit
         }
         return None;
     }
+    // CR 509.1b: "can't be blocked unless it's attacking its owner [or a
+    // permanent its owner controls]" — conditional evasion gated on the
+    // recipient's attack target relative to its OWNER (CR 108.3). Express as
+    // CantBeBlocked + Not(RecipientAttackingOwnerTarget): unblockable EXCEPT when
+    // attacking owner / owner-controlled permanent. Must precede the generic
+    // "as long as …" condition fallthrough so the "unless" form is classified
+    // explicitly rather than mis-handled by the generic condition parser.
+    if let Some(after) = nom_tag_lower(rest, rest, " unless ") {
+        if let Some(target) = parse_block_unless_attacking_owner_nom(after) {
+            return Some((
+                StaticMode::CantBeBlocked,
+                Some(StaticCondition::Not {
+                    condition: Box::new(StaticCondition::RecipientAttackingOwnerTarget { target }),
+                }),
+            ));
+        }
+    }
     // Bare "can't be blocked".
     if rest.is_empty() {
         return Some((StaticMode::CantBeBlocked, None));
@@ -1225,6 +1242,36 @@ fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<StaticCondit
         return Some((StaticMode::CantBeBlocked, Some(condition)));
     }
     None
+}
+
+/// CR 509.1b + CR 506.2 + CR 108.3: classify the "unless it's attacking its
+/// owner [or a permanent its owner controls]" exception following
+/// "can't be blocked". Mirrors the attack-side owner-relative axis
+/// (`parse_cant_attack_rule_static_predicate_nom`). The longer
+/// `OwnerOrPlaneswalker` phrase is ordered before `Owner` (nom `alt` is
+/// leftmost-match). `tag_no_case` handles casing; the split path reconstructs
+/// the clause with an ASCII apostrophe (`try_split_and_cant_be_blocked`), so a
+/// single ASCII-apostrophe arm suffices. Returns `Some` only when the combinator
+/// consumes the whole tail — the parser IS the detector.
+fn parse_block_unless_attacking_owner_nom(
+    input: &str,
+) -> Option<crate::types::triggers::AttackTargetFilter> {
+    use crate::types::triggers::AttackTargetFilter;
+    let (rest, target) = alt((
+        value(
+            AttackTargetFilter::OwnerOrPlaneswalker,
+            tag_no_case::<_, _, OracleError<'_>>(
+                "it's attacking its owner or a permanent its owner controls",
+            ),
+        ),
+        value(
+            AttackTargetFilter::Owner,
+            tag_no_case::<_, _, OracleError<'_>>("it's attacking its owner"),
+        ),
+    ))
+    .parse(input)
+    .ok()?;
+    rest.trim().is_empty().then_some(target)
 }
 
 /// CR 509.1b: Attach a trailing "as long as …" condition to the evasion

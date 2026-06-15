@@ -70,4 +70,32 @@ describe("MenuSelect", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load deck..." }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
+
+  it("uses an anchored dropdown when menuLayout is dropdown, even on mobile", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(max-width: 819px)",
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+
+    render(
+      <MenuSelect
+        label="All types"
+        items={items}
+        onSelect={vi.fn()}
+        menuLayout="dropdown"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "All types" }));
+
+    const listbox = screen.getByRole("listbox");
+    expect(listbox).toBeInTheDocument();
+    expect(listbox.className).toContain("rounded-xl");
+    expect(listbox.className).not.toContain("rounded-t-2xl");
+    expect(screen.queryByRole("button", { name: "All types" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "All types" })).toHaveLength(1);
+
+    vi.unstubAllGlobals();
+  });
 });

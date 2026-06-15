@@ -832,6 +832,134 @@ fn cant_be_blocked_static_split_keeps_trailing_condition() {
     );
 }
 
+/// CR 509.1b + CR 506.2 + CR 108.3: The compound "+N/+N and can't be blocked
+/// unless it's attacking its owner or a permanent its owner controls" must
+/// decompose into BOTH the P/T grant AND a `CantBeBlocked` static whose
+/// condition is `Not(RecipientAttackingOwnerTarget { OwnerOrPlaneswalker })`,
+/// both sharing the enchanted-creature filter. (Become the Pilot.)
+#[test]
+fn cant_be_blocked_static_split_unless_attacking_owner_or_permanent() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked unless it's attacking its owner or a permanent its owner controls.",
+    );
+
+    // Evasion companion: CantBeBlocked gated on Not(RecipientAttackingOwnerTarget).
+    let evasion = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeBlocked)
+        .expect("expected split CantBeBlocked static");
+    assert!(
+        matches!(
+            evasion.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    StaticCondition::RecipientAttackingOwnerTarget {
+                        target: AttackTargetFilter::OwnerOrPlaneswalker
+                    }
+                )
+        ),
+        "expected Not(RecipientAttackingOwnerTarget {{ OwnerOrPlaneswalker }}), got {:?}",
+        evasion.condition
+    );
+
+    // The +2/+2 grant is preserved as a continuous P/T modification.
+    let pt = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("P/T grant must be preserved");
+    assert!(
+        pt.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { value: 2 }
+                | ContinuousModification::AddToughness { value: 2 }
+        )),
+        "expected AddPower(2)/AddToughness(2), got {:?}",
+        pt.modifications
+    );
+
+    // Both statics share the same EnchantedBy-creature affected filter.
+    let enchanted_by = |d: &StaticDefinition| {
+        matches!(
+            &d.affected,
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::EnchantedBy)
+        )
+    };
+    assert!(
+        enchanted_by(evasion) && enchanted_by(pt),
+        "both statics must share the EnchantedBy filter"
+    );
+
+    // No condition was dropped into an Unrecognized/None bucket.
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.condition, Some(StaticCondition::Unrecognized { .. }))),
+        "no Unrecognized condition should be emitted, got {:?}",
+        defs.iter().map(|d| &d.condition).collect::<Vec<_>>()
+    );
+}
+
+/// CR 509.1b + CR 506.2: The bare "unless it's attacking its owner" form (no
+/// "or a permanent its owner controls" tail) yields the `Owner` parameter.
+#[test]
+fn cant_be_blocked_static_split_unless_attacking_owner_bare() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked unless it's attacking its owner.",
+    );
+    let evasion = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeBlocked)
+        .expect("expected split CantBeBlocked static");
+    assert!(
+        matches!(
+            evasion.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    StaticCondition::RecipientAttackingOwnerTarget {
+                        target: AttackTargetFilter::Owner
+                    }
+                )
+        ),
+        "expected Not(RecipientAttackingOwnerTarget {{ Owner }}), got {:?}",
+        evasion.condition
+    );
+}
+
+/// CR 509.1b: Negative guard — an unrelated "unless" tail must NOT be stolen by
+/// the new owner-attack arm; the "as long as" condition path still wins for the
+/// Gate condition card, so the new arm returns `None` for non-owner tails.
+#[test]
+fn cant_be_blocked_unless_owner_arm_does_not_steal_other_conditions() {
+    // The "as long as you control a Gate" condition still classifies via its own
+    // arm — proving the owner-attack arm is scoped to its exact phrase.
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked as long as you control a Gate.",
+    );
+    let evasion = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeBlocked)
+        .expect("expected split CantBeBlocked static");
+    assert!(
+        !matches!(
+            evasion.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    StaticCondition::RecipientAttackingOwnerTarget { .. }
+                )
+        ),
+        "owner-attack arm must not steal the Gate condition, got {:?}",
+        evasion.condition
+    );
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]
@@ -5207,6 +5335,58 @@ fn static_you_may_choose_not_to_untap_self() {
             .unwrap();
     assert_eq!(def.mode, StaticMode::MayChooseNotToUntap);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+// CR 502.3: Smoke / Stoic Angel — "Players can't untap more than one creature
+// during their untap steps." Lowers to a creature-filtered MaxUntapPerType cap.
+#[test]
+fn static_max_untap_one_creature() {
+    let def =
+        parse_static_line("Players can't untap more than one creature during their untap steps.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            max: 1,
+        }
+    );
+}
+
+// CR 502.3: Damping Field / Imi Statue — artifact form.
+#[test]
+fn static_max_untap_one_artifact() {
+    let def =
+        parse_static_line("Players can't untap more than one artifact during their untap steps.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            max: 1,
+        }
+    );
+}
+
+// CR 502.3 + CR 205.4a: Winter Orb family — nonbasic-land form parses the
+// "nonbasic" supertype-negation property, proving the type filter is general.
+#[test]
+fn static_max_untap_one_nonbasic_land() {
+    let def = parse_static_line(
+        "Players can't untap more than one nonbasic land during their untap steps.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                FilterProp::NotSupertype {
+                    value: crate::types::card_type::Supertype::Basic,
+                }
+            ])),
+            max: 1,
+        }
+    );
 }
 
 #[test]

@@ -72,6 +72,12 @@ export interface MenuSelectProps {
   ariaLabel?: string;
   /** Highlights the matching option in the open menu. */
   selectedValue?: string;
+  /**
+   * `auto` (default): bottom sheet below 820px, anchored dropdown at wider
+   * widths. `dropdown`: always anchor below/above the trigger like a native
+   * select — use inside scrollable panels (e.g. deck-builder filters).
+   */
+  menuLayout?: "auto" | "dropdown";
   /** Class on the outer relative wrapper (e.g. `max-w-[8rem] shrink-0`). */
   wrapperClassName?: string;
   /** Class on the trigger button. */
@@ -120,11 +126,13 @@ export function MenuSelect({
   disabled = false,
   ariaLabel,
   selectedValue,
+  menuLayout = "auto",
   wrapperClassName = "",
   className = "",
 }: MenuSelectProps) {
   const listboxId = useId();
   const mobileSheet = useMobileSheetLayout();
+  const useBottomSheet = menuLayout === "auto" && mobileSheet;
   const [open, setOpen] = useState(false);
   const [minWidthPx, setMinWidthPx] = useState<number | undefined>(undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -160,7 +168,7 @@ export function MenuSelect({
   }, [label, allItems]);
 
   const updatePosition = useCallback(() => {
-    if (mobileSheet) return;
+    if (useBottomSheet) return;
     const trigger = triggerRef.current;
     if (!trigger) return;
 
@@ -188,7 +196,7 @@ export function MenuSelect({
       top: openUp ? "auto" : rect.bottom + MENU_GAP_PX,
       bottom: openUp ? window.innerHeight - rect.top + MENU_GAP_PX : "auto",
     });
-  }, [mobileSheet]);
+  }, [useBottomSheet]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -202,7 +210,7 @@ export function MenuSelect({
         : null;
     (selectedOption ?? menu?.querySelector<HTMLButtonElement>('[role="option"]'))?.focus();
     selectedOption?.scrollIntoView({ block: "nearest" });
-  }, [open, selectedValue, updatePosition, mobileSheet]);
+  }, [open, selectedValue, updatePosition, useBottomSheet]);
 
   useEffect(() => {
     if (!open) return;
@@ -258,7 +266,7 @@ export function MenuSelect({
         parent.removeEventListener("scroll", handleScroll);
       });
     };
-  }, [open, updatePosition, mobileSheet]);
+  }, [open, updatePosition, useBottomSheet]);
 
   const renderOption = (item: MenuSelectItem) => (
     <button
@@ -320,7 +328,7 @@ export function MenuSelect({
       {open &&
         createPortal(
           <>
-            {mobileSheet && (
+            {useBottomSheet && (
               <button
                 type="button"
                 aria-label={ariaLabel ?? label}
@@ -335,13 +343,13 @@ export function MenuSelect({
               aria-label={ariaLabel ?? label}
               className={[
                 "fixed z-[120] flex flex-col overflow-x-hidden overflow-y-auto overscroll-contain border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar",
-                mobileSheet
+                useBottomSheet
                   ? "inset-x-0 bottom-[calc(76px+env(safe-area-inset-bottom))] max-h-[min(70dvh,calc(100dvh-76px-env(safe-area-inset-bottom)-1rem))] rounded-t-2xl rounded-b-none border-b-0"
                   : "rounded-xl",
               ].join(" ")}
               onWheel={(event) => event.stopPropagation()}
               style={
-                mobileSheet
+                useBottomSheet
                   ? undefined
                   : {
                       top: menuStyle.top,

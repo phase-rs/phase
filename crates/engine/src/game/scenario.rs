@@ -1444,6 +1444,7 @@ impl GameRunner {
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
+            WaitingFor::ChooseUntapSubset { .. } => "ChooseUntapSubset",
             WaitingFor::ExertChoice { .. } => "ExertChoice",
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",

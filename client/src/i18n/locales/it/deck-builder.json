@@ -5,6 +5,8 @@
     "reset": "Reimposta",
     "textPlaceholder": "Cerca carte...",
     "allTypes": "Tutti i tipi",
+    "cardType": "Tipo di carta",
+    "browseFormatFilter": "Legale nel formato",
     "cmcMax": "CMC max:",
     "sets": "Set",
     "addSetPlaceholder": "Aggiungi codice set...",
