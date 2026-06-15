@@ -778,12 +778,46 @@ fn parse_enchanted_land_destroy_sacrifice_replacement(
     if effect_text.is_empty() {
         return None;
     }
+    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    bind_enchanted_land_grant_to_replaced_object(&mut execute);
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::Destroy)
             .valid_card(TargetFilter::AttachedTo)
-            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .execute(execute)
             .description(original_text.to_string()),
     )
+}
+
+fn bind_enchanted_land_grant_to_replaced_object(def: &mut AbilityDefinition) {
+    // CR 614.1a + CR 608.2c: in "If enchanted land would be destroyed, instead
+    // sacrifice ~ and that land gains ...", "that land" refers to the object
+    // whose destruction is being replaced, not to every land.
+    if let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &mut *def.effect
+    {
+        let mut binds_replaced_land = false;
+        for static_ability in static_abilities {
+            if matches!(
+                static_ability.affected.as_ref(),
+                Some(TargetFilter::Typed(filter))
+                    if filter.type_filters == [TypeFilter::Land]
+            ) {
+                static_ability.affected = Some(TargetFilter::ParentTarget);
+                binds_replaced_land = true;
+            }
+        }
+        if binds_replaced_land {
+            *target = None;
+        }
+    }
+
+    if let Some(sub_ability) = def.sub_ability.as_mut() {
+        bind_enchanted_land_grant_to_replaced_object(sub_ability);
+    }
 }
 
 /// CR 705.1 + CR 614.1a: Krark's Thumb — "If you would flip a coin, instead flip
