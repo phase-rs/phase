@@ -80,6 +80,7 @@ mod giada_angel_counters;
 mod giggling_skitterspike_issue_890;
 mod gimbal_gremlin_prodigy;
 mod gluntch_choose_player_chain;
+mod good_king_mog_xii_chapter_iv_588;
 mod gran_gran_integration;
 mod greater_good_activation;
 mod green_suns_zenith_regression;

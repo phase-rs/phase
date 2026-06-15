@@ -8839,6 +8839,25 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    /// Issue #588 (Summon: Good King Mog XII, chapter IV): "each other Moogle
+    /// you control" must retain subtype + controller + Another. When "Moogle"
+    /// was missing from SUBTYPES the filter collapsed to every other permanent.
+    #[test]
+    fn each_other_moogle_you_control_scopes_filter_issue_588() {
+        let (filter, rest) = parse_target("each other Moogle you control");
+        assert_eq!(rest, "");
+        let tf = typed_leg(&filter).expect("expected Typed filter");
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Moogle")),
+            "Moogle subtype must be captured, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
+    }
+
     /// Sibling coverage: bare "creatures target player controls" without
     /// "each other" prefix. Confirms the controller parser is independent of
     /// modifier words.

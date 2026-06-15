@@ -29454,6 +29454,34 @@ mod tests {
         );
     }
 
+    /// Issue #588 (Summon: Good King Mog XII, chapter IV): the mass counter
+    /// placement must stay scoped to other Moogles you control — not every
+    /// other permanent. Regression when "Moogle" was absent from SUBTYPES.
+    #[test]
+    fn put_counter_all_each_other_moogle_you_control_issue_588() {
+        let e = parse_effect("put two +1/+1 counters on each other moogle you control");
+        let Effect::PutCounterAll {
+            counter_type,
+            count,
+            target,
+        } = e
+        else {
+            panic!("expected PutCounterAll, got {e:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+        let tf = typed_leg(&target).expect("target should be Typed");
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Moogle")),
+            "Moogle subtype must be captured, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
+    }
+
     #[test]
     fn effect_pay_life_cost() {
         let e = parse_effect("pay 3 life");
