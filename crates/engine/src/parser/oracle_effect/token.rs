@@ -134,7 +134,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         .map(|(_, rest)| rest)
         .unwrap_or(&text)
         .trim();
-    let token = parse_token_description(after)?;
+    let token = parse_token_description_with_context(after, ctx)?;
     Some(Effect::Token {
         name: token.name,
         power: token.power.unwrap_or(PtValue::Fixed(0)),
@@ -266,6 +266,13 @@ fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
 }
 
 pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
+    parse_token_description_with_context(text, &ParseContext::default())
+}
+
+fn parse_token_description_with_context(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<TokenDescription> {
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 
@@ -385,8 +392,37 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     if is_all_colors {
         colors = ManaColor::ALL.to_vec();
     }
-    let keywords = parse_token_keyword_clause(suffix);
-    let (mut name, types) = parse_token_identity(descriptor)?;
+    let mut keywords = parse_token_keyword_clause(suffix);
+    let (mut name, types) = parse_token_identity(descriptor, ctx.card_name.as_deref())?;
+
+    // CR 111.4 + CR 111.1: When the token is a registry-defined named token
+    // (descriptor is a bare catalog name such as "Vibranium" / "Mutavault" with
+    // no inline core type), fill its catalog body characteristics — power,
+    // toughness, colors, keywords — that the effect text didn't already
+    // specify. CR 111.10 lets the creating effect modify/add to predefined
+    // characteristics, so inline P/T, colors, and keywords from the Oracle text
+    // take precedence and are never overwritten. The lookup keys on the bare
+    // descriptor, so type-bearing descriptors ("Soldier creature") never match
+    // a catalog `display_name` and are left untouched.
+    if let Some(body) = crate::game::token_presets::known_token_body_by_name_for_source(
+        descriptor,
+        ctx.card_name.as_deref(),
+    ) {
+        if power.is_none() {
+            power = body.power.map(PtValue::Fixed);
+        }
+        if toughness.is_none() {
+            toughness = body.toughness.map(PtValue::Fixed);
+        }
+        if colors.is_empty() {
+            colors = body.colors.clone();
+        }
+        for keyword in &body.keywords {
+            if !keywords.contains(keyword) {
+                keywords.push(keyword.clone());
+            }
+        }
+    }
 
     if let Some(name_override) = leading_name.or(name_override) {
         name = name_override;
@@ -932,7 +968,10 @@ fn extract_token_pt_expression(text: &str) -> Option<String> {
     None
 }
 
-fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+fn parse_token_identity(
+    descriptor: &str,
+    source_name: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
 
@@ -948,7 +987,7 @@ fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
     }
 
     if core_types.is_empty() {
-        return known_named_token_identity(descriptor);
+        return known_named_token_identity(descriptor, source_name);
     }
 
     let name = if subtypes.is_empty() {
@@ -965,7 +1004,10 @@ fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
     Some((name, types))
 }
 
-fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+fn known_named_token_identity(
+    descriptor: &str,
+    source_name: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let lower = descriptor.trim().to_lowercase();
 
     // CR 303.7: Role tokens are Enchantment -- Aura Role tokens.
@@ -985,13 +1027,42 @@ fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)>
         "gold" => "Gold",
         "lander" => "Lander",
         "mutagen" => "Mutagen",
-        _ => return None,
+        // CR 111.4: Any other named token (Vibranium, Mutavault, …) whose
+        // identity is catalogued in the predefined-token registry resolves to
+        // that catalog body. This generalizes the hardcoded predefined-subtype
+        // list above to the entire registry-defined named-token class instead
+        // of an allowlist that drops every uncatalogued name to Unimplemented.
+        // The simple-artifact predefined subtypes above are kept inline so
+        // their canonical name/type-line is independent of catalog presence.
+        _ => return known_registry_token_identity(descriptor, source_name),
     };
 
     Some((
         name.to_string(),
         vec!["Artifact".to_string(), name.to_string()],
     ))
+}
+
+/// CR 111.4 + CR 111.1: Resolve a named token's `(display name, type strings)`
+/// from the predefined-token registry (`known-tokens.toml`). The type string
+/// list follows the parser convention used by [`parse_token_identity`]: core
+/// types first (in catalog order), then subtypes. Returns `None` for names not
+/// present in the catalog, leaving the token unparsed (Unimplemented) as before.
+fn known_registry_token_identity(
+    descriptor: &str,
+    source_name: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    let body =
+        crate::game::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
+    let mut types: Vec<String> = body
+        .core_types
+        .iter()
+        .map(|core| core.to_string())
+        .collect();
+    for subtype in &body.subtypes {
+        push_unique_string(&mut types, subtype);
+    }
+    Some((body.display_name.clone(), types))
 }
 
 /// CR 303.7: Role tokens are predefined Enchantment -- Aura Role tokens with
@@ -1955,5 +2026,138 @@ mod tests {
             "X must count controlled creatures, got {:?}",
             tf.type_filters
         );
+    }
+
+    /// CR 111.4 + CR 111.1: A registry-defined named token (here the Mutavault
+    /// land token) parses to a complete `Effect::Token` sourced from the
+    /// predefined-token catalog, instead of dropping to `Effect::Unimplemented`.
+    /// Verifies the registry building block (`known_token_body_by_name`) covers
+    /// the whole class of catalog named tokens, not a hardcoded allowlist.
+    #[test]
+    fn registry_named_land_token_parses_with_tapped() {
+        let text = "Create a tapped Mutavault token.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("registry named token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            tapped,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Mutavault");
+        assert_eq!(types, vec!["Land".to_string()]);
+        // CR 110.5b + CR 603.6d: the leading "tapped " word still flows through.
+        assert!(tapped, "leading 'tapped' must set tapped=true");
+        // CR 208.3: a noncreature (Land) token has no power/toughness; the
+        // create-token default of 0/0 applies.
+        assert_eq!(power, PtValue::Fixed(0));
+        assert_eq!(toughness, PtValue::Fixed(0));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+    }
+
+    /// CR 111.4 + CR 111.1 + CR 208.1: A registry-defined named *creature* token
+    /// (Ajani's Pridemate) fills its catalog power/toughness, color, and types
+    /// from the registry body when the Oracle text omits them. Previously the
+    /// missing P/T forced the parse to bail (a creature with no P/T returns
+    /// None) and the card dropped to Unimplemented.
+    #[test]
+    fn registry_named_creature_token_fills_body_from_catalog() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create an Ajani's Pridemate token.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("registry named creature token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Ajani's Pridemate");
+        assert!(
+            types.contains(&"Creature".to_string())
+                && types.contains(&"Cat".to_string())
+                && types.contains(&"Soldier".to_string()),
+            "catalog core type + subtypes must flow through, got {types:?}"
+        );
+        // CR 111.10: catalog characteristics fill in for text the effect omitted.
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(2));
+        assert_eq!(colors, vec![ManaColor::White]);
+    }
+
+    /// CR 111.1 + CR 111.4 + CR 208.1: ordinary subtype display names are not
+    /// token identities when the registry has multiple distinct bodies for the
+    /// same name. The Oracle text must supply the missing body characteristics
+    /// ("2/2 green Bear creature", "4/4 white Angel creature with flying", etc.)
+    /// instead of inheriting whichever catalog entry appears first.
+    #[test]
+    fn ambiguous_registry_subtype_name_does_not_guess_body() {
+        use crate::types::mana::ManaColor;
+
+        assert!(
+            crate::game::token_presets::known_token_body_by_name("Bear").is_none(),
+            "Bear has multiple catalog bodies and must not pick the first one"
+        );
+
+        let text = "Create a Bear token.";
+        assert!(
+            try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default()).is_none(),
+            "a bare ambiguous subtype name must remain unsupported until Oracle text supplies P/T"
+        );
+
+        let mut ctx = ParseContext {
+            card_name: Some("The Earth King".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("source-scoped Bear token must resolve through the catalog");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Bear");
+        assert_eq!(types, vec!["Creature".to_string(), "Bear".to_string()]);
+        assert_eq!(power, PtValue::Fixed(4));
+        assert_eq!(toughness, PtValue::Fixed(4));
+        assert_eq!(colors, vec![ManaColor::Green]);
+    }
+
+    /// CR 111.10: The hardcoded predefined-subtype tokens (Treasure, Food, …)
+    /// must keep resolving to their canonical artifact identity even though the
+    /// registry fallthrough was added — no regression for the existing class.
+    #[test]
+    fn predefined_subtype_tokens_still_resolve() {
+        for (descriptor, expected) in [
+            (
+                "Treasure",
+                vec!["Artifact".to_string(), "Treasure".to_string()],
+            ),
+            ("Food", vec!["Artifact".to_string(), "Food".to_string()]),
+            ("Clue", vec!["Artifact".to_string(), "Clue".to_string()]),
+        ] {
+            let (name, types) = known_named_token_identity(descriptor, None)
+                .expect("predefined subtype must resolve");
+            assert_eq!(name, descriptor);
+            assert_eq!(types, expected);
+        }
     }
 }
