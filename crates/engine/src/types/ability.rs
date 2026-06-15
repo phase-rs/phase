@@ -221,6 +221,8 @@ pub enum ChoiceType {
     },
     /// "Choose a player" — selects any player in the game.
     Player,
+    /// "Choose an object" — selects a game object (e.g., "choose a commander").
+    Object,
     /// "Choose two colors" — selects two distinct mana colors.
     TwoColors,
     /// "Choose a word" — names any English word (Un-set and silver-border cards).
@@ -325,12 +327,13 @@ impl Serialize for ChoiceType {
                 }
             },
             Self::Player => serializer.serialize_unit_variant("ChoiceType", 10, "Player"),
-            Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
-            Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
-            Self::Artist => serializer.serialize_unit_variant("ChoiceType", 13, "Artist"),
+            Self::Object => serializer.serialize_unit_variant("ChoiceType", 11, "Object"),
+            Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 12, "TwoColors"),
+            Self::Word => serializer.serialize_unit_variant("ChoiceType", 13, "Word"),
+            Self::Artist => serializer.serialize_unit_variant("ChoiceType", 14, "Artist"),
             Self::Keyword { options } => {
                 let mut variant =
-                    serializer.serialize_struct_variant("ChoiceType", 14, "Keyword", 1)?;
+                    serializer.serialize_struct_variant("ChoiceType", 15, "Keyword", 1)?;
                 variant.serialize_field("options", options)?;
                 variant.end()
             }
@@ -686,6 +689,8 @@ pub enum ChosenAttribute {
     Number(u8),
     /// Stores the chosen opponent/player ID (CR 800.4a).
     Player(PlayerId),
+    /// Stores a chosen object ID (e.g., "choose a commander" for Stinging Study).
+    Object(ObjectId),
     /// Stores two chosen colors as a pair.
     TwoColors([ManaColor; 2]),
     /// CR 702.104a + CR 702.104b: Records whether the opponent chosen for the
@@ -721,6 +726,8 @@ impl ChosenAttribute {
             Self::Number(_) => ChoiceType::NumberRange { min: 0, max: 20 },
             // Player covers both Player and Opponent choice types
             Self::Player(_) => ChoiceType::Player,
+            // Object choice (e.g., "choose a commander")
+            Self::Object(_) => ChoiceType::Object,
             Self::TwoColors(_) => ChoiceType::TwoColors,
             // CR 702.104: Tribute outcome uses a dedicated prompt type rather than
             // a NamedChoice (two fixed labels: Paid / Declined). Classify under the
@@ -757,6 +764,7 @@ impl ChosenAttribute {
             ChoiceValue::OddOrEven(parity) => Some(Self::OddOrEven(parity)),
             ChoiceValue::CardName(card_name) => Some(Self::CardName(card_name)),
             ChoiceValue::Player(id) => Some(Self::Player(id)),
+            ChoiceValue::Object(id) => Some(Self::Object(id)),
             ChoiceValue::TwoColors(colors) => Some(Self::TwoColors(colors)),
             ChoiceValue::Number(n) => Some(Self::Number(n)),
             ChoiceValue::Keyword(keyword) => Some(Self::Keyword(keyword)),
@@ -783,6 +791,7 @@ pub enum ChoiceValue {
     Label(String),
     LandType(String),
     Player(PlayerId),
+    Object(ObjectId),
     TwoColors([ManaColor; 2]),
     /// CR 608.2d: typed-keyword choice from a `ChoiceType::Keyword` option
     /// list (Urborg / Walking Sponge). Persisted into the source's
@@ -813,6 +822,11 @@ impl ChoiceValue {
                 .parse::<u8>()
                 .ok()
                 .map(|id| Self::Player(PlayerId(id))),
+            // Parse object ID from string for object choices (e.g., "choose a commander")
+            ChoiceType::Object => value
+                .parse::<u64>()
+                .ok()
+                .map(|id| Self::Object(ObjectId(id))),
             ChoiceType::TwoColors => {
                 let (a, b) = value.split_once(", ")?;
                 let c1 = a.parse::<ManaColor>().ok()?;
@@ -3829,6 +3843,15 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
+    /// CR 608.2d: Property of an object chosen during resolution.
+    /// Used for "choose a commander, where X is its mana value" patterns.
+    /// The resolver prompts the player to choose an object matching `selection_filter`,
+    /// then returns the requested property of that chosen object.
+    ChosenObject {
+        property: ObjectProperty,
+        /// Filter used to select the object (e.g., commander in battlefield/command zone)
+        selection_filter: TargetFilter,
+    },
     /// CR 508.1a: Number of creatures that attacked this turn, scoped by
     /// `scope` and optionally narrowed by `filter` (e.g. "attacked with a
     /// token / a commander / a Wolf"). `Controller` + `filter: None` counts all
