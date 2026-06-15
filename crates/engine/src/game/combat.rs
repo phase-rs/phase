@@ -619,6 +619,18 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
         .is_some()
 }
 
+/// CR 509.1b + CR 609.4 + CR 702.28b: A creature without shadow normally can't
+/// block a creature with shadow. This returns `true` when the blocker has a
+/// functioning `CanBlockShadow` static — "~ can block creatures with shadow as
+/// though they didn't have shadow" / "as though it had shadow" — which lifts the
+/// shadow blocker-side restriction for that creature only (Heartwood Dryad, Wall
+/// of Diffusion). Mirrors the `CanAttackWithDefender` lookup: the static is
+/// `affected: SelfRef`, so it is read off the blocker's own active statics.
+fn blocker_can_block_shadow(state: &GameState, blocker: &GameObject) -> bool {
+    super::functioning_abilities::active_static_definitions(state, blocker)
+        .any(|sd| sd.mode == StaticMode::CanBlockShadow)
+}
+
 /// CR 509.1b: Static abilities on the blocker (or on another source whose
 /// `affected` filter matches the blocker) that restrict which attackers it
 /// may block — e.g. "This creature can block only creatures with flying."
@@ -906,7 +918,9 @@ pub fn validate_blockers_for_player(
         // and cannot block creatures without shadow.
         let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
         let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
-        if attacker_has_shadow && !blocker_has_shadow {
+        // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
+        // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
+        if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
             return Err(format!(
                 "{:?} cannot block {:?} (shadow can only be blocked by shadow)",
                 blocker_id, attacker_id
@@ -2704,7 +2718,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }
     let attacker_has_shadow = attacker.has_keyword(&Keyword::Shadow);
     let blocker_has_shadow = blocker.has_keyword(&Keyword::Shadow);
-    if attacker_has_shadow && !blocker_has_shadow {
+    // CR 509.1b + CR 609.4 + CR 702.28b: a `CanBlockShadow` static lifts the
+    // shadow restriction for this blocker (Heartwood Dryad, Wall of Diffusion).
+    if attacker_has_shadow && !blocker_has_shadow && !blocker_can_block_shadow(state, blocker) {
         return false;
     }
     if !attacker_has_shadow && blocker_has_shadow {
@@ -4350,6 +4366,55 @@ mod tests {
 
         // Shadow creature can't block non-shadow attacker
         assert!(validate_blockers(&state, &[(shadow_blocker, attacker)]).is_err());
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.28b: Heartwood Dryad / Wall of Diffusion —
+    /// a non-shadow creature with `CanBlockShadow` may block a shadow attacker.
+    /// Discriminating: an identical non-shadow creature WITHOUT the static cannot.
+    #[test]
+    fn can_block_shadow_static_lets_non_shadow_block_shadow() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Shadow A", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+
+        // Plain non-shadow blocker: cannot block the shadow attacker.
+        let plain_blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        assert!(validate_blockers(&state, &[(plain_blocker, attacker)]).is_err());
+        assert!(!can_block_pair(&state, plain_blocker, attacker));
+
+        // Non-shadow blocker with CanBlockShadow: now allowed by both seams.
+        let dryad = create_creature(&mut state, PlayerId(1), "Heartwood Dryad", 2, 2);
+        state
+            .objects
+            .get_mut(&dryad)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBlockShadow).affected(TargetFilter::SelfRef),
+            );
+        assert!(validate_blockers(&state, &[(dryad, attacker)]).is_ok());
+        assert!(can_block_pair(&state, dryad, attacker));
+
+        // The permission does NOT make the Dryad itself blockable-by-anything or
+        // change the non-shadow attacker symmetry: a shadow blocker still can't
+        // block a non-shadow attacker (the other CR 702.28b half is untouched).
+        let normal_attacker = create_creature(&mut state, PlayerId(0), "Grizzly", 2, 2);
+        let shadow_blocker = create_creature(&mut state, PlayerId(1), "Shadow B", 2, 2);
+        state
+            .objects
+            .get_mut(&shadow_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Shadow);
+        assert!(validate_blockers(&state, &[(shadow_blocker, normal_attacker)]).is_err());
     }
 
     #[test]

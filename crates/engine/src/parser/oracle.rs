@@ -16502,6 +16502,35 @@ mod tests {
     }
 
     /// CR 702.94a + CR 400.3: End-to-end reproduction of Sliver Weftwinder's
+    /// CR 509.1b + CR 702.28b: both shadow-block cards reach a `CanBlockShadow`
+    /// static through the full pipeline (card-name → `~` normalization included),
+    /// instead of falling to `Effect::Unimplemented`.
+    #[test]
+    fn block_shadow_cards_reach_can_block_shadow_static() {
+        for (oracle, name) in [
+            (
+                "Heartwood Dryad can block creatures with shadow as though they didn't have shadow.",
+                "Heartwood Dryad",
+            ),
+            (
+                "Wall of Diffusion can block creatures with shadow as though it had shadow.",
+                "Wall of Diffusion",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], &["Creature"], &[]);
+            assert!(
+                parsed
+                    .statics
+                    .iter()
+                    .any(|s| s.mode == StaticMode::CanBlockShadow
+                        && s.affected == Some(TargetFilter::SelfRef)),
+                "{name}: expected a SelfRef CanBlockShadow static, got statics={:?}, abilities={:?}",
+                parsed.statics,
+                parsed.abilities,
+            );
+        }
+    }
+
     /// hand-grant line through the full `parse_oracle_text` pipeline.
     #[test]
     fn hand_grant_reaches_statics_through_full_pipeline() {

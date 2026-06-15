@@ -1339,6 +1339,21 @@ pub enum StaticMode {
     /// CR 602.5a activation restriction is lifted, combat attacker validation
     /// (CR 508.1a) is untouched. Canonical card: Tyvar, Jubilant Brawler.
     CanActivateAbilitiesAsThoughHaste,
+    /// CR 509.1b + CR 609.4 + CR 702.28b: Per-source block permission that lifts
+    /// the shadow blocker-side restriction for the affected creature only — it may
+    /// block creatures with shadow despite not having shadow itself. Shadow is the
+    /// unique evasion keyword (CR 702.28b) with a symmetric "without-shadow can't
+    /// block with-shadow" pairing, so this is keyword-specific (mirrors
+    /// `CanAttackWithDefender`) rather than a generic keyword-parameterized form,
+    /// which would cross keyword CR sections with distinct runtime resolvers.
+    ///
+    /// Captures both printed phrasings of the same CR 509.1b outcome: "can block
+    /// creatures with shadow as though they didn't have shadow" (Heartwood Dryad)
+    /// and "can block creatures with shadow as though it had shadow" (Wall of
+    /// Diffusion). `affected: SelfRef` (per-source, not the global rule
+    /// modification `IgnoreLandwalkForBlocking` uses). Enforced inside the shadow
+    /// block-legality seam in `combat.rs`, not as a layer-6 keyword grant.
+    CanBlockShadow,
     /// CR 510.1a: This creature assigns no combat damage.
     /// Used for creatures like Ornithopter of Paradise and various Walls that can
     /// attack/block but deal 0 combat damage.
@@ -1598,6 +1613,7 @@ impl StaticMode {
             | StaticMode::CanAttackWithDefender
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::CanBlockShadow
             | StaticMode::AssignNoCombatDamage
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
             | StaticMode::EntersWithAdditionalCounters { .. }
@@ -1882,6 +1898,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 write!(f, "CanActivateAbilitiesAsThoughHaste")
             }
+            StaticMode::CanBlockShadow => write!(f, "CanBlockShadow"),
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
@@ -2215,6 +2232,7 @@ impl FromStr for StaticMode {
                 StaticMode::IgnoreLandwalkForBlocking { qualifier: None }
             }
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
+            "CanBlockShadow" => StaticMode::CanBlockShadow,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
