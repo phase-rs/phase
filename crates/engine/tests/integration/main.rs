@@ -210,6 +210,7 @@ mod issue_2943_kayas_wrath;
 mod issue_3127_reveal_otherwise_graveyard;
 mod issue_3321_volcanic_spite_optional;
 mod issue_3322_airbend_owner_cast;
+mod issue_3323_nexus_of_fate_extra_turn;
 mod issue_3324_haunted_one;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
