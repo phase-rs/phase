@@ -175,7 +175,9 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // a parent target. Placed after longer "that ..." phrases so
             // longest-match-first dispatch is preserved.
             value(TargetFilter::TriggeringSource, tag("that creature")),
-            // CR 506.3d: "defending player" — the player being attacked.
+            // CR 508.5 / CR 508.5a: "defending player" — the player (or the
+            // protector of the battle / controller of the planeswalker) that the
+            // attacking creature is attacking.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
         ))
         .parse(input)
@@ -2292,6 +2294,33 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += counters_offset + (remaining_counters.len() - rest.len());
     }
 
+    // CR 201.2a + CR 201.4: "<type-phrase> with the chosen name" / "<type-phrase>
+    // with a name chosen for ~" — restrict the object class to objects whose name
+    // equals the source's ChosenAttribute::CardName (bound by a preceding
+    // Effect::Choose { CardName, persist: true }, e.g. Day of the Moon's "Choose
+    // a creature card name, then goad all creatures with a name chosen for this
+    // enchantment"). The self-reference noun ("this enchantment"/"this permanent"
+    // /...) is normalized to `~` before parsing (SELF_REF_TYPE_PHRASES in
+    // oracle_util.rs), so every noun variant collapses to the single canonical
+    // form "with a name chosen for ~" — matching `~` is both correct and verb-/
+    // noun-agnostic. Both surface forms are CR-201.2a name-match synonyms and
+    // lower identically to a HasChosenName leg. Mirrors the `exiled_by_source`
+    // recognizer above: a pos-tracked boolean wrapped into TargetFilter::And at
+    // end-of-function. The static-line analogue ("Spells with the chosen name
+    // can't be cast") lives in oracle_static/shared.rs::parse_continuous_subject_filter.
+    let mut has_chosen_name = false;
+    let remaining_chosen = lower[pos..].trim_start();
+    let chosen_offset = lower[pos..].len() - remaining_chosen.len();
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("with the chosen name"),
+        tag::<_, _, OracleError<'_>>("with a name chosen for ~"),
+    ))
+    .parse(remaining_chosen)
+    {
+        has_chosen_name = true;
+        pos += chosen_offset + (remaining_chosen.len() - rest.len());
+    }
+
     // CR 608.2d: "of their choice" / "of his or her choice" — informational qualifier
     // on opponent-choice effects. The actual choice is handled by the WaitingFor state machine.
     let remaining_choice = lower[pos..].trim_start();
@@ -2446,6 +2475,19 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let filter = if exiled_by_source {
         TargetFilter::And {
             filters: vec![filter, TargetFilter::ExiledBySource],
+        }
+    } else {
+        filter
+    };
+
+    // CR 201.2a: Compose the typed filter with the chosen-name constraint when
+    // the suffix was present. Runtime And-eval requires every inner filter to
+    // match (game/filter.rs line 1464/1782); the HasChosenName arm
+    // (game/filter.rs line 1604) compares the object's name to the source's
+    // ChosenAttribute::CardName.
+    let filter = if has_chosen_name {
+        TargetFilter::And {
+            filters: vec![filter, TargetFilter::HasChosenName],
         }
     } else {
         filter
@@ -5314,6 +5356,8 @@ enum ZoneQual {
     Opponent,
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
+    /// "target player's " — produces `Owned{TargetPlayer}`.
+    TargetPlayer,
     /// "their " — produces `Owned{ScopedPlayer}`; in an each-player iteration
     /// the third-person possessive binds to the iterated player.
     Their,
@@ -5368,6 +5412,8 @@ pub(crate) fn scan_zone_phrase(
 /// - Opponent possessive: "from an opponent's graveyard", "from each opponent's graveyard"
 ///   → `[Owned{Opponent}, InZone]` so stolen creatures that died are still matched by owner.
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
+/// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
+///   so the card selection is constrained by the companion player target.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -5434,6 +5480,18 @@ fn parse_zone_suffix_nom(
             None,
         ),
         ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+        // CR 108.3 + CR 109.4 + CR 115.1: Non-battlefield zone membership is
+        // owner-keyed. "target player's graveyard" constrains selected cards
+        // by ownership relative to the chosen target player, not by controller.
+        ZoneQual::TargetPlayer => (
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                },
+                FilterProp::InZone { zone },
+            ],
+            None,
+        ),
         // CR 110.1 + CR 108.3: a graveyard/hand/library card is not a permanent
         // and has no controller — membership is keyed by owner. CR 109.5:
         // "their" in an each-player iteration binds to the iterated player
@@ -5460,6 +5518,7 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
+        value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
         value(
             ZoneQual::OtherPoss,
@@ -8324,6 +8383,98 @@ mod tests {
         }
     }
 
+    // ── HasChosenName suffix (CR 201.2a + CR 201.4) ──
+    //
+    // Building-block coverage for the "<type-phrase> with the chosen name" /
+    // "<type-phrase> with a name chosen for this enchantment" suffix recognized
+    // inside parse_type_phrase_with_ctx. This is verb-agnostic: every
+    // object-target effect clause (goad/destroy/exile/tap/...) funnels through
+    // this chokepoint, so the recognizer must compose the HasChosenName leg onto
+    // the typed filter regardless of the surrounding verb. Day of the Moon is
+    // the immediate unlock (goad all creatures with a name chosen for this
+    // enchantment); a card-level regression for it lives in oracle.rs.
+
+    /// Assert the filter is `And { [Typed(Creature), HasChosenName] }`.
+    fn assert_chosen_name_creature_and(f: &TargetFilter) {
+        match f {
+            TargetFilter::And { filters } => {
+                assert!(
+                    filters.contains(&TargetFilter::HasChosenName),
+                    "And must include HasChosenName, got {filters:?}"
+                );
+                assert!(
+                    filters.iter().any(|inner| matches!(
+                        inner,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    )),
+                    "And must include a Typed creature filter, got {filters:?}"
+                );
+            }
+            other => panic!("expected And {{ Typed, HasChosenName }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn creatures_with_name_chosen_for_tilde_composes_has_chosen_name() {
+        // `~` is the normalized self-reference for "this enchantment"/"this
+        // permanent"/etc. (SELF_REF_TYPE_PHRASES). The parser sees the normalized
+        // form, so the recognizer matches `~` rather than the literal noun.
+        let (f, rest) = parse_target("creatures with a name chosen for ~");
+        assert_eq!(rest, "", "the chosen-name suffix must be fully consumed");
+        assert_chosen_name_creature_and(&f);
+    }
+
+    #[test]
+    fn creatures_with_the_chosen_name_composes_has_chosen_name() {
+        let (f, rest) = parse_target("creatures with the chosen name");
+        assert_eq!(rest, "", "the chosen-name suffix must be fully consumed");
+        assert_chosen_name_creature_and(&f);
+    }
+
+    #[test]
+    fn singular_creature_with_the_chosen_name_composes_has_chosen_name() {
+        // Verb-agnostic singular form (e.g. "destroy each creature with the
+        // chosen name") must compose the same way as the plural goad form.
+        let (f, rest) = parse_target("creature with the chosen name");
+        assert_eq!(rest, "", "the chosen-name suffix must be fully consumed");
+        assert_chosen_name_creature_and(&f);
+    }
+
+    #[test]
+    fn creatures_with_flying_does_not_attach_has_chosen_name() {
+        // Negative: an unrelated "with <keyword>" suffix must not spuriously
+        // attach HasChosenName.
+        let (f, _rest) = parse_target("creatures with flying");
+        assert!(
+            !filter_contains_has_chosen_name(&f),
+            "flying must not attach HasChosenName, got {f:?}"
+        );
+    }
+
+    #[test]
+    fn bare_creatures_does_not_attach_has_chosen_name() {
+        // Negative: a bare type phrase must stay a bare Typed filter with no
+        // spurious And wrap.
+        let (f, rest) = parse_target("creatures");
+        assert_eq!(rest, "");
+        assert!(
+            matches!(&f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+            "bare \"creatures\" must be a Typed creature filter, got {f:?}"
+        );
+    }
+
+    /// Recursively check whether any leaf of the filter is `HasChosenName`.
+    fn filter_contains_has_chosen_name(f: &TargetFilter) -> bool {
+        match f {
+            TargetFilter::HasChosenName => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_contains_has_chosen_name)
+            }
+            _ => false,
+        }
+    }
+
     #[test]
     fn exiled_cards_with_named_counters_produces_exile_counter_filter() {
         let (f, rest) = parse_target("exiled cards with aegis counters on them");
@@ -8885,6 +9036,73 @@ mod tests {
                     ),
                     "leg 2 = modified creatures you control"
                 );
+            }
+            other => panic!("Expected Or filter, got {other:?}"),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    // CR 508.5 / CR 508.5a: the "defending player controls" controller suffix
+    // scopes attack-trigger targets to the defending player (Kogla, The
+    // Tarrasque, ~42 cards). These tests pin the class-level combinator
+    // behavior across the bug-card path: the high-level controller-suffix
+    // delegate, the end-to-end target verb path, and Or-target propagation.
+
+    // High-level `parse_controller_suffix` (the runtime function the bug-card
+    // path relies on). The direct assertion guarantees the `parse_zone_controller`
+    // delegate is actually reached and not shadowed by an earlier past-tense or
+    // "that player controls" arm.
+    #[test]
+    fn parse_controller_suffix_defending_player() {
+        let ctx = ParseContext::default();
+        let (ctrl, len) = parse_controller_suffix("defending player controls", &ctx)
+            .expect("defending player controls should resolve a controller scope");
+        assert_eq!(ctrl, ControllerRef::DefendingPlayer);
+        assert_eq!(len, "defending player controls".len());
+
+        // Leading whitespace is included in the consumed length (the type-phrase
+        // suffix step passes the post-type-word remainder, which begins with a
+        // space).
+        let (ctrl_ws, len_ws) = parse_controller_suffix(" defending player controls", &ctx)
+            .expect("leading-space variant should resolve");
+        assert_eq!(ctrl_ws, ControllerRef::DefendingPlayer);
+        assert_eq!(len_ws, " defending player controls".len());
+    }
+
+    // End-to-end target verb path: a representative effect phrase parses to a
+    // Typed filter scoped to the defending player. Generic type phrase, not a
+    // card name (The Tarrasque class: "fights target creature defending player
+    // controls").
+    #[test]
+    fn parse_target_defending_player_controls_single_type() {
+        let (f, rest) = parse_target("target creature defending player controls");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // Or-target propagation: an Or-target phrase ending in "defending player
+    // controls" fans the DefendingPlayer scope onto each disjunct via
+    // `distribute_controller_to_or` (Kogla class: "destroy target artifact or
+    // enchantment defending player controls").
+    #[test]
+    fn parse_target_defending_player_controls_or_target() {
+        let (f, rest) = parse_target("target artifact or enchantment defending player controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+                for (i, leg) in filters.iter().enumerate() {
+                    match leg {
+                        TargetFilter::Typed(tf) => assert_eq!(
+                            tf.controller,
+                            Some(ControllerRef::DefendingPlayer),
+                            "leg {i} must inherit the defending-player scope"
+                        ),
+                        other => panic!("leg {i} expected Typed, got {other:?}"),
+                    }
+                }
             }
             other => panic!("Expected Or filter, got {other:?}"),
         }

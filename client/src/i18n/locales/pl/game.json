@@ -1153,6 +1153,12 @@
       "subtitle_other": "Wygnaj {{count}} materiały, aby wytworzyć",
       "subtitleRange": "Wygnaj od {{min}} do {{count}} materiałów, aby wytworzyć"
     },
+    "exilePermanent": {
+      "title": "Wygnaj trwałą kartę",
+      "subtitle_one": "Wygnaj {{count}} trwałą kartę, którą kontrolujesz",
+      "subtitle_other": "Wygnaj {{count}} trwałe karty, które kontrolujesz",
+      "subtitleRange": "Wygnaj od {{min}} do {{count}} trwałych kart, które kontrolujesz"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Wygnaj pasującego trwałego lub kartę",

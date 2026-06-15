@@ -1192,6 +1192,64 @@ mod tests {
         );
     }
 
+    /// CR 115.10a + CR 119.3 + CR 608.2c (Wound Reflection / Archfiend of Despair /
+    /// Warlock Class L3): "each opponent loses life equal to the life they lost
+    /// this turn" resolves with a `LifeLostThisTurn { ScopedPlayer }` amount under
+    /// `player_scope: Opponent`. Each iterated opponent must lose its OWN life lost
+    /// this turn — NOT the source controller's. The controller's count is seeded
+    /// high (99) as a trap: the prior `Controller`-scoped encoding drained every
+    /// opponent by 99. This is the canonical runtime regression guard for the
+    /// reported bug; the parser fix is covered in oracle_effect/mod.rs.
+    #[test]
+    fn each_opponent_loses_own_life_lost_uses_scoped_player() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{PlayerFilter, PlayerScope};
+
+        // 3-player game so two distinct opponents prove per-iteration scoping.
+        let mut state = GameState::new(crate::types::FormatConfig::standard(), 3, 42);
+        state.players[0].life_lost_this_turn = 99; // controller — trap, must be ignored
+        state.players[1].life_lost_this_turn = 3; // opponent A
+        state.players[2].life_lost_this_turn = 5; // opponent B
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+        let p2_life_before = state.players[2].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Controller untouched — it is the source, not an affected opponent.
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "controller must not lose life — the trap value (99) must be ignored"
+        );
+        // Each opponent loses ITS OWN life lost this turn (3 and 5), not 99.
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 3,
+            "opponent A must lose its own life lost (3), not the controller's 99"
+        );
+        assert_eq!(
+            state.players[2].life,
+            p2_life_before - 5,
+            "opponent B must lose its own life lost (5), not the controller's 99"
+        );
+    }
+
     /// Issue #317 (Lich): "If you would gain life, draw that many cards
     /// instead." The replacement substitutes a *different* event type
     /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +

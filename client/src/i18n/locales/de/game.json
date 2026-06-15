@@ -1153,6 +1153,12 @@
       "subtitle_other": "Schicke {{count}} Materialien zum Herstellen ins Exil",
       "subtitleRange": "Schicke {{min}} bis {{count}} Materialien zum Herstellen ins Exil"
     },
+    "exilePermanent": {
+      "title": "Schicke eine bleibende Karte ins Exil",
+      "subtitle_one": "Schicke {{count}} bleibende Karte, die du kontrollierst, ins Exil",
+      "subtitle_other": "Schicke {{count}} bleibende Karten, die du kontrollierst, ins Exil",
+      "subtitleRange": "Schicke {{min}} bis {{count}} bleibende Karten, die du kontrollierst, ins Exil"
+    },
     "behold": {
       "title": "Erblicken",
       "subtitleExile": "Schicke eine passende bleibende Karte oder Karte ins Exil",

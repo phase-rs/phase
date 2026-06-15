@@ -267,6 +267,9 @@ fn payment_cost(
             Some(Zone::Graveyard) => 0.1 + card_value(state, obj_id) * 0.2,
             _ => card_value(state, obj_id),
         },
+        // CR 701.13: Exile a battlefield permanent you control as a cost
+        // (Food Chain class) — valued like the battlefield ExileMaterials case.
+        PayCostKind::ExilePermanent { .. } => permanent_value(state, obj_id),
         PayCostKind::ExileFromManaZone { zone } => match zone {
             Zone::Battlefield => permanent_value(state, obj_id),
             Zone::Hand => card_value(state, obj_id) * 1.2,

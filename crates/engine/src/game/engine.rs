@@ -2241,6 +2241,20 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
+                // controls as an additional/alternative cost (Food Chain class).
+                PayCostKind::ExilePermanent { filter } => {
+                    engine_casting::handle_exile_permanent_for_cost(
+                        state,
+                        *player,
+                        filter.clone(),
+                        *pending_cast.clone(),
+                        *count,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 // CR 702.167a/b: Craft materials exile across the
                 // battlefield/graveyard union.
                 PayCostKind::ExileMaterials { materials } => {
@@ -2345,6 +2359,7 @@ fn apply_action(
                 PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
+                | PayCostKind::ExilePermanent { .. }
                 | PayCostKind::RemoveCounter { .. }
                 | PayCostKind::Behold { .. } => {
                     return Err(EngineError::InvalidAction(
@@ -11662,6 +11677,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -12047,6 +12063,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),

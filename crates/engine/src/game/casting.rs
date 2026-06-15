@@ -635,7 +635,7 @@ fn graveyard_spell_objects_available_to_cast(
                 || has_disturb_keyword(state, obj_id)
                 || retrace_has_discardable_land(state, player, obj_id)
                 || jumpstart_has_discardable_card(state, player, obj_id)
-                || graveyard_has_enough_for_escape(state, player, obj_id)
+                || can_pay_escape_additional_cost(state, player, obj_id)
                 // CR 702.187b: Mayhem is eligible only while the card was
                 // discarded this turn.
                 || (was_discarded_this_turn(state, obj_id)
@@ -698,29 +698,24 @@ fn graveyard_object_castable_by_permission_sources(
     })
 }
 
-/// CR 702.138: Check that the player's graveyard has enough OTHER cards to pay escape's exile cost.
-fn graveyard_has_enough_for_escape(
+/// CR 702.138a + CR 601.2f-h: Check that the player can pay escape's additional
+/// (exile) cost. Delegates the whole residual `AbilityCost` to the single
+/// affordability authority `AbilityCost::is_payable` — its Composite arm requires
+/// ALL sub-costs payable and routes each `Exile` sub-cost (the graveyard clause
+/// and the battlefield "Exile a land you control" clause on Lunar Hatchling)
+/// through the same `exile_cost_effective_zone` + `eligible_exile_cost_objects`
+/// functions the payment arm uses, so the pre-check and payment-time eligibility
+/// match by construction. Returns `false` for an unparsed/placeholder escape
+/// (no residual), correctly gating it out of legal actions.
+fn can_pay_escape_additional_cost(
     state: &GameState,
     player: PlayerId,
     escape_obj_id: ObjectId,
 ) -> bool {
-    let exile_count = super::keywords::effective_escape_data(state, escape_obj_id)
-        .map(|(_, exile_count)| exile_count);
-    let Some(needed) = exile_count else {
+    let Some((_, residual)) = super::keywords::effective_escape_data(state, escape_obj_id) else {
         return false;
     };
-    let other_cards = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| {
-            p.graveyard
-                .iter()
-                .filter(|&&id| id != escape_obj_id)
-                .count()
-        })
-        .unwrap_or(0);
-    other_cards >= needed as usize
+    residual.is_payable(state, player, escape_obj_id)
 }
 
 /// CR 702.180: Check if an object has the Harmonize keyword.
@@ -9409,9 +9404,11 @@ fn can_cast_prepared_now(
         return false;
     }
 
-    // CR 702.138: Escape requires enough other graveyard cards to exile.
+    // CR 702.138a: Escape requires the player to be able to pay its additional
+    // (exile) cost — usually exiling other graveyard cards, plus any battlefield
+    // exile clause (Lunar Hatchling's "Exile a land you control").
     if prepared.casting_variant == CastingVariant::Escape
-        && !graveyard_has_enough_for_escape(state, player, prepared.object_id)
+        && !can_pay_escape_additional_cost(state, player, prepared.object_id)
     {
         return false;
     }
@@ -10733,7 +10730,9 @@ pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &
     }
 }
 
-fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&TargetFilter>)> {
+pub(crate) fn find_non_self_discard(
+    cost: &AbilityCost,
+) -> Option<(&QuantityExpr, Option<&TargetFilter>)> {
     match cost {
         AbilityCost::Discard {
             count,
@@ -10783,7 +10782,9 @@ pub(crate) fn stamp_self_ref_discard_cost_paid_object(
 /// Self-ref exile (Scavenge, Suspend) returns `None` — that shape is auto-paid
 /// by `pay_ability_cost`'s self-ref exile arm and never back-referenced as a
 /// cost-paid object. Recurses into `Composite`.
-fn find_non_self_exile(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilter>)> {
+pub(super) fn find_non_self_exile(
+    cost: &AbilityCost,
+) -> Option<(u32, Zone, Option<&TargetFilter>)> {
     match cost {
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
@@ -11091,6 +11092,23 @@ pub(super) fn split_evoke_cost_components(
     match evoke {
         EvokeCost::Mana(mana) => (Some(mana.clone()), None),
         EvokeCost::NonMana(ab) => split_alt_cost_components(ab),
+    }
+}
+
+/// CR 702.138a + CR 601.2f-h: Escape twin of `split_evoke_cost_components`.
+/// `EscapeCost::Mana` is a bare mana sub-cost with no residual; `NonMana(...)`
+/// (the printed compound — "[mana], Exile N other cards from your graveyard",
+/// possibly with extra exile clauses on Lunar Hatchling) delegates to the
+/// shared `split_alt_cost_components` walker, which extracts the mana sub-cost
+/// for the normal mana flow (CR 601.2g) and returns the exile residual for
+/// `pay_additional_cost` (CR 601.2h).
+pub(super) fn split_escape_cost_components(
+    escape: &crate::types::keywords::EscapeCost,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    use crate::types::keywords::EscapeCost;
+    match escape {
+        EscapeCost::Mana(mana) => (Some(mana.clone()), None),
+        EscapeCost::NonMana(ab) => split_alt_cost_components(ab),
     }
 }
 
@@ -11686,6 +11704,31 @@ pub fn handle_activate_ability(
             return casting_costs::enter_payment_step(state, player, None, events);
         }
 
+        // CR 107.1b + CR 601.2f: When an activated ability's cost includes a mana
+        // cost containing X — either directly (`Mana { cost }`) or as a sub-cost
+        // of a Composite (e.g., `{X} + Discard a card`, `Tap + Pay {X}`) — divert
+        // to ChooseXValue so X is chosen in step 601.2f BEFORE any cost is paid.
+        // This MUST run before the non-self sacrifice/discard/exile detours below:
+        // those return a `PayCost` `WaitingFor` and never resume into the X
+        // announcement, so a `{X}`-plus-discard cost (Momir Basic emblem) would
+        // otherwise pay the discard and treat X as 0. The remaining non-mana
+        // sub-costs stay in `activation_cost` and are paid after ManaPayment via
+        // the residual-cost handler (`finish_pending_cost_or_cast`), which already
+        // surfaces a `PayCost::Discard` / `Sacrifice` / `Composite` for them.
+        if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
+            let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
+            pending_x.activation_cost = remaining;
+            pending_x.activation_ability_index = Some(ability_index);
+            // CR 601.2f + CR 601.2h: POSITIVE signal — the residual non-mana tail
+            // in `activation_cost` is still OUTSTANDING after mana payment, so
+            // `push_activated_ability_to_stack` must re-surface a non-self discard
+            // sub-cost. Only THIS path sets it; the discard-first detour below
+            // already pays the discard and resumes with the flag unset.
+            pending_x.x_residual_activation = true;
+            state.pending_cast = Some(Box::new(pending_x));
+            return casting_costs::enter_payment_step(state, player, None, events);
+        }
+
         if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
             let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
             let (min_count, max_count) = sacrifice_cost_bounds(count, eligible.len());
@@ -11949,19 +11992,6 @@ pub fn handle_activate_ability(
                 Some(ConvokeMode::Waterbend),
                 events,
             );
-        }
-
-        // CR 107.1b + CR 601.2f: When an activated ability's cost includes a mana
-        // cost containing X — either directly (`Mana { cost }`) or as a sub-cost
-        // of a Composite (e.g., `Tap + Pay {X}`) — divert to ChooseXValue so X is
-        // chosen before mana payment. The remaining non-mana sub-costs (Tap,
-        // Sacrifice, etc.) are paid after ManaPayment via `activation_cost`.
-        if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
-            let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
-            pending_x.activation_cost = remaining;
-            pending_x.activation_ability_index = Some(ability_index);
-            state.pending_cast = Some(Box::new(pending_x));
-            return casting_costs::enter_payment_step(state, player, None, events);
         }
     }
 
@@ -12809,7 +12839,7 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
     use crate::types::events::GameEvent;
-    use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+    use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
     use crate::types::mana::{
         ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSpellGrant, ManaType, ManaUnit,
     };
@@ -17508,6 +17538,106 @@ mod tests {
         assert!(matches!(
             state.stack[0].kind,
             StackEntryKind::ActivatedAbility { source_id, .. } if source_id == blood
+        ));
+    }
+
+    /// CR 601.2h + CR 701.9a (MED-1 regression): an activated ability whose ONLY
+    /// cost is a BARE non-self `Discard` (no mana, no X) takes the discard-FIRST
+    /// detour. After the discard is paid and the activation resumes through
+    /// `push_activated_ability_to_stack`, the X-residual discard detour MUST NOT
+    /// re-fire. Before the fix, that detour was gated on the cost SHAPE
+    /// (`matches!(cost, Discard)`), which is true for a bare `Discard` resumed
+    /// from EITHER path, so it would prompt for a SECOND discard. With exactly one
+    /// card in hand, the second prompt finds an empty hand and the activation
+    /// errors. The fix gates on the positive `x_residual` signal (false on the
+    /// discard-first path), so the single discard pays the cost and the ability
+    /// lands on the stack.
+    ///
+    /// Discriminating assertion: `state.stack.len() == 1` (the activated ability
+    /// reached the stack). If MED-1 is reverted, `apply_as_current` returns `Err`
+    /// (not enough cards to discard the second time) and the stack stays empty.
+    #[test]
+    fn bare_non_self_discard_activation_does_not_double_prompt() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{AbilityCost, AbilityKind, Effect};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(973),
+            PlayerId(0),
+            "Bare Discard Source".to_string(),
+            Zone::Battlefield,
+        );
+        // Exactly ONE card in hand — a second (erroneous) discard prompt would
+        // have nothing to discard and fail.
+        let only_card = create_object(
+            &mut state,
+            CardId(974),
+            PlayerId(0),
+            "Sole Hand Card".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                }),
+            );
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+
+        // Discard-first detour surfaces a single Discard prompt for the one card.
+        match &state.waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices,
+                count,
+                ..
+            } => {
+                assert_eq!(*count, 1);
+                assert_eq!(choices, &vec![only_card]);
+            }
+            other => panic!("expected PayCost Discard, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![only_card],
+            },
+        )
+        .expect("single discard must pay the cost without a second prompt");
+
+        assert_eq!(state.objects[&only_card].zone, Zone::Graveyard);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "ability must reach the stack after exactly one discard"
+        );
+        assert!(matches!(
+            state.stack[0].kind,
+            StackEntryKind::ActivatedAbility { source_id, .. } if source_id == source
         ));
     }
 
@@ -32677,8 +32807,9 @@ mod tests {
         let mut state = setup_game_at_main_phase();
 
         // A Phlage-shaped escape card in the AI player's (PlayerId(1))
-        // graveyard. Native `Keyword::Escape` with cost {R}{R}{W}{W} and
-        // exile_count 5, mirroring Phlage, Titan of Fire's Fury.
+        // graveyard. Native `Keyword::Escape` with the compound escape cost
+        // {R}{R}{W}{W} plus "Exile five other cards from your graveyard",
+        // mirroring Phlage, Titan of Fire's Fury.
         let phlage = create_object(
             &mut state,
             CardId(9419),
@@ -32703,10 +32834,18 @@ mod tests {
                 generic: 4,
                 shards: vec![ManaCostShard::Red, ManaCostShard::White],
             };
-            let escape_kw = Keyword::Escape {
-                cost: escape_mana.clone(),
-                exile_count: 5,
-            };
+            let escape_kw = Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: escape_mana.clone(),
+                    },
+                    AbilityCost::Exile {
+                        count: 5,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
+            }));
             obj.base_keywords.push(escape_kw.clone());
             obj.keywords.push(escape_kw);
         }

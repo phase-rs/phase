@@ -1158,6 +1158,12 @@
       "subtitle_other": "Exile {{count}} materials to craft",
       "subtitleRange": "Exile {{min}} to {{count}} materials to craft"
     },
+    "exilePermanent": {
+      "title": "Exile a permanent",
+      "subtitle_one": "Exile {{count}} permanent you control",
+      "subtitle_other": "Exile {{count}} permanents you control",
+      "subtitleRange": "Exile {{min}} to {{count}} permanents you control"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Exile a matching permanent or card",

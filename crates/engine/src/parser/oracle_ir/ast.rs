@@ -1251,7 +1251,7 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
     RemoveCounter {
         counter_type: Option<CounterType>,
-        count: i32,
+        count: QuantityExpr,
         target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.

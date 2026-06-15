@@ -2778,6 +2778,37 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
             }
         }
 
+        // CR 114.4 + CR 602.1: Command-zone activated abilities (Momir Basic
+        // emblem). Mirrors the battlefield loop above; `can_activate_ability_now`
+        // honors each ability's `activation_zone` (casting.rs), so legality is
+        // unchanged. Gated on the format's command-zone capability so non-Momir
+        // games pay no extra scan.
+        if state.format_config.command_zone {
+            for &obj_id in &state.command_zone {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller == player {
+                        for (i, ability_def) in
+                            casting::activated_ability_definitions(state, obj_id)
+                        {
+                            if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                                && !crate::game::mana_abilities::is_mana_ability(&ability_def)
+                                && casting::can_activate_ability_now(state, player, obj_id, i)
+                            {
+                                actions.push(candidate(
+                                    GameAction::ActivateAbility {
+                                        source_id: obj_id,
+                                        ability_index: i,
+                                    },
+                                    TacticalClass::Ability,
+                                    Some(player),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if is_main_phase && stack_empty && is_active {
             for &obj_id in &state.battlefield {
                 let Some(obj) = state.objects.get(&obj_id) else {

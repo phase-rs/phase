@@ -480,6 +480,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                         })
                         .collect(),
                 ),
+                // CR 400.2: Other PayCost kinds reveal only public-zone choices
+                // and need no redaction. `ExilePermanent` (battlefield exile-cost,
+                // Food Chain class) draws exclusively from the battlefield, a
+                // public zone, so its choices fall through here unredacted.
                 _ => None,
             };
             if let Some(redacted_choices) = redacted {
@@ -773,6 +777,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
+            x_residual_activation: false,
         })
     }
 

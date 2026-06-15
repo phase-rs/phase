@@ -6248,6 +6248,56 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
 
+    /// CR 615.1a + CR 615.5 + CR 122.1 + CR 608.2h: Protean Hydra class —
+    /// "If damage would be dealt to ~, prevent that damage and remove that
+    /// many +1/+1 counters from it." Building-block assertions:
+    ///
+    /// 1. The shield is self-scoped (`valid_card: SelfRef`) and prevents all
+    ///    damage to the source — not a broad creature filter.
+    /// 2. The rider parses to `Effect::RemoveCounter` (not `Unimplemented`),
+    ///    so the four-card class (Protean Hydra, Ugin's Conjurant, Polukranos
+    ///    Unchained, Underdark Beholder) is unlocked.
+    /// 3. The rider's "that many" count resolves to `EventContextAmount` (the
+    ///    prevented-damage amount), mirroring the Vigor `PutCounter` cohort.
+    /// 4. "from it" binds to the shield-bearing permanent (`SelfRef`).
+    #[test]
+    fn protean_hydra_prevent_and_remove_that_many_counters() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to ~, prevent that damage and remove that many +1/+1 counters from it.",
+            "Protean Hydra",
+        )
+        .expect("Protean Hydra should parse as a damage prevention replacement");
+
+        // (1) Self-scoped shield.
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            def.damage_target_filter.is_none(),
+            "self-scoped prevention must not use a broad damage_target_filter"
+        );
+
+        // (2) + (3) + (4) Rider removes EventContextAmount counters from self.
+        let execute = def.execute.as_ref().expect("execute follow-up present");
+        match &*execute.effect {
+            Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, Some(CounterType::Plus1Plus1));
+                assert_eq!(*target, TargetFilter::SelfRef, "\"from it\" = the source");
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                    "\"that many\" must bind the prevented-damage amount"
+                );
+            }
+            other => panic!("expected Effect::RemoveCounter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn find_copy_verb_present_recognizes_copy_replacement() {
         // CR 707.9 / CR 614.1c: copy replacement verbs are recognized.

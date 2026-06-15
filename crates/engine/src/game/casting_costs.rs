@@ -870,6 +870,7 @@ fn finish_pending_cost_or_cast(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         )?;
         return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -1177,6 +1178,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             activation_ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -1903,6 +1905,63 @@ pub(crate) fn handle_exile_for_cost(
     )
 }
 
+/// CR 601.2h + CR 701.13: Resolve a battlefield exile-permanent additional cost
+/// (Food Chain class; Lunar Hatchling's "Exile a land you control"). The player
+/// has chosen permanents they control on the battlefield; validate count and
+/// legality, re-validate eligibility against the live battlefield (still on the
+/// battlefield, controlled by `player`, matching `filter`, not the source), then
+/// EXILE each chosen object (CR 701.13 — not a sacrifice, so no sacrifice/death
+/// triggers) and resume the pending cast. Mirrors `handle_exile_for_cost`
+/// (single-zone, single-filter) but revalidates against the battlefield rather
+/// than hand/graveyard. `count == min_count` for a mandatory fixed-count cost.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_permanent_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    filter: Option<TargetFilter>,
+    pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        (expected, expected),
+        legal_cards,
+        chosen,
+        events,
+        "permanent(s)",
+        "Selected permanent not eligible to exile as a cost",
+        |state, player, id, pending| {
+            // CR 601.2h: Re-validate against the live battlefield — the chosen
+            // permanent must still be on the battlefield, controlled by the
+            // payer, match the cost's filter, and not be the cast source.
+            if id == pending.object_id {
+                return Err(EngineError::InvalidAction(
+                    "Cannot exile the spell being cast as its own escape cost".into(),
+                ));
+            }
+            let ctx = super::filter::FilterContext::from_source(state, pending.object_id);
+            let eligible = state.objects.get(&id).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && filter
+                        .as_ref()
+                        .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            });
+            if !eligible {
+                return Err(EngineError::InvalidAction(
+                    "Selected permanent is no longer eligible to exile".into(),
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_exile_selection_for_cost(
     state: &mut GameState,
@@ -2037,6 +2096,7 @@ pub(crate) fn handle_exile_materials_for_cost(
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_activated_ability_to_stack(
     state: &mut GameState,
     player: PlayerId,
@@ -2044,12 +2104,85 @@ pub(super) fn push_activated_ability_to_stack(
     ability_index: usize,
     mut resolved: ResolvedAbility,
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
+    // CR 601.2f + CR 601.2h: POSITIVE signal that the caller took the `{X}`-mana
+    // detour, so `remaining_cost` is the unpaid residual non-mana tail. Threaded
+    // from `PendingCast::x_residual_activation` — set ONLY by that detour.
+    x_residual: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // CR 601.2f + CR 601.2h + CR 701.9a: When the X-mana detour ran first
+        // (e.g. the Momir Basic emblem's `{X}, Discard a card` cost), the non-self
+        // "discard a card" sub-cost is still OUTSTANDING here AFTER mana payment,
+        // signalled by `x_residual`. In contrast, the discard-FIRST pre-check
+        // detour in `handle_activate_ability` already paid the discard and resumes
+        // with `x_residual == false` and the ORIGINAL cost — its discard sub-cost
+        // is correctly no-op'd by `pay_ability_cost_for_activation` below. Gating
+        // on the positive `x_residual` signal (not the cost shape) avoids
+        // double-charging the discard on that pre-check path even when the cost is
+        // a BARE `Discard` (which would otherwise fail with an empty hand).
+        if let Some((count, filter)) =
+            super::casting::find_non_self_discard(cost).filter(|_| x_residual)
+        {
+            let count =
+                super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+            let eligible =
+                super::casting::find_eligible_discard_targets(state, player, source_id, filter);
+            if eligible.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard".into(),
+                ));
+            }
+            let mut pending_discard =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_discard.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
+                count,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_discard),
+                },
+            });
+        }
+
+        // CR 118.3 + CR 601.2h: The `{X}`-mana detour (`extract_x_mana_cost` in
+        // `handle_activate_ability`) hoists X-first and leaves the residual tail
+        // here, but ONLY the non-self `Discard` arm above re-surfaces an
+        // interactive cost. A residual non-self SACRIFICE or non-self EXILE would
+        // otherwise fall through to `pay_ability_cost_for_activation`, where both
+        // are silent `Paid` no-ops (they rely on the pre-payment
+        // SacrificeForCost / ExileForCost WaitingFor interception that the X-first
+        // hoist bypassed) — silently SKIPPING the cost. No current card has an
+        // `{X} + non-self-sacrifice/exile` activated ability (corpus scan = zero),
+        // and this was already broken pre-hoist (X→0), so this is not a
+        // regression — but a silent cost-swallow must not ship. Fail LOUDLY here.
+        // A future `{X} + non-self-sacrifice/exile` activated ability must extend
+        // this residual detour with Sacrifice/Exile arms mirroring the Discard arm
+        // above (route to `WaitingFor::PayCost { kind: Sacrifice | ExileFromZone }`
+        // with the residual stored in the resumed pending).
+        if x_residual
+            && (super::casting::find_non_self_sacrifice_cost(cost).is_some()
+                || super::casting::find_non_self_exile(cost).is_some())
+        {
+            debug_assert!(
+                false,
+                "X-residual activation left a non-self sacrifice/exile cost unhandled \
+                 (cost: {cost:?}); extend the residual detour in \
+                 push_activated_ability_to_stack"
+            );
+            return Err(EngineError::ActionNotAllowed(
+                "Unsupported activated-ability cost: {X} combined with a non-self \
+                 sacrifice/exile is not yet implemented"
+                    .into(),
+            ));
+        }
+
         // CR 606.3 + CR 606.5: Capture the symbolic `[−X]` loyalty shape before
         // chosen-X concretization turns it into a fixed counter-removal count.
         let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
@@ -3055,9 +3188,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
-    // CR 702.138a: Escape requires exiling N other cards from graveyard.
+    // CR 702.138a: Escape's additional cost is the residual after extracting the
+    // mana sub-cost. Usually "Exile N other cards from your graveyard"; may be a
+    // Composite of multiple exile clauses (Lunar Hatchling: "Exile a land you
+    // control, Exile five other cards from your graveyard"). Paid one sub-cost at
+    // a time by `pay_additional_cost`'s Composite arm (CR 601.2h).
     if casting_variant == CastingVariant::Escape {
-        if let Some((_, exile_count)) = super::keywords::effective_escape_data(state, object_id) {
+        if let Some((_, residual)) = super::keywords::effective_escape_data(state, object_id) {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
@@ -3066,17 +3203,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.payment_mode = payment_mode;
             pending.additional_cost_flow =
                 imposed_required_cost.clone().map(AdditionalCost::Required);
-            return pay_additional_cost(
-                state,
-                player,
-                AbilityCost::Exile {
-                    count: exile_count,
-                    zone: Some(Zone::Graveyard),
-                    filter: None,
-                },
-                pending,
-                events,
-            );
+            return pay_additional_cost(state, player, residual, pending, events);
         }
     }
 
@@ -3796,6 +3923,53 @@ fn pay_additional_cost_with_source(
                     }));
             }
             return pay_additional_cost(state, player, first, pending, events);
+        }
+        // CR 118.9 + CR 601.2h + CR 701.13: Exile a permanent you control on the
+        // battlefield as an additional/alternative cost (Food Chain class; Lunar
+        // Hatchling's "Exile a land you control"). The parser emits zone: None +
+        // a permanent-implying filter; `exile_cost_effective_zone` resolves it to
+        // the battlefield. The permanent is EXILED, not sacrificed (CR 701.13).
+        // `eligible_exile_cost_objects` is single-zone (only controller-owned
+        // battlefield objects matching the filter) — graveyard cards are NEVER
+        // offered (unlike the dual-zone craft union `ExileMaterials`). Ordered
+        // before the hand/graveyard exile arm; the two are disjoint by effective
+        // zone, but the battlefield case is checked first.
+        AbilityCost::Exile {
+            count,
+            zone,
+            ref filter,
+        } if super::cost_payability::exile_cost_effective_zone(zone, filter.as_ref())
+            == Zone::Battlefield =>
+        {
+            let effective_filter =
+                super::cost_payability::exile_cost_effective_filter(filter.as_ref());
+            let eligible = super::cost_payability::eligible_exile_cost_objects(
+                state,
+                player,
+                pending.object_id,
+                Zone::Battlefield,
+                effective_filter.as_ref(),
+                count,
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to exile".into(),
+                ));
+            }
+            // CR 601.2h: "Exile a land you control" is a mandatory fixed-count
+            // cost (min == count), unlike the optional graveyard exile below.
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ExilePermanent {
+                    filter: filter.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: count as usize,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            });
         }
         AbilityCost::Exile {
             count,
@@ -6963,6 +7137,7 @@ pub fn finalize_mana_payment(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -7127,6 +7302,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             ability_index,
             pending.ability,
             pending.activation_cost.as_ref(),
+            pending.x_residual_activation,
             events,
         );
     }
@@ -7770,6 +7946,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }
     }
 
@@ -11881,6 +12058,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let result = pay_additional_cost(
@@ -12005,6 +12183,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let mut events = Vec::new();
@@ -12098,6 +12277,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -12180,6 +12360,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -12295,6 +12476,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         };
 
         let result = pay_additional_cost(
@@ -14889,6 +15071,66 @@ its replicate cost was paid.)\nDraw a card.";
                 generic: 3,
             },
             "declined offering must leave cost at full {{3}}{{W}}"
+        );
+    }
+
+    /// CR 118.3 + CR 601.2h: A `{X}` + non-self SACRIFICE activated-ability cost
+    /// takes the X-mana detour, leaving the non-self sacrifice as the unpaid
+    /// residual in `push_activated_ability_to_stack`. That function only
+    /// re-surfaces the non-self DISCARD arm; a non-self sacrifice/exile residual
+    /// would otherwise fall through to `pay_ability_cost_for_activation` and be a
+    /// SILENT `Paid` no-op (the cost would be skipped). The guard must instead
+    /// fail LOUDLY. No real card has this cost shape; this guards the shared
+    /// pipeline against a future one. In debug builds the `debug_assert!` panics
+    /// (asserted here); in release builds it is compiled out and the function
+    /// returns `EngineError::ActionNotAllowed` instead, so the cost is never
+    /// silently skipped on either profile.
+    #[test]
+    #[should_panic(expected = "non-self sacrifice/exile cost unhandled")]
+    fn x_residual_non_self_sacrifice_fails_loudly() {
+        let mut state = GameState::new_two_player(42);
+        // A permanent the player could sacrifice — present so the failure is the
+        // unhandled-cost guard, not an empty eligible set.
+        let source = create_object(
+            &mut state,
+            CardId(7_700),
+            PlayerId(0),
+            "X-Sacrifice Source".to_string(),
+            Zone::Battlefield,
+        );
+        let _victim = create_object(
+            &mut state,
+            CardId(7_701),
+            PlayerId(0),
+            "Sac Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        let resolved = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        // The X-mana sub-cost has already been extracted/paid by the detour; the
+        // residual handed to `push_activated_ability_to_stack` is the non-self
+        // sacrifice, flagged as the X-residual path (`x_residual = true`).
+        let residual = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            1,
+        ));
+        let mut events = Vec::new();
+        let _ = push_activated_ability_to_stack(
+            &mut state,
+            PlayerId(0),
+            source,
+            0,
+            resolved,
+            Some(&residual),
+            true,
+            &mut events,
         );
     }
 }

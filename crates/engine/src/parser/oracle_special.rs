@@ -11,7 +11,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect,
     SolveCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{EscapeCost, Keyword};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::statics::StaticMode;
 
@@ -399,17 +399,41 @@ fn strip_die_table_flavor_label(text: &str) -> &str {
     text
 }
 
+/// CR 702.138a + CR 118.9: Parse the escape cost following the em-dash separator
+/// (e.g. "Escape—{4}{G}{U}, Exile a land you control, Exile five other cards from
+/// your graveyard."). Mirrors `parse_evoke_cost`/`parse_bestow_cost`: detection of
+/// the em-dash stays a structural `split_once`, but the entire comma-separated
+/// cost list is delegated wholesale to `parse_oracle_cost`, which composes the
+/// clauses into `AbilityCost::Composite`. This eliminates the prior
+/// article-as-one bug (where `parse_number("a land...")` returned 1 and the real
+/// "Exile five..." clause was dropped) because no scalar count is pulled from the
+/// first token. The result is wrapped in `EscapeCost::Mana` for a pure mana cost
+/// or `EscapeCost::NonMana` otherwise; the runtime split via
+/// `split_escape_cost_components` separates the mana sub-cost for normal payment.
 pub(super) fn parse_escape_keyword(line: &str) -> Option<Keyword> {
     let (_, after_dash) = line.split_once('\u{2014}')?;
-    let after_dash = after_dash.trim();
-    let (cost, rest) = parse_mana_symbols(after_dash)?;
-    let rest = rest.trim_start_matches(',').trim();
-    let rest_lower = rest.to_lowercase();
-    let ((), exile_part) = nom_on_lower(&rest_lower, &rest_lower, |i| {
-        value((), tag("exile ")).parse(i)
-    })?;
-    let (exile_count, _) = super::oracle_util::parse_number(exile_part)?;
-    Some(Keyword::Escape { cost, exile_count })
+    let trimmed = after_dash
+        .trim()
+        .trim_end_matches('.')
+        .trim_end_matches(')');
+    // Strip reminder text in parentheses: take everything before the first " (".
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    let escape = match cost {
+        AbilityCost::Mana { cost } => EscapeCost::Mana(cost),
+        // Filter out parse failures: parse_oracle_cost returns Unimplemented for
+        // unrecognized text. Don't manufacture a meaningless escape ability.
+        AbilityCost::Unimplemented { .. } => return None,
+        other => EscapeCost::NonMana(other),
+    };
+    Some(Keyword::Escape(escape))
 }
 
 pub(super) fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {

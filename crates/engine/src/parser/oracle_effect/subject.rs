@@ -454,7 +454,14 @@ fn try_parse_subject_restriction_clause(
         nom_primitives::scan_preceded(&lower, parse_cant_be_regenerated_predicate)
     {
         let subject = text[..before_lower.len()].trim();
-        let application = subject_application_for_cant_be_activated(subject, ctx)?;
+        // CR 608.2c + CR 701.19c: the DAMAGE-form anaphor ("a creature/creatures/
+        // a permanent dealt damage this way") binds to the preceding damage
+        // clause's published set (`TrackedSet`) rather than a fresh target.
+        // Tried first so it pre-empts the generic subject resolution; non-damage
+        // subjects (Hurr Jackal, Lim-Dûl's Cohort) return None here and fall
+        // through to `subject_application_for_cant_be_activated`.
+        let application = subject_application_for_cant_be_regenerated(subject)
+            .or_else(|| subject_application_for_cant_be_activated(subject, ctx))?;
         let affected = static_affected_for_application(&application);
         let mode = StaticMode::CantBeRegenerated;
         return Some(ParsedEffectClause {
@@ -1380,6 +1387,85 @@ pub(super) fn parse_leading_subject_application(
 ) -> Option<SubjectApplication> {
     let subject_text = extract_subject_text(text)?;
     parse_subject_application(&subject_text, ctx)
+}
+
+/// CR 608.2c + CR 701.19c: Resolve the subject of a DAMAGE-form
+/// "[noun] dealt damage this way can't be regenerated [this turn]" clause.
+///
+/// The three clean cards (Incinerate, Flamebreak, Jaya Ballard, Task Mage)
+/// print this regen prohibition as a separate sentence following a damage
+/// clause. The subject is the anaphor "a creature/creatures/a permanent dealt
+/// damage this way" — a back-reference (CR 608.2c "this way") to the set of
+/// objects the preceding damage effect struck, NOT a fresh target. It resolves
+/// to the most recently published tracked set (`TrackedSetId(0)` sentinel),
+/// which the parent damage clause publishes once this rider is attached as its
+/// sub-ability (the `target: Some(TrackedSet)` trips
+/// `next_sub_needs_tracked_set`, and `affected_objects_from_events`' DealDamage
+/// arm collects the damaged object ids). The anaphor tag set mirrors the
+/// die-exile rider's (`oracle_effect/mod.rs::try_parse_die_exile_rider`) plus
+/// the plural "creatures dealt damage this way" for the DamageAll form
+/// (Flamebreak). Returns `None` for every non-damage subject so the other
+/// "can't be regenerated" clauses (Hurr Jackal, Lim-Dûl's Cohort) fall through
+/// to `subject_application_for_cant_be_activated` unchanged.
+fn subject_application_for_cant_be_regenerated(subject: &str) -> Option<SubjectApplication> {
+    let lower = subject.to_lowercase();
+    let matched = all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("a creature dealt damage this way"),
+        tag("creatures dealt damage this way"),
+        tag("a permanent dealt damage this way"),
+    )))
+    .parse(lower.as_str())
+    .is_ok();
+    if !matched {
+        return None;
+    }
+    let tracked = TargetFilter::TrackedSet {
+        id: crate::types::identifiers::TrackedSetId(0),
+    };
+    Some(SubjectApplication {
+        affected: tracked.clone(),
+        // The static binds to the damaged-object tracked set via `target`/`affected`
+        // above; the rider does not inherit the parent's chosen targets.
+        target: Some(tracked),
+        multi_target: None,
+        inherits_parent: false,
+        is_optional: false,
+    })
+}
+
+/// CR 608.2c + CR 701.19c: Build the separate-sentence regen rider attached to a
+/// preceding damage clause. Recognizes the full "[noun] dealt damage this way
+/// can't be regenerated [this turn]" sentence (the three clean cards print it as
+/// its own sentence) and returns an `AbilityDefinition` carrying the
+/// `GenericEffect{CantBeRegenerated}` whose `target: TrackedSet(0)` binds to the
+/// damage clause's published set. Mirrors `static_affected_for_application`'s
+/// `target.is_some() → ParentTarget` convention so the static's `affected` is the
+/// runtime-bound `ParentTarget` (which the GenericEffect resolver reads against
+/// `chain_tracked_set_id`). Returns `None` for any other "can't be regenerated"
+/// subject (the targeted/anaphor forms keep their existing in-chain dispatch).
+pub(super) fn try_parse_cant_be_regenerated_damage_rider(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+    let (before_lower, (), _) =
+        nom_primitives::scan_preceded(&lower, parse_cant_be_regenerated_predicate)?;
+    let subject = text[..before_lower.len()].trim();
+    let application = subject_application_for_cant_be_regenerated(subject)?;
+    let affected = static_affected_for_application(&application);
+    let mode = StaticMode::CantBeRegenerated;
+    let def = AbilityDefinition::new(
+        kind,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(mode.clone())
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: application.target,
+        },
+    )
+    .duration(Duration::UntilEndOfTurn);
+    Some(def)
 }
 
 /// CR 602.5 + CR 603.2a + CR 608.2c: Resolve the subject of an EFFECT-form
