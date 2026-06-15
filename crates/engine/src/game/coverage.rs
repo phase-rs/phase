@@ -722,6 +722,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
         }

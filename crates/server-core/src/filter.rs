@@ -272,6 +272,7 @@ mod tests {
         state.waiting_for = WaitingFor::ManifestDreadChoice {
             player: p0,
             cards: vec![card_a, card_b],
+            source_id: ObjectId(99),
         };
         state.revealed_cards.insert(card_a);
         state.revealed_cards.insert(card_b);
