@@ -4732,9 +4732,8 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             // a "."/"," terminator) with "this turn" stripped upstream. A trailing
             // SPACE is NOT a boundary — it signals continued, unmatched text
             // ("didn't attack a player"), which must not match.
-            let consumed_at = |remainder: &str| -> Option<usize> {
-                Some(leading_ws + trimmed.len() - remainder.len())
-            };
+            let consumed_at =
+                |remainder: &str| -> usize { leading_ws + trimmed.len() - remainder.len() };
             // (a) explicit " this turn" + word boundary (guards "this turning").
             if let Ok((after_turn, _)) =
                 tag::<_, _, OracleError<'_>>(" this turn").parse(after_disjunction)
@@ -4744,7 +4743,7 @@ pub(crate) fn parse_that_clause_suffix<'a>(
                     .next()
                     .is_none_or(|c| !c.is_alphanumeric() && c != '_');
                 if at_boundary {
-                    return Some((props, consumed_at(after_turn).unwrap()));
+                    return Some((props, consumed_at(after_turn)));
                 }
             }
             // (b) duration stripped upstream: verb at a clause boundary.
@@ -4753,7 +4752,7 @@ pub(crate) fn parse_that_clause_suffix<'a>(
                 .next()
                 .is_none_or(|c| c == '.' || c == ',');
             if at_clause_boundary {
-                return Some((props, consumed_at(after_disjunction).unwrap()));
+                return Some((props, consumed_at(after_disjunction)));
             }
         }
     }
