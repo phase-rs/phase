@@ -413,6 +413,7 @@ pub(super) fn handle_resolution_choice(
                 player,
                 manifest_id,
                 crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                None,
                 events,
             )
             .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;

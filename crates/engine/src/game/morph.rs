@@ -264,6 +264,7 @@ pub fn manifest_card(
     _player: PlayerId,
     object_id: ObjectId,
     profile: crate::types::ability::FaceDownProfile,
+    controller: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if !state.objects.contains_key(&object_id) {
@@ -286,12 +287,18 @@ pub fn manifest_card(
     // parked event and the resume path applies it through the shared CR 708.3
     // helper (`zone_pipeline::apply_face_down_entry_profile`), so the manifest
     // resumes face down with nothing left for this helper to do.
-    match super::zone_pipeline::move_object(
-        state,
+    // CR 110.2a: An effect that puts an object onto the battlefield may specify
+    // a controller other than the object's owner ("under your control"). When
+    // `controller` is `Some`, the manifested card enters under that player's
+    // control instead of the library owner's (Cybership routes the damaged
+    // player's cards under the Cybership controller).
+    let mut request =
         super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
-            .face_down(profile),
-        events,
-    ) {
+            .face_down(profile);
+    if let Some(controller) = controller {
+        request = request.under_control_of(controller);
+    }
+    match super::zone_pipeline::move_object(state, request, events) {
         super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
@@ -299,7 +306,10 @@ pub fn manifest_card(
 }
 
 /// Find the object id of the top card of `player`'s library, if any.
-fn top_library_object(state: &GameState, player: PlayerId) -> Result<ObjectId, EngineError> {
+pub(crate) fn top_library_object(
+    state: &GameState,
+    player: PlayerId,
+) -> Result<ObjectId, EngineError> {
     let player_state = state
         .players
         .iter()
@@ -344,6 +354,7 @@ pub fn manifest(
         player,
         object_id,
         crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        None,
         events,
     )
 }
@@ -362,6 +373,7 @@ pub fn cloak(
         player,
         object_id,
         crate::types::ability::FaceDownProfile::cloaked_2_2(),
+        None,
         events,
     )
 }

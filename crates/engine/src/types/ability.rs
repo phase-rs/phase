@@ -8737,6 +8737,20 @@ pub enum Effect {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 708.2a: Effect-specified face-down characteristics override
+        /// ("They're 2/2 Cyberman artifact creatures."). `None` = the vanilla
+        /// 2/2 manifest default (CR 701.40a). The put-clause seeds
+        /// `Some(vanilla_2_2())` when the surface form is "put the top N cards
+        /// ... onto the battlefield face down", and a trailing
+        /// `FaceDownProfileSpec` continuation refines it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<FaceDownProfile>,
+        /// CR 110.2a: Controller override on entry ("under your control"). `None`
+        /// leaves each manifested card under the library owner's control (the
+        /// CR 701.40a default). Cybership routes the damaged player's cards under
+        /// the Cybership controller via `ControllerRef::You`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 701.62a: Manifest dread — look at top 2 cards of library, manifest one,
     /// put the rest into graveyard. Uses interactive WaitingFor::ManifestDreadChoice.

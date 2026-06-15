@@ -46,6 +46,7 @@ pub fn resolve(
             player,
             card_id,
             crate::types::ability::FaceDownProfile::vanilla_2_2(),
+            None,
             events,
         )
         .map_err(|e| EffectError::MissingParam(format!("{e}")))?;

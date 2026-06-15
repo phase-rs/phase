@@ -11186,6 +11186,8 @@ fn lower_subject_predicate_ast(
                 return parsed_clause(Effect::Manifest {
                     target: subject.affected,
                     count,
+                    profile: None,
+                    enters_under: None,
                 });
             }
             let mut clause = lower_imperative_clause(&text, ctx);
@@ -26530,7 +26532,8 @@ mod tests {
                 e,
                 Effect::Manifest {
                     target: TargetFilter::Controller,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ Controller, count: 1 }}, got: {e:?}"
@@ -26545,7 +26548,8 @@ mod tests {
                 e,
                 Effect::Manifest {
                     target: TargetFilter::Controller,
-                    count: QuantityExpr::Fixed { value: 2 }
+                    count: QuantityExpr::Fixed { value: 2 },
+                    ..
                 }
             ),
             "expected Manifest {{ Controller, count: 2 }}, got: {e:?}"
@@ -26568,11 +26572,89 @@ mod tests {
                 *def.effect,
                 Effect::Manifest {
                     target: TargetFilter::TriggeringPlayer,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
             def.effect
+        );
+    }
+
+    /// CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+    /// library onto the battlefield face down [under your control]" lowers to
+    /// `Effect::Manifest` (Cybership's put-clause surface form), preserving the
+    /// count (top-N), the library-owner binding, the seeded face-down profile,
+    /// and the controller override. Exercises the player × face-down axes.
+    #[test]
+    fn effect_put_top_onto_battlefield_face_down_lowers_to_manifest() {
+        // Cybership: "that player's library" (DamageDone → TriggeringPlayer) +
+        // "face down" + "under your control".
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "Put the top two cards of that player's library onto the battlefield face down under your control",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let Effect::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
+        } = &*def.effect
+        else {
+            panic!("expected Manifest, got {:?}", def.effect);
+        };
+        assert_eq!(*target, TargetFilter::TriggeringPlayer);
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(*enters_under, Some(ControllerRef::You));
+        assert_eq!(
+            *profile,
+            Some(crate::types::ability::FaceDownProfile::vanilla_2_2()),
+            "face down → seeded vanilla 2/2 profile"
+        );
+
+        // "your library" binds to the controller.
+        let your = parse_effect("Put the top card of your library onto the battlefield face down");
+        assert!(
+            matches!(
+                &your,
+                Effect::Manifest {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    profile: Some(_),
+                    enters_under: None,
+                }
+            ),
+            "your library → Controller, face down, no controller override, got: {your:?}"
+        );
+
+        // "target player's library" binds to a chosen player.
+        let target_player = parse_effect(
+            "Put the top three cards of target player's library onto the battlefield face down",
+        );
+        assert!(
+            matches!(
+                &target_player,
+                Effect::Manifest {
+                    target: TargetFilter::Player,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "target player's library → Player, got: {target_player:?}"
+        );
+
+        // No "face down" → NOT a manifest (a non-face-down put onto the
+        // battlefield is a regular ChangeZone, not CR 701.40a manifest). Proves
+        // the face-down axis is part of the dispatch decision.
+        let no_face_down = parse_effect("Put the top card of your library onto the battlefield");
+        assert!(
+            !matches!(no_face_down, Effect::Manifest { .. }),
+            "without 'face down' the put-onto-battlefield form must NOT be a Manifest, got: {no_face_down:?}"
         );
     }
 
@@ -26600,7 +26682,8 @@ mod tests {
                 *sub.effect,
                 Effect::Manifest {
                     target: TargetFilter::ParentTargetController,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ ParentTargetController, count: 1 }}, got: {:?}",

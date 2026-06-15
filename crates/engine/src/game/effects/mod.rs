@@ -8478,6 +8478,8 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::ParentTargetController,
                 count: QuantityExpr::Fixed { value: 1 },
+                profile: None,
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
