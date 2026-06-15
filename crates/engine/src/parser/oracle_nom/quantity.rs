@@ -642,34 +642,19 @@ fn parse_commander_owner_phrase(input: &str) -> OracleResult<'_, ControllerRef> 
 fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = tag("on the battlefield or in the command zone").parse(input)?;
 
-    // Build zone disjunction filter: commanders in battlefield OR command zone
-    let battlefield_filter = TargetFilter::Typed(TypedFilter {
-        controller: None,
-        type_filters: vec![],
-        properties: vec![
-            FilterProp::IsCommander,
-            FilterProp::InZone {
-                zone: Zone::Battlefield,
-            },
-        ],
-    });
-
-    let command_zone_filter = TargetFilter::Typed(TypedFilter {
-        controller: None,
-        type_filters: vec![],
-        properties: vec![
-            FilterProp::IsCommander,
-            FilterProp::InZone {
-                zone: Zone::Command,
-            },
-        ],
-    });
-
+    // Build zone disjunction filter using InAnyZone for efficiency
     Ok((
         rest,
-        TargetFilter::Or {
-            filters: vec![battlefield_filter, command_zone_filter],
-        },
+        TargetFilter::Typed(TypedFilter {
+            controller: None,
+            type_filters: vec![],
+            properties: vec![
+                FilterProp::IsCommander,
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Battlefield, Zone::Command],
+                },
+            ],
+        }),
     ))
 }
 
@@ -686,28 +671,16 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
 fn parse_chosen_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the ").parse(input)?;
     let (rest, property) = parse_mana_value_phrase(rest)?;
-    let (rest, _) = tag("of a commander ").parse(rest)?;
+    let (rest, _) = tag(" of a commander ").parse(rest)?;
     let (rest, owner) = parse_commander_owner_phrase(rest)?;
     let (rest, mut zone_filter) = parse_commander_zone_disjunction(rest)?;
 
     // Add ownership to the zone filter
-    zone_filter = match zone_filter {
-        TargetFilter::Or { filters } => {
-            let filters = filters
-                .into_iter()
-                .map(|mut f| {
-                    if let TargetFilter::Typed(ref mut tf) = f {
-                        tf.properties.push(FilterProp::Owned {
-                            controller: owner.clone(),
-                        });
-                    }
-                    f
-                })
-                .collect();
-            TargetFilter::Or { filters }
-        }
-        _ => zone_filter,
-    };
+    if let TargetFilter::Typed(ref mut tf) = zone_filter {
+        tf.properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+    }
 
     Ok((
         rest,
@@ -730,28 +703,16 @@ fn parse_chosen_commander_mana_value_ref(input: &str) -> OracleResult<'_, Quanti
 fn parse_greatest_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the greatest ").parse(input)?;
     let (rest, property) = parse_mana_value_phrase(rest)?;
-    let (rest, _) = tag("of a commander ").parse(rest)?;
+    let (rest, _) = tag(" of a commander ").parse(rest)?;
     let (rest, owner) = parse_commander_owner_phrase(rest)?;
     let (rest, mut zone_filter) = parse_commander_zone_disjunction(rest)?;
 
     // Add ownership to the zone filter
-    zone_filter = match zone_filter {
-        TargetFilter::Or { filters } => {
-            let filters = filters
-                .into_iter()
-                .map(|mut f| {
-                    if let TargetFilter::Typed(ref mut tf) = f {
-                        tf.properties.push(FilterProp::Owned {
-                            controller: owner.clone(),
-                        });
-                    }
-                    f
-                })
-                .collect();
-            TargetFilter::Or { filters }
-        }
-        _ => zone_filter,
-    };
+    if let TargetFilter::Typed(ref mut tf) = zone_filter {
+        tf.properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+    }
 
     Ok((
         rest,
@@ -6295,7 +6256,7 @@ mod tests {
         // Test the non-greatest pattern (CR 608.2d choice)
         let phrase =
             "the mana value of a commander you own on the battlefield or in the command zone";
-        let (rest, q) = parse_quantity_ref(phrase).unwrap();
+        let (rest, q) = parse_chosen_commander_mana_value_ref(phrase).unwrap();
         assert_eq!(rest, "", "phrase should be fully consumed");
 
         // Verify it produces ChosenObject for resolution-time choice
@@ -6309,51 +6270,40 @@ mod tests {
 
         assert_eq!(property, ObjectProperty::ManaValue);
 
-        // Verify the filter is an Or disjunction of two zone filters
-        let TargetFilter::Or { filters } = selection_filter else {
-            panic!("Expected Or filter, got {selection_filter:?}");
+        // Verify the filter uses InAnyZone for multi-zone disjunction
+        let TargetFilter::Typed(tf) = selection_filter else {
+            panic!("Expected Typed filter, got {selection_filter:?}");
         };
 
-        assert_eq!(filters.len(), 2, "Should have exactly 2 zone filters");
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsCommander)),
+            "Filter should have IsCommander"
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                }
+            )),
+            "Filter should have Owned{{You}}"
+        );
 
-        // Verify each filter has IsCommander, Owned{You}, and appropriate zone
-        for (idx, filter) in filters.iter().enumerate() {
-            let TargetFilter::Typed(tf) = filter else {
-                panic!("Expected Typed filter, got {filter:?}");
-            };
-
-            assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::IsCommander)),
-                "Filter {} should have IsCommander",
-                idx
-            );
-            assert!(
-                tf.properties.iter().any(|p| matches!(
-                    p,
-                    FilterProp::Owned {
-                        controller: ControllerRef::You
-                    }
-                )),
-                "Filter {} should have Owned{{You}}",
-                idx
-            );
-
-            let expected_zone = if idx == 0 {
-                Zone::Battlefield
-            } else {
-                Zone::Command
-            };
-            assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == expected_zone)),
-                "Filter {} should have InZone{{{:?}}}",
-                idx,
-                expected_zone
-            );
-        }
+        // Verify InAnyZone with both zones
+        let in_any_zone = tf.properties.iter().find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones),
+            _ => None,
+        });
+        assert!(in_any_zone.is_some(), "Filter should have InAnyZone");
+        let zones = in_any_zone.unwrap();
+        assert_eq!(zones.len(), 2, "Should have exactly 2 zones");
+        assert!(
+            zones.contains(&Zone::Battlefield),
+            "Should include Battlefield"
+        );
+        assert!(zones.contains(&Zone::Command), "Should include Command");
     }
 
     #[test]
@@ -6376,43 +6326,35 @@ mod tests {
         assert_eq!(function, AggregateFunction::Max);
         assert_eq!(property, ObjectProperty::ManaValue);
 
-        // Verify the filter is an Or disjunction of two zone filters
-        let TargetFilter::Or { filters } = filter else {
-            panic!("Expected Or filter, got {filter:?}");
+        // Verify the filter uses InAnyZone for multi-zone disjunction
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
         };
 
-        assert_eq!(filters.len(), 2, "Should have exactly 2 zone filters");
+        assert!(
+            tf.properties.contains(&FilterProp::IsCommander),
+            "Filter missing IsCommander"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::You
+            }),
+            "Filter missing Owned{{You}}"
+        );
 
-        // Verify each filter has IsCommander, Owned{You}, and appropriate zone
-        for (idx, filter) in filters.iter().enumerate() {
-            let TargetFilter::Typed(tf) = filter else {
-                panic!("Filter {idx} should be Typed, got {filter:?}");
-            };
-
-            assert!(
-                tf.properties.contains(&FilterProp::IsCommander),
-                "Filter {idx} missing IsCommander"
-            );
-            assert!(
-                tf.properties.contains(&FilterProp::Owned {
-                    controller: ControllerRef::You
-                }),
-                "Filter {idx} missing Owned{{You}}"
-            );
-
-            // One should be Battlefield, one should be Command
-            let has_battlefield = tf.properties.contains(&FilterProp::InZone {
-                zone: Zone::Battlefield,
-            });
-            let has_command = tf.properties.contains(&FilterProp::InZone {
-                zone: Zone::Command,
-            });
-
-            assert!(
-                has_battlefield || has_command,
-                "Filter {idx} should have either Battlefield or Command zone"
-            );
-        }
+        // Verify InAnyZone with both zones
+        let in_any_zone = tf.properties.iter().find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones),
+            _ => None,
+        });
+        assert!(in_any_zone.is_some(), "Filter should have InAnyZone");
+        let zones = in_any_zone.unwrap();
+        assert_eq!(zones.len(), 2, "Should have exactly 2 zones");
+        assert!(
+            zones.contains(&Zone::Battlefield),
+            "Should include Battlefield"
+        );
+        assert!(zones.contains(&Zone::Command), "Should include Command");
     }
 
     #[test]
@@ -6445,26 +6387,33 @@ mod tests {
             panic!("Expected ChosenObject, got {q:?}");
         };
 
-        // Verify the filter has Owned{Opponent}
-        let TargetFilter::Or { filters } = selection_filter else {
-            panic!("Expected Or filter, got {selection_filter:?}");
+        // Verify the filter uses InAnyZone with Owned{Opponent}
+        let TargetFilter::Typed(tf) = selection_filter else {
+            panic!("Expected Typed filter, got {selection_filter:?}");
         };
 
-        for filter in filters.iter() {
-            let TargetFilter::Typed(tf) = filter else {
-                panic!("Expected Typed filter, got {filter:?}");
-            };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Owned {
+                    controller: ControllerRef::Opponent
+                }
+            )),
+            "Filter should have Owned{{Opponent}}"
+        );
 
-            assert!(
-                tf.properties.iter().any(|p| matches!(
-                    p,
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent
-                    }
-                )),
-                "Filter should have Owned{{Opponent}}"
-            );
-        }
+        let in_any_zone = tf.properties.iter().find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones),
+            _ => None,
+        });
+        assert!(in_any_zone.is_some(), "Filter should have InAnyZone");
+        let zones = in_any_zone.unwrap();
+        assert_eq!(zones.len(), 2, "Should have exactly 2 zones");
+        assert!(
+            zones.contains(&Zone::Battlefield),
+            "Should include Battlefield"
+        );
+        assert!(zones.contains(&Zone::Command), "Should include Command");
     }
 
     /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
