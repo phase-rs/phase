@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn good_king_mog_chapter_four_counters_other_moogles_issue_588() {
         use crate::types::ability::{
-            ControllerRef, FilterProp, QuantityExpr, TypeFilter, TypedFilter,
+            ControllerRef, FilterProp, QuantityExpr, TypeFilter,
         };
         use crate::types::counter::CounterType;
 
