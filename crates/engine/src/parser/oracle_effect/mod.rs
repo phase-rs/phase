@@ -1949,8 +1949,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         cost,
                         cast_transformed: false,
                         constraint: None,
-                        // CR 611.2a: `grant_permission::resolve` binds this to
-                        // the ability controller at grant time.
+                        // CR 611.2a: airbend grants cast permission to each
+                        // exiled object's owner, not the airbender's controller.
                         granted_to: None,
                         resolution_cleanup: None,
                         duration: None,
@@ -1959,7 +1959,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
-                    grantee: Default::default(),
+                    grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
                 },
             )
             .sub_ability(register_bending),
@@ -8112,7 +8112,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
             AbilityKind::Spell,
             Effect::RemoveCounter {
                 counter_type: Some(CounterType::Plus1Plus1),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
             },
         )
@@ -19959,7 +19959,11 @@ mod tests {
                         }
                         Effect::RemoveCounter { target, count, .. } => {
                             assert_eq!(*target, TargetFilter::ParentTarget);
-                            assert_eq!(*count, 1, "remove exactly one counter of that kind");
+                            assert_eq!(
+                                *count,
+                                QuantityExpr::Fixed { value: 1 },
+                                "remove exactly one counter of that kind"
+                            );
                             saw_remove = true;
                         }
                         other => panic!("expected Put/RemoveCounter branch, got {other:?}"),

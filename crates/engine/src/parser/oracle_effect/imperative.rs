@@ -1791,15 +1791,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 cost,
                 cast_transformed: false,
                 constraint: None,
-                // CR 611.2a: bound to the ability controller by
-                // `grant_permission::resolve`.
+                // CR 611.2a: airbend grants cast permission to each exiled
+                // object's owner, not the airbender's controller.
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
                 exile_instead_of_graveyard_on_resolve: false,
             },
             target,
-            grantee: Default::default(),
+            grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
         },
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
     }

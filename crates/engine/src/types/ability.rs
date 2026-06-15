@@ -4296,7 +4296,12 @@ pub enum PlayerFilter {
 
 /// An expression that produces an integer for quantity comparisons.
 /// Either a dynamic game-state lookup or a literal constant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// CR 107: `Deserialize` is hand-written below (NOT derived) so it ALSO accepts
+/// the legacy bare-integer form (`2`, `-1`) that pre-`QuantityExpr` card-data
+/// and committed game-state snapshots stored. `Serialize` stays derived, so the
+/// canonical on-disk form remains the tagged `{"type":"Fixed","value":2}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum QuantityExpr {
     /// A dynamic quantity looked up from the current game state.
@@ -4386,6 +4391,106 @@ pub enum QuantityExpr {
         left: Box<QuantityExpr>,
         right: Box<QuantityExpr>,
     },
+}
+
+/// CR 107: Back-compatible `Deserialize` for [`QuantityExpr`]. Accepts BOTH the
+/// canonical tagged form (`{"type":"Fixed","value":2}`) and the legacy bare
+/// integer (`2`, `-1`) that pre-`QuantityExpr` card-data.json and committed
+/// game-state snapshots (e.g. the phase-ai `saheeli-copy-sacrifice` scenario)
+/// stored before counts became `QuantityExpr`. Mirrors the `PtValue` migration
+/// in this module so every `QuantityExpr` field — card-data, fixtures, and
+/// game-state snapshots — round-trips without regenerating captured data.
+impl<'de> serde::Deserialize<'de> for QuantityExpr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            // Legacy: a bare integer is the old `Fixed` count.
+            serde_json::Value::Number(n) => {
+                let value = n
+                    .as_i64()
+                    .ok_or_else(|| de::Error::custom("expected integer for QuantityExpr"))?;
+                let value = i32::try_from(value)
+                    .map_err(|_| de::Error::custom("QuantityExpr integer out of i32 range"))?;
+                Ok(QuantityExpr::Fixed { value })
+            }
+            // Canonical tagged form — delegate to a derived mirror. The
+            // recursive `Box<QuantityExpr>` fields re-enter this impl, so nested
+            // legacy bare integers are accepted too.
+            serde_json::Value::Object(_) => {
+                #[derive(serde::Deserialize)]
+                #[serde(tag = "type")]
+                enum Tagged {
+                    Ref {
+                        qty: QuantityRef,
+                    },
+                    Fixed {
+                        value: i32,
+                    },
+                    DivideRounded {
+                        inner: Box<QuantityExpr>,
+                        divisor: u32,
+                        rounding: RoundingMode,
+                    },
+                    Offset {
+                        inner: Box<QuantityExpr>,
+                        offset: i32,
+                    },
+                    ClampMin {
+                        inner: Box<QuantityExpr>,
+                        minimum: i32,
+                    },
+                    Multiply {
+                        factor: i32,
+                        inner: Box<QuantityExpr>,
+                    },
+                    Sum {
+                        exprs: Vec<QuantityExpr>,
+                    },
+                    UpTo {
+                        max: Box<QuantityExpr>,
+                    },
+                    Power {
+                        base: i32,
+                        exponent: Box<QuantityExpr>,
+                    },
+                    Difference {
+                        left: Box<QuantityExpr>,
+                        right: Box<QuantityExpr>,
+                    },
+                }
+                let tagged: Tagged =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(match tagged {
+                    Tagged::Ref { qty } => QuantityExpr::Ref { qty },
+                    Tagged::Fixed { value } => QuantityExpr::Fixed { value },
+                    Tagged::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    },
+                    Tagged::Offset { inner, offset } => QuantityExpr::Offset { inner, offset },
+                    Tagged::ClampMin { inner, minimum } => {
+                        QuantityExpr::ClampMin { inner, minimum }
+                    }
+                    Tagged::Multiply { factor, inner } => QuantityExpr::Multiply { factor, inner },
+                    Tagged::Sum { exprs } => QuantityExpr::Sum { exprs },
+                    Tagged::UpTo { max } => QuantityExpr::UpTo { max },
+                    Tagged::Power { base, exponent } => QuantityExpr::Power { base, exponent },
+                    Tagged::Difference { left, right } => QuantityExpr::Difference { left, right },
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected an integer or a tagged object for QuantityExpr",
+            )),
+        }
+    }
 }
 
 impl QuantityExpr {
@@ -6825,8 +6930,15 @@ pub enum Effect {
     RemoveCounter {
         #[serde(default)]
         counter_type: Option<CounterType>,
-        #[serde(default = "default_one_i32")]
-        count: i32,
+        /// CR 122.1: Number of counters to remove. Mirrors `PutCounter.count`
+        /// so dynamic amounts compose — "remove that many +1/+1 counters"
+        /// (Protean Hydra class) resolves the prevented-damage amount via
+        /// `QuantityExpr::Ref { qty: QuantityRef::EventContextAmount }`.
+        /// The literal `QuantityExpr::Fixed { value: -1 }` is the legacy
+        /// "remove all" sentinel — `resolve_remove` keys off `< 0` to strip
+        /// every counter of the named type (Vampire Hexmage).
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -8870,10 +8982,6 @@ pub enum Effect {
 }
 
 fn default_one() -> u32 {
-    1
-}
-
-fn default_one_i32() -> i32 {
     1
 }
 
@@ -15582,6 +15690,31 @@ mod tests {
         let (peeled, was_up_to) = expr.peel_up_to();
         assert!(!was_up_to);
         assert_eq!(peeled, &expr);
+    }
+
+    #[test]
+    fn quantity_expr_deserializes_legacy_bare_integer() {
+        let expr: QuantityExpr = serde_json::from_str("-1").unwrap();
+        assert_eq!(expr, QuantityExpr::Fixed { value: -1 });
+    }
+
+    #[test]
+    fn quantity_expr_deserializes_nested_legacy_bare_integer() {
+        let expr: QuantityExpr =
+            serde_json::from_str(r#"{"type":"Multiply","factor":2,"inner":3}"#).unwrap();
+        assert_eq!(
+            expr,
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Fixed { value: 3 }),
+            }
+        );
+    }
+
+    #[test]
+    fn quantity_expr_rejects_invalid_bare_number() {
+        assert!(serde_json::from_str::<QuantityExpr>("1.5").is_err());
+        assert!(serde_json::from_str::<QuantityExpr>("2147483648").is_err());
     }
 
     /// Demonstrates the new compositional power: "up to your hand size cards"

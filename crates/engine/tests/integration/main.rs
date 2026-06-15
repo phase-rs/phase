@@ -209,6 +209,7 @@ mod issue_2941_vivien_reid;
 mod issue_2943_kayas_wrath;
 mod issue_3127_reveal_otherwise_graveyard;
 mod issue_3321_volcanic_spite_optional;
+mod issue_3322_airbend_owner_cast;
 mod issue_3324_haunted_one;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;

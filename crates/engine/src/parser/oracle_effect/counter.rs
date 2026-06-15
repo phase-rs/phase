@@ -601,25 +601,40 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     }) {
         return Some(Effect::RemoveCounter {
             counter_type: None,
-            count: -1,
+            count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SelfRef,
         });
     }
 
     // CR 122.1: "remove all" uses sentinel count -1, resolved to actual count at runtime.
     // Also handle "up to N" prefix (player may remove fewer).
+    // CR 615.5 + CR 608.2h: "that many" / "that much" binds the prevented-damage
+    // amount of an enclosing prevention replacement (Protean Hydra class:
+    // "prevent that damage and remove that many +1/+1 counters from it"). The
+    // amount is the info the rider reads from the prevented event at resolution.
+    // Resolves to `EventContextAmount`, matching the `PutCounter` "that many"
+    // path used by the Vigor / Phyrexian Hydra cohort.
     let (count, rest) = if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
+        value((), alt((tag("that many "), tag("that much ")))).parse(i)
+    }) {
+        (
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            rest.trim_start(),
+        )
+    } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("all ")).parse(i)
     }) {
-        (-1i32, rest.trim_start())
+        (QuantityExpr::Fixed { value: -1 }, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
         let (n, r) = parse_number(rest.trim())?;
-        (n as i32, r)
+        (QuantityExpr::Fixed { value: n as i32 }, r)
     } else {
         let (n, r) = parse_number(after_remove)?;
-        (n as i32, r)
+        (QuantityExpr::Fixed { value: n as i32 }, r)
     };
 
     // Try matching "counter(s)" directly (untyped: "remove all counters from ...").
@@ -1142,7 +1157,11 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None, "untyped should be None");
-        assert_eq!(count, -1, "all = sentinel -1");
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: -1 },
+            "all = sentinel -1"
+        );
         assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 
@@ -1162,7 +1181,7 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None);
-        assert_eq!(count, 1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
     }
 
     #[test]
@@ -1181,7 +1200,7 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None);
-        assert_eq!(count, 3);
+        assert_eq!(count, QuantityExpr::Fixed { value: 3 });
     }
 
     /// CR 608.2k anaphor: "remove those counters" with no "from {target}"
@@ -1212,7 +1231,11 @@ mod tests {
                 panic!("{input}: expected RemoveCounter, got {result:?}");
             };
             assert_eq!(counter_type, None, "{input}: counter_type None");
-            assert_eq!(count, -1, "{input}: sentinel -1 = all");
+            assert_eq!(
+                count,
+                QuantityExpr::Fixed { value: -1 },
+                "{input}: sentinel -1 = all"
+            );
             assert!(
                 matches!(target, TargetFilter::SelfRef),
                 "{input}: target SelfRef, got {target:?}"
@@ -1233,7 +1256,7 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
-        assert_eq!(count, 1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
     }
 
     #[test]
