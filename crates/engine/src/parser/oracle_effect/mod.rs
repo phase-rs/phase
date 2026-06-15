@@ -19146,6 +19146,38 @@ pub(crate) fn parse_dynamic_energy_unless_cost(input: &str) -> Option<QuantityEx
     Some(QuantityExpr::Ref { qty })
 }
 
+/// CR 400.1: A for-each subject that lives in a zone OTHER than the
+/// battlefield (graveyard, library, exile, hand) cannot be faithfully counted
+/// by the shared `parse_for_each_clause` building block: its "named X in
+/// <zone>" / "<filter> in <zone>" handling swallows the zone phrase into the
+/// preceding name/filter and then defaults the count to the battlefield
+/// (e.g. Rune Snag's "card named Rune Snag in each graveyard" becomes
+/// `Named{name:"rune snag in each graveyard"}` counted on the battlefield).
+/// Rather than emit a silently-wrong dynamic cost, the unless-for-each arm
+/// declines (returns `None`) when such an off-battlefield zone keyword is
+/// present, leaving the card honestly gapped (flat cost + SwallowedClause
+/// warning) until the shared name/zone parser is fixed.
+///
+/// Scans at word boundaries (CLAUDE.md word-boundary idiom) so only complete
+/// zone tokens match — never "party"/"battlefield"/"control", which belong to
+/// faithfully-modeled battlefield subjects (Concerted Defense's "creature in
+/// your party", Spell Stutter's "Faerie you control") and must keep flipping
+/// to a correct dynamic cost.
+fn for_each_clause_references_offbattlefield_zone(clause: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(clause, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("graveyards"),
+            tag("graveyard"),
+            tag("libraries"),
+            tag("library"),
+            tag("exile"),
+            tag("hand"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 pub(crate) fn parse_unless_for_each_payment(
     after_cost: &str,
     cost: &ManaCost,
@@ -19155,6 +19187,65 @@ pub(crate) fn parse_unless_for_each_payment(
     };
     if !shards.is_empty() || *generic == 0 {
         return None;
+    }
+
+    // CR 118.12 + CR 118.12a: "unless [a player] pays {N} plus an additional {M}
+    // for each <filter>" — the interposed " plus an additional {M}" increment
+    // sits between the base {N} and the " for each " per-each clause. Recognize
+    // this infix BEFORE the bare " for each " arm so the dynamic per-each term is
+    // not dropped (otherwise the whole remainder fails to start with " for each "
+    // and parsing falls through to a flat generic cost). Emits
+    // `Sum[Fixed{N}, per_each]` where `per_each` mirrors the bare-arm collapse:
+    // {M}==1 stays a plain `Ref`, otherwise a `Multiply{factor: M}`. The
+    // `ControllerRef` is supplied by the filter text itself ("you control" →
+    // `ControllerRef::You`; the default is `ControllerRef::ScopedPlayer`) — not
+    // hard-coded here.
+    if let Ok((clause, (_, increment, _))) = (
+        tag::<_, _, OracleError<'_>>(" plus an additional "),
+        nom_primitives::parse_mana_cost,
+        tag::<_, _, OracleError<'_>>(" for each "),
+    )
+        .parse(after_cost)
+    {
+        let ManaCost::Cost {
+            shards: m_shards,
+            generic: m_generic,
+        } = increment
+        else {
+            return None;
+        };
+        if !m_shards.is_empty() || m_generic == 0 {
+            return None;
+        }
+        // CR 400.1: an off-battlefield-zone for-each subject (e.g. Rune Snag's
+        // "card named Rune Snag in each graveyard") is mis-modeled by the shared
+        // `parse_for_each_clause` — it folds the zone phrase into the name and
+        // counts on the battlefield. `parse_for_each_clause` returns a wrong
+        // `Some` here (not `None`), so the `?` below does NOT protect us. Decline
+        // explicitly so parsing falls through to the flat cost and the card keeps
+        // its honest SwallowedClause/DynamicQty gap until the shared parser is fixed.
+        if for_each_clause_references_offbattlefield_zone(clause) {
+            return None;
+        }
+        let qty = parse_for_each_clause(clause.trim())?;
+        let per_each = if m_generic == 1 {
+            QuantityExpr::Ref { qty }
+        } else {
+            QuantityExpr::Multiply {
+                factor: i32::try_from(m_generic).ok()?,
+                inner: Box::new(QuantityExpr::Ref { qty }),
+            }
+        };
+        return Some(AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed {
+                        value: i32::try_from(*generic).ok()?,
+                    },
+                    per_each,
+                ],
+            },
+        });
     }
 
     let (_, clause) = preceded(
@@ -23406,6 +23497,207 @@ mod tests {
             "unless payment should multiply the discarded-this-way tracked-set count, \
              got {:?}",
             unless_pay.cost
+        );
+    }
+
+    // Issue #3308: "unless pays {N} plus an additional {M} for each <filter>" —
+    // the interposed " plus an additional {M}" must not drop the dynamic per-each
+    // term. Spell Stutter ("{2} plus an additional {1} for each Faerie you
+    // control") lowers to Sum[Fixed{2}, Ref{ObjectCount{Faerie, controller:You}}]
+    // (NOT a flat Mana{generic:2}). The "you control" in the filter text supplies
+    // ControllerRef::You.
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_spell_stutter() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {2} plus an additional {1} for each Faerie you control",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        let AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum { exprs },
+        } = &unless_pay.cost
+        else {
+            panic!("expected ManaDynamic Sum, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(exprs.len(), 2, "Sum should have base + per-each: {exprs:?}");
+        assert_eq!(
+            exprs[0],
+            QuantityExpr::Fixed { value: 2 },
+            "base {{2}} term"
+        );
+        // {M}==1 → plain Ref (no Multiply collapse), per-each = Faerie you control.
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &exprs[1]
+        else {
+            panic!("expected Ref ObjectCount per-each, got {:?}", exprs[1]);
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed Faerie filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "\"you control\" must bind ControllerRef::You: {tf:?}"
+        );
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Faerie")),
+            "filter should match Faerie subtype: {tf:?}"
+        );
+    }
+
+    // Issue #3308: Concerted Defense — "{1} plus an additional {1} for each
+    // creature in your party" lowers to Sum[Fixed{1}, Ref{PartySize}] (the real
+    // shape parse_for_each_clause yields for "creature in your party"), proving
+    // the second affected card flips to a CORRECT dynamic form, not flat.
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_concerted_defense() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {1} plus an additional {1} for each creature in your party",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        let AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum { exprs },
+        } = &unless_pay.cost
+        else {
+            panic!("expected ManaDynamic Sum, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(exprs.len(), 2, "Sum should have base + per-each: {exprs:?}");
+        assert_eq!(exprs[0], QuantityExpr::Fixed { value: 1 }, "base {{1}}");
+        assert!(
+            matches!(
+                &exprs[1],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PartySize { .. }
+                }
+            ),
+            "per-each should be the party-size count, got {:?}",
+            exprs[1]
+        );
+    }
+
+    // Issue #3308 GAP A — Rune Snag's "card named Rune Snag in each graveyard"
+    // for-each subject lives OFF the battlefield, where the shared
+    // `parse_for_each_clause` mis-models it (it folds " in each graveyard" into
+    // the card name and counts on the battlefield, yielding a silently-wrong
+    // dynamic cost). The off-battlefield-zone honesty guard
+    // (`for_each_clause_references_offbattlefield_zone`) declines that case, so
+    // the unless-for-each arm returns None and parsing falls through to the flat
+    // cost: Rune Snag STAYS GAPPED as a static `Mana{generic:2}` (the announced
+    // {2} base), preserving its honest SwallowedClause/DynamicQty warning until
+    // the shared name/zone parser is fixed. (Spell Stutter / Concerted Defense
+    // reference battlefield subjects and still flip to a correct dynamic cost.)
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_rune_snag_offbattlefield_zone_stays_gapped(
+    ) {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        // The guard declines → fall through to the flat-cost fallthrough, which
+        // constructs `AbilityCost::Mana { cost: ManaCost::Cost { shards: [], generic: 2 } }`
+        // from the parsed base {2}. NOT a ManaDynamic.
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 2 }
+                } if shards.is_empty()
+            ),
+            "off-battlefield-zone for-each must stay gapped as flat Mana{{generic:2}}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // Issue #3308 no-regression: a flat "unless pays {3}" (no for-each, no
+    // "plus an additional") must still yield a flat static Mana{generic:3} —
+    // the new infix arm must not capture plain costs.
+    #[test]
+    fn effect_counter_unless_pays_flat_generic_stays_static() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {3}",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 3 }
+                } if shards.is_empty()
+            ),
+            "flat unless-cost should stay static Mana{{generic:3}}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // Issue #3308 GAP A — full-card swallow/parse-warning check. Spell Stutter
+    // and Concerted Defense are single-clause counterspells; once the dynamic
+    // per-each term is captured there must be NO remaining swallowed-clause /
+    // unimplemented warning (so CI's card-data coverage gate stays green).
+    // Concerted Defense's "(Your party consists of ...)" reminder text is
+    // stripped before parsing and must not surface a warning.
+    #[test]
+    fn issue_3308_full_card_parse_has_no_swallow_warnings() {
+        let instant = ["Instant".to_string()];
+        for (name, text) in [
+            (
+                "Spell Stutter",
+                "Counter target spell unless its controller pays {2} plus an additional {1} for each Faerie you control.",
+            ),
+            (
+                "Concerted Defense",
+                "Counter target spell unless its controller pays {1} plus an additional {1} for each creature in your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)",
+            ),
+        ] {
+            let r = crate::parser::parse_oracle_text(text, name, &[], &instant, &[]);
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
+            assert!(
+                matches!(*r.abilities[0].effect, Effect::Counter { .. }),
+                "{name}: expected Counter, got {:?}",
+                r.abilities[0].effect
+            );
+            assert!(
+                r.parse_warnings.is_empty(),
+                "{name}: clean flip must leave no swallow/unimplemented warning, got {:?}",
+                r.parse_warnings
+            );
+        }
+    }
+
+    // Issue #3308 GAP A — honest gap preserved. Rune Snag's off-battlefield
+    // for-each subject is declined by the honesty guard, so its full-card parse
+    // must STILL surface a SwallowedClause/DynamicQty warning (the dynamic
+    // "for each card named Rune Snag in each graveyard" increment is not
+    // faithfully captured). This is the coverage-honest counterpart to the
+    // no-warnings test above: a correct dynamic flip would clear the warning,
+    // but a silently-wrong flip must not — the gap stays visible to CI.
+    #[test]
+    fn issue_3308_rune_snag_keeps_swallow_warning() {
+        let instant = ["Instant".to_string()];
+        let r = crate::parser::parse_oracle_text(
+            "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard.",
+            "Rune Snag",
+            &[],
+            &instant,
+            &[],
+        );
+        assert!(
+            r.parse_warnings.iter().any(|warning| matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "DynamicQty"
+            )),
+            "Rune Snag's off-battlefield for-each must keep a DynamicQty swallow warning, got {:?}",
+            r.parse_warnings
         );
     }
 

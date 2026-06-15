@@ -446,6 +446,17 @@ pub struct ZoneChangeCombatStatus {
     pub blocking: bool,
     #[serde(default)]
     pub blocked: bool,
+    /// CR 506.5 + CR 603.10a: Whether the object was the sole attacker when it
+    /// left combat. Captured at zone-exit because combat membership is cleared
+    /// by CR 506.4 before look-back ("leaves the battlefield") trigger
+    /// conditions are evaluated, so live combat can no longer answer it.
+    #[serde(default)]
+    pub attacking_alone: bool,
+    /// CR 506.5 + CR 603.10a: Whether the object was the sole blocker when it
+    /// left combat. Captured at zone-exit for the same look-back reason as
+    /// `attacking_alone`.
+    #[serde(default)]
+    pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
 }

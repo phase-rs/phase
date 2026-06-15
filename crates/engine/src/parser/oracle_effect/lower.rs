@@ -5537,6 +5537,11 @@ fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&st
                 .map(|p| apply_where_x_to_filter_prop(p, where_x_expression))
                 .collect(),
         },
+        // CR 608.2c: Descend into the negated inner prop so X-substitution
+        // reaches it (mirrors the AnyOf transform).
+        FilterProp::Not { prop } => FilterProp::Not {
+            prop: Box::new(apply_where_x_to_filter_prop(*prop, where_x_expression)),
+        },
         other => other,
     }
 }

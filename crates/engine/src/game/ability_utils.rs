@@ -1857,19 +1857,32 @@ fn target_filter_needs_chosen_x(ability: &ResolvedAbility, filter: &TargetFilter
 
 fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
-            FilterProp::Cmc { value, .. } | FilterProp::Counters { count: value, .. } => {
-                value.contains_x()
-            }
-            FilterProp::CanEnchant { target } => target_filter_contains_chosen_x_ref(target),
-            _ => false,
-        }),
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_contains_chosen_x_ref),
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             target_filter_contains_chosen_x_ref(filter)
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_contains_chosen_x_ref)
         }
+        _ => false,
+    }
+}
+
+/// CR 601.2c: A negated prop (`FilterProp::Not`) can wrap an X-bearing prop
+/// (e.g. `Not(Cmc { value: X })`), so X resolution must descend into it just
+/// like the `CanEnchant` filter-bearing arm — otherwise an unannounced X in a
+/// negated relative clause would be missed when deciding to route through
+/// `ChooseXValue` ahead of target selection.
+fn filter_prop_contains_chosen_x_ref(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. } | FilterProp::Counters { count: value, .. } => {
+            value.contains_x()
+        }
+        FilterProp::CanEnchant { target } => target_filter_contains_chosen_x_ref(target),
+        FilterProp::Not { prop } => filter_prop_contains_chosen_x_ref(prop),
         _ => false,
     }
 }
@@ -2344,6 +2357,10 @@ fn filter_prop_references_target_creature_quantity(
         crate::types::ability::FilterProp::AnyOf { props } => props
             .iter()
             .any(filter_prop_references_target_creature_quantity),
+        // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
+        crate::types::ability::FilterProp::Not { prop } => {
+            filter_prop_references_target_creature_quantity(prop)
+        }
         crate::types::ability::FilterProp::DifferentNameFrom { filter } => {
             filter_references_target_creature_quantity(filter)
         }
