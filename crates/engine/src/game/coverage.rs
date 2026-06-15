@@ -5665,7 +5665,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
-        QuantityRef::ChosenObject { .. } => ("ChosenObject", Handled),
+        QuantityRef::ChosenObject { .. } => ("ChosenObject", Unhandled),
         QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {

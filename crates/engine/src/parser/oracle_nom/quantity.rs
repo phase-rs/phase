@@ -630,10 +630,12 @@ fn parse_mana_value_phrase(input: &str) -> OracleResult<'_, ObjectProperty> {
 }
 
 /// CR 108.3: Parse ownership phrase - handles "you own" and per-player "they own".
+/// CR 109.5: "they own" in each-player contexts binds to ScopedPlayer (the iterating player),
+/// not Opponent. This ensures "each player ... a commander they own" selects each player's own commander.
 fn parse_commander_owner_phrase(input: &str) -> OracleResult<'_, ControllerRef> {
     alt((
         value(ControllerRef::You, tag("you own ")),
-        value(ControllerRef::Opponent, tag("they own ")),
+        value(ControllerRef::ScopedPlayer, tag("they own ")),
     ))
     .parse(input)
 }
@@ -6373,13 +6375,13 @@ mod tests {
 
     #[test]
     fn test_parse_commander_mana_value_ref_per_player() {
-        // Test per-player "they own" variant
+        // Test per-player "they own" variant - should bind to ScopedPlayer
         let phrase =
             "the mana value of a commander they own on the battlefield or in the command zone";
         let (rest, q) = parse_quantity_ref(phrase).unwrap();
         assert_eq!(rest, "");
 
-        // Verify it produces ChosenObject with Opponent controller
+        // Verify it produces ChosenObject with ScopedPlayer controller
         let QuantityRef::ChosenObject {
             selection_filter, ..
         } = q
@@ -6387,7 +6389,7 @@ mod tests {
             panic!("Expected ChosenObject, got {q:?}");
         };
 
-        // Verify the filter uses InAnyZone with Owned{Opponent}
+        // Verify the filter uses InAnyZone with Owned{ScopedPlayer}
         let TargetFilter::Typed(tf) = selection_filter else {
             panic!("Expected Typed filter, got {selection_filter:?}");
         };
@@ -6396,10 +6398,10 @@ mod tests {
             tf.properties.iter().any(|p| matches!(
                 p,
                 FilterProp::Owned {
-                    controller: ControllerRef::Opponent
+                    controller: ControllerRef::ScopedPlayer
                 }
             )),
-            "Filter should have Owned{{Opponent}}"
+            "Filter should have Owned{{ScopedPlayer}}"
         );
 
         let in_any_zone = tf.properties.iter().find_map(|p| match p {

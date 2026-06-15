@@ -271,7 +271,10 @@ impl ChoiceType {
     /// predicate is true) from an impossible choice that must resolve as a
     /// no-op per CR 609.3 (this predicate is false).
     pub fn options_supplied_by_player(&self) -> bool {
-        matches!(self, Self::CardName | Self::Word | Self::Artist)
+        matches!(
+            self,
+            Self::CardName | Self::Word | Self::Artist | Self::Object
+        )
     }
 }
 
