@@ -149,10 +149,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // object. Parameterized — no registry entry; coverage support here.
             | StaticMode::EntersWithAdditionalCounters { .. }
             // CR 502.3: MaxUntapPerType carries the permanent-type filter + cap
-            // (Smoke / Damping Field / Winter Orb). Runtime enforcement is in
-            // turns.rs::execute_untap_with_choices (cap clamp) and
-            // turns.rs::untap_choice_candidates (player determination).
-            // Parameterized — no registry entry; coverage support here.
+            // (Smoke / Damping Field / Winter Orb). Runtime: the active player
+            // determines the bounded untap subset via
+            // turns.rs::max_untap_subset_prompt (→ WaitingFor::ChooseUntapSubset),
+            // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
+            // safety net. Parameterized — no registry entry; coverage support here.
             | StaticMode::MaxUntapPerType { .. }
     )
 }
