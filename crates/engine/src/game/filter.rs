@@ -197,6 +197,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -396,6 +397,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
@@ -2516,6 +2518,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
         FilterProp::HasManaAbility
@@ -2948,6 +2951,12 @@ fn matches_filter_prop(
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
         FilterProp::HasXInManaCost => crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        // CR 107.3 + CR 601.2f: "{X} in its activation cost" — consult the
+        // pending activation record for the matched source object. Composes with
+        // typed type/controller filters via `TargetFilter::And`/`Or`.
+        FilterProp::HasXInActivationCost => {
+            crate::game::casting_costs::pending_activation_cost_has_x(state, object_id)
+        }
         // CR 605.1: Delegate to the single mana-ability classifier instead of
         // duplicating the definition at the filter layer.
         FilterProp::HasManaAbility => obj
@@ -3778,6 +3787,7 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
         // CR 113.1 + CR 113.3: Zone-change records do not snapshot all
@@ -4950,6 +4960,54 @@ mod tests {
         assert!(
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
+        );
+    }
+
+    /// CR 107.3 + CR 601.2f: `FilterProp::HasXInActivationCost` consults the
+    /// pending activation record and composes with typed filters via `And`.
+    #[test]
+    fn pending_activation_has_x_in_activation_cost_composes_with_type_filter() {
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter as Tf,
+            TypedFilter,
+        };
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "X Activator");
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: Tf::Controller,
+            },
+        );
+        ability.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X],
+            },
+        });
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
+            .push(ability);
+        state.pending_activations.push((source, 0));
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+                ),
+            ],
+        };
+        assert!(
+            matches_target_filter(&state, source, &filter, source),
+            "creature source with pending X activation must match composed filter"
+        );
+        state.pending_activations.clear();
+        assert!(
+            !matches_target_filter(&state, source, &filter, source),
+            "without pending activation, HasXInActivationCost must fail"
         );
     }
 

@@ -4287,8 +4287,7 @@ fn delayed_trigger_event(
             })
             .cloned(),
         // CR 603.7c: "Whenever [event] this turn" — delegate to trigger matcher registry.
-        DelayedTriggerCondition::WheneverEvent { trigger }
-        | DelayedTriggerCondition::WhenNextEvent { trigger } => {
+        DelayedTriggerCondition::WheneverEvent { trigger } => {
             if let Some(matcher) = super::trigger_matchers::trigger_matcher(trigger.mode.clone()) {
                 events
                     .iter()
@@ -4298,6 +4297,24 @@ fn delayed_trigger_event(
                 None
             }
         }
+        // CR 603.7: "When you next [event] this turn" — one-shot; optional
+        // `or_trigger` covers disjunctive clauses (Magus Lucea Kane).
+        // Scan newest-to-oldest so a batch containing several events binds
+        // the most recent match (the activation/cast that fired the trigger).
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } => events.iter().rev().find_map(|event| {
+            for t in std::iter::once(trigger.as_ref()).chain(or_trigger.iter().map(|b| b.as_ref()))
+            {
+                if let Some(matcher) = super::trigger_matchers::trigger_matcher(t.mode.clone()) {
+                    if matcher(event, t, source_id, state) {
+                        return Some(event.clone());
+                    }
+                }
+            }
+            None
+        }),
     }
 }
 

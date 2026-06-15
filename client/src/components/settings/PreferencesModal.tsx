@@ -252,26 +252,31 @@ export function PreferencesModal({
       subtitle={t("modal.subtitle")}
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
-      bodyClassName="overflow-y-auto p-4 sm:p-6"
+      bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden pl-4 pt-4 pr-1.5 pb-8 sm:pl-6 sm:pt-6 sm:pr-2 sm:pb-10"
     >
-      <div className="grid gap-4 md:grid-cols-[200px_minmax(0,1fr)]">
-            <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
-              {SETTINGS_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`min-h-11 shrink-0 snap-start rounded-[16px] border px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors md:w-full md:px-4 md:text-xs md:tracking-[0.18em] ${
-                    activeTab === tab.id
-                      ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
-                      : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
-                  }`}
-                >
-                  {t(`tabs.${tab.id}`)}
-                </button>
-              ))}
-            </nav>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 md:min-h-[28rem] md:flex-row md:overflow-hidden">
+            <aside className="flex shrink-0 flex-col md:w-[200px] md:justify-between">
+              <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
+                {SETTINGS_TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`min-h-11 shrink-0 snap-start rounded-[16px] border px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors md:w-full md:px-4 md:text-xs md:tracking-[0.18em] ${
+                      activeTab === tab.id
+                        ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                        : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
+                    }`}
+                  >
+                    {t(`tabs.${tab.id}`)}
+                  </button>
+                ))}
+              </nav>
+              <div className="hidden shrink-0 border-t border-white/5 pt-6 pb-8 md:block">
+                <ResetAllFooter resetAllPreferences={resetAllPreferences} />
+              </div>
+            </aside>
 
-            <div className="min-w-0">
+            <div className="thin-scrollbar flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pb-4 pr-3 md:pr-4">
               {activeTab === "gameplay" && (
                 <SettingsSection title={t("gameplay.title")}>
                   <SettingGroup label={t("gameplay.language")}>
@@ -652,8 +657,10 @@ export function PreferencesModal({
           <DataSection />
         </>
       )}
+              <div className="border-t border-white/5 py-4 md:hidden">
+                <ResetAllFooter resetAllPreferences={resetAllPreferences} />
+              </div>
             </div>
-            <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
     </ModalPanelShell>
   );
@@ -676,15 +683,13 @@ function ResetAllFooter({
   }, [resetAllPreferences, t]);
 
   return (
-    <div className="mt-4 flex justify-end border-t border-white/5 pt-3">
-      <button
-        type="button"
-        onClick={onClick}
-        className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
-      >
-        {t("resetAll.button")}
-      </button>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
+    >
+      {t("resetAll.button")}
+    </button>
   );
 }
 

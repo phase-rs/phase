@@ -2360,7 +2360,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             )]
         }
         // CR 701.62a: AI selects one card to manifest — one action per card option
-        WaitingFor::ManifestDreadChoice { player, cards } => {
+        WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
                 vec![candidate(
                     GameAction::SelectCards { cards: vec![] },
