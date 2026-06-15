@@ -6060,6 +6060,56 @@ fn static_legend_rule_creature_tokens_scope() {
 }
 
 #[test]
+fn static_legend_rule_creatures_you_control() {
+    // CR 704.5j: Council of Reeds — bare permanent type "creatures you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creatures you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    match def.affected {
+        Some(TargetFilter::Typed(ref typed)) => {
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert!(typed
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, crate::types::ability::TypeFilter::Creature)));
+        }
+        other => panic!("expected typed creature filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_legend_rule_tokens_you_control() {
+    // CR 111.1 + CR 704.5j: Cadric, Soul Kindler — "tokens you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to tokens you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_legend_rule_commanders_you_control() {
+    // CR 903.3 + CR 704.5j: "commanders you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to commanders you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::IsCommander)
+    ));
+}
+
+#[test]
 fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
     // CR 603.2 + CR 609.3: The Master, Multiplied.
     let def = parse_static_line(
@@ -6088,8 +6138,10 @@ fn static_legend_rule_defers_unparseable_scopes() {
     // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
     // deferred (left Unimplemented), never misparsed into a no-op exemption.
     for text in [
-            "The \"legend rule\" doesn't apply to tokens you control.", // Cadric
-            "The \"legend rule\" doesn't apply to commanders you control.", // Try-My-Deck Elemental
+            // Bare pronoun scope with no concrete filter — must defer, not be
+            // emitted as a no-op exemption.
+            "The \"legend rule\" doesn't apply to them.",
+            // Conditional form that doesn't begin with the exemption clause.
             "If there are exactly two permanents named Brothers Yamazaki on the battlefield, the \"legend rule\" doesn't apply to them.",
         ] {
             assert!(
