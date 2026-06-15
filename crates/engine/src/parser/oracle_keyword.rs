@@ -1444,18 +1444,21 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     let (_, (name, rest)) = split_once_on(text, " ").ok()?;
     let rest = rest.trim();
 
-    // CR 702.32a (Fading N) / CR 702.63a (Vanishing N) / CR 702.112a (Renown N) /
-    // CR 702.68a (Frenzy N) and the other bare-integer count keywords (see each
-    // keyword's `FromStr` arm in types/keywords.rs for its per-keyword CR): these
-    // take ONLY a leading integer. The generic remainder path below would slurp a
-    // trailing clause (e.g. "vanishing 3 if that creature doesn't have vanishing")
-    // into the FromStr param, where `p.parse::<u32>()` fails and silently falls
-    // back to the default (Vanishing(0)). Take only the leading numeric token and
-    // discard the trailing text so "<kw> N <anything>" yields Keyword(N). This
-    // mirrors the Renown/Frenzy/Ripple `parse_number` arms above, except it keeps
-    // (rather than rejects) the count when trailing text follows. Unparameterized
-    // "vanishing" (CR 702.63b) has no number, so `parse_number` fails and we fall
-    // through to the generic path, preserving today's Vanishing(0) routing.
+    // CR 702.32a: Fading N.
+    // CR 702.63a: Vanishing N.
+    // CR 702.112a: Renown N.
+    // CR 702.68a: Frenzy N.
+    // Bare-integer count keywords take ONLY a leading integer. The generic
+    // remainder path below would slurp a trailing clause (e.g. "vanishing 3 if
+    // that creature doesn't have vanishing") into the FromStr param, where
+    // `p.parse::<u32>()` fails and silently falls back to the default
+    // (Vanishing(0)). Take only the leading numeric token and discard the
+    // trailing text so "<kw> N <anything>" yields Keyword(N). This mirrors the
+    // Renown/Frenzy/Ripple `parse_number` arms above, except it keeps (rather
+    // than rejects) the count when trailing text follows.
+    // CR 702.63b: Vanishing without a number has no count, so `parse_number`
+    // fails and we fall through to the generic path, preserving today's
+    // Vanishing(0) routing.
     let param: Cow<'_, str> = if is_numeric_count_keyword(name) {
         match nom_primitives::parse_number.parse(rest) {
             Ok((remainder, _)) => Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
@@ -1480,9 +1483,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 /// (or wraps the integer in `QuantityExpr::Fixed`) over the parameter string —
 /// see the arms in `types/keywords.rs`. For these the generic normalizer must
 /// take ONLY the leading integer and drop any trailing clause, or the count is
-/// silently lost to the fallback. The per-keyword CR lives on each `FromStr`
-/// arm; representative rules: CR 702.32a (Fading N), CR 702.63a (Vanishing N),
-/// CR 702.112a (Renown N), CR 702.68a (Frenzy N), CR 702.122a (Crew N).
+/// silently lost to the fallback.
+///
+/// CR 702.32a: Fading N.
+/// CR 702.63a: Vanishing N.
+/// CR 702.112a: Renown N.
+/// CR 702.68a: Frenzy N.
+/// CR 702.122a: Crew N.
 fn is_numeric_count_keyword(name: &str) -> bool {
     // One `tag` per keyword name, grouped into ≤21-element `alt` blocks for
     // nom's tuple limit. `all_consuming` requires an exact whole-name match so
@@ -2194,8 +2201,11 @@ mod tests {
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
     }
 
-    /// CR 702.63a (Vanishing N) / CR 702.32a (Fading N) / CR 702.112a (Renown N):
-    /// the numeric-count normalizer must keep the leading integer even when a
+    /// CR 702.63a: Vanishing N.
+    /// CR 702.32a: Fading N.
+    /// CR 702.112a: Renown N.
+    ///
+    /// The numeric-count normalizer must keep the leading integer even when a
     /// trailing clause follows (e.g. Flesh Duplicate's "vanishing 3 if ..."),
     /// instead of feeding the whole remainder to FromStr and falling back. This
     /// tests the building-block class, not a single card.
