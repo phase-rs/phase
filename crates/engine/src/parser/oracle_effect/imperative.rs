@@ -12772,4 +12772,83 @@ mod tests {
             dynamic_base,
         );
     }
+
+    /// CR 705.1: Subject-prefixed coin flips ("you flip a coin", "that player
+    /// flips a coin", "each player flips a coin") must subject-strip to the
+    /// existing bare `FlipCoin` path rather than falling to `Unimplemented`.
+    /// The flip happens for the resolving player; `Effect::FlipCoin` carries no
+    /// player field, so subject anaphora is a harmless no-op here.
+    #[test]
+    fn subject_prefixed_flip_a_coin_routes_to_flip_coin() {
+        for text in [
+            "you flip a coin",
+            "that player flips a coin",
+            "each player flips a coin",
+            "its controller flips a coin",
+        ] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            assert!(
+                matches!(&*ability.effect, Effect::FlipCoin { .. }),
+                "expected FlipCoin for {text:?}, got {:?}",
+                ability.effect
+            );
+        }
+    }
+
+    /// CR 705.1: End-to-end — a trigger whose effect is "that player flips a
+    /// coin" (Mirrored Depths, Planar Chaos) must emit a `FlipCoin` effect in
+    /// the parsed trigger, not leave the coin-flip clause `Unimplemented`. This
+    /// is the real card class the `PREDICATE_VERBS` change unlocks (the subject
+    /// "that player" reaches subject-stripping inside the trigger effect chain).
+    #[test]
+    fn trigger_subject_flip_a_coin_parses_to_flip_coin() {
+        fn effect_tree_has_flip_coin(def: &AbilityDefinition) -> bool {
+            matches!(&*def.effect, Effect::FlipCoin { .. })
+                || def
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| effect_tree_has_flip_coin(s))
+        }
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever a player casts a spell, that player flips a coin. If the player loses the flip, counter that spell.",
+            "Mirrored Depths",
+            &[],
+            &[],
+            &[],
+        );
+        assert!(
+            parsed.triggers.iter().any(|t| t
+                .execute
+                .as_ref()
+                .is_some_and(|e| effect_tree_has_flip_coin(e))),
+            "trigger coin-flip clause must lower to FlipCoin, got:\n{parsed:#?}"
+        );
+    }
+
+    /// CR 710.4 vs CR 705.1: The Kamigawa "flip <permanent>" flip-card mechanic
+    /// ("flip ~" / "flip it") must NOT be mis-routed to the coin-flip `FlipCoin`
+    /// effect — the flip arm only matches when "a coin" is present. Adding "flip"
+    /// to `PREDICATE_VERBS` (so subject-prefixed coin flips strip) must not
+    /// regress this: a bare object-form "flip" never produces FlipCoin.
+    #[test]
+    fn flip_permanent_transform_is_not_coin_flip() {
+        for text in ["flip ~", "flip it"] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            assert!(
+                !matches!(&*ability.effect, Effect::FlipCoin { .. }),
+                "object-form flip {text:?} must not route to FlipCoin, got {:?}",
+                ability.effect
+            );
+        }
+    }
 }
