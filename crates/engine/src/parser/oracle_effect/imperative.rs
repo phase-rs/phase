@@ -1213,14 +1213,28 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("discard ")).parse(input))
     {
         let after_discard = &lower[lower.len() - after_discard_orig.len()..];
-        // CR 701.9a: Back-reference discard — "discard that card" / "discard
-        // those cards" target a specific card identified by the parent effect
-        // (Seek/Conjure/Reveal-Choose populate ParentTarget at runtime). Must
-        // be checked before the player-choice count-based discard path, since
-        // "that card" is not a count phrase.
+        // CR 701.9a: Back-reference discard — the noun forms "discard that
+        // card" / "discard those cards" and the pronoun (anaphoric) forms
+        // "discard it" / "discard them" all target a specific card the parent
+        // effect already identified (Seek/Conjure/Reveal-Choose/"look at the
+        // top card ... discard it" populate ParentTarget at runtime). Must be
+        // checked before the player-choice count-based discard path, since a
+        // back-reference is not a count phrase.
+        //
+        // The pronoun arms need a word boundary so a bare "it"/"them" does not
+        // swallow longer words ("itself", "themselves", "theme") or a trailing
+        // continuation ("discard them all", "discard it into exile"): the
+        // back-reference word must be a complete word, i.e. immediately
+        // followed by end-of-input or clause punctuation. The noun arms are
+        // unambiguous and keep their existing (boundary-free) behavior.
+        fn discard_backref_word_boundary(i: &str) -> OracleResult<'_, ()> {
+            peek(alt((value((), eof), value((), one_of(".,"))))).parse(i)
+        }
         if alt((
-            tag::<_, _, OracleError<'_>>("that card"),
-            tag("those cards"),
+            value((), tag::<_, _, OracleError<'_>>("that card")),
+            value((), tag("those cards")),
+            value((), terminated(tag("it"), discard_backref_word_boundary)),
+            value((), terminated(tag("them"), discard_backref_word_boundary)),
         ))
         .parse(after_discard)
         .is_ok()
@@ -10878,6 +10892,68 @@ mod tests {
                 );
             }
             other => panic!("Expected Discard with unless_filter, got {other:?}"),
+        }
+    }
+
+    /// CR 701.9a: Pronoun back-reference discard — "discard it" / "discard
+    /// them" anaphorically refer to a card the parent effect already
+    /// identified (e.g. "look at the top card of your library ... discard
+    /// it."). These must lower to `DiscardCard { ParentTarget }`, exactly
+    /// like the noun forms "discard that card" / "discard those cards", not
+    /// to a player-choice `Discard` count and not to `Unimplemented`.
+    #[test]
+    fn parse_discard_it_backref() {
+        for text in ["discard it", "discard it.", "discard it,"] {
+            let lower = text.to_lowercase();
+            let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+            assert!(
+                matches!(
+                    result,
+                    Some(TargetedImperativeAst::DiscardCard {
+                        target: TargetFilter::ParentTarget
+                    })
+                ),
+                "Expected DiscardCard {{ ParentTarget }} for {text:?}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_discard_them_backref() {
+        for text in ["discard them", "discard them.", "discard them,"] {
+            let lower = text.to_lowercase();
+            let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+            assert!(
+                matches!(
+                    result,
+                    Some(TargetedImperativeAst::DiscardCard {
+                        target: TargetFilter::ParentTarget
+                    })
+                ),
+                "Expected DiscardCard {{ ParentTarget }} for {text:?}, got {result:?}"
+            );
+        }
+    }
+
+    /// Word-boundary guard regression: a bare "it"/"them" back-reference must
+    /// NOT swallow longer words that merely start with those letters. "discard
+    /// itself" / "discard themselves" / "discard them all" / "discard it into
+    /// exile" must NOT lower to the `ParentTarget` back-reference — the pronoun
+    /// is not a complete word there.
+    #[test]
+    fn parse_discard_pronoun_word_boundary_guard() {
+        for text in [
+            "discard itself",
+            "discard themselves",
+            "discard them all",
+            "discard it into exile",
+        ] {
+            let lower = text.to_lowercase();
+            let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+            assert!(
+                !matches!(result, Some(TargetedImperativeAst::DiscardCard { .. })),
+                "Did not expect a back-reference DiscardCard for {text:?}, got {result:?}"
+            );
         }
     }
 
