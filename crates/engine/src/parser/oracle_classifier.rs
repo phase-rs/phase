@@ -295,6 +295,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't cast spells of the chosen",
     "can't draw more than",
     "can't draw cards",
+    // CR 502.3: Smoke / Damping Field / Winter Orb class — "Players can't untap
+    // more than one <type> during their untap steps." Routes to the static
+    // parser so it lowers to StaticMode::MaxUntapPerType instead of an effect.
+    "can't untap more than",
     "can cast spells only during",
     // CR 602.5 + CR 117.1b: City of Solitude class — combined cast+activate
     // prohibition. The conjunction "and activate abilities" is the

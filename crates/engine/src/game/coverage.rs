@@ -148,6 +148,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // scans active statics whose `affected` filter matches the entering
             // object. Parameterized — no registry entry; coverage support here.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 502.3: MaxUntapPerType carries the permanent-type filter + cap
+            // (Smoke / Damping Field / Winter Orb). Runtime enforcement is in
+            // turns.rs::execute_untap_with_choices (cap clamp) and
+            // turns.rs::untap_choice_candidates (player determination).
+            // Parameterized — no registry entry; coverage support here.
+            | StaticMode::MaxUntapPerType { .. }
     )
 }
 
@@ -7053,6 +7059,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 502.3: Smoke / Damping Field / Winter Orb max-untap cap. Anchor
+            // on the verb phrase; the type filter half is the reused TargetFilter
+            // and is validated by parser tests.
+            StaticMode::MaxUntapPerType { .. } => effective_lower.contains("can't untap more than"),
             // CR 301.5 + CR 303.4: positive "can be attached only to {filter}"
             // restriction. Anchor on the verb phrase; the filter half is the
             // reused TargetFilter and is validated by parser tests.

@@ -5134,6 +5134,58 @@ fn static_you_may_choose_not_to_untap_self() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+// CR 502.3: Smoke / Stoic Angel — "Players can't untap more than one creature
+// during their untap steps." Lowers to a creature-filtered MaxUntapPerType cap.
+#[test]
+fn static_max_untap_one_creature() {
+    let def =
+        parse_static_line("Players can't untap more than one creature during their untap steps.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            max: 1,
+        }
+    );
+}
+
+// CR 502.3: Damping Field / Imi Statue — artifact form.
+#[test]
+fn static_max_untap_one_artifact() {
+    let def =
+        parse_static_line("Players can't untap more than one artifact during their untap steps.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            max: 1,
+        }
+    );
+}
+
+// CR 502.3 + CR 205.4a: Winter Orb family — nonbasic-land form parses the
+// "nonbasic" supertype-negation property, proving the type filter is general.
+#[test]
+fn static_max_untap_one_nonbasic_land() {
+    let def = parse_static_line(
+        "Players can't untap more than one nonbasic land during their untap steps.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                FilterProp::NotSupertype {
+                    value: crate::types::card_type::Supertype::Basic,
+                }
+            ])),
+            max: 1,
+        }
+    );
+}
+
 #[test]
 fn static_you_may_look_at_top_card_of_library() {
     let def = parse_static_line("You may look at the top card of your library any time.").unwrap();
