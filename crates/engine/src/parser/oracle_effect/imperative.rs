@@ -7674,7 +7674,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             let mut clause =
                 parsed_clause(lower_targeted_action_ast(TargetedImperativeAst::Fight {
                     target,
-                    multi_target: multi_target.clone(),
+                    multi_target: None,
                 }));
             clause.multi_target = multi_target;
             clause
