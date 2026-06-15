@@ -8791,6 +8791,88 @@ mod tests {
     }
 
     #[test]
+    fn song_style_set_card_types_and_basic_land_type_makes_nonland_a_forest() {
+        // CR 205.1a + CR 305.7: Song of the Dryads both makes the enchanted
+        // permanent a land and sets its basic land subtype, which removes its
+        // rules-text abilities and grants the Forest intrinsic mana ability.
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let creature_id = create_object(
+            &mut state,
+            CardId(0),
+            p0,
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            Arc::make_mut(&mut obj.base_abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+            obj.abilities = Arc::new((*obj.base_abilities).clone());
+        }
+
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Song of the Dryads".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Card)
+                            .properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::SetCardTypes {
+                            core_types: vec![CoreType::Land],
+                        },
+                        ContinuousModification::SetBasicLandType {
+                            land_type: BasicLandType::Forest,
+                        },
+                    ]),
+            );
+        }
+
+        state.objects.get_mut(&aura_id).unwrap().attached_to = Some(creature_id.into());
+
+        evaluate_layers(&mut state);
+
+        let creature = state.objects.get(&creature_id).unwrap();
+        assert_eq!(creature.card_types.core_types, vec![CoreType::Land]);
+        assert!(creature.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(
+            !creature
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::GainLife { .. })),
+            "CR 305.7: rules-text abilities should be removed"
+        );
+        assert_eq!(
+            count_mana_abilities(creature, ManaColor::Green),
+            1,
+            "CR 305.7: Forest subtype should grant the intrinsic green mana ability"
+        );
+    }
+
+    #[test]
     fn set_chosen_basic_land_type_reads_source_choice() {
         // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura
         // (source) recorded a chosen basic land type as it entered; its
