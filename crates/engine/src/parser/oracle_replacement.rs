@@ -2914,6 +2914,23 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
         })
 }
 
+/// CR 614.1d: External ETB subject including "played by your opponents" (Uphill Battle).
+fn parse_external_entry_subject(subject: &str) -> Option<TargetFilter> {
+    let subject = subject.trim();
+    if let Some(type_part) = subject.strip_suffix(" played by your opponents") {
+        let (filter, rest) = parse_type_phrase(type_part);
+        if filter == TargetFilter::Any || !rest.trim().is_empty() {
+            return None;
+        }
+        return Some(inject_controller(filter, ControllerRef::Opponent));
+    }
+    let (filter, rest) = parse_type_phrase(subject);
+    if filter == TargetFilter::Any || !rest.trim().is_empty() {
+        return None;
+    }
+    Some(filter)
+}
+
 fn build_external_entry_replacement(
     subject: &str,
     original_text: &str,
@@ -2923,10 +2940,7 @@ fn build_external_entry_replacement(
         return None;
     }
 
-    let (filter, rest) = parse_type_phrase(subject);
-    if !rest.trim().is_empty() {
-        return None;
-    }
+    let filter = parse_external_entry_subject(subject)?;
 
     let effect = if enters_tapped {
         Effect::SetTapState {
@@ -12004,6 +12018,17 @@ mod tests {
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
+
+    #[test]
+    fn parses_played_by_opponents_enters_tapped() {
+        let def = parse_replacement_line(
+            "Creatures played by your opponents enter tapped.",
+            "Uphill Battle",
+        )
+        .expect("played by opponents ETB");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+    }
+
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
