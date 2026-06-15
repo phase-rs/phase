@@ -2366,6 +2366,17 @@ pub enum PayCostKind {
     ExileMaterials {
         materials: TargetFilter,
     },
+    /// CR 601.2h + CR 701.13: Exile a permanent the player controls from the
+    /// battlefield as an additional/alternative cost (Food Chain class; Lunar
+    /// Hatchling's "Exile a land you control"). Single-zone (battlefield only),
+    /// distinct from `ExileFromZone` (Hand|Graveyard only) and `ExileMaterials`
+    /// (dual-zone craft union). `filter` is the permanent-implying `TargetFilter`
+    /// the choices were drawn from; the handler re-validates eligibility against
+    /// the live battlefield before exiling. This is EXILE (CR 701.13), not
+    /// sacrifice (CR 701.21) — no sacrifice/death triggers fire.
+    ExilePermanent {
+        filter: Option<TargetFilter>,
+    },
     /// Exile objects from any zone (mana-ability exile costs).
     ExileFromManaZone {
         zone: Zone,

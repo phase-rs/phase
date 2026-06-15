@@ -250,7 +250,7 @@ fn has_recursion(card: &CardFace) -> bool {
     card.keywords.iter().any(|kw| {
         matches!(
             kw,
-            Keyword::Flashback(..) | Keyword::Escape { .. } | Keyword::Unearth(..)
+            Keyword::Flashback(..) | Keyword::Escape(_) | Keyword::Unearth(..)
         )
     })
 }

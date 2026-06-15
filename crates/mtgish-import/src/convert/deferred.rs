@@ -139,9 +139,9 @@
 //!   engine-bound on a typed `Mystery` keyword.
 //!
 //! - **`Rule::Escape(Cost, Vec<Rule>) (~4 cards)**: Engine has
-//!   `Keyword::Escape { cost, exile_count }`. Converter wiring is
-//!   straightforward but requires unwrapping the inner Vec<Rule> as
-//!   a payload of inner abilities. Single-commit fix.
+//!   `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{N, graveyard}]))`.
+//!   Converter wiring is straightforward but requires unwrapping the inner
+//!   Vec<Rule> as a payload of inner abilities. Single-commit fix.
 //!
 //! - **`Rule::AbilitiesTriggerAnAdditionalTime (~4 cards)** /
 //!   **`Rule::APermanentEnteringTheBattlefieldCausesAbilitiesToTriggerAnAdditionalTime (~4 cards)**:
@@ -197,9 +197,9 @@
 //!   `Keyword::Champion` convention.
 //!
 //! - **`Rule::Escape (~6 cards)**: Engine has
-//!   `Keyword::Escape { cost, exile_count }` but mtgish carries only
-//!   the cost — the `exile_count` lives in Oracle text or a separate
-//!   metadata pipeline. Defaulting to 0 would silently produce wrong
+//!   `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{N, graveyard}]))`
+//!   but mtgish carries only the cost — the exile count lives in Oracle text or
+//!   a separate metadata pipeline. Defaulting to 0 would silently produce wrong
 //!   data; round-6 strict-fails until the count source is wired.
 //!
 //! ### Pre-game-only / no in-game effect (silent-consume in commit

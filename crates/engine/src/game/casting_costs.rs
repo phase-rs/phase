@@ -1905,6 +1905,63 @@ pub(crate) fn handle_exile_for_cost(
     )
 }
 
+/// CR 601.2h + CR 701.13: Resolve a battlefield exile-permanent additional cost
+/// (Food Chain class; Lunar Hatchling's "Exile a land you control"). The player
+/// has chosen permanents they control on the battlefield; validate count and
+/// legality, re-validate eligibility against the live battlefield (still on the
+/// battlefield, controlled by `player`, matching `filter`, not the source), then
+/// EXILE each chosen object (CR 701.13 — not a sacrifice, so no sacrifice/death
+/// triggers) and resume the pending cast. Mirrors `handle_exile_for_cost`
+/// (single-zone, single-filter) but revalidates against the battlefield rather
+/// than hand/graveyard. `count == min_count` for a mandatory fixed-count cost.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_permanent_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    filter: Option<TargetFilter>,
+    pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        (expected, expected),
+        legal_cards,
+        chosen,
+        events,
+        "permanent(s)",
+        "Selected permanent not eligible to exile as a cost",
+        |state, player, id, pending| {
+            // CR 601.2h: Re-validate against the live battlefield — the chosen
+            // permanent must still be on the battlefield, controlled by the
+            // payer, match the cost's filter, and not be the cast source.
+            if id == pending.object_id {
+                return Err(EngineError::InvalidAction(
+                    "Cannot exile the spell being cast as its own escape cost".into(),
+                ));
+            }
+            let ctx = super::filter::FilterContext::from_source(state, pending.object_id);
+            let eligible = state.objects.get(&id).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && filter
+                        .as_ref()
+                        .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            });
+            if !eligible {
+                return Err(EngineError::InvalidAction(
+                    "Selected permanent is no longer eligible to exile".into(),
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_exile_selection_for_cost(
     state: &mut GameState,
@@ -3131,9 +3188,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
-    // CR 702.138a: Escape requires exiling N other cards from graveyard.
+    // CR 702.138a: Escape's additional cost is the residual after extracting the
+    // mana sub-cost. Usually "Exile N other cards from your graveyard"; may be a
+    // Composite of multiple exile clauses (Lunar Hatchling: "Exile a land you
+    // control, Exile five other cards from your graveyard"). Paid one sub-cost at
+    // a time by `pay_additional_cost`'s Composite arm (CR 601.2h).
     if casting_variant == CastingVariant::Escape {
-        if let Some((_, exile_count)) = super::keywords::effective_escape_data(state, object_id) {
+        if let Some((_, residual)) = super::keywords::effective_escape_data(state, object_id) {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
@@ -3142,17 +3203,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.payment_mode = payment_mode;
             pending.additional_cost_flow =
                 imposed_required_cost.clone().map(AdditionalCost::Required);
-            return pay_additional_cost(
-                state,
-                player,
-                AbilityCost::Exile {
-                    count: exile_count,
-                    zone: Some(Zone::Graveyard),
-                    filter: None,
-                },
-                pending,
-                events,
-            );
+            return pay_additional_cost(state, player, residual, pending, events);
         }
     }
 
@@ -3872,6 +3923,53 @@ fn pay_additional_cost_with_source(
                     }));
             }
             return pay_additional_cost(state, player, first, pending, events);
+        }
+        // CR 118.9 + CR 601.2h + CR 701.13: Exile a permanent you control on the
+        // battlefield as an additional/alternative cost (Food Chain class; Lunar
+        // Hatchling's "Exile a land you control"). The parser emits zone: None +
+        // a permanent-implying filter; `exile_cost_effective_zone` resolves it to
+        // the battlefield. The permanent is EXILED, not sacrificed (CR 701.13).
+        // `eligible_exile_cost_objects` is single-zone (only controller-owned
+        // battlefield objects matching the filter) — graveyard cards are NEVER
+        // offered (unlike the dual-zone craft union `ExileMaterials`). Ordered
+        // before the hand/graveyard exile arm; the two are disjoint by effective
+        // zone, but the battlefield case is checked first.
+        AbilityCost::Exile {
+            count,
+            zone,
+            ref filter,
+        } if super::cost_payability::exile_cost_effective_zone(zone, filter.as_ref())
+            == Zone::Battlefield =>
+        {
+            let effective_filter =
+                super::cost_payability::exile_cost_effective_filter(filter.as_ref());
+            let eligible = super::cost_payability::eligible_exile_cost_objects(
+                state,
+                player,
+                pending.object_id,
+                Zone::Battlefield,
+                effective_filter.as_ref(),
+                count,
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to exile".into(),
+                ));
+            }
+            // CR 601.2h: "Exile a land you control" is a mandatory fixed-count
+            // cost (min == count), unlike the optional graveyard exile below.
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ExilePermanent {
+                    filter: filter.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: count as usize,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            });
         }
         AbilityCost::Exile {
             count,
