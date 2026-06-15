@@ -40713,6 +40713,41 @@ mod tests {
         assert!(def.sub_ability.is_none(), "should have no sub_ability");
     }
 
+    /// CR 701.20a + CR 205.3m: "reveal cards ... until you reveal a Time Lord
+    /// creature card" must dig to a Time Lord creature, not the first card of any
+    /// type. Regression (Time Lord Regeneration): the filter collapsed to
+    /// `TargetFilter::Any` because "Time Lord" (CR 205.3m: the only two-word
+    /// creature type) was missing from the SUBTYPES registry, so the typed
+    /// "Time Lord creature card" noun phrase failed to parse.
+    #[test]
+    fn reveal_until_time_lord_creature_keeps_typed_filter() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a Time Lord creature card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::RevealUntil { filter, .. } => {
+                let tf = match filter {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("expected Typed filter, got {other:?}"),
+                };
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature in type_filters, got {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Time Lord")),
+                    "expected Subtype(\"Time Lord\") in type_filters, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected RevealUntil, got {other:?}"),
+        }
+    }
+
     /// CR 109.5 + CR 701.20a: Third-person form ("Its controller reveals cards
     /// from the top of their library until they reveal a creature card.") —
     /// must dispatch to RevealUntil with player=ParentTargetController, not to
