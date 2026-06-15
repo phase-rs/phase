@@ -489,12 +489,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
 
-    if nom_primitives::scan_contains(&lower, "would get one or more {e}")
-        && nom_primitives::scan_contains(&lower, "instead")
-    {
-        if let Some(def) = parse_energy_get_replacement(&lower, &text) {
-            return Some(def);
-        }
+    if let Some(def) = parse_energy_get_replacement(&lower, &text) {
+        return Some(def);
     }
 
     if nom_primitives::scan_contains(&lower, "counters would be put on")
@@ -5019,17 +5015,21 @@ fn token_description_to_spec(
 /// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
 /// CR 107.14 + CR 614.1a: Izzet Generatorium — additional {E} on would-get events.
 fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
-    if !nom_primitives::scan_contains(lower, "would get one or more {e}") {
-        return None;
-    }
-    if !nom_primitives::scan_contains(lower, "get an additional {e} instead") {
-        return None;
-    }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .quantity_modification(QuantityModification::Plus { value: 1 })
-            .description(original_text.to_string()),
-    )
+    all_consuming(value(
+        (),
+        (
+            tag::<_, _, OracleError<'_>>("if you would get one or more {e}, "),
+            tag("you get an additional {e} instead."),
+        ),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .quantity_modification(QuantityModification::Plus { value: 1 })
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
 }
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
@@ -11854,6 +11854,7 @@ mod tests {
             def.quantity_modification,
             Some(QuantityModification::Plus { value: 1 })
         );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
 }
 
