@@ -11013,6 +11013,84 @@ mod tests {
         assert_eq!(etb.valid_card, Some(TargetFilter::SelfRef));
     }
 
+    /// CR 714.2b (Saga chapter) → CR 701.15 (goad) → CR 201.2a/201.4
+    /// (chosen-name). Day of the Moon's three chapters each "Choose a creature
+    /// card name, then goad all creatures with a name chosen for this
+    /// enchantment." Regression: the chosen-name suffix used to be dropped, so
+    /// GoadAll targeted a bare Typed[Creature] (every creature). It must lower
+    /// to a chained Choose{CardName, persist} → GoadAll whose target is
+    /// And[Typed[Creature], HasChosenName].
+    #[test]
+    fn parse_saga_day_of_the_moon_goads_only_chosen_name() {
+        use crate::types::ability::TypeFilter;
+        let oracle = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II, III — Choose a creature card name, then goad all creatures with a name chosen for this enchantment. (Until your next turn, they attack each combat if able and attack a player other than you if able.)";
+        let result = parse_oracle_text(
+            oracle,
+            "Day of the Moon",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+
+        assert_eq!(
+            result.triggers.len(),
+            3,
+            "Expected 3 chapter triggers, got: {:?}",
+            result.triggers.len()
+        );
+
+        for (i, trigger) in result.triggers.iter().enumerate() {
+            assert_eq!(trigger.mode, TriggerMode::CounterAdded);
+            let execute = trigger
+                .execute
+                .as_ref()
+                .unwrap_or_else(|| panic!("chapter {i} should have an execute ability"));
+
+            // Chapter: Choose a creature card name (persisted) ...
+            assert!(
+                matches!(
+                    *execute.effect,
+                    Effect::Choose {
+                        choice_type: ChoiceType::CardName,
+                        persist: true,
+                        ..
+                    }
+                ),
+                "chapter {i} effect should be Choose{{CardName, persist}}, got {:?}",
+                execute.effect
+            );
+
+            // ... then goad all creatures WITH THE CHOSEN NAME.
+            let sub = execute
+                .sub_ability
+                .as_ref()
+                .unwrap_or_else(|| panic!("chapter {i} should chain a goad-all sub-ability"));
+            let target = match &*sub.effect {
+                Effect::GoadAll { target } => target,
+                other => panic!("chapter {i} sub-effect should be GoadAll, got {other:?}"),
+            };
+            match target {
+                TargetFilter::And { filters } => {
+                    assert!(
+                        filters.contains(&TargetFilter::HasChosenName),
+                        "chapter {i} GoadAll target must include HasChosenName, got {filters:?}"
+                    );
+                    assert!(
+                        filters.iter().any(|inner| matches!(
+                            inner,
+                            TargetFilter::Typed(tf)
+                                if tf.type_filters.contains(&TypeFilter::Creature)
+                        )),
+                        "chapter {i} GoadAll target must include Typed(Creature), got {filters:?}"
+                    );
+                }
+                other => panic!(
+                    "chapter {i} GoadAll target must be And[Typed(Creature), HasChosenName], got {other:?}"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn discard_self_to_battlefield_instead_is_replacement_not_spell_ability() {
         let result = parse(
