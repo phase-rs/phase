@@ -4,7 +4,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{char, multispace1};
-use nom::combinator::{all_consuming, eof, opt, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -396,10 +396,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
-    if nom_primitives::scan_contains(&lower, "would lose life") {
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string()),
-        );
+    if let Some(def) = parse_lose_life_replacement(&text, &lower) {
+        return Some(def);
     }
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
@@ -794,6 +792,73 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
     // CR 614.1a: "If you would flip a coin" — controller-scoped.
     def.valid_player = Some(ReplacementPlayerScope::You);
     Some(def)
+}
+
+/// CR 614.1a + CR 119.3: Lose-life replacement effects.
+///
+/// Handles Bloodletter-style doublers and preserves generic "If you would lose
+/// life, instead ..." replacement recognition without substring dispatch.
+fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    let ((scope, quantity_modification), rest) = nom_on_lower(text, lower, |i| {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, scope) = parse_lose_life_subject(i)?;
+        let (i, _) = tag(" would lose life").parse(i)?;
+        let (i, _) = opt(preceded(tag(" "), tag("during your turn"))).parse(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        let (i, quantity_modification) = alt((
+            value(
+                Some(QuantityModification::Double),
+                terminated(parse_double_lose_life_consequence, opt(char('.'))),
+            ),
+            value(None, parse_lose_life_instead_consequence),
+        ))
+        .parse(i)?;
+        Ok((i, (scope, quantity_modification)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def =
+        ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string());
+    if let Some(scope) = scope {
+        def.valid_player = Some(scope);
+    }
+    if let Some(quantity_modification) = quantity_modification {
+        def = def.quantity_modification(quantity_modification);
+    }
+    Some(def)
+}
+
+fn parse_lose_life_subject(input: &str) -> OracleResult<'_, Option<ReplacementPlayerScope>> {
+    alt((
+        value(
+            Some(ReplacementPlayerScope::Opponent),
+            alt((tag("an opponent"), tag("opponent"))),
+        ),
+        value(None, tag("you")),
+    ))
+    .parse(input)
+}
+
+fn parse_double_lose_life_consequence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag("they "), tag("that opponent "), tag("you "))),
+            alt((tag("lose "), tag("loses "))),
+            tag("twice that much life instead"),
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_lose_life_instead_consequence(input: &str) -> OracleResult<'_, ()> {
+    let (remaining, body) = preceded(tag("instead "), rest).parse(input)?;
+    if body.trim().is_empty() {
+        return Err(oracle_err(body));
+    }
+    Ok((remaining, ()))
 }
 
 fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
@@ -7432,7 +7497,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::LoseLife);
-        assert!(def.description.is_some());
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Double)
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+    }
+
+    #[test]
+    fn replacement_lose_life_instead_preserves_generic_shape() {
+        let def = parse_replacement_line(
+            "If you would lose life, instead put one of your shields into your hand.",
+            "Lich's Duel Mastery",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::LoseLife);
+        assert_eq!(def.quantity_modification, None);
+        assert_eq!(def.valid_player, None);
     }
 
     #[test]
