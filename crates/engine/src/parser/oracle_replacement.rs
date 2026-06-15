@@ -275,6 +275,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if nom_primitives::scan_contains(&lower, "if you would scry ")
+        && nom_primitives::scan_contains(&lower, "draw that many cards instead")
+    {
+        if let Some(def) = parse_scry_that_many_draw_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
     if let Some(def) = parse_mill_count_replacement(&norm_lower, &text) {
         return Some(def);
     }
@@ -4335,6 +4343,32 @@ fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
         ),
     ))
     .parse(input)
+}
+
+/// CR 614.1a: "If you would scry N, draw that many cards instead" (Sphinx-class).
+fn parse_scry_that_many_draw_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you would scry ").parse(lower).ok()?;
+    let (rest, _) =
+        take_until::<_, _, OracleError<'_>>(", draw that many cards instead").parse(rest).ok()?;
+    let (_, _) = tag::<_, _, OracleError<'_>>(", draw that many cards instead")
+        .parse(rest)
+        .ok()?;
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Scry)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ))
+            .description(original_text.to_string()),
+    )
 }
 
 fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
@@ -11817,6 +11851,16 @@ mod tests {
             scan_damage_modification("it deals that much damage minus 1 instead"),
             Some(DamageModification::Minus { value: 1 })
         );
+    }
+
+    #[test]
+    fn parses_scry_that_many_draw_instead_replacement() {
+        let def = parse_replacement_line(
+            "If you would scry 2, draw that many cards instead.",
+            "Test Scry Draw",
+        )
+        .expect("scry to draw replacement");
+        assert_eq!(def.event, ReplacementEvent::Scry);
     }
 }
 
