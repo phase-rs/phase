@@ -218,6 +218,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if nom_primitives::scan_contains(&norm_lower, "enchanted land would be destroyed") {
+        if let Some(def) = parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -274,6 +280,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
 
     if let Some(def) = parse_scry_count_replacement(&lower, &text) {
         return Some(def);
+    }
+
+    if nom_primitives::scan_contains(&lower, "if you would scry ")
+        && nom_primitives::scan_contains(&lower, "draw that many cards instead")
+    {
+        if let Some(def) = parse_scry_that_many_draw_replacement(&lower, &text) {
+            return Some(def);
+        }
     }
 
     if let Some(def) = parse_mill_count_replacement(&norm_lower, &text) {
@@ -398,6 +412,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
     if let Some(def) = parse_lose_life_replacement(&text, &lower) {
         return Some(def);
+    }
+
+    if nom_primitives::scan_contains(&norm_lower, "double all damage") {
+        if let Some(def) = parse_global_damage_double_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
     }
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
@@ -538,6 +558,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // CR 614.1a: Replacement effects that change the type of mana produced.
     if let Some(def) = parse_mana_replacement(&norm_lower, &text) {
         return Some(def);
+    }
+
+    if nom_primitives::scan_contains(&lower, "would explore")
+        && nom_primitives::scan_contains(&lower, "instead")
+    {
+        if let Some(def) = parse_explore_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
     }
 
     // --- Life-floor damage replacement: "if you control a [filter], damage that would
@@ -2914,6 +2942,23 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
         })
 }
 
+/// CR 614.1d: External ETB subject including "played by your opponents" (Uphill Battle).
+fn parse_external_entry_subject(subject: &str) -> Option<TargetFilter> {
+    let subject = subject.trim();
+    if let Some(type_part) = subject.strip_suffix(" played by your opponents") {
+        let (filter, rest) = parse_type_phrase(type_part);
+        if filter == TargetFilter::Any || !rest.trim().is_empty() {
+            return None;
+        }
+        return Some(inject_controller(filter, ControllerRef::Opponent));
+    }
+    let (filter, rest) = parse_type_phrase(subject);
+    if filter == TargetFilter::Any || !rest.trim().is_empty() {
+        return None;
+    }
+    Some(filter)
+}
+
 fn build_external_entry_replacement(
     subject: &str,
     original_text: &str,
@@ -2923,10 +2968,7 @@ fn build_external_entry_replacement(
         return None;
     }
 
-    let (filter, rest) = parse_type_phrase(subject);
-    if !rest.trim().is_empty() {
-        return None;
-    }
+    let filter = parse_external_entry_subject(subject)?;
 
     let effect = if enters_tapped {
         Effect::SetTapState {
@@ -4411,6 +4453,32 @@ fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
     .parse(input)
 }
 
+/// CR 614.1a: "If you would scry N, draw that many cards instead" (Sphinx-class).
+fn parse_scry_that_many_draw_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you would scry ").parse(lower).ok()?;
+    let (rest, _) =
+        take_until::<_, _, OracleError<'_>>(", draw that many cards instead").parse(rest).ok()?;
+    let (_, _) = tag::<_, _, OracleError<'_>>(", draw that many cards instead")
+        .parse(rest)
+        .ok()?;
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Scry)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ))
+            .description(original_text.to_string()),
+    )
+}
+
 fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     let ((effect_kind, count), rest) = nom_on_lower(lower, lower, |input| {
         let (input, _) = tag("if you would scry ").parse(input)?;
@@ -5090,6 +5158,27 @@ fn token_description_to_spec(
 /// can't put a negative number of markers on a permanent — and the
 /// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
 /// CR 107.14 + CR 614.1a: Izzet Generatorium — additional {E} on would-get events.
+/// CR 614.1a: Harmonious Emergence destroy → sacrifice aura + indestructible until EOT.
+fn parse_enchanted_land_destroy_sacrifice_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if enchanted land would be destroyed, ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("instead ").parse(rest).ok()?;
+    let effect_text = rest.trim_end_matches('.');
+    if effect_text.is_empty() {
+        return None;
+    }
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::AttachedTo)
+            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .description(original_text.to_string()),
+    )
+}
+
 fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     all_consuming(value(
         (),
@@ -5110,7 +5199,9 @@ fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<Repl
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
-    let modification = if nom_primitives::scan_contains(lower, "twice that many") {
+    let modification = if nom_primitives::scan_contains(lower, "half that many") {
+        QuantityModification::Half
+    } else if nom_primitives::scan_contains(lower, "twice that many") {
         QuantityModification::Double
     } else if let Some(rest) = strip_after(lower, "that many plus ") {
         // "that many plus one ... counters are put on it instead"
@@ -5141,6 +5232,11 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
         def = def.valid_card(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
+    }
+    if nom_primitives::scan_contains(lower, "an opponent would put")
+        || nom_primitives::scan_contains(lower, "opponent would put")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
     }
 
     // CR 122.1a + CR 614.1a: When the Oracle text names a specific counter type
@@ -6105,6 +6201,71 @@ fn parse_colorless_mana(input: &str) -> super::oracle_nom::error::OracleResult<'
     .parse(input)
 }
 
+/// CR 614.1a: Global "Double all damage … would deal" doublers.
+fn parse_global_damage_double_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, rest) = split_once_on_lower(original_text, norm_lower, "double all damage ")?;
+    let (source_filter, tail) = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("~ would deal").parse(rest)
+    {
+        (Some(TargetFilter::SelfRef), rest)
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("that permanent sources you control would deal").parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("that creature sources you control would deal").parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("that sources you control would deal").parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(
+        "that sources you control of the chosen type would deal",
+    )
+    .parse(rest)
+    {
+        (
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+            rest,
+        )
+    } else {
+        return None;
+    };
+    if !tail.trim_end_matches('.').trim().is_empty()
+        && !nom_primitives::scan_contains(tail, "instead")
+    {
+        return None;
+    }
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_modification(DamageModification::Double)
+        .description(original_text.to_string());
+    if let Some(sf) = source_filter {
+        def = def.damage_source_filter(sf);
+    }
+    Some(def)
+}
+
 /// CR 614.1d: Parse "enters tapped unless a player has N or less life" (bond lands).
 /// Extract "unless a player has N or less life" condition (bond lands).
 /// CR 614.1d
@@ -6282,6 +6443,35 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
 ///
 /// Identical to [`parse_life_floor_damage_replacement`] but without the Worship-class
 /// "if you control a [filter]," guard. Dispatched after the conditional arm.
+/// CR 614.1a + CR 701.20: Explore replacement with scry prelude (Twists and Turns).
+fn parse_explore_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if a creature you control would explore, ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("instead you scry 1, then that creature explores")
+        .parse(rest)
+        .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    let scry = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Explore)
+            .execute(scry.sub_ability(explore))
+            .description(original_text.to_string()),
+    )
+}
+
 fn parse_unconditional_life_floor_damage_replacement(
     norm_lower: &str,
 ) -> Option<ReplacementDefinition> {
@@ -12004,6 +12194,74 @@ mod tests {
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
+
+    #[test]
+    fn parses_global_damage_double_sources_you_control() {
+        let def = parse_replacement_line(
+            "Double all damage that sources you control of the chosen type would deal.",
+            "Collective Inferno",
+        )
+        .expect("global doubler");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+    }
+
+
+    #[test]
+    fn parses_explore_replacement_with_scry() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead you scry 1, then that creature explores.",
+            "Twists and Turns",
+        )
+        .expect("explore replacement");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+    }
+
+
+    #[test]
+    fn parses_played_by_opponents_enters_tapped() {
+        let def = parse_replacement_line(
+            "Creatures played by your opponents enter tapped.",
+            "Uphill Battle",
+        )
+        .expect("played by opponents ETB");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+    }
+
+
+    #[test]
+    fn parses_halving_season_opponent_counter_replacement() {
+        let def = parse_replacement_line(
+            "If an opponent would put one or more counters on a permanent or player, they put half that many of those counters on that permanent or player instead, rounded down.",
+            "Halving Season",
+        )
+        .expect("halving season");
+        assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+    }
+
+
+    #[test]
+    fn parses_enchanted_land_destroy_sacrifice_indestructible() {
+        let def = parse_replacement_line(
+            "If enchanted land would be destroyed, instead sacrifice ~ and that land gains indestructible until end of turn.",
+            "Harmonious Emergence",
+        )
+        .expect("enchanted land destroy");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert!(def.execute.is_some());
+    }
+
+
+    #[test]
+    fn parses_scry_that_many_draw_instead_replacement() {
+        let def = parse_replacement_line(
+            "If you would scry 2, draw that many cards instead.",
+            "Test Scry Draw",
+        )
+        .expect("scry to draw replacement");
+        assert_eq!(def.event, ReplacementEvent::Scry);
+    }
+
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.

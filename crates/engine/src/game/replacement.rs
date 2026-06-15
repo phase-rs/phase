@@ -1711,6 +1711,7 @@ fn gain_life_applier(
         {
             let new_amount = match modification {
                 QuantityModification::Double => amount.saturating_mul(2),
+                QuantityModification::Half => amount / 2,
                 QuantityModification::Plus { value } => amount.saturating_add(value),
                 QuantityModification::Minus { value } => amount.saturating_sub(value),
                 // CR 614.6 + CR 614.7: No life-gain replacement uses Prevent
@@ -1918,6 +1919,7 @@ fn add_counter_applier(
     }
     let new_count = |count: u32| match modification {
         QuantityModification::Double => count.saturating_mul(2),
+        QuantityModification::Half => count / 2,
         QuantityModification::Plus { value } => count.saturating_add(value),
         QuantityModification::Minus { value } => count.saturating_sub(value),
         QuantityModification::Prevent => unreachable!(),
@@ -2053,6 +2055,7 @@ fn create_token_applier(
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Half) => count / 2,
             Some(QuantityModification::Plus { value }) => count.saturating_add(value),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
             // CR 614.6 + CR 614.7 + CR 111.1: No printed token-creation
@@ -4721,7 +4724,7 @@ impl CommuteClass {
 
 fn quantity_commute_class(modification: &QuantityModification) -> CommuteClass {
     match modification {
-        QuantityModification::Double => CommuteClass::Multiplicative,
+        QuantityModification::Double | QuantityModification::Half => CommuteClass::Multiplicative,
         QuantityModification::Plus { .. } => CommuteClass::Additive,
         QuantityModification::Minus { .. } => CommuteClass::Subtractive,
         QuantityModification::Prevent => CommuteClass::NonCommuting,
