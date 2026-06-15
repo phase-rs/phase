@@ -533,6 +533,8 @@ fn filter_prop_uses_recipient(prop: &FilterProp) -> bool {
     match prop {
         FilterProp::AttachedToRecipient | FilterProp::Another => true,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_uses_recipient),
+        // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
+        FilterProp::Not { prop } => filter_prop_uses_recipient(prop),
         FilterProp::SharesQuality {
             reference: Some(reference),
             ..
