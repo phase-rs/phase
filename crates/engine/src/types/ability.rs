@@ -176,6 +176,8 @@ pub struct SearchDestinationSplit {
 pub enum OpponentMayScope {
     /// "any opponent may" — each opponent in APNAP order gets the chance; first accept wins.
     AnyOpponent,
+    /// CR 608.2d + CR 101.4: "any player may" — every player INCLUDING the controller is offered in APNAP order; first accept wins (distinct from AnyOpponent which excludes the controller).
+    AnyPlayer,
 }
 
 /// What kind of named choice the player must make at resolution time.
@@ -12181,6 +12183,18 @@ impl AbilityCondition {
             AbilityCondition::EffectOutcome {
                 signal: EffectOutcomeSignal::OptionalEffectPerformed
             }
+        )
+    }
+
+    /// CR 608.2d + CR 101.4: `Not(OptionalEffectPerformed)` — the "if no one
+    /// does" decline branch carried directly on an "any opponent/player may"
+    /// head's sub_ability (Browbeat, Book Burning). True only for the negated
+    /// optional-effect-performed signal.
+    pub fn is_not_optional_effect_performed(&self) -> bool {
+        matches!(
+            self,
+            AbilityCondition::Not { condition }
+                if condition.is_optional_effect_performed()
         )
     }
 

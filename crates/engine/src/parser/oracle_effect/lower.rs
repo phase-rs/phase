@@ -94,10 +94,33 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                     SpecialClause::Otherwise(else_def) => {
                         // Walk defs backward to find the most recent conditional
+                        let mut attached = false;
                         for d in defs.iter_mut().rev() {
                             if d.condition.is_some() {
                                 d.else_ability = Some(else_def.clone());
+                                attached = true;
                                 break;
+                            }
+                        }
+                        // CR 608.2d + CR 101.4: standalone "If no one does, X" on
+                        // an "any opponent/player may" head (Browbeat, Book
+                        // Burning). The head has no `condition` — it is made
+                        // conditional by `optional_for`. The reward is the
+                        // no-one-accepted branch. Synthesize a
+                        // `Not(OptionalEffectPerformed)`-gated sub carrying the
+                        // reward: on accept the head's chain skips it (signal
+                        // true → negated false); on all-decline the runtime
+                        // decline path fires it (see `handle_opponent_may_choice`).
+                        if !attached {
+                            for d in defs.iter_mut().rev() {
+                                if d.optional_for.is_some() && d.sub_ability.is_none() {
+                                    let mut reward = (**else_def).clone();
+                                    reward.condition = Some(AbilityCondition::Not {
+                                        condition: Box::new(AbilityCondition::effect_performed()),
+                                    });
+                                    d.sub_ability = Some(Box::new(reward));
+                                    break;
+                                }
                             }
                         }
                         true
@@ -1540,6 +1563,17 @@ pub(super) fn strip_optional_effect_prefix(
                     None,
                 ),
                 tag("any opponent may "),
+            ),
+            // CR 608.2d + CR 101.4: "any player may" — every player INCLUDING the
+            // controller is offered in APNAP order; first accept wins (group
+            // bargain / punisher cards: Browbeat, Argothian Wurm, …). Diverges
+            // from "any opponent may " at byte 5 — no ordering hazard.
+            value(
+                (
+                    Some(crate::types::ability::OpponentMayScope::AnyPlayer),
+                    None,
+                ),
+                tag("any player may "),
             ),
             // CR 608.2c: "the first player may" — Oath of Mages and analogous
             // cross-clause patterns where the chooser of a prior sentence

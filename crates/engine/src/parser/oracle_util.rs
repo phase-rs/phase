@@ -1170,6 +1170,11 @@ const SUBTYPES: &[&str] = &[
     "Thopter",
     "Thrull",
     "Tiefling",
+    // CR 205.3m: "Time Lord" is the only two-word creature type. Multi-word
+    // matching is handled by `parse_subtype_entry`/`starts_with_word_ci`
+    // (full-entry match + word boundary); no SUBTYPE_PLURALS entry is needed
+    // because the regular plural "Time Lords" is covered by the +"s" branch.
+    "Time Lord",
     "Treefolk",
     "Trilobite",
     "Troll",
@@ -2319,6 +2324,29 @@ mod tests {
         // Not a subtype.
         assert!(!is_subtype_word("sharuum"));
         assert!(!is_subtype_word("flying")); // that's a keyword, not a subtype
+    }
+
+    #[test]
+    fn parse_subtype_recognizes_two_word_time_lord() {
+        // CR 205.3m: "Time Lord" is the only two-word creature type. The
+        // two-word match is handled by `parse_subtype_entry`/`starts_with_word_ci`
+        // (full-entry match + word boundary), so the registry entry alone is
+        // sufficient — no SUBTYPE_PLURALS or canonicalization change is needed.
+        assert_eq!(
+            parse_subtype("Time Lord"),
+            Some(("Time Lord".to_string(), 9))
+        );
+        assert_eq!(
+            parse_subtype("time lord creature card"),
+            Some(("Time Lord".to_string(), 9))
+        );
+        // Regular plural via the +"s" branch — no SUBTYPE_PLURALS entry.
+        assert_eq!(
+            parse_subtype("Time Lords"),
+            Some(("Time Lord".to_string(), 10))
+        );
+        // Negative: a bare single word must NOT match the two-word subtype.
+        assert_eq!(parse_subtype("time you control"), None);
     }
 
     #[test]

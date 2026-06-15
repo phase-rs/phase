@@ -10,9 +10,9 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
-    FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    FilterProp, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -4615,25 +4615,39 @@ fn resolve_chain_body(
         }
     }
 
-    // CR 608.2d + CR 101.4: "Any opponent may" — prompt opponents in APNAP order.
-    if ability.optional && ability.optional_for.is_some() {
-        let description = ability.description.clone();
-        let mut opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
-            .into_iter()
-            .filter(|p| *p != ability.controller)
-            .collect();
-        if let Some(first) = opponent_order.first().copied() {
-            let remaining = opponent_order.split_off(1);
-            state.pending_optional_effect =
-                Some(Box::new(ability_with_event_context_targets(state, ability)));
-            state.waiting_for = WaitingFor::OpponentMayChoice {
-                player: first,
-                source_id: ability.source_id,
-                description,
-                remaining,
+    // CR 608.2d + CR 101.4: "Any opponent may" / "Any player may" — prompt the
+    // eligible players in APNAP order. The scope decides whether the controller
+    // is included: AnyOpponent excludes them (unchanged); AnyPlayer (group
+    // bargain / punisher) includes them in their correct APNAP slot.
+    if ability.optional {
+        if let Some(scope) = ability.optional_for {
+            // Exhaustive match: there is no compiler exhaustiveness guard at the
+            // other OpponentMayScope consumers, so this serves as the manual
+            // guard. Adding a variant forces a decision here.
+            let include_controller = match scope {
+                OpponentMayScope::AnyOpponent => false,
+                OpponentMayScope::AnyPlayer => true,
             };
+            let description = ability.description.clone();
+            // apnap_order returns ALL living players active-player-first
+            // (CR 101.4), so the controller lands in its correct slot.
+            let mut opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
+                .into_iter()
+                .filter(|p| include_controller || *p != ability.controller)
+                .collect();
+            if let Some(first) = opponent_order.first().copied() {
+                let remaining = opponent_order.split_off(1);
+                state.pending_optional_effect =
+                    Some(Box::new(ability_with_event_context_targets(state, ability)));
+                state.waiting_for = WaitingFor::OpponentMayChoice {
+                    player: first,
+                    source_id: ability.source_id,
+                    description,
+                    remaining,
+                };
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     // CR 117.3a + CR 609.3: "You may" effects prompt the acting player before

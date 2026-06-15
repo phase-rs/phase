@@ -408,6 +408,151 @@ fn atomic_creature(name: &str, mana_cost: &str, keyword: &str, oracle: &str) -> 
     }
 }
 
+/// Build a minimal `AtomicCard` with an explicit type line and Oracle text.
+/// `keywords` mirrors the MTGJSON keywords array (e.g. Trample) so evergreen
+/// keyword lines in the Oracle text are recognized, not parsed as body effects.
+/// Used by the "any player may" group-bargain flip check (issue #3236).
+fn atomic_with_types(
+    name: &str,
+    type_line: &str,
+    types: &[&str],
+    keywords: &[&str],
+    oracle: &str,
+) -> AtomicCard {
+    let is_creature = types.contains(&"Creature");
+    AtomicCard {
+        name: name.to_string(),
+        mana_cost: Some("{2}{R}".to_string()),
+        colors: vec!["R".to_string()],
+        color_identity: vec!["R".to_string()],
+        text: Some(oracle.to_string()),
+        power: if is_creature {
+            Some("3".to_string())
+        } else {
+            None
+        },
+        toughness: if is_creature {
+            Some("3".to_string())
+        } else {
+            None
+        },
+        loyalty: None,
+        defense: None,
+        layout: "normal".to_string(),
+        type_line: Some(type_line.to_string()),
+        types: types.iter().map(|s| s.to_string()).collect(),
+        subtypes: Vec::new(),
+        supertypes: Vec::new(),
+        keywords: if keywords.is_empty() {
+            None
+        } else {
+            Some(keywords.iter().map(|s| s.to_string()).collect())
+        },
+        side: None,
+        face_name: None,
+        mana_value: 3.0,
+        legalities: Default::default(),
+        leadership_skills: None,
+        printings: Vec::new(),
+        rulings: Vec::new(),
+        is_game_changer: false,
+        identifiers: crate::database::mtgjson::AtomicIdentifiers {
+            scryfall_oracle_id: Some(format!("{name}-oracle")),
+            scryfall_id: Some(format!("{name}-face")),
+        },
+        foreign_data: Vec::new(),
+    }
+}
+
+/// CR 608.2d + CR 101.4 (issue #3236): the "any player may … if a player
+/// does / if no one does" group-bargain cards must flip to fully supported
+/// (no `Effect::Unimplemented` parts) with the new `AnyPlayer` scope.
+///
+/// Breaking Point intentionally remains PARTIAL: its "Creatures destroyed this
+/// way can't be regenerated" rider is a separate, pre-existing gap. The test
+/// asserts that status explicitly so a future fix re-classifies it deliberately.
+#[test]
+fn any_player_group_bargain_cards_flip_supported() {
+    // (name, type_line, types, keywords, oracle) — aliased to satisfy
+    // clippy::type_complexity (CI runs `-D warnings`).
+    type CardSpec = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        &'static str,
+    );
+    let clean_cards: &[CardSpec] = &[
+        (
+            "Browbeat",
+            "Sorcery",
+            &["Sorcery"],
+            &[],
+            "Any player may have Browbeat deal 5 damage to them. \
+             If no one does, target player draws three cards.",
+        ),
+        (
+            "Book Burning",
+            "Sorcery",
+            &["Sorcery"],
+            &[],
+            "Any player may have Book Burning deal 6 damage to them. \
+             If no one does, target player mills six cards.",
+        ),
+        (
+            "Argothian Wurm",
+            "Creature — Wurm",
+            &["Creature"],
+            &["Trample"],
+            "Trample\n\
+             When this creature enters, any player may sacrifice a land of their \
+             choice. If a player does, put this creature on top of its owner's library.",
+        ),
+        (
+            "Shivan Wumpus",
+            "Creature — Beast",
+            &["Creature"],
+            &["Trample"],
+            "Trample\n\
+             When this creature enters, any player may sacrifice a land of their \
+             choice. If a player does, put this creature on top of its owner's library.",
+        ),
+        (
+            "Prowling Pangolin",
+            "Creature — Pangolin",
+            &["Creature"],
+            &[],
+            "When this creature enters, any player may sacrifice two creatures of \
+             their choice. If a player does, sacrifice this creature.",
+        ),
+    ];
+
+    for (name, type_line, types, keywords, oracle) in clean_cards {
+        let atomic = atomic_with_types(name, type_line, types, keywords, oracle);
+        let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+        assert!(
+            !crate::game::coverage::card_face_has_unimplemented_parts(&face),
+            "{name} must flip to fully supported (no Unimplemented parts) under AnyPlayer"
+        );
+    }
+
+    // Breaking Point: the regen rider is a separate gap → stays PARTIAL.
+    let breaking_point = atomic_with_types(
+        "Breaking Point",
+        "Sorcery",
+        &["Sorcery"],
+        &[],
+        "Any player may have Breaking Point deal 6 damage to them. If no one does, \
+         destroy all creatures. Creatures destroyed this way can't be regenerated.",
+    );
+    let bp_face = crate::database::synthesis::build_oracle_face(&breaking_point, None);
+    assert!(
+        crate::game::coverage::card_face_has_unimplemented_parts(&bp_face),
+        "Breaking Point is expected to remain PARTIAL (regen rider is a separate gap); \
+         if this fails, the rider now parses — re-verify and update this assertion"
+    );
+}
+
 /// Assert the face carries exactly one synthesized graveyard-activated
 /// sorcery-speed `CopyTokenOf` ability — the runtime the keyword should produce.
 fn assert_face_has_token_copy_ability(face: &CardFace) {

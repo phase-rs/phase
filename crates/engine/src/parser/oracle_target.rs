@@ -5796,6 +5796,23 @@ mod tests {
     }
 
     #[test]
+    fn time_lord_target_keeps_subtype_and_controller() {
+        // CR 205.3m + CR 115.1: "target Time Lord you control" must keep both the
+        // two-word subtype (CR 205.3m: the only two-word creature type) and the
+        // controller restriction (CR 115.1: declared target). Regression: when
+        // "Time Lord" was absent from the SUBTYPES registry this collapsed to
+        // Typed{type_filters:[], controller:None} (Time Lord Regeneration).
+        let (filter, rest) = parse_target("target Time Lord you control");
+        assert_eq!(rest, "");
+        let tf = typed_leg(&filter).expect("expected Typed filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Time Lord")));
+    }
+
+    #[test]
     fn bare_commander_they_control_uses_relative_player_scope() {
         let mut ctx = ParseContext {
             relative_player_scope: Some(ControllerRef::TargetPlayer),

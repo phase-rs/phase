@@ -15888,7 +15888,16 @@ pub(crate) fn parse_effect_chain_ir(
             };
             // Check whether a prior clause has a condition — lowering will attach as else_ability
             let has_condition = clauses.iter().any(|c| c.condition.is_some());
-            let special = if has_condition {
+            // CR 608.2d + CR 101.4: a standalone "If no one does, X" reward on an
+            // "any opponent/player may" head (Browbeat, Book Burning) has no
+            // explicit "if a player does" condition clause, but the may-head IS a
+            // conditional anchor: the reward is the decline (no-one-accepted)
+            // branch. Route it through `Otherwise` so lowering can synthesize the
+            // OptionalEffectPerformed sub the runtime decline path walks, instead
+            // of the unconditional `OtherwiseFallback` (which would fire the
+            // reward ALWAYS and emit an Unimplemented placeholder).
+            let has_optional_may_head = clauses.iter().any(|c| c.opponent_may_scope.is_some());
+            let special = if has_condition || has_optional_may_head {
                 SpecialClause::Otherwise(Box::new(else_def))
             } else {
                 SpecialClause::OtherwiseFallback(Box::new(else_def))
@@ -16847,6 +16856,15 @@ pub(crate) fn parse_effect_chain_ir(
         // sacrifice an opponent's permanent — violating CR 701.21a.
         let chunk_actor = match (is_optional, &opponent_may_scope, &player_scope) {
             (true, None, None) => Some(ControllerRef::You),
+            // CR 608.2d + CR 101.4: "any player may sacrifice … of their choice" —
+            // every player (including the controller) is the potential actor, so
+            // there is NO single controller to stamp on the sacrifice TargetFilter.
+            // Leaving the actor ABSENT lets the runtime `obj.controller == promptee`
+            // pre-filter (engine_payment_choices.rs) scope "their own permanents"
+            // per promptee. Stamping Opponent (the `Some(_)` arm below) would make
+            // the controller unable to sacrifice their OWN permanents. Must precede
+            // the catch-all. Does NOT change AnyOpponent.
+            (true, Some(crate::types::ability::OpponentMayScope::AnyPlayer), _) => None,
             (true, Some(_), _) => Some(ControllerRef::Opponent),
             (_, _, Some(PlayerFilter::Opponent)) => Some(ControllerRef::You),
             (_, _, Some(PlayerFilter::Controller)) => Some(ControllerRef::You),
@@ -37013,6 +37031,120 @@ mod tests {
         );
     }
 
+    // ── "Any player may" — group bargain / punisher (issue #3236) ──────────
+
+    /// CR 608.2d + CR 101.4: "any player may sacrifice … of their choice. If a
+    /// player does, …" lowers to `optional: true` + `optional_for: AnyPlayer`
+    /// (every player INCLUDING the controller is offered), with an
+    /// `OptionalEffectPerformed` sub-condition.
+    ///
+    /// BLOCKER 1 regression guard: the sacrifice TargetFilter must NOT stamp
+    /// `controller: Some(Opponent)`. AnyPlayer leaves the actor ABSENT so the
+    /// runtime `obj.controller == promptee` pre-filter scopes "their own
+    /// permanents" per promptee — otherwise the controller could never
+    /// sacrifice their own land.
+    #[test]
+    fn any_player_may_sacrifice_sets_anyplayer_and_no_opponent_controller() {
+        let def = parse_effect_chain(
+            "any player may sacrifice a land of their choice. if a player does, \
+             put this creature on top of its owner's library",
+            AbilityKind::Spell,
+        );
+        assert!(def.optional, "should be optional");
+        assert_eq!(
+            def.optional_for,
+            Some(crate::types::ability::OpponentMayScope::AnyPlayer),
+            "should have AnyPlayer scope"
+        );
+        assert_ne!(
+            def.optional_for,
+            Some(crate::types::ability::OpponentMayScope::AnyOpponent),
+            "AnyPlayer must NOT be AnyOpponent (controller is included)"
+        );
+        assert!(
+            matches!(*def.effect, Effect::Sacrifice { .. }),
+            "effect should be Sacrifice, got {:?}",
+            def.effect
+        );
+        // BLOCKER 1: controller must NOT be baked to Opponent — it must be None
+        // (promptee-scoped at runtime).
+        if let Effect::Sacrifice { ref target, .. } = *def.effect {
+            match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(
+                        tf.controller, None,
+                        "BLOCKER 1: AnyPlayer sacrifice must leave controller \
+                         absent (None), not stamp Opponent — got {:?}",
+                        tf.controller
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            }
+        }
+        // "if a player does" → OptionalEffectPerformed sub-condition.
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::effect_performed()),
+            "sub condition should be OptionalEffectPerformed (if a player does)"
+        );
+        // The "put this creature on top of its owner's library" consequence must
+        // parse cleanly (no Unimplemented) so the card flips to supported.
+        assert!(
+            !matches!(*sub.effect, Effect::Unimplemented { .. }),
+            "if-a-player-does consequence must not be Unimplemented, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 608.2d + CR 101.4: Browbeat-class — "any player may have ~ deal 5
+    /// damage to them. If no one does, target player draws three cards." The
+    /// reward attaches as the `else_ability` on the OptionalEffectPerformed sub.
+    #[test]
+    fn any_player_may_have_deal_damage_with_if_no_one_does_reward() {
+        let def = parse_effect_chain(
+            "any player may have ~ deal 5 damage to them. if no one does, \
+             target player draws three cards",
+            AbilityKind::Spell,
+        );
+        assert!(def.optional, "should be optional");
+        assert_eq!(
+            def.optional_for,
+            Some(crate::types::ability::OpponentMayScope::AnyPlayer),
+            "should have AnyPlayer scope"
+        );
+        assert_ne!(
+            def.optional_for,
+            Some(crate::types::ability::OpponentMayScope::AnyOpponent),
+        );
+        assert!(
+            matches!(*def.effect, Effect::DealDamage { .. }),
+            "effect should be DealDamage, got {:?}",
+            def.effect
+        );
+        // Standalone "if no one does" has no "if a player does" head, so the
+        // reward is carried on a Not(OptionalEffectPerformed)-gated sub_ability
+        // (the decline branch), NOT a top-level else_ability.
+        let sub = def.sub_ability.as_ref().expect("should have sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "reward sub must be gated Not(OptionalEffectPerformed), got {:?}",
+            sub.condition
+        );
+        assert!(
+            matches!(*sub.effect, Effect::Draw { .. }),
+            "reward sub effect should be Draw, got {:?}",
+            sub.effect
+        );
+        assert!(
+            !matches!(*sub.effect, Effect::Unimplemented { .. }),
+            "reward must not be Unimplemented"
+        );
+    }
+
     /// CR 608.2e + CR 109.5: Braids, Arisen Nightmare's decline-consequence
     /// tail. "If you do, each opponent may sacrifice ... For each opponent who
     /// doesn't, that player loses 2 life and you draw a card." must lower to a
@@ -40814,6 +40946,41 @@ mod tests {
         );
         // No sub_ability — destinations are baked in
         assert!(def.sub_ability.is_none(), "should have no sub_ability");
+    }
+
+    /// CR 701.20a + CR 205.3m: "reveal cards ... until you reveal a Time Lord
+    /// creature card" must dig to a Time Lord creature, not the first card of any
+    /// type. Regression (Time Lord Regeneration): the filter collapsed to
+    /// `TargetFilter::Any` because "Time Lord" (CR 205.3m: the only two-word
+    /// creature type) was missing from the SUBTYPES registry, so the typed
+    /// "Time Lord creature card" noun phrase failed to parse.
+    #[test]
+    fn reveal_until_time_lord_creature_keeps_typed_filter() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a Time Lord creature card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::RevealUntil { filter, .. } => {
+                let tf = match filter {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("expected Typed filter, got {other:?}"),
+                };
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature in type_filters, got {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Time Lord")),
+                    "expected Subtype(\"Time Lord\") in type_filters, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected RevealUntil, got {other:?}"),
+        }
     }
 
     /// CR 109.5 + CR 701.20a: Third-person form ("Its controller reveals cards
