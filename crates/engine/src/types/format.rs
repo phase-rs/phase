@@ -52,9 +52,10 @@ pub enum GameFormat {
     HistoricBrawl,
     FreeForAll,
     TwoHeadedGiant,
-    /// Momir Basic: 60 basic lands, 24 life, a game-start command-zone emblem
-    /// granting "{X}, Discard a card: Create a token that's a copy of a creature
-    /// card with mana value X chosen at random."
+    /// Momir's Madness: 60 snow basic lands (12 each, no Snow-Covered Wastes),
+    /// 20 life, a game-start command-zone emblem granting "{X}, Discard a card:
+    /// Create a token that's a copy of a creature card with mana value X chosen
+    /// at random."
     Momir,
 }
 
@@ -174,7 +175,7 @@ impl GameFormat {
             | GameFormat::DuelCommander
             | GameFormat::Oathbreaker
             | GameFormat::Brawl
-            // Momir has no sideboard — the deck is exactly 60 basic lands.
+            // Momir has no sideboard — the deck is exactly 60 snow basic lands.
             | GameFormat::Momir
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
@@ -243,7 +244,7 @@ impl GameFormat {
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
             GameFormat::TwoHeadedGiant => "Two-Headed Giant",
-            GameFormat::Momir => "Momir Basic",
+            GameFormat::Momir => "Momir's Madness",
         }
     }
 
@@ -400,9 +401,9 @@ impl GameFormat {
             },
             FormatMetadata {
                 format: GameFormat::Momir,
-                label: "Momir Basic",
+                label: "Momir's Madness",
                 short_label: "MOM",
-                description: "60 basic lands, random creature tokens",
+                description: "60 snow basic lands, random creature tokens",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::momir(),
             },
@@ -633,14 +634,15 @@ impl FormatConfig {
         }
     }
 
-    /// Momir Basic: 60 basic lands, 24 life, 2-player. A game-start command-zone
-    /// emblem grants the random-creature-token activated ability. No sideboard,
-    /// no commander. `command_zone: true` so the command-zone activation surface
-    /// and pool rehydration are enabled.
+    /// Momir's Madness: 60 snow basic lands (12 each of Snow-Covered Plains/
+    /// Island/Swamp/Mountain/Forest, no Snow-Covered Wastes), 20 life, 2-player.
+    /// A game-start command-zone emblem grants the random-creature-token
+    /// activated ability. No sideboard, no commander. `command_zone: true` so
+    /// the command-zone activation surface and pool rehydration are enabled.
     pub fn momir() -> Self {
         FormatConfig {
             format: GameFormat::Momir,
-            starting_life: 24,
+            starting_life: 20,
             min_players: 2,
             max_players: 2,
             deck_size: 60,

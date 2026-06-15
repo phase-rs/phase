@@ -3946,4 +3946,85 @@ mod tests {
         assert!(obj.abilities.is_empty());
         assert!(obj.keywords.is_empty());
     }
+
+    /// Build a scenario with a 2/2 victim (P1) that carries a regeneration
+    /// shield and an Incinerate-class spell (P0) carrying `oracle_text`. Casts
+    /// the spell at the victim through the full pipeline and returns the
+    /// `(CastOutcome, victim_id)`.
+    fn cast_damage_at_shielded_victim(oracle_text: &str) -> (CastOutcome, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // CR 701.19a: a 2/2 creature carrying a one-shot regeneration shield.
+        let victim = scenario
+            .add_creature(P1, "Shielded Bear", 2, 2)
+            .with_replacement_definition(
+                ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Destroy)
+                    .valid_card(TargetFilter::SelfRef)
+                    .description("Regenerate".to_string())
+                    .regeneration_shield(),
+            )
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Incinerate Test", true, oracle_text)
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).target_object(victim).resolve();
+        (outcome, victim)
+    }
+
+    /// CR 701.19c + CR 608.2c + CR 614.8 (issue #3333) — DISCRIMINATING runtime
+    /// gate. Incinerate deals LETHAL damage to a creature that HAS a regeneration
+    /// shield. The "A creature dealt damage this way can't be regenerated this
+    /// turn." rider must publish the damaged creature (non-empty tracked set) and
+    /// grant it `CantBeRegenerated`, so the SBA destruction BYPASSES the shield
+    /// and the creature DIES. This fails if the Part 1 collector arm OR the Part 3
+    /// TrackedSet binding is reverted (the set is empty → no static → shield
+    /// saves the creature).
+    #[test]
+    fn incinerate_rider_bypasses_regeneration_shield() {
+        let (outcome, victim) = cast_damage_at_shielded_victim(
+            "Incinerate deals 3 damage to any target. A creature dealt damage \
+             this way can't be regenerated this turn.",
+        );
+
+        // CR 701.19c: the shield is not applied — the creature is destroyed.
+        outcome.assert_zone(&[victim], Zone::Graveyard);
+
+        // DIRECTLY catches the empty-bind regression: the damage clause must have
+        // published a NON-EMPTY tracked set containing the damaged creature's id.
+        let published_any = outcome
+            .state()
+            .tracked_object_sets
+            .values()
+            .any(|set| set.contains(&victim));
+        assert!(
+            published_any,
+            "the damage clause must publish a non-empty tracked set containing \
+             the damaged creature (got {:?})",
+            outcome.state().tracked_object_sets
+        );
+    }
+
+    /// CR 701.19a/b — CONTROL for the discriminating gate. The same lethal damage
+    /// to the same shielded creature WITHOUT the regen rider: the regeneration
+    /// shield SAVES the creature (it stays on the battlefield, tapped, with damage
+    /// removed). Confirms the bypass above is caused specifically by the rider,
+    /// not by the damage alone.
+    #[test]
+    fn damage_without_rider_lets_regeneration_shield_save() {
+        let (outcome, victim) =
+            cast_damage_at_shielded_victim("Incinerate Test deals 3 damage to any target.");
+
+        // CR 701.19a/b: the shield regenerates the creature — it survives.
+        outcome.assert_zone(&[victim], Zone::Battlefield);
+        assert!(
+            outcome.state().objects[&victim].tapped,
+            "CR 701.19b: a regenerated creature is tapped"
+        );
+        assert_eq!(
+            outcome.state().objects[&victim].damage_marked,
+            0,
+            "CR 701.19a: regeneration removes all marked damage"
+        );
+    }
 }

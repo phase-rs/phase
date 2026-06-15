@@ -149,6 +149,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                         true
                     }
+                    SpecialClause::CantBeRegeneratedRider(rider_def) => {
+                        // CR 608.2c + CR 701.19c: Attach the "<noun> dealt damage
+                        // this way can't be regenerated" rider as the tail of the
+                        // preceding damage clause's sub_ability chain. The rider's
+                        // `GenericEffect{target: TrackedSet}` then trips
+                        // `next_sub_needs_tracked_set` on that damage clause, so it
+                        // publishes the damaged object ids the rider's
+                        // CantBeRegenerated static binds to.
+                        if let Some(last_def) = defs.last_mut() {
+                            append_to_deepest_sub_ability(last_def, Some(rider_def.clone()));
+                        }
+                        true
+                    }
                     SpecialClause::DigInsteadAlt(alt_def) => {
                         if let Some(last_def) = defs.pop() {
                             let mut new_def = *alt_def.clone();
@@ -1588,6 +1601,16 @@ pub(super) fn strip_optional_effect_prefix(
             value(
                 (None, Some(PlayerFilter::Opponent)),
                 tag("target opponent may "),
+            ),
+            // CR 506.2 + CR 608.2d + CR 121.3a: "Defending player may have you
+            // draw a card" (Shakedown Heavy) — on an attack trigger, the
+            // defending player is the may-actor who decides whether the
+            // controller performs the granted action. CR 121.3a: the chooser
+            // need not be the player who draws. Parallels the targeted-opponent
+            // arm above; the actor scope is the attack's defending player.
+            value(
+                (None, Some(PlayerFilter::DefendingPlayer)),
+                tag("defending player may "),
             ),
             // CR 608.2d: "That creature's controller may have this artifact deal …"
             // (Requiem Monolith) — the targeted creature's controller chooses.

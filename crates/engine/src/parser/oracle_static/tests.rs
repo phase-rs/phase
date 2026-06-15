@@ -10422,6 +10422,49 @@ fn gain_all_creature_types_produces_add_keyword_changeling() {
 }
 
 #[test]
+fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
+    // CR 305.7: Song of the Dryads pattern - should use SetBasicLandType to trigger ability removal
+    let def = parse_static_line("Enchanted permanent is a colorless Forest land.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
+            }),
+        "Song-style type change must make the permanent a land: {:?}",
+        def.modifications
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::SetBasicLandType {
+            land_type: crate::types::ability::BasicLandType::Forest,
+        }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::SetColor { colors: vec![] }));
+}
+
+#[test]
+fn enchanted_permanent_is_forest_land_produces_set_basic_land_type() {
+    // CR 305.7: Without color prefix, should still use SetBasicLandType
+    let def = parse_static_line("Enchanted permanent is a Forest land.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
+            }),
+        "Song-style type change must make the permanent a land: {:?}",
+        def.modifications
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::SetBasicLandType {
+            land_type: crate::types::ability::BasicLandType::Forest,
+        }));
+}
+
+#[test]
 fn static_condition_source_in_graveyard() {
     let cond = parse_static_condition("this card is in your graveyard");
     assert!(

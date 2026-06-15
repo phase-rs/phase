@@ -2788,10 +2788,31 @@ pub(crate) fn distinct_counter_kinds_among(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<CounterType> {
+    let mut seen: HashSet<CounterType> = HashSet::new();
+    // CR 608.2c + CR 122.1: a `ParentTarget` iteration source ("for each kind of
+    // counter on target permanent" — Dramatist's Puppet, Quarry Hauler) resolves
+    // to the chosen target(s) carried on the resolving ability, not via
+    // battlefield object matching (`matches_target_filter` returns false for
+    // `ParentTarget` by design — it is resolution-time context, not a predicate).
+    if matches!(filter, TargetFilter::ParentTarget) {
+        if let Some(ability) = filter_ctx.ability {
+            for target in &ability.targets {
+                if let TargetRef::Object(id) = target {
+                    if let Some(obj) = state.objects.get(id) {
+                        for counter_type in positive_counter_types(&obj.counters) {
+                            seen.insert(counter_type);
+                        }
+                    }
+                }
+            }
+        }
+        let mut kinds: Vec<CounterType> = seen.into_iter().collect();
+        kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        return kinds;
+    }
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut seen: HashSet<CounterType> = HashSet::new();
     for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
         if !matches_target_filter(state, id, filter, filter_ctx) {
             continue;
