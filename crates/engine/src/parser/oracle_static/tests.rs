@@ -1118,6 +1118,28 @@ fn continuous_mods_decompose_becomes_compound_type_phrase() {
     );
 }
 
+/// CR 608.2d + CR 613.1f: "gain that ability" / "the chosen ability" / "the
+/// chosen keyword" is a chosen-keyword anaphor referring back to a preceding
+/// `Effect::Choose { ChoiceType::Keyword }` clause (Angelic Skirmisher,
+/// Linvala, Shield of Sea Gate). It must lower to `AddChosenKeyword`, NOT a
+/// bare `AddKeyword` (the chosen value is unknown at parse time) and NOT a
+/// silent drop. Builds for the whole "gain the chosen keyword" class.
+#[test]
+fn continuous_mods_grant_chosen_keyword_anaphor() {
+    for phrase in [
+        "gain that ability",
+        "gain the chosen ability",
+        "gain the chosen keyword",
+    ] {
+        let mods = parse_continuous_modifications(phrase);
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddChosenKeyword],
+            "expected AddChosenKeyword for {phrase:?}, got {mods:?}"
+        );
+    }
+}
+
 #[test]
 fn continuous_mods_replace_creature_subtypes_for_bare_becomes_clause() {
     let mods = parse_continuous_modifications("gets +3/+3 and becomes a Bear Berserker");
