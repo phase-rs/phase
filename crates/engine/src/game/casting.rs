@@ -635,7 +635,7 @@ fn graveyard_spell_objects_available_to_cast(
                 || has_disturb_keyword(state, obj_id)
                 || retrace_has_discardable_land(state, player, obj_id)
                 || jumpstart_has_discardable_card(state, player, obj_id)
-                || graveyard_has_enough_for_escape(state, player, obj_id)
+                || can_pay_escape_additional_cost(state, player, obj_id)
                 // CR 702.187b: Mayhem is eligible only while the card was
                 // discarded this turn.
                 || (was_discarded_this_turn(state, obj_id)
@@ -698,29 +698,24 @@ fn graveyard_object_castable_by_permission_sources(
     })
 }
 
-/// CR 702.138: Check that the player's graveyard has enough OTHER cards to pay escape's exile cost.
-fn graveyard_has_enough_for_escape(
+/// CR 702.138a + CR 601.2f-h: Check that the player can pay escape's additional
+/// (exile) cost. Delegates the whole residual `AbilityCost` to the single
+/// affordability authority `AbilityCost::is_payable` — its Composite arm requires
+/// ALL sub-costs payable and routes each `Exile` sub-cost (the graveyard clause
+/// and the battlefield "Exile a land you control" clause on Lunar Hatchling)
+/// through the same `exile_cost_effective_zone` + `eligible_exile_cost_objects`
+/// functions the payment arm uses, so the pre-check and payment-time eligibility
+/// match by construction. Returns `false` for an unparsed/placeholder escape
+/// (no residual), correctly gating it out of legal actions.
+fn can_pay_escape_additional_cost(
     state: &GameState,
     player: PlayerId,
     escape_obj_id: ObjectId,
 ) -> bool {
-    let exile_count = super::keywords::effective_escape_data(state, escape_obj_id)
-        .map(|(_, exile_count)| exile_count);
-    let Some(needed) = exile_count else {
+    let Some((_, residual)) = super::keywords::effective_escape_data(state, escape_obj_id) else {
         return false;
     };
-    let other_cards = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| {
-            p.graveyard
-                .iter()
-                .filter(|&&id| id != escape_obj_id)
-                .count()
-        })
-        .unwrap_or(0);
-    other_cards >= needed as usize
+    residual.is_payable(state, player, escape_obj_id)
 }
 
 /// CR 702.180: Check if an object has the Harmonize keyword.
@@ -9409,9 +9404,11 @@ fn can_cast_prepared_now(
         return false;
     }
 
-    // CR 702.138: Escape requires enough other graveyard cards to exile.
+    // CR 702.138a: Escape requires the player to be able to pay its additional
+    // (exile) cost — usually exiling other graveyard cards, plus any battlefield
+    // exile clause (Lunar Hatchling's "Exile a land you control").
     if prepared.casting_variant == CastingVariant::Escape
-        && !graveyard_has_enough_for_escape(state, player, prepared.object_id)
+        && !can_pay_escape_additional_cost(state, player, prepared.object_id)
     {
         return false;
     }
@@ -11095,6 +11092,23 @@ pub(super) fn split_evoke_cost_components(
     match evoke {
         EvokeCost::Mana(mana) => (Some(mana.clone()), None),
         EvokeCost::NonMana(ab) => split_alt_cost_components(ab),
+    }
+}
+
+/// CR 702.138a + CR 601.2f-h: Escape twin of `split_evoke_cost_components`.
+/// `EscapeCost::Mana` is a bare mana sub-cost with no residual; `NonMana(...)`
+/// (the printed compound — "[mana], Exile N other cards from your graveyard",
+/// possibly with extra exile clauses on Lunar Hatchling) delegates to the
+/// shared `split_alt_cost_components` walker, which extracts the mana sub-cost
+/// for the normal mana flow (CR 601.2g) and returns the exile residual for
+/// `pay_additional_cost` (CR 601.2h).
+pub(super) fn split_escape_cost_components(
+    escape: &crate::types::keywords::EscapeCost,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    use crate::types::keywords::EscapeCost;
+    match escape {
+        EscapeCost::Mana(mana) => (Some(mana.clone()), None),
+        EscapeCost::NonMana(ab) => split_alt_cost_components(ab),
     }
 }
 
@@ -12825,7 +12839,7 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
     use crate::types::events::GameEvent;
-    use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+    use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
     use crate::types::mana::{
         ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSpellGrant, ManaType, ManaUnit,
     };
@@ -32793,8 +32807,9 @@ mod tests {
         let mut state = setup_game_at_main_phase();
 
         // A Phlage-shaped escape card in the AI player's (PlayerId(1))
-        // graveyard. Native `Keyword::Escape` with cost {R}{R}{W}{W} and
-        // exile_count 5, mirroring Phlage, Titan of Fire's Fury.
+        // graveyard. Native `Keyword::Escape` with the compound escape cost
+        // {R}{R}{W}{W} plus "Exile five other cards from your graveyard",
+        // mirroring Phlage, Titan of Fire's Fury.
         let phlage = create_object(
             &mut state,
             CardId(9419),
@@ -32819,10 +32834,18 @@ mod tests {
                 generic: 4,
                 shards: vec![ManaCostShard::Red, ManaCostShard::White],
             };
-            let escape_kw = Keyword::Escape {
-                cost: escape_mana.clone(),
-                exile_count: 5,
-            };
+            let escape_kw = Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: escape_mana.clone(),
+                    },
+                    AbilityCost::Exile {
+                        count: 5,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    },
+                ],
+            }));
             obj.base_keywords.push(escape_kw.clone());
             obj.keywords.push(escape_kw);
         }

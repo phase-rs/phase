@@ -1258,6 +1258,7 @@ mod tests {
                     ContinuousModification::AddToughness { value: 1 },
                 ],
                 condition: None,
+                duration_subject: None,
                 source_name: String::new(),
             });
 

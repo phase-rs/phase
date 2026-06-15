@@ -155,10 +155,22 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.power = Some(2);
         obj.toughness = Some(2);
-        obj.keywords.push(Keyword::Escape {
-            cost: engine::types::mana::ManaCost::zero(),
-            exile_count: 3,
-        });
+        obj.keywords.push(Keyword::Escape(
+            engine::types::keywords::EscapeCost::NonMana(
+                engine::types::ability::AbilityCost::Composite {
+                    costs: vec![
+                        engine::types::ability::AbilityCost::Mana {
+                            cost: engine::types::mana::ManaCost::zero(),
+                        },
+                        engine::types::ability::AbilityCost::Exile {
+                            count: 3,
+                            zone: Some(Zone::Graveyard),
+                            filter: None,
+                        },
+                    ],
+                },
+            ),
+        ));
 
         let config = AiConfig::default();
         let ability = ResolvedAbility::new(
@@ -225,10 +237,22 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.power = Some(2);
         obj.toughness = Some(2);
-        obj.keywords.push(Keyword::Escape {
-            cost: engine::types::mana::ManaCost::zero(),
-            exile_count: 3,
-        });
+        obj.keywords.push(Keyword::Escape(
+            engine::types::keywords::EscapeCost::NonMana(
+                engine::types::ability::AbilityCost::Composite {
+                    costs: vec![
+                        engine::types::ability::AbilityCost::Mana {
+                            cost: engine::types::mana::ManaCost::zero(),
+                        },
+                        engine::types::ability::AbilityCost::Exile {
+                            count: 3,
+                            zone: Some(Zone::Graveyard),
+                            filter: None,
+                        },
+                    ],
+                },
+            ),
+        ));
 
         let config = AiConfig::default();
         let ability = ResolvedAbility::new(

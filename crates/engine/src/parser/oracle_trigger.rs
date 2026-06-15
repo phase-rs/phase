@@ -2759,6 +2759,11 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceIsMonstrous
+        // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
+        // target-relative tap condition (Zygon Infiltrator's copy duration). It
+        // is never produced as an intervening-if, so there is no
+        // `TriggerCondition` equivalent — lowering returns `None`.
+        | StaticCondition::IsTapped { .. }
         // CR 702.171b: the saddled designation has no intervening-if
         // (`TriggerCondition`) equivalent.
         | StaticCondition::SourceIsSaddled
@@ -24190,7 +24195,11 @@ mod tests {
                         "charge".to_string()
                     ))
                 );
-                assert_eq!(*count, -1, "count=-1 is the remove-all sentinel");
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: -1 },
+                    "Fixed(-1) is the remove-all sentinel"
+                );
                 assert!(matches!(target, TargetFilter::SelfRef));
             }
             other => panic!("expected Effect::RemoveCounter, got {other:?}"),
@@ -27824,6 +27833,71 @@ mod tests {
         }
     }
 
+    /// CR 508.5 / CR 508.5a: an attack-trigger effect whose target carries the
+    /// explicit "defending player controls" qualifier must scope to the
+    /// defending player. This is the bug class (Kogla, The Tarrasque, ~42
+    /// cards) — distinct from the "attack a player ... that player controls"
+    /// anaphor path covered above. Drives the full trigger→effect→target
+    /// pipeline on the real Oracle text; the assertion flips to `None` if the
+    /// `parse_zone_controller` arm is reverted.
+    #[test]
+    fn attack_trigger_destroy_or_target_defending_player_controls() {
+        use crate::types::ability::Effect;
+
+        // Kogla, the Titan Ape: Or-target destroy, scope must fan onto each leg.
+        let def = parse_trigger_line(
+            "Whenever Kogla, the Titan Ape attacks, destroy target artifact or enchantment defending player controls.",
+            "Kogla, the Titan Ape",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Destroy { target, .. } => match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+                    for (i, leg) in filters.iter().enumerate() {
+                        match leg {
+                            TargetFilter::Typed(t) => assert_eq!(
+                                t.controller,
+                                Some(ControllerRef::DefendingPlayer),
+                                "leg {i} must scope to the defending player, not null",
+                            ),
+                            other => panic!("leg {i} expected Typed, got {other:?}"),
+                        }
+                    }
+                }
+                other => panic!("expected Or target, got {other:?}"),
+            },
+            other => panic!("expected Destroy effect, got {other:?}"),
+        }
+    }
+
+    /// CR 508.5 / CR 508.5a + CR 701.14a: The Tarrasque — "it fights target
+    /// creature defending player controls". The fight target must scope to the
+    /// defending player. Covers the Fight verb of the bug class.
+    #[test]
+    fn attack_trigger_fight_defending_player_controls() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever The Tarrasque attacks, it fights target creature defending player controls.",
+            "The Tarrasque",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Fight { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "fight target should scope to the defending player, not null",
+                ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
     /// CR 120.3: Damage-to-player triggers (e.g., "Whenever ~ deals combat
     /// damage to a player, destroy target creature that player controls") must
     /// continue using `ControllerRef::TargetPlayer`, not `DefendingPlayer`,
@@ -28586,6 +28660,76 @@ mod tests {
                 tf.controller,
                 Some(crate::types::ability::ControllerRef::You),
                 "gate for {keyword:?} must be scoped to creatures you control"
+            );
+        }
+    }
+
+    /// CR 608.2d + CR 113.3 + CR 611.2: Angelic Skirmisher — "At the beginning
+    /// of each combat, choose first strike, vigilance, or lifelink. Creatures
+    /// you control gain that ability until end of turn." The trigger execute
+    /// chain must (a) prompt a typed `Effect::Choose { ChoiceType::Keyword }`
+    /// with `persist: true`, then (b) grant `AddChosenKeyword` to creatures you
+    /// control — never `Effect::Unimplemented`.
+    #[test]
+    fn parse_angelic_skirmisher_choose_then_grant_chosen_keyword() {
+        use crate::types::ability::ChoiceType;
+        use crate::types::keywords::Keyword;
+
+        let def = parse_trigger_line(
+            "At the beginning of each combat, choose first strike, vigilance, or \
+             lifelink. Creatures you control gain that ability until end of turn.",
+            "Angelic Skirmisher",
+        );
+        let execute = def
+            .execute
+            .expect("Angelic Skirmisher trigger must have an execute");
+        let chain = ability_chain(&execute);
+
+        // (a) The choose clause is a persisting typed keyword choice.
+        let choose = chain
+            .iter()
+            .find_map(|node| match &*node.effect {
+                Effect::Choose {
+                    choice_type,
+                    persist,
+                } => Some((choice_type.clone(), *persist)),
+                _ => None,
+            })
+            .expect("expected an Effect::Choose in the chain");
+        assert_eq!(
+            choose.0,
+            ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+            },
+            "choose clause must be a typed keyword choice"
+        );
+        assert!(
+            choose.1,
+            "keyword choice must persist for the grant to read"
+        );
+
+        // (b) The grant clause adds the chosen keyword to creatures you control.
+        let granted_chosen = chain.iter().any(|node| match &*node.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().any(|sdef| {
+                sdef.modifications
+                    .contains(&ContinuousModification::AddChosenKeyword)
+            }),
+            _ => false,
+        });
+        assert!(
+            granted_chosen,
+            "expected an AddChosenKeyword grant, chain: {:?}",
+            chain.iter().map(|n| &n.effect).collect::<Vec<_>>()
+        );
+
+        // Nothing in the chain may be Unimplemented.
+        for node in &chain {
+            assert!(
+                !matches!(&*node.effect, Effect::Unimplemented { .. }),
+                "no clause may be Unimplemented, got {:?}",
+                node.effect
             );
         }
     }

@@ -6305,7 +6305,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -6429,7 +6429,7 @@ fn build_battlefield_upkeep_counter_removal_trigger(
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(counter_type.clone()),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -6472,7 +6472,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Fade),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     )
@@ -9166,7 +9166,7 @@ pub fn synthesize_impending(face: &mut CardFace) {
         AbilityKind::Spell,
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Time),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
     );
@@ -22718,7 +22718,7 @@ mod fading_vanishing_tests {
             removal.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::RemoveCounter {
                 counter_type: Some(CounterType::Fade),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             })
         ));
@@ -22777,7 +22777,7 @@ mod fading_vanishing_tests {
             removal.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::RemoveCounter {
                 counter_type: Some(CounterType::Time),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             })
         ));

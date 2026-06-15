@@ -94,6 +94,7 @@ impl ContinuousModification {
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::RemoveChosenKeyword
+            | ContinuousModification::AddChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }

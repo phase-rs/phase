@@ -611,23 +611,55 @@ fn matches_waiting_target_choice(
     }
 }
 
+/// True when an `ActivateAbility` action is a meaningful priority decision.
+///
+/// Non-mana abilities are always meaningful. Mana abilities are meaningful only
+/// when their penalty axis says so (today: sacrifice-for-mana per CR 605.3a +
+/// CR 603.6, issue #544).
+fn activate_ability_is_meaningful_priority(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    state.objects.get(&source_id).is_some_and(|obj| {
+        obj.abilities.get(ability_index).is_some_and(|ability| {
+            !mana_abilities::is_mana_ability(ability)
+                || mana_sources::mana_ability_penalty(ability).is_meaningful_priority_activation()
+        })
+    })
+}
+
 /// True when `actions` contains a priority action that materially changes the
 /// game beyond passing or producing standalone mana.
+///
+/// Sacrifice-for-mana activations are omitted from the flat `legal_actions`
+/// list (they live in `legal_actions_by_object` only) but remain meaningful
+/// priority decisions, so during `WaitingFor::Priority` this also scans
+/// `activatable_object_mana_actions`.
 pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction]) -> bool {
-    actions.iter().any(|action| match action {
+    if actions.iter().any(|action| match action {
         GameAction::PassPriority => false,
         GameAction::ActivateAbility {
             source_id,
             ability_index,
-        } => state.objects.get(source_id).is_some_and(|obj| {
-            obj.abilities.get(*ability_index).is_some_and(|ability| {
-                !mana_abilities::is_mana_ability(ability)
-                    || mana_sources::mana_ability_penalty(ability)
-                        .is_meaningful_priority_activation()
-            })
-        }),
+        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
         _ => true,
-    })
+    }) {
+        return true;
+    }
+
+    // Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
+    // excluded from the flat legal-actions list but must still block auto-pass.
+    matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && activatable_object_mana_actions(state).iter().any(|action| {
+            matches!(
+                action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
+            )
+        })
 }
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
@@ -2250,6 +2282,34 @@ mod tests {
         assert!(
             !super::auto_pass_recommended(&state, &actions),
             "Auto-pass must not fire when only a sacrifice-for-mana ability is available (#544)"
+        );
+
+        // Production path: flat `legal_actions` omits mana abilities, so the
+        // auto-pass gate must consult `activatable_object_mana_actions` instead
+        // of relying on the caller to inject the activation.
+        let (flat, _, grouped) = legal_actions_full(&state);
+        assert!(
+            !flat.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == kci
+            )),
+            "precondition: KCI activation is grouped-only during priority"
+        );
+        assert!(
+            bucket_has(
+                &grouped,
+                kci,
+                &GameAction::ActivateAbility {
+                    source_id: kci,
+                    ability_index: 0,
+                },
+            ),
+            "KCI activation must appear in legal_actions_by_object"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "Issue #544: auto-pass must not fire from flat legal_actions alone \
+             when grouped sacrifice-for-mana is available"
         );
     }
 

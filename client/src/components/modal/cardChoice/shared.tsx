@@ -91,7 +91,7 @@ export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"g
     : t("cardChoice.search.subtitleExact", opts);
 }
 
-export type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield";
+export type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield" | "Untap" | "Tap";
 
 export const EFFECT_ZONE_VISUAL_CLASSES: Record<
   EffectZoneMode,
@@ -117,6 +117,16 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     overlay: "bg-emerald-500/20",
     badge: "bg-emerald-500/90",
   },
+  Untap: {
+    ring: "ring-cyan-400/80",
+    overlay: "bg-cyan-500/20",
+    badge: "bg-cyan-500/90",
+  },
+  Tap: {
+    ring: "ring-amber-400/80",
+    overlay: "bg-amber-500/20",
+    badge: "bg-amber-500/90",
+  },
 };
 
 export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
@@ -124,6 +134,8 @@ export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Topdeck: "cardChoice.effectZone.labelTop",
   Hand: "cardChoice.effectZone.labelReturn",
   Battlefield: "cardChoice.effectZone.labelPut",
+  Untap: "cardChoice.effectZone.labelConfirm",
+  Tap: "cardChoice.effectZone.labelConfirm",
 };
 
 export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
@@ -131,4 +143,6 @@ export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Topdeck: "cardChoice.badges.put",
   Hand: "cardChoice.badges.return",
   Battlefield: "cardChoice.badges.put",
+  Untap: "cardChoice.badges.untap",
+  Tap: "cardChoice.badges.tap",
 };

@@ -652,6 +652,16 @@ fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, ContinuousModific
 
 /// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
 /// Terminates at the next body separator (" and it ", end-of-string, or '.').
+///
+/// CR 702.63a: a numeric grant carrying a trailing condition (Flesh Duplicate's
+/// "vanishing 3 if that creature doesn't have vanishing") is emitted as an
+/// UNCONDITIONAL `AddKeyword { Vanishing(3) }`. `ContinuousModification` has no
+/// conditional-on-source-keywords wrapper, so the "if the source lacks vanishing"
+/// predicate is intentionally dropped. This is correct whenever the copy source
+/// lacks vanishing (the common case).
+/// CR 702.63c: Multiple vanishing instances each work separately, so in the rare
+/// copy-a-vanishing-creature case we only over-grant a redundant, benign
+/// instance rather than producing wrong behavior.
 fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("it has ").parse(input).ok()?;
     // Keyword list terminates at " and it " (next body), the period, or end.
@@ -1022,6 +1032,28 @@ mod tests {
             vec![ContinuousModification::SetName {
                 name: "Irma, Part-Time Mutant".to_string(),
             }]
+        );
+    }
+
+    /// CR 702.63a: Vanishing N.
+    /// CR 707.9a: Copy effects can add abilities to copiable values.
+    ///
+    /// Flesh Duplicate's except-clause path must carry the count 3 through
+    /// `parse_keyword_from_oracle` into an `AddKeyword { Vanishing(3) }`, not
+    /// lose it to the FromStr fallback (0).
+    #[test]
+    fn except_it_has_vanishing_with_trailing_condition_keeps_count() {
+        let (_, mods) = parse_except_clause(
+            ", except it has vanishing 3 if that creature doesn't have vanishing",
+            "Flesh Duplicate",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Vanishing(3),
+            }),
+            "expected AddKeyword{{Vanishing(3)}}, got {mods:?}"
         );
     }
 

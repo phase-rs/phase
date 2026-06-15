@@ -85,7 +85,7 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
     let mut outer = ResolvedAbility::new(
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Generic("charge".to_string())),
-            count: -1, // CR 122.1: sentinel for "remove all"
+            count: QuantityExpr::Fixed { value: -1 }, // CR 122.1: sentinel for "remove all"
             target: TargetFilter::SelfRef,
         },
         vec![TargetRef::Object(source)],

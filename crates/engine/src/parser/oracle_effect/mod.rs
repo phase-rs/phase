@@ -97,9 +97,10 @@ use crate::types::ability::{
     ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
     QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    RoundingMode, SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode,
+    ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -1948,8 +1949,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         cost,
                         cast_transformed: false,
                         constraint: None,
-                        // CR 611.2a: `grant_permission::resolve` binds this to
-                        // the ability controller at grant time.
+                        // CR 611.2a: airbend grants cast permission to each
+                        // exiled object's owner, not the airbender's controller.
                         granted_to: None,
                         resolution_cleanup: None,
                         duration: None,
@@ -1958,7 +1959,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
-                    grantee: Default::default(),
+                    grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
                 },
             )
             .sub_ability(register_bending),
@@ -3144,15 +3145,60 @@ fn try_parse_have_causative(
         return None;
     }
 
-    // Pattern B: "have you [verb]" — controller performs an action directed by opponent
+    // Pattern B: "have you [verb]" — controller performs an action directed by
+    // another player.
+    //
+    // CR 121.3a + CR 608.2d: "<actor> may have you draw a card" (Shakedown
+    // Heavy — "defending player may …"; Palantír of Orthanc / Bane, Lord of
+    // Darkness — "target opponent may …"). The named actor decides, but the
+    // *printed controller* performs the action (CR 121.3a: the player making the
+    // choice need not be the player who draws). The actor is captured upstream
+    // by `strip_optional_effect_prefix` as a may-actor `player_scope`, which the
+    // resolver fans out by rebinding the runtime `controller` to that actor (the
+    // same mechanism as `player_scope: Opponent` discard). A bare
+    // `TargetFilter::Controller` "you" reference would then resolve to the actor
+    // and route the draw to the wrong player. Rebind `Controller` →
+    // `OriginalController` so "you" stays anchored to the printed controller and
+    // survives the scope's controller-rebind (CR 109.5). When no may-actor scope
+    // is present (plain "you may have you …"), the two refer to the same player,
+    // so the rewrite is a no-op in effect.
     if let Some((_, rest_orig)) = nom_on_lower(tp.original, tp.lower, |i| {
         value((), tag("have you ")).parse(i)
     }) {
         let clause = parse_effect_clause(rest_orig, ctx);
-        return Some(clause);
+        return Some(rebind_controller_to_original(clause));
     }
 
     None
+}
+
+/// CR 109.5 + CR 121.3a: Rebind a recursed clause's `TargetFilter::Controller`
+/// "you" references to `TargetFilter::OriginalController`. Used by the causative
+/// "have you [verb]" path so the printed controller's action ("you draw a card")
+/// is unaffected when an outer may-actor `player_scope` rebinds the runtime
+/// controller to the directing player at resolution. Mirrors
+/// `rebind_controller_to_triggering_source`; covers the controller-anchored
+/// effect verbs reachable from a "have you …" grant.
+fn rebind_controller_to_original(mut clause: ParsedEffectClause) -> ParsedEffectClause {
+    let rebind = |target: &mut TargetFilter| {
+        if matches!(target, TargetFilter::Controller) {
+            *target = TargetFilter::OriginalController;
+        }
+    };
+    match &mut clause.effect {
+        Effect::Draw { target, .. } => rebind(target),
+        Effect::Mill { target, .. } => rebind(target),
+        Effect::DiscardCard { target, .. } => rebind(target),
+        Effect::GainLife { player, .. } => rebind(player),
+        // CR 119.3: `LoseLife.target` is `Option<TargetFilter>` — only rebind the
+        // populated `Controller` case; `None` already means the resolving
+        // ability's controller, preserved as-is.
+        Effect::LoseLife {
+            target: Some(t), ..
+        } => rebind(t),
+        _ => {}
+    }
+    clause
 }
 
 fn all_core_type_categories() -> Vec<CoreType> {
@@ -8066,7 +8112,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
             AbilityKind::Spell,
             Effect::RemoveCounter {
                 counter_type: Some(CounterType::Plus1Plus1),
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
             },
         )
@@ -10020,6 +10066,34 @@ fn parse_controlled_creature_each_second_subject(rest: &str) -> Option<(usize, T
     Some((rest.len() - remaining.len(), filter))
 }
 
+/// Second-subject axis: "other creatures you control that share a creature type
+/// with it each " (Haunted One: "~ and other creatures you control that share
+/// a creature type with it each get +2/+0 and gain undying until end of turn").
+fn parse_other_creatures_share_type_each_second_subject(
+    rest: &str,
+) -> Option<(usize, TargetFilter)> {
+    let (remaining, _) = tag::<_, _, OracleError<'_>>(
+        "other creatures you control that share a creature type with it each ",
+    )
+    .parse(rest)
+    .ok()?;
+    Some((
+        rest.len() - remaining.len(),
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::Another,
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::CreatureType,
+                        reference: Some(Box::new(TargetFilter::TriggeringSource)),
+                        relation: SharedQualityRelation::Shares,
+                    },
+                ]),
+        ),
+    ))
+}
+
 fn type_phrase_has_compound_conjunction(type_phrase: &str) -> bool {
     take_until::<_, _, OracleError<'_>>(" and ")
         .parse(type_phrase)
@@ -10061,11 +10135,12 @@ fn parse_dynamic_compound_subject_prefix(
             tag::<_, _, OracleError<'_>>("you and "),
         ),
         value(TargetFilter::SelfRef, tag("~ and ")),
+        value(TargetFilter::SelfRef, tag("it and ")),
     ))
     .parse(lower)
     .ok()?;
-    let (second_consumed, second_filter) =
-        parse_controlled_creature_each_second_subject(remaining)?;
+    let (second_consumed, second_filter) = parse_controlled_creature_each_second_subject(remaining)
+        .or_else(|| parse_other_creatures_share_type_each_second_subject(remaining))?;
     Some((
         lower.len() - remaining.len() + second_consumed,
         first_filter,
@@ -13575,11 +13650,42 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::Word)
     } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
         Some(ChoiceType::Artist)
+    } else if let Some(options) = try_parse_keyword_choice(rest) {
+        // CR 608.2d: "choose [keyword], [keyword], or [keyword]" — a typed
+        // keyword enumeration (Angelic Skirmisher's "first strike, vigilance,
+        // or lifelink"; Linvala, Shield of Sea Gate's "hexproof or
+        // indestructible"). Recognized BEFORE the generic labeled fallback so
+        // the chosen value persists as a typed `ChosenAttribute::Keyword` that
+        // `ContinuousModification::AddChosenKeyword` ("creatures you control
+        // gain that ability") can read at layer evaluation.
+        Some(ChoiceType::Keyword { options })
     } else {
         // Generic "X or Y" / "X, Y, or Z" / "W, X, Y, or Z" labeled choice —
         // must come AFTER all specific patterns above.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 608.2d + CR 113.3: Parse a typed keyword enumeration following "choose "
+/// ("first strike, vigilance, or lifelink", "hexproof or indestructible") into
+/// its `Keyword` option list.
+///
+/// Reuses `try_parse_labeled_choice`'s structural Oxford-comma / "or" splitting
+/// (the canonical N-ary disjunction grammar) and then maps every label through
+/// the shared single-keyword parser `parse_keyword_from_oracle`. Returns `None`
+/// unless **every** label maps to a real keyword — partial matches fall through
+/// to the generic labeled-choice handler so non-keyword disjunctions are
+/// unaffected. Building for the class: any "choose <kw>, <kw>, or <kw>" line,
+/// not the two cards that motivate it.
+fn try_parse_keyword_choice(rest: &str) -> Option<Vec<Keyword>> {
+    let labels = try_parse_labeled_choice(rest)?;
+    let keywords: Vec<Keyword> = labels
+        .iter()
+        .map(|label| {
+            crate::parser::oracle_keyword::parse_keyword_from_oracle(&label.to_lowercase())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(keywords)
 }
 
 /// Try to parse a labeled choice ("X or Y", "X, Y, or Z", "W, X, Y, or Z", ...) into
@@ -19884,7 +19990,11 @@ mod tests {
                         }
                         Effect::RemoveCounter { target, count, .. } => {
                             assert_eq!(*target, TargetFilter::ParentTarget);
-                            assert_eq!(*count, 1, "remove exactly one counter of that kind");
+                            assert_eq!(
+                                *count,
+                                QuantityExpr::Fixed { value: 1 },
+                                "remove exactly one counter of that kind"
+                            );
                             saw_remove = true;
                         }
                         other => panic!("expected Put/RemoveCounter branch, got {other:?}"),
@@ -29373,6 +29483,34 @@ mod tests {
             "Expected PutCounterAll for 'each creature you control', got {:?}",
             e
         );
+    }
+
+    /// Issue #588 (Summon: Good King Mog XII, chapter IV): the mass counter
+    /// placement must stay scoped to other Moogles you control — not every
+    /// other permanent. Regression when "Moogle" was absent from SUBTYPES.
+    #[test]
+    fn put_counter_all_each_other_moogle_you_control_issue_588() {
+        let e = parse_effect("put two +1/+1 counters on each other moogle you control");
+        let Effect::PutCounterAll {
+            counter_type,
+            count,
+            target,
+        } = e
+        else {
+            panic!("expected PutCounterAll, got {e:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+        let tf = typed_leg(&target).expect("target should be Typed");
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Moogle")),
+            "Moogle subtype must be captured, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Another));
     }
 
     #[test]
@@ -43302,6 +43440,47 @@ mod tests {
         );
     }
 
+    /// CR 608.2d + CR 113.3: A "choose <kw>, <kw>, or <kw>" line whose labels
+    /// are all real keywords must parse to a typed `ChoiceType::Keyword` option
+    /// list (Angelic Skirmisher), NOT the opaque-string `Labeled` form — the
+    /// typed list is what persists as `ChosenAttribute::Keyword` for a later
+    /// `AddChosenKeyword` grant to read.
+    #[test]
+    fn keyword_choice_ternary_first_strike_vigilance_lifelink() {
+        assert_eq!(
+            super::try_parse_named_choice("choose first strike, vigilance, or lifelink"),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::FirstStrike, Keyword::Vigilance, Keyword::Lifelink],
+            })
+        );
+    }
+
+    /// CR 608.2d: Binary keyword choice (Linvala, Shield of Sea Gate —
+    /// "hexproof or indestructible").
+    #[test]
+    fn keyword_choice_binary_hexproof_indestructible() {
+        assert_eq!(
+            super::try_parse_named_choice("choose hexproof or indestructible"),
+            Some(ChoiceType::Keyword {
+                options: vec![Keyword::Hexproof, Keyword::Indestructible],
+            })
+        );
+    }
+
+    /// Discriminating: a disjunction whose labels are NOT all keywords must
+    /// fall through to the generic `Labeled` handler — the keyword recognizer
+    /// only fires when every option maps to a real keyword. "Creature" / "land"
+    /// are card types, not keywords.
+    #[test]
+    fn keyword_choice_falls_through_for_non_keyword_labels() {
+        assert_eq!(
+            super::try_parse_named_choice("choose left or right"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Left".to_string(), "Right".to_string()],
+            })
+        );
+    }
+
     /// Per-label ≤2-words gate must apply to every position in the list, not
     /// just left/right of the binary form. Three multi-word "labels" must
     /// reject as a whole.
@@ -47846,6 +48025,47 @@ mod tests {
             );
             cursor = node.sub_ability.as_deref();
         }
+    }
+
+    /// Haunted One granted trigger: compound-subject distribution with
+    /// SharesQuality relative to the tapped commander.
+    #[test]
+    fn compound_subject_each_other_creatures_share_commander_type() {
+        use crate::types::ability::{FilterProp, SharedQuality};
+
+        let mut ctx = ParseContext::default();
+        let text = "it and other creatures you control that share a creature type with it each get +2/+0 and gain undying until end of turn";
+        let clause = try_parse_compound_subject_each(text, &mut ctx)
+            .expect("Haunted One body should parse as compound-subject each");
+        assert_eq!(chain_len(&clause), 2, "expected 2 links");
+        assert_no_unimplemented(&clause);
+        match &clause.effect {
+            Effect::GenericEffect {
+                target: Some(t), ..
+            } => assert_eq!(*t, TargetFilter::SelfRef),
+            Effect::Pump { target, .. } => assert_eq!(*target, TargetFilter::SelfRef),
+            other => panic!("expected head with SelfRef recipient, got {other:?}"),
+        }
+        let tail = clause.sub_ability.as_ref().expect("tail link");
+        let tail_target = match &*tail.effect {
+            Effect::GenericEffect {
+                target: Some(t), ..
+            }
+            | Effect::Pump { target: t, .. } => t.clone(),
+            other => panic!("expected tail GenericEffect/Pump, got {other:?}"),
+        };
+        let TargetFilter::Typed(tf) = tail_target else {
+            panic!("expected typed tail filter, got {tail_target:?}");
+        };
+        assert!(tf.properties.contains(&FilterProp::Another));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                ..
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
     }
 
     /// "~ and that creature each get +2/+0" → 2-link Pump chain:

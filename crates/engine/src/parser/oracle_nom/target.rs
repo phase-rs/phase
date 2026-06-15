@@ -543,6 +543,28 @@ mod tests {
         assert_eq!(rest2, "");
     }
 
+    // No-regression guard: the "defending player controls" controller scope is
+    // added only to the high-level `oracle_nom::filter::parse_zone_controller`
+    // path (the bug-card path), NOT to this nom combinator consumed by
+    // `parse_type_phrase`. Folding it in here would change the remainder handed
+    // to the five remainder-coupled `parse_type_phrase` callers. This test
+    // documents that deliberate divergence (it also does not match
+    // "you don't control") so a future edit to this combinator is a conscious
+    // choice, not an accident.
+    #[test]
+    fn test_parse_controller_suffix_excludes_defending_player_and_negated() {
+        assert!(
+            parse_controller_suffix("defending player controls").is_err(),
+            "nom parse_controller_suffix must NOT match 'defending player controls' \
+             (handled by parse_zone_controller on the bug-card path)"
+        );
+        assert!(
+            parse_controller_suffix("you don't control").is_err(),
+            "nom parse_controller_suffix must NOT match 'you don't control' \
+             (pre-existing deliberate divergence from parse_zone_controller)"
+        );
+    }
+
     #[test]
     fn test_parse_type_phrase_single() {
         let (rest, filter) = parse_type_phrase("creature you control").unwrap();

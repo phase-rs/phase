@@ -21,9 +21,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::condition::{parse_inner_condition, parse_recipient_has_counters};
-use super::error::OracleResult;
+use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::scan_contains;
-use crate::types::ability::{Duration, PlayerScope, StaticCondition};
+use crate::types::ability::{Duration, ObjectScope, PlayerScope, StaticCondition};
 use crate::types::phase::Phase;
 
 /// Parse a duration phrase from Oracle text.
@@ -146,7 +146,9 @@ fn parse_until_next_turn(input: &str) -> OracleResult<'_, Duration> {
 ///
 /// Mapping (ported verbatim from the legacy `strip_trailing_duration` table):
 /// - compound "[a] and [b]" → `ForAsLongAs(And[..])`
-/// - "[subject] remains tapped" → `ForAsLongAs(SourceIsTapped)`
+/// - "[subject] remains tapped" → `ForAsLongAs(SourceIsTapped)` for source
+///   subjects, `ForAsLongAs(IsTapped { scope: Target })` for demonstrative
+///   subjects (see `parse_remains_tapped`)
 /// - "you control [subject]" → `UntilHostLeavesPlay`
 /// - "[subject] remains on the battlefield" → `UntilHostLeavesPlay`
 /// - "[subject] has [N] [type] counter(s) on it" → `ForAsLongAs(HasCounters)`
@@ -160,14 +162,12 @@ fn parse_until_next_turn(input: &str) -> OracleResult<'_, Duration> {
 pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration> {
     alt((
         parse_compound_for_as_long_as,
-        // "[subject] remains tapped" — subject varies ("~", "it", "this
-        // creature"), so the phrase is matched at any word boundary.
-        value(
-            Duration::ForAsLongAs {
-                condition: StaticCondition::SourceIsTapped,
-            },
-            verify(rest, |tail: &str| scan_contains(tail, "remains tapped")),
-        ),
+        // "[subject] remains tapped" — the grammatical subject selects the
+        // tracked object's scope. Demonstrative subjects ("that creature") bind
+        // the duration to the copy/control TARGET; source subjects ("~", "this
+        // creature", bare card names) bind to the source. See
+        // `parse_remains_tapped`.
+        parse_remains_tapped,
         // "you control [subject]" → host-control lifetime, modeled with the
         // existing UntilHostLeavesPlay variant.
         value(
@@ -204,6 +204,99 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
         }),
     ))
     .parse(input)
+}
+
+/// CR 110.5b + CR 611.2b: subject-aware "[subject] remains tapped" duration.
+///
+/// The grammatical subject of "remains tapped" selects which object's tap state
+/// the `ForAsLongAs` duration tracks:
+///
+/// - **Demonstrative subjects** ("that creature/permanent/artifact") → the
+///   copy/control TARGET. Emits `IsTapped { scope: Target }` so the resolver
+///   (`become_copy.rs`) binds the duration to the resolved target object (Zygon
+///   Infiltrator: "as long as THAT creature remains tapped" tracks the copied
+///   creature, not Zygon). This tier is tried FIRST.
+///
+/// The anaphoric pronoun "it" is deliberately NOT in the demonstrative set: its
+/// referent is clause-context-dependent ("you control ~ and it remains tapped"
+/// → "it" is the source; "tap another target permanent. Its abilities can't be
+/// activated for as long as it remains tapped" → "it" is the target). The
+/// duration combinator has no clause subject to disambiguate, so "it" falls to
+/// the source fallback (the pre-existing behavior), preserving every "it
+/// remains tapped" card's current parse. The only cluster card needing the
+/// target binding (Zygon) uses the unambiguous "that creature".
+/// - **Source subjects** ("~", "this creature", a `SELF_REF_TYPE_PHRASES`
+///   self-reference, or a bare card name like "The Blackstaff of Waterdeep") →
+///   the source. Emits `SourceIsTapped`. The explicit self-reference `alt()`
+///   plus the retained `scan_contains` word-boundary fallback covers every
+///   source phrasing, including proper names beginning with "The".
+///
+/// Demonstrative dispatch MUST precede the source fallback so a proper-name card
+/// is never misread as a target subject and "that creature" is never swallowed
+/// by the source `scan_contains` scan. The closed demonstrative `alt()`
+/// deliberately excludes any "the " arm — a leading "The" belongs to a card name
+/// (source), not a demonstrative. Compound cards (Hivis, Rubinia) are split by
+/// `parse_compound_for_as_long_as` before this combinator runs, so each side
+/// re-enters here and lands on the source fallback.
+fn parse_remains_tapped(input: &str) -> OracleResult<'_, Duration> {
+    // Each tier is clause-final: a trailing `rest` consumes any remainder after
+    // "[subject] remains tapped" so the arm behaves like the legacy `verify(rest,
+    // ..)` arm (the phrase sits at the trailing edge of the effect clause).
+    //
+    // Tier 1: demonstrative subject → target-relative tap state.
+    let demonstrative = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::IsTapped {
+                scope: ObjectScope::Target,
+            },
+        },
+        (
+            alt((
+                tag("that creature"),
+                tag("that permanent"),
+                tag("that artifact"),
+            )),
+            tag(" remains tapped"),
+            rest,
+        ),
+    );
+
+    // Tier 2a: explicit source self-reference → source-relative tap state.
+    let source_self_ref = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        },
+        (parse_self_reference_subject, tag(" remains tapped"), rest),
+    );
+
+    // Tier 2b: any other source phrasing (proper card names like "The Blackstaff
+    // of Waterdeep", compound-clause remnants) → source. Word-boundary scan, not
+    // a dispatch primitive, and only reached after demonstrative dispatch fails.
+    let source_fallback = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        },
+        verify(rest, |tail: &str| scan_contains(tail, "remains tapped")),
+    );
+
+    alt((demonstrative, source_self_ref, source_fallback)).parse(input)
+}
+
+/// Source self-reference subject combinator: "~" or any `SELF_REF_TYPE_PHRASES`
+/// phrase ("this creature", "this permanent", …). Iterates the shared
+/// self-reference constant — the single authority for source self-references —
+/// so no card-specific phrasing leaks in. (`SELF_REF_TYPE_PHRASES` is a runtime
+/// slice, so the closed set is folded by iteration rather than a fixed `alt()`
+/// tuple; each candidate is still matched with the nom `tag()` combinator.)
+fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
+    for phrase in std::iter::once(&"~").chain(crate::parser::oracle_util::SELF_REF_TYPE_PHRASES) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    // No self-reference subject matched — surface a recoverable nom error so the
+    // outer `alt()` falls through to the `scan_contains` source fallback.
+    Err(oracle_err(input))
 }
 
 /// Compound "for as long as [a] and [b]" → `ForAsLongAs(And[..])`.
@@ -495,6 +588,112 @@ mod tests {
         assert_eq!(
             parse_cast_snapshot_suffix(" as you cast this spell."),
             Ok((".", ()))
+        );
+    }
+
+    // ---- "remains tapped" subject-aware duration (CR 110.5b + CR 611.2b) ----
+
+    /// Demonstrative subject ("that creature") → target-relative tap state. This
+    /// is the Zygon Infiltrator copy-duration class: the duration must track the
+    /// copied creature (the target), not the source.
+    #[test]
+    fn test_remains_tapped_demonstrative_binds_target() {
+        for subject in ["that creature", "that permanent", "that artifact"] {
+            let text = format!("for as long as {subject} remains tapped");
+            let (rest, d) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                d,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                "demonstrative subject {subject:?} must bind the target",
+            );
+        }
+    }
+
+    /// Source self-reference ("this creature"/"~") → source-relative tap state
+    /// (`SourceIsTapped`) — the 41-card source-subject majority of the class.
+    #[test]
+    fn test_remains_tapped_self_reference_binds_source() {
+        for subject in ["~", "this creature", "this artifact", "this permanent"] {
+            let text = format!("for as long as {subject} remains tapped");
+            let (rest, d) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                d,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::SourceIsTapped,
+                },
+                "self-reference subject {subject:?} must bind the source",
+            );
+        }
+    }
+
+    /// Proper-name regression: a card name beginning with "The" is a SOURCE
+    /// subject and must NOT be misread as a demonstrative target despite the
+    /// leading "The" (Animate Walking Statue → The Blackstaff of Waterdeep; The
+    /// Pandorica). Guards the closed demonstrative `alt()` from a "the " leak.
+    #[test]
+    fn test_remains_tapped_proper_name_binds_source() {
+        for subject in ["The Blackstaff of Waterdeep", "The Pandorica"] {
+            let text = format!("for as long as {subject} remains tapped");
+            let (rest, d) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                d,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::SourceIsTapped,
+                },
+                "proper-name subject {subject:?} must stay source-bound",
+            );
+        }
+    }
+
+    /// Compound regression (Hivis / Rubinia): "you control X and X remains
+    /// tapped" splits on " and " and each side re-enters the combinator; the
+    /// "X remains tapped" side hits the source fallback → `SourceIsTapped`. The
+    /// new demonstrative tier must not perturb the compound path.
+    #[test]
+    fn test_remains_tapped_compound_card_name_binds_source() {
+        for name in ["rubinia soulsinger", "hivis"] {
+            let text = format!("for as long as you control {name} and {name} remains tapped");
+            let (rest, d) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {name:?}");
+            match d {
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::And { conditions },
+                } => {
+                    assert_eq!(conditions.len(), 2, "failed for {name:?}");
+                    assert!(
+                        matches!(conditions[0], StaticCondition::IsPresent { filter: None }),
+                        "control side for {name:?}",
+                    );
+                    assert!(
+                        matches!(conditions[1], StaticCondition::SourceIsTapped),
+                        "tapped side for {name:?} must be source-bound",
+                    );
+                }
+                other => panic!("expected ForAsLongAs(And[..]) for {name:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Anaphoric "it" stays source-bound (the pre-existing behavior): "it" is
+    /// excluded from the demonstrative set because its referent is clause-context
+    /// dependent. This pins the decision so a future edit cannot silently move
+    /// "it" into the target-binding tier and regress the compound-control class.
+    #[test]
+    fn test_remains_tapped_it_stays_source() {
+        let (rest, d) = parse_duration("for as long as it remains tapped").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            d,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsTapped,
+            },
         );
     }
 }

@@ -6,7 +6,7 @@
 use engine::game::effects::counters::resolve_remove;
 use engine::game::effects::proliferate::{apply_proliferate, resolve};
 use engine::game::zones::create_object;
-use engine::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -22,7 +22,7 @@ fn remove_all_plus_one(obj: ObjectId, state: &mut GameState) {
     let ability = ResolvedAbility::new(
         Effect::RemoveCounter {
             counter_type: Some(CounterType::Plus1Plus1),
-            count: -1,
+            count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::Any,
         },
         vec![TargetRef::Object(obj)],

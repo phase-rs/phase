@@ -100,24 +100,30 @@ pub fn effective_disturb_cost(state: &GameState, object_id: ObjectId) -> Option<
     }
 }
 
-pub fn effective_escape_data(state: &GameState, object_id: ObjectId) -> Option<(ManaCost, u32)> {
+/// CR 702.138a: Resolve an object's effective escape cost into its mana sub-cost
+/// (paid via the normal mana flow, CR 601.2g) and the residual additional cost
+/// (usually "Exile N other cards from your graveyard", possibly a Composite of
+/// several exile clauses; paid via `pay_additional_cost`, CR 601.2h).
+///
+/// A printed escape card always carries at least the graveyard-exile sub-cost,
+/// and the granted/native compound (parser) always carries the exile residual.
+/// Only a `FromStr`/JSON placeholder (`EscapeCost::Mana` with no residual) or a
+/// parse failure yields no residual — refuse those (return `None`) so the
+/// mis-parse surfaces rather than producing an illegal cost-free escape cast.
+pub fn effective_escape_data(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<(ManaCost, AbilityCost)> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Escape)?;
     match keyword {
-        Keyword::Escape { cost, exile_count } => {
-            // CR 702.138a: "Escape [cost]" always specifies "Exile N other cards"
-            // with N >= 1 — the exile is part of the escape cost. A leaked
-            // exile_count == 0 is a parse failure (the "Exile N" clause was not
-            // extracted), not a legal "exile 0 cards" escape. Refuse the escape so
-            // the mis-parse surfaces instead of allowing an illegal 0-card escape
-            // cast (the exile-selection path would build bounds (0, 0) and accept
-            // an empty selection).
-            if exile_count == 0 {
-                return None;
-            }
-            Some((
-                resolve_keyword_mana_cost(state, object_id, &cost),
-                exile_count,
-            ))
+        Keyword::Escape(escape) => {
+            let (mana, residual) = super::casting::split_escape_cost_components(&escape);
+            // CR 702.138a: a real escape cost always has a non-mana residual
+            // (the exile sub-cost). No residual ⇒ unparsed placeholder ⇒ refuse.
+            let residual = residual?;
+            let mana =
+                resolve_keyword_mana_cost(state, object_id, &mana.unwrap_or(ManaCost::NoCost));
+            Some((mana, residual))
         }
         _ => None,
     }
@@ -854,17 +860,21 @@ mod tests {
         assert_eq!(effective_total_toxic_value(&state, plain), 0);
     }
 
-    /// CR 702.138a: a placeholder `exile_count == 0` is a parse failure, not a
-    /// legal "exile 0 cards" escape. `effective_escape_data` must refuse it
-    /// (return `None`) so the mis-parse can't produce an illegal 0-card escape
-    /// cast, while well-parsed counts (N >= 1) pass through unchanged.
+    /// CR 702.138a: a bare-mana escape with no exile residual is a parse failure
+    /// / `FromStr` placeholder, not a legal cost-free escape. `effective_escape_data`
+    /// must refuse it (return `None`) so the mis-parse can't produce an illegal
+    /// 0-cost escape cast, while a well-parsed compound cost (mana + exile
+    /// residual) passes through with its mana sub-cost resolved and the residual
+    /// returned.
     #[test]
-    fn effective_escape_data_refuses_zero_exile_count() {
-        let escape_cost = ManaCost::Cost {
+    fn effective_escape_data_refuses_bare_mana_no_residual() {
+        use crate::types::keywords::EscapeCost;
+
+        let escape_mana = ManaCost::Cost {
             generic: 2,
             shards: vec![ManaCostShard::Black],
         };
-        let make_escape_obj = |state: &mut GameState, exile_count: u32| {
+        let make_escape_obj = |state: &mut GameState, escape: EscapeCost| {
             let id = create_object(
                 state,
                 CardId(1),
@@ -873,26 +883,36 @@ mod tests {
                 Zone::Battlefield,
             );
             let obj = state.objects.get_mut(&id).unwrap();
-            obj.keywords.push(Keyword::Escape {
-                cost: escape_cost.clone(),
-                exile_count,
-            });
+            obj.keywords.push(Keyword::Escape(escape));
             id
         };
 
-        // Placeholder 0 -> refused.
+        // Bare-mana placeholder (no exile residual) -> refused.
         let mut state = GameState::new_two_player(1);
-        let zero_id = make_escape_obj(&mut state, 0);
-        assert_eq!(effective_escape_data(&state, zero_id), None);
+        let bare_id = make_escape_obj(&mut state, EscapeCost::Mana(escape_mana.clone()));
+        assert_eq!(effective_escape_data(&state, bare_id), None);
 
-        // Well-parsed counts pass through with the resolved cost.
+        // Well-parsed compound (mana + exile residual) -> mana resolved, residual returned.
         for n in [1u32, 2, 5] {
             let mut state = GameState::new_two_player(1);
-            let id = make_escape_obj(&mut state, n);
+            let exile = AbilityCost::Exile {
+                count: n,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            };
+            let compound = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: escape_mana.clone(),
+                    },
+                    exile.clone(),
+                ],
+            };
+            let id = make_escape_obj(&mut state, EscapeCost::NonMana(compound));
             assert_eq!(
                 effective_escape_data(&state, id),
-                Some((escape_cost.clone(), n)),
-                "exile_count {n} must be accepted unchanged",
+                Some((escape_mana.clone(), exile)),
+                "compound escape with exile count {n} must resolve mana + residual",
             );
         }
     }
