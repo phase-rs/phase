@@ -148,6 +148,8 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -340,6 +342,8 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -2537,6 +2541,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::Untapped
@@ -2858,6 +2864,10 @@ fn matches_filter_prop(
         // CR 509.1h: Unblocked = attacking creature that was never assigned blockers.
         // unblocked_attackers checks the permanent `blocked` flag, not the current blocker list.
         FilterProp::Unblocked => combat::unblocked_attackers(state).contains(&object_id),
+        // CR 506.5: sole attacker / sole blocker against live combat. Look-back
+        // callers route through the zone-change snapshot arm instead.
+        FilterProp::AttackingAlone => combat::attacking_alone(state, object_id),
+        FilterProp::BlockingAlone => combat::blocking_alone(state, object_id),
         FilterProp::Tapped => obj.tapped,
         // CR 702.171b: Matches permanents with the saddled designation.
         FilterProp::IsSaddled => obj.is_saddled,
@@ -3652,6 +3662,10 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
+        // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker status as of the
+        // zone change, captured by `capture_combat_status` before combat removal.
+        FilterProp::AttackingAlone => record.combat_status.attacking_alone,
+        FilterProp::BlockingAlone => record.combat_status.blocking_alone,
         FilterProp::HasAttachment {
             kind,
             controller,
@@ -8355,6 +8369,8 @@ mod tests {
                 attacking: true,
                 blocking: false,
                 blocked: false,
+                attacking_alone: true,
+                blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
@@ -8364,6 +8380,8 @@ mod tests {
                 attacking: false,
                 blocking: true,
                 blocked: false,
+                attacking_alone: false,
+                blocking_alone: true,
                 defending_player: None,
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
@@ -8393,6 +8411,54 @@ mod tests {
             &FilterProp::Blocking,
             &state,
             &blocking_record,
+            &source_ctx,
+        ));
+
+        // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker look-back reads
+        // the captured `attacking_alone` / `blocking_alone` snapshot. The
+        // attacking-alone record matches AttackingAlone but not BlockingAlone,
+        // and vice versa for the blocking-alone record.
+        assert!(zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::BlockingAlone,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::BlockingAlone,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+        // CR 506.5 boundary: a record where the creature attacked but NOT alone
+        // (co-attacker present at zone-exit) must fail AttackingAlone.
+        let attacked_with_company = ZoneChangeRecord {
+            combat_status: ZoneChangeCombatStatus {
+                attacking: true,
+                blocking: false,
+                blocked: false,
+                attacking_alone: false,
+                blocking_alone: false,
+                defending_player: Some(PlayerId(0)),
+            },
+            ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::AttackingAlone,
+            &state,
+            &attacked_with_company,
             &source_ctx,
         ));
     }

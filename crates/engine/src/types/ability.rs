@@ -2224,6 +2224,15 @@ pub enum FilterProp {
     },
     /// CR 509.1h: Matches attacking creatures with no blockers assigned.
     Unblocked,
+    /// CR 506.5: Matches a creature that is (or, via the zone-change look-back
+    /// snapshot, was) the sole attacker — "attacking alone". Live evaluation
+    /// reads combat; look-back evaluation reads
+    /// `ZoneChangeCombatStatus::attacking_alone`.
+    AttackingAlone,
+    /// CR 506.5: Matches a creature that is (or was) the sole blocker —
+    /// "blocking alone". Look-back evaluation reads
+    /// `ZoneChangeCombatStatus::blocking_alone`.
+    BlockingAlone,
     Tapped,
     /// CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
     Untapped,
