@@ -166,6 +166,22 @@ pub fn known_token_preset_by_id(id: &str) -> Option<&'static TokenPreset> {
     known_token_presets().iter().find(|preset| preset.id == id)
 }
 
+/// CR 111.4: A token's name and subtype(s) are set by the effect that creates
+/// it; for named tokens (Vibranium, Mutavault, …) those characteristics live in
+/// the predefined catalog. Resolve the full token body by display name so the
+/// Oracle parser can lower `"create a [Name] token"` to a complete
+/// `Effect::Token` for the *entire class* of registry-defined named tokens,
+/// rather than a hardcoded allowlist. Case-insensitive to match Oracle text
+/// casing variance. Returns the first matching body (catalog `display_name` is
+/// effectively unique per token identity).
+pub fn known_token_body_by_name(name: &str) -> Option<&'static TokenCharacteristics> {
+    let name = name.trim();
+    known_token_presets()
+        .iter()
+        .map(|preset| &preset.body)
+        .find(|body| body.display_name.eq_ignore_ascii_case(name))
+}
+
 pub fn find_exact_token_ref(
     state: &GameState,
     source_id: ObjectId,
