@@ -8470,6 +8470,104 @@ mod tests {
         );
     }
 
+    /// Spider-Sense — "Counter target instant spell, sorcery spell, or
+    /// triggered ability." must parse to the full three-way disjunction, not
+    /// the buggy bare `Typed { [Instant] }` that dropped the sorcery and
+    /// triggered-ability legs. CR 701.6a + CR 115.1: every listed leg of the
+    /// legal target set must be reproduced.
+    #[test]
+    fn parse_counter_spider_sense_spell_first_disjunction() {
+        let text = "Counter target instant spell, sorcery spell, or triggered ability.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Spider-Sense counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // Regression guard for the exact bug: it must NOT be the bare
+        // instant-only `Typed` filter.
+        assert!(
+            !matches!(&target, TargetFilter::Typed(_)),
+            "Spider-Sense must not parse to a bare Typed filter (the instant-only bug): {target:?}"
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ instant, sorcery, ability }}, got {target:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
+            "missing the triggered-ability disjunct: {target:?}"
+        );
+        let instant_leg = filters
+            .iter()
+            .filter_map(typed_leg)
+            .find(|tf| has_type(tf, TypeFilter::Instant))
+            .expect("missing the instant-spell disjunct");
+        assert!(
+            has_prop(instant_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the instant leg must be pinned to the stack zone: {instant_leg:?}"
+        );
+        let sorcery_leg = filters
+            .iter()
+            .filter_map(typed_leg)
+            .find(|tf| has_type(tf, TypeFilter::Sorcery))
+            .expect("missing the sorcery-spell disjunct (the dropped leg)");
+        assert!(
+            has_prop(sorcery_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the sorcery leg must be pinned to the stack zone: {sorcery_leg:?}"
+        );
+    }
+
+    /// Disallow / Voidslime / Overcharged Amalgam / Ertai Resurrected —
+    /// "Counter target spell, activated ability, or triggered ability." must
+    /// parse to `Or { spell, ability }`, not the buggy bare `StackSpell` that
+    /// dropped BOTH ability legs (the highest-printing member of the class).
+    /// CR 701.6a + CR 113.3b/113.3c.
+    #[test]
+    fn parse_counter_disallow_three_way_disjunction() {
+        let text = "Counter target spell, activated ability, or triggered ability.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Disallow counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // Regression guard for the exact bug: it must NOT be the bare
+        // StackSpell that silently dropped both ability legs.
+        assert!(
+            !matches!(&target, TargetFilter::StackSpell),
+            "Disallow must not parse to bare StackSpell (the dropped-abilities bug): {target:?}"
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ spell, ability }}, got {target:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
+            "missing the activated/triggered ability disjunct: {target:?}"
+        );
+        let spell_leg = filters
+            .iter()
+            .find_map(typed_leg)
+            .expect("missing the bare-spell disjunct");
+        assert!(
+            has_type(spell_leg, TypeFilter::Card),
+            "the bare-spell leg must carry TypeFilter::Card: {spell_leg:?}"
+        );
+        assert!(
+            has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the bare-spell leg must be pinned to the stack zone: {spell_leg:?}"
+        );
+    }
+
     /// Issue #899 regression — "counter target spell with mana value X or
     /// less, where X is the number of Faeries you control" (Spellstutter
     /// Sprite) must resolve the `Cmc` bound to the defining `where X is …`
