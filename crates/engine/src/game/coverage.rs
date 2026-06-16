@@ -2087,6 +2087,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 },
             ));
         }
+        Effect::ExchangeLifeTotals { player_a, player_b } => {
+            d.push(("player_a".into(), fmt_target(player_a)));
+            d.push(("player_b".into(), fmt_target(player_b)));
+        }
         Effect::ChangeZone {
             origin,
             destination,

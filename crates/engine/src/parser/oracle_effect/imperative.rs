@@ -6086,6 +6086,32 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
     }
 
+    // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
+    // of Mortality). The subject ("two target players") precedes the verb, so
+    // `first_word` is "two"/"target"/"have" rather than a verb keyword —
+    // intercept it as an anchored whole-phrase production before the first-word
+    // dispatch. Accept three optional leading wrinkles:
+    //   - "have " — the causative construction from "you may have <players>
+    //     exchange ..." (Axis of Mortality), which keeps its full surface form.
+    //   - "two " — the cardinality quantifier, which may already be stripped
+    //     upstream by `strip_any_number_quantifier`.
+    // Both players are `Player` targets.
+    if all_consuming(terminated(
+        preceded(
+            (opt(tag::<_, _, OracleError<'_>>("have ")), opt(tag("two "))),
+            tag("target players exchange life totals"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::ExchangeLifeTotals {
+            player_a: TargetFilter::Player,
+            player_b: TargetFilter::Player,
+        });
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -6736,6 +6762,12 @@ pub(super) fn parse_imperative_family_ast(
         // Both shapes lower to ExchangeControl { target_a, target_b }; in the
         // quantified case both filters are identical.
         "exchange" => {
+            // CR 701.12a: player-to-player "exchange life totals" (Soul Conduit,
+            // Axis of Mortality, Magus of the Mirror, Mirror Universe) — checked
+            // before the life-with-stat shape since both begin "exchange life".
+            if let Some((player_a, player_b)) = try_parse_exchange_life_totals(lower) {
+                return Some(ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b });
+            }
             // CR 701.12a: "exchange <player>'s life total with ~'s power/toughness"
             // (Tree of Perdition, Tree of Redemption, Evra) — checked before
             // "exchange control of" since the two shapes share only the verb.
@@ -7010,6 +7042,33 @@ fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
     ))
     .parse(input)
     .ok()
+}
+
+/// CR 701.12a: Player-to-player "exchange life totals", verb-initial shape:
+/// "exchange life totals with target opponent" / "... target player" — the
+/// controller (`Controller`) exchanges with that opponent/player (Magus of the
+/// Mirror, Mirror Universe). The subject-initial "two target players exchange
+/// life totals" shape (Soul Conduit, Axis of Mortality) is intercepted earlier
+/// in `parse_imperative_family_ast` because its first word is not a verb.
+/// Returns `(player_a, player_b)` or `None` for unrecognised shapes.
+fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFilter)> {
+    // "exchange life totals with <target opponent | target player>".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exchange life totals with ").parse(lower) {
+        let (rest, other) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag::<_, _, OracleError<'_>>("target opponent"),
+            ),
+            value(TargetFilter::Player, tag("target player")),
+        ))
+        .parse(rest)
+        .ok()?;
+        if rest.trim().trim_end_matches(['.', ';']).trim().is_empty() {
+            return Some((TargetFilter::Controller, other));
+        }
+    }
+
+    None
 }
 
 /// CR 701.12a: Extract the two per-slot target filters from the "<...>" body of
@@ -7869,6 +7928,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         }
         ImperativeFamilyAst::ExchangeLifeWithStat { player, stat } => {
             Effect::ExchangeLifeWithStat { player, stat }
+        }
+        // CR 701.12a: Two players exchange life totals. The two player filters
+        // come from the parser; resolution reads ability.targets in declaration
+        // order for any non-context-ref slots.
+        ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
+            Effect::ExchangeLifeTotals { player_a, player_b }
         }
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
@@ -13549,5 +13614,78 @@ mod tests {
             !def.optional,
             "expected optional: false for 'then planeswalk'"
         );
+    }
+
+    /// CR 701.12a: Soul Conduit / Axis of Mortality body — "two target players
+    /// exchange life totals" lowers to ExchangeLifeTotals{Player, Player}.
+    #[test]
+    fn two_target_players_exchange_life_totals_parses() {
+        let def = super::super::parse_effect_chain(
+            "Two target players exchange life totals.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Player);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: Axis of Mortality causative body — "have two target players
+    /// exchange life totals" (from "you may have …") lowers to
+    /// ExchangeLifeTotals{Player, Player}.
+    #[test]
+    fn have_two_target_players_exchange_life_totals_parses() {
+        let def = super::super::parse_effect_chain(
+            "Have two target players exchange life totals.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Player);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: Magus of the Mirror / Mirror Universe body — "exchange life
+    /// totals with target opponent" lowers to ExchangeLifeTotals{Controller,
+    /// Typed(Opponent)}.
+    #[test]
+    fn exchange_life_totals_with_target_opponent_parses() {
+        let def = super::super::parse_effect_chain(
+            "Exchange life totals with target opponent.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Controller);
+                assert_eq!(
+                    *player_b,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+                );
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: "exchange life totals with target player" form lowers to
+    /// ExchangeLifeTotals{Controller, Player}.
+    #[test]
+    fn exchange_life_totals_with_target_player_parses() {
+        let def = super::super::parse_effect_chain(
+            "Exchange life totals with target player.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Controller);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
     }
 }

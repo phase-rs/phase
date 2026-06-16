@@ -96,6 +96,7 @@ pub mod exchange_control;
 // `intensify.rs`, so `intensify.rs` stays implementation-only).
 pub mod cloak;
 pub mod exchange_life;
+pub mod exchange_life_totals;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -2510,6 +2511,7 @@ pub fn resolve_effect(
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
+        Effect::ExchangeLifeTotals { .. } => exchange_life_totals::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())

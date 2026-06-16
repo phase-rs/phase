@@ -67,6 +67,7 @@ mod emrakul_control_turn_crash;
 mod engine_invariants;
 mod enlightened_tutor_regression;
 mod evelyn_regression;
+mod exchange_life_totals_cards;
 mod exhibition_tidecaller_target_player_mill;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;
