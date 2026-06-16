@@ -374,6 +374,7 @@ fn static_affects_player(
             Some(ControllerRef::ScopedPlayer) => false,
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: chosen-player scope has no meaning here. Fail closed.
             Some(ControllerRef::SourceChosenPlayer) => false,

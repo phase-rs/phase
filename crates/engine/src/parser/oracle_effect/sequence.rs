@@ -866,20 +866,23 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with that name"),
-        tag("with the chosen name"),
-        (
-            tag("with the same name as that "),
-            alt((
-                tag("creature"),
-                tag("permanent"),
-                tag("planeswalker"),
-                tag("artifact"),
-                tag("enchantment"),
-                tag("land"),
-                tag("spell"),
-                tag("card"),
-            )),
+        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        value((), tag("with the chosen name")),
+        value(
+            (),
+            (
+                tag("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
         ),
     ))
     .parse(rest)?;

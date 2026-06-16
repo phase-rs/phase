@@ -4170,6 +4170,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // CR 400.7 + CR 608.2c + CR 701.23a: Name-hate search/exile compounds
+    // ("search [player]'s graveyard, hand, and library ... and exile them")
+    // are a single structured instruction. Route them before broader clause
+    // shortcuts can reinterpret the trailing "exile them" as a generic
+    // ParentTarget zone move.
+    if let Some(owner) = imperative::try_parse_multi_zone_same_name_exile(&lower) {
+        return parsed_clause(imperative::lower_search_and_creation_ast(
+            SearchCreationImperativeAst::MultiZoneSameNameExile { owner },
+        ));
+    }
+
     if let Some(effect) = try_parse_triggered_damage_replacement(&lower) {
         return parsed_clause(effect);
     }
@@ -10569,6 +10580,17 @@ fn replace_target_with_parent(effect: &mut Effect) {
     // them to another creature", where the attach destination is a fresh,
     // distinct choice, not the bounced creature).
     if let Some(TargetFilter::Typed(tf)) = effect.target_filter() {
+        // CR 201.2 + CR 608.2c: Same-name filters already encode their
+        // anaphoric reference via `SameNameAsParentTarget`; replacing the
+        // whole target with `ParentTarget` would discard the actual search/mass
+        // filter.
+        if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+        {
+            return;
+        }
         if tf
             .properties
             .iter()
@@ -10619,6 +10641,13 @@ fn replace_target_with_parent(effect: &mut Effect) {
         // three time counters on it") names the source via `~` (SelfRef); the
         // "on it" anaphor is a trailing counter modifier, not the moved object.
         // Leave SelfRef intact so the source still moves itself.
+        Effect::ChangeZoneAll {
+            target: TargetFilter::Typed(tf),
+            ..
+        } if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)) => {}
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
             if !matches!(target, TargetFilter::SelfRef) =>
         {
@@ -44943,15 +44972,17 @@ mod tests {
             let TargetFilter::Typed(typed) = target else {
                 return false;
             };
-            typed.properties.iter().any(|p| {
-                matches!(p, FilterProp::SameNameAsParentTarget)
-            }) && typed.properties.iter().any(|p| {
-                matches!(
-                    p,
-                    FilterProp::InAnyZone { zones }
-                        if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library]
-                )
-            })
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+                && typed.properties.iter().any(|p| {
+                    matches!(
+                        p,
+                        FilterProp::InAnyZone { zones }
+                            if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+                    )
+                })
         }
         if matches(def.effect.as_ref()) {
             return true;
@@ -45002,7 +45033,7 @@ mod tests {
             );
             assert!(
                 chain_contains_multi_zone_same_name_exile(&def),
-                "{label}: expected ChangeZoneAll {{ InAnyZone[GY,Hand,Lib], SameNameAsParentTarget }} in chain"
+                "{label}: expected ChangeZoneAll {{ InAnyZone[GY,Hand,Lib], SameNameAsParentTarget }} in chain: {def:#?}"
             );
         }
     }

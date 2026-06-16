@@ -2183,6 +2183,7 @@ pub(crate) fn collect_player_targets(
                 // resolved from ability.targets directly); fail closed.
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: no card scopes this shape to a persisted chosen
                 // player; fail closed (mirrors DefendingPlayer).

@@ -2107,6 +2107,9 @@ pub enum ControllerRef {
     /// object target inherited by this chained effect ("that permanent's
     /// controller may sacrifice a land").
     ParentTargetController,
+    /// CR 608.2c + CR 108.3: Filter owner is the owner of the parent object
+    /// target inherited by this chained effect ("its owner's graveyard").
+    ParentTargetOwner,
     /// CR 508.5 / CR 508.5a: Filter controller is the defending player for
     /// the source attacking creature, resolved per attacker through
     /// `combat::defending_player_for_attacker`. Used by intervening-if
