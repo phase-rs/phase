@@ -105,6 +105,21 @@ fn collect_controller_controlled_as_cast_filters_from_condition(
     }
 }
 
+fn recompute_pending_cast_cost_after_additional_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) {
+    let object_id = pending.object_id;
+    let prior_pending = state.pending_cast.take();
+    state.pending_cast = Some(Box::new(pending.clone()));
+    let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
+    state.pending_cast = prior_pending;
+    if let Some(cost) = recomputed {
+        pending.cost = cost;
+    }
+}
+
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
 /// For `Optional`: `pay=true` pays the cost and sets `additional_cost_paid`, `pay=false` skips.
@@ -282,14 +297,7 @@ pub(crate) fn handle_decide_additional_cost(
     // flag via `state.pending_cast`, so publish `updated_pending` there for the
     // duration of the recompute, then restore the prior value.
     if optional_cost_paid {
-        let object_id = updated_pending.object_id;
-        let prior_pending = state.pending_cast.take();
-        state.pending_cast = Some(Box::new(updated_pending.clone()));
-        let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
-        state.pending_cast = prior_pending;
-        if let Some(cost) = recomputed {
-            updated_pending.cost = cost;
-        }
+        recompute_pending_cast_cost_after_additional_cost(state, player, &mut updated_pending);
     }
 
     if let Some(cost) = cost_to_pay {
@@ -467,6 +475,10 @@ fn handle_decide_kicker_cost(
 
     pending.ability.context.additional_cost_paid = true;
     pending.ability.context.kickers_paid.push(variant);
+    // CR 601.2b + CR 601.2f + CR 702.33d: Kicker is declared before total cost is
+    // locked in. Recompute now so "kicked spell" cost reducers see the paid kicker
+    // through `state.pending_cast` before mana payment.
+    recompute_pending_cast_cost_after_additional_cost(state, player, &mut pending);
     if pending.deferred_modal_choice.is_some() || pending.deferred_target_selection {
         pending.declared_kickers_to_pay.push(variant);
         return finish_pending_cost_or_cast(state, player, pending, events);

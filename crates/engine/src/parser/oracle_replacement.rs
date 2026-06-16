@@ -533,6 +533,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     if let Some(def) = parse_global_object_counter_prohibition(&lower, &text) {
         return Some(def);
     }
+    if let Some(def) = parse_inverted_typed_counter_prohibition(&lower, &text) {
+        return Some(def);
+    }
 
     // --- Counter-prohibition replacement: "~ can't have counters put on it." ---
     // CR 614.6 + CR 614.7 + CR 122.1: A self-targeted counter-placement
@@ -5363,6 +5366,47 @@ fn parse_global_object_counter_prohibition(
                 parse_counter_prohibition_type_separator,
                 parse_counter_prohibition_type,
             ),
+        ),
+        opt(tag(".")),
+    ));
+    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let type_filter = match type_filters.as_slice() {
+        [single] => single.clone(),
+        _ => TypeFilter::AnyOf(type_filters),
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(attach_zone_to_filter(
+                TargetFilter::Typed(TypedFilter::new(type_filter)),
+                Zone::Battlefield,
+            ))
+            .quantity_modification(QuantityModification::Prevent)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.17 + CR 614.6 + CR 122.1: Parse inverted type-scoped counter
+/// prohibitions such as "Creatures can't have counters put on them." Lowers to
+/// the same `AddCounter` + `Prevent` replacement as Solemnity's object-counter
+/// line, scoped to a single permanent type on the battlefield.
+fn parse_inverted_typed_counter_prohibition(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Inverted surface form of `parse_global_object_counter_prohibition`: the
+    // permanent type is the grammatical subject ("Creatures can't have counters
+    // put on them") rather than the object ("Counters can't be put on
+    // creatures"). Same replacement class, so it reuses the shared type-list
+    // combinators and covers every permanent type (and comma/or-separated
+    // lists) in one arm.
+    let mut combinator = all_consuming(terminated(
+        terminated(
+            separated_list1(
+                parse_counter_prohibition_type_separator,
+                parse_counter_prohibition_type,
+            ),
+            tag::<_, _, OracleError<'_>>(" can't have counters put on them"),
         ),
         opt(tag(".")),
     ));
@@ -11135,18 +11179,60 @@ mod tests {
     }
 
     #[test]
-    fn no_counters_replacement_rejects_non_self_subject() {
-        // CR 614.1a: the parser must NOT match the global "creatures can't
-        // have counters put on them" wording — that is a different (wider)
-        // replacement class (Solemnity-style) which is intentionally out of
-        // scope for this PR. The current scope is strictly self-targeted.
-        // A non-self subject must fall through to the unimplemented path
-        // rather than silently lower into a SelfRef replacement.
-        let def = parse_replacement_line("Creatures can't have counters put on them.", "Test Card");
-        assert!(
-            def.is_none(),
-            "non-self subject must not match the SelfRef-scoped parser"
-        );
+    fn inverted_typed_counter_prohibition_covers_every_permanent_type() {
+        // CR 614.6 + CR 122.1: "<type> can't have counters put on them" lowers to
+        // the AddCounter+Prevent replacement scoped to that permanent type. The
+        // single combinator covers every permanent type, so creatures (#3450),
+        // planeswalkers (#3453), and artifacts (#3455) are all handled by one arm.
+        for (oracle_type, expected) in [
+            ("Creatures", TypeFilter::Creature),
+            ("Planeswalkers", TypeFilter::Planeswalker),
+            ("Artifacts", TypeFilter::Artifact),
+            ("Enchantments", TypeFilter::Enchantment),
+            ("Lands", TypeFilter::Land),
+        ] {
+            let text = format!("{oracle_type} can't have counters put on them.");
+            let def = parse_replacement_line(&text, "Test Card")
+                .unwrap_or_else(|| panic!("{oracle_type} counter prohibition must parse"));
+            assert_eq!(def.event, ReplacementEvent::AddCounter);
+            assert_eq!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            );
+            assert!(
+                matches!(
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.type_filters == vec![expected.clone()]
+                            && tf.controller.is_none()
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InZone { zone: Zone::Battlefield }
+                            ))
+                ),
+                "{oracle_type} must scope to {expected:?} on the battlefield"
+            );
+        }
+    }
+
+    #[test]
+    fn inverted_typed_counter_prohibition_handles_multiple_types() {
+        // CR 614.6: comma/or-separated type lists reuse the shared type-list
+        // combinator, so "Creatures or artifacts" lowers to a TypeFilter::AnyOf.
+        let def = parse_replacement_line(
+            "Creatures or artifacts can't have counters put on them.",
+            "T",
+        )
+        .expect("multi-type counter prohibition must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters == vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Artifact,
+                ])]
+        ));
     }
 
     #[test]

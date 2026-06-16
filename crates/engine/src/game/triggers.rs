@@ -7431,6 +7431,7 @@ pub mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -7443,6 +7444,7 @@ pub mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -9969,6 +9971,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -9981,6 +9984,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13409,6 +13413,7 @@ pub mod tests {
                 has_x_in_cost: true,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
         assert!(
@@ -13430,6 +13435,7 @@ pub mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
         assert!(
@@ -13452,6 +13458,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13464,6 +13471,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13489,6 +13497,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13501,6 +13510,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13524,6 +13534,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13536,6 +13547,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -13548,6 +13560,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -13571,6 +13584,7 @@ pub mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }
         }
 

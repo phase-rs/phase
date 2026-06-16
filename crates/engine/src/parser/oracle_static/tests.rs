@@ -3466,21 +3466,50 @@ fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
 }
 
 /// CR 601.2f + CR 702.33d: "The first kicked spell you cast each turn costs {1}
-/// less to cast." (Vine Gecko). The "kicked" qualifier — whether the spell's
-/// kicker additional cost was paid — is not a representable spell-cost filter,
-/// so the parser must DECLINE the cost static rather than emit a filterless,
-/// conditionless reducer. A broad reducer would silently drop both the printed
-/// "first … each turn" once-per-turn gate and the "kicked" qualifier, reducing
-/// every spell the controller casts (the bug this guards against).
+/// less to cast." (Vine Gecko).
 #[test]
-fn static_first_kicked_spell_does_not_emit_broad_reducer() {
-    let parsed =
-        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.");
+fn static_first_kicked_spell_costs_less() {
+    let def =
+        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.")
+            .expect("Vine Gecko static should parse");
 
-    assert!(
-        parsed.is_none(),
-        "kicked-spell cost reducer must be declined until paid-kicker state is representable; got {parsed:?}"
-    );
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(1));
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected WasKicked spell filter");
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter { properties, .. })
+            if properties.contains(&FilterProp::WasKicked)
+    ));
+
+    let condition = def.condition.expect("expected first-kicked-spell gate");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if matches!(
+            inner,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::WasKicked)
+        )
+    ));
 }
 
 #[test]
