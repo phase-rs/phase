@@ -5952,6 +5952,50 @@ mod tests {
         }
     }
 
+    /// CR 108.3 + CR 109.4 + CR 603.4: "you control N or more permanents you
+    /// don't own" — the bare negated-ownership suffix must be consumed by the
+    /// type-phrase parser so the whole count condition is recognized (Agent of
+    /// Treachery #3304). Before the fix "you don't own" was left unconsumed,
+    /// leaving a non-empty remainder that aborted intervening-if hoisting.
+    #[test]
+    fn parse_control_count_ge_permanents_you_dont_own() {
+        for text in [
+            "you control three or more permanents you don't own",
+            "you control three or more permanents you do not own",
+        ] {
+            let (rest, cond) = parse_control_count_ge(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } = cond
+            else {
+                panic!("expected ObjectCount >= 3 comparison for {text:?}, got {cond:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}, got {filter:?}");
+            };
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "controller pinned to You via inject_controller_you for {text:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }),
+                "filter must carry Owned{{Opponent}} (\"you don't own it\") for {text:?}, \
+                 got {:?}",
+                tf.properties
+            );
+        }
+    }
+
     #[test]
     fn parse_quantity_quantity_comparison_x_ge_library() {
         // CR 107.3 + CR 608.2c: Thassa's Oracle trailing intervening-if.

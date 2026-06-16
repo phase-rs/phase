@@ -186,6 +186,66 @@ pub fn create_object_from_card_face(
     obj_id
 }
 
+/// The five snow basic land card names that make up every Momir's Madness deck.
+/// CR 305.6: Snow-Covered Wastes is intentionally excluded — "Wastes" is the
+/// basic colorless land, not a basic land type. These printed names are the
+/// single source the format auto-supplies; `deck_validation::evaluate_momir`
+/// validates the same structure via typed snow-basic detection, kept in lockstep
+/// by the `momir_fixed_deck_*` cross-check tests.
+pub const MOMIR_SNOW_BASICS: [&str; 5] = [
+    "Snow-Covered Plains",
+    "Snow-Covered Island",
+    "Snow-Covered Swamp",
+    "Snow-Covered Mountain",
+    "Snow-Covered Forest",
+];
+
+/// Momir's Madness fixed-deck ratio: exactly 12 copies of each snow basic, 60
+/// total. Players never build this deck — the engine supplies it for every seat.
+const MOMIR_COPIES_PER_BASIC: usize = 12;
+
+/// Display-only art source for the Momir emblem (CR 114.5: an emblem has no art
+/// of its own). The emblem is named for Momir Vig, so the client renders the
+/// chip with his card art via the standard name-based image lookup — the same
+/// `emblem_source` provenance path planeswalker emblems use for their source's
+/// art crop.
+const MOMIR_EMBLEM_SOURCE_NAME: &str = "Momir Vig, Simic Visionary";
+
+/// The canonical Momir's Madness decklist as a flat name list (12× each of the
+/// five snow basics, 60 cards). Single source of truth for the auto-supplied
+/// deck across every transport (wasm/server/tauri) and every seat.
+pub fn momir_fixed_deck_names() -> Vec<String> {
+    let mut names = Vec::with_capacity(MOMIR_SNOW_BASICS.len() * MOMIR_COPIES_PER_BASIC);
+    for basic in MOMIR_SNOW_BASICS {
+        for _ in 0..MOMIR_COPIES_PER_BASIC {
+            names.push(basic.to_string());
+        }
+    }
+    names
+}
+
+/// Build the auto-supplied Momir's Madness `DeckPayload`: every seat (player,
+/// opponent, and each AI seat) receives the identical fixed 60-card snow-basic
+/// deck. Momir admits exactly one legal deck, so the submitted payload's deck
+/// *contents* are ignored; only its seat structure (AI seat count and per-seat
+/// difficulties) is preserved so the correct number of players is created.
+fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckPayload {
+    let fixed_seat = || PlayerDeckPayload {
+        main_deck: resolve_names(db, &momir_fixed_deck_names()),
+        sideboard: Vec::new(),
+        commander: Vec::new(),
+        attraction_deck: Vec::new(),
+        signature_spell: Vec::new(),
+        bracket_tier: CommanderBracketTier::default(),
+    };
+    DeckPayload {
+        player: fixed_seat(),
+        opponent: fixed_seat(),
+        ai_decks: submitted.ai_decks.iter().map(|_| fixed_seat()).collect(),
+        ai_difficulties: submitted.ai_difficulties.clone(),
+    }
+}
+
 /// Build the Momir Basic emblem's activated ability programmatically (no Oracle
 /// text — emblems have no card to parse). CR 113.1b + CR 114.4:
 /// "{X}, Discard a card: Create a token that's a copy of a creature card with
@@ -484,13 +544,24 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     if state.format_config.format == crate::types::format::GameFormat::Momir {
         for i in 0..state.players.len() {
             let player = PlayerId(i as u8);
-            crate::game::effects::create_emblem::grant_emblem(
+            let emblem_id = crate::game::effects::create_emblem::grant_emblem(
                 state,
                 player,
                 Vec::new(),
                 Vec::new(),
                 vec![momir_emblem_ability()],
             );
+            // CR 114.5: give the emblem chip a face. `grant_emblem` leaves
+            // `emblem_source` unset (it has no ability source of its own), so
+            // attach Momir Vig as the display-only art provenance the client
+            // already renders for emblems. Name-only is sufficient — the
+            // name-based image path resolves the art crop from the card pool.
+            if let Some(obj) = state.objects.get_mut(&emblem_id) {
+                obj.emblem_source = Some(crate::game::game_object::EmblemSource {
+                    name: MOMIR_EMBLEM_SOURCE_NAME.to_string(),
+                    printed_ref: None,
+                });
+            }
         }
     }
 
@@ -564,6 +635,23 @@ pub fn load_and_hydrate_decks(
     payload: &DeckPayload,
     db: Option<&CardDatabase>,
 ) {
+    // Momir's Madness supplies a fixed deck (CR-defined: 12× each snow basic) for
+    // every seat — players never build it. Synthesize it here, in the canonical
+    // init path shared by all transports, so web/server/tauri and every AI seat
+    // receive the identical deck. Hydration needs the CardDatabase to resolve the
+    // snow-basic names; with no db we fall back to whatever was submitted.
+    let momir_payload;
+    let payload = if state.format_config.format == crate::types::format::GameFormat::Momir {
+        match db {
+            Some(card_db) => {
+                momir_payload = momir_fixed_deck_payload(card_db, payload);
+                &momir_payload
+            }
+            None => payload,
+        }
+    } else {
+        payload
+    };
     load_deck_into_state(state, payload);
     match db {
         Some(db) => {
@@ -816,6 +904,99 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    /// A minimal card database containing only the five snow basic lands, so a
+    /// unit test can exercise the Momir auto-deck synthesis without the full
+    /// 92MB corpus.
+    fn snow_basics_db() -> CardDatabase {
+        let mut map = serde_json::Map::new();
+        for (key, name, subtype) in [
+            ("snow-covered plains", "Snow-Covered Plains", "Plains"),
+            ("snow-covered island", "Snow-Covered Island", "Island"),
+            ("snow-covered swamp", "Snow-Covered Swamp", "Swamp"),
+            ("snow-covered mountain", "Snow-Covered Mountain", "Mountain"),
+            ("snow-covered forest", "Snow-Covered Forest", "Forest"),
+        ] {
+            map.insert(
+                key.to_string(),
+                serde_json::json!({
+                    "name": name,
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": {
+                        "supertypes": ["Basic", "Snow"],
+                        "core_types": ["Land"],
+                        "subtypes": [subtype]
+                    },
+                    "power": null, "toughness": null, "loyalty": null, "defense": null,
+                    "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                    "keywords": [], "abilities": [], "triggers": [],
+                    "static_abilities": [], "replacements": [],
+                    "color_override": null, "scryfall_oracle_id": null
+                }),
+            );
+        }
+        let json = serde_json::Value::Object(map).to_string();
+        CardDatabase::from_json_str(&json).expect("snow-basics fixture parses")
+    }
+
+    #[test]
+    fn momir_fixed_deck_names_is_sixty_snow_basics() {
+        let names = momir_fixed_deck_names();
+        assert_eq!(names.len(), 60, "Momir's Madness deck is exactly 60 cards");
+        for basic in MOMIR_SNOW_BASICS {
+            assert_eq!(
+                names.iter().filter(|n| n.as_str() == basic).count(),
+                12,
+                "exactly 12 copies of {basic}"
+            );
+        }
+    }
+
+    #[test]
+    fn momir_auto_supplies_fixed_deck_for_every_seat() {
+        // The bug: starting a Momir's Madness game failed deck validation because
+        // no Momir-legal deck was selected. The engine now supplies the fixed
+        // 60-card snow-basic deck for every seat regardless of what was submitted.
+        // This test drives the real `load_and_hydrate_decks` path with an EMPTY
+        // payload (one AI seat) and would fail if the synthesis were reverted.
+        let mut state = GameState::new(crate::types::format::FormatConfig::momir(), 3, 42);
+        let db = snow_basics_db();
+
+        // Submit nothing — just a seat for one AI deck (3 players total).
+        let submitted = DeckPayload {
+            ai_decks: vec![PlayerDeckPayload::default()],
+            ..Default::default()
+        };
+
+        load_and_hydrate_decks(&mut state, &submitted, Some(&db));
+
+        for player in 0..3 {
+            let library = &state.players[player].library;
+            assert_eq!(
+                library.len(),
+                60,
+                "seat {player} library is the fixed 60-card Momir deck"
+            );
+            let snow_count = library
+                .iter()
+                .filter(|id| MOMIR_SNOW_BASICS.contains(&state.objects[id].name.as_str()))
+                .count();
+            assert_eq!(snow_count, 60, "seat {player} holds only snow basics");
+
+            // Every seat is fully initialized: it also owns exactly one Momir
+            // emblem in the command zone (CR 114.1) — the source of the
+            // random-creature activated ability that makes the deck playable.
+            let emblems = state
+                .command_zone
+                .iter()
+                .filter(|id| {
+                    let obj = &state.objects[id];
+                    obj.is_emblem && obj.owner == PlayerId(player as u8)
+                })
+                .count();
+            assert_eq!(emblems, 1, "seat {player} owns exactly one Momir emblem");
+        }
     }
 
     #[test]

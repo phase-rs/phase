@@ -2,6 +2,7 @@ import { lazy, StrictMode, Suspense, useCallback, useEffect, useState, type Reac
 import { BrowserRouter, Routes, Route, useSearchParams } from "react-router";
 
 import { AppShell } from "./components/chrome/AppShell";
+import { AppToast } from "./components/chrome/AppToast";
 import { HostControlTile } from "./components/chrome/HostControlTile";
 import { EngineLostModal } from "./components/modal/EngineLostModal";
 import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
@@ -119,6 +120,7 @@ function AppContent() {
         </Routes>
       </Suspense>
       <HostControlTile />
+      <AppToast />
       <EngineLostModal />
       <NonFatalPanicToast />
       <StuckDecisionToast />

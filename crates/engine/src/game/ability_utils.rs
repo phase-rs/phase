@@ -2183,6 +2183,7 @@ pub(crate) fn collect_player_targets(
                 // resolved from ability.targets directly); fail closed.
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: no card scopes this shape to a persisted chosen
                 // player; fail closed (mirrors DefendingPlayer).
@@ -2427,7 +2428,9 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
             CardTypeSetSource::Objects { filter } => {
                 filter_references_target_creature_quantity(filter)
             }
-            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
         },
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {

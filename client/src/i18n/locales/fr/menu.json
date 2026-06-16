@@ -157,7 +157,9 @@
     "errorNetworkFailure": "Impossible de contacter le service d'import. Vérifiez votre connexion et réessayez.",
     "errorGeneric": "Échec de l'import du deck.",
     "fileSupports": "Prend en charge les formats .dck, .dec, .txt et MTGA",
-    "chooseFile": "Choisir un fichier"
+    "chooseFile": "Choisir un fichier",
+    "importedSuccessTitle": "Deck importé",
+    "importedSuccessDescription": "« {{name}} » a été ajouté à vos decks."
   },
   "precon": {
     "savePrompt": "Enregistrer le deck préconstruit sous :",

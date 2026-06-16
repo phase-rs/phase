@@ -3711,6 +3711,26 @@ mod tests {
                 "Chained Throatseeker",
                 &["Creature"][..],
             ),
+            // Issue #3466: counter spells with a NON-mana "unless" cost. The
+            // counter path previously recognized only the mana form ("pays
+            // {N}") and silently dropped life / sacrifice / discard costs,
+            // shipping an unconditional counter. CR 118.12 / CR 119.4 / CR
+            // 608.2c.
+            (
+                "Counter target spell unless its controller pays 5 life.",
+                "Dash Hopes",
+                &["Instant"][..],
+            ),
+            (
+                "Counter target spell unless its controller sacrifices a creature.",
+                "Counter-Sacrifice",
+                &["Instant"][..],
+            ),
+            (
+                "Counter target spell unless its controller discards a card.",
+                "Counter-Discard",
+                &["Instant"][..],
+            ),
         ] {
             let parsed = parse_named(oracle, name, types);
             assert!(

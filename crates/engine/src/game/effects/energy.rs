@@ -218,4 +218,38 @@ mod tests {
             "prevented energy-counter additions must not emit energy-change events"
         );
     }
+
+    #[test]
+    fn gain_energy_count_is_increased_by_controller_scoped_replacement() {
+        let mut state = GameState::new_two_player(42);
+        let source = zones::create_object(
+            &mut state,
+            CardId(88),
+            PlayerId(0),
+            "Izzet Generatorium".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Plus { value: 1 });
+        replacement.valid_player = Some(ReplacementPlayerScope::You);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+
+        let ability = gain_energy_ability(QuantityExpr::Fixed { value: 2 });
+        let mut events = Vec::new();
+
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].energy, 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: 3,
+            }
+        )));
+    }
 }

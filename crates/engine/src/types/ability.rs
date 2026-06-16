@@ -2107,6 +2107,9 @@ pub enum ControllerRef {
     /// object target inherited by this chained effect ("that permanent's
     /// controller may sacrifice a land").
     ParentTargetController,
+    /// CR 608.2c + CR 108.3: Filter owner is the owner of the parent object
+    /// target inherited by this chained effect ("its owner's graveyard").
+    ParentTargetOwner,
     /// CR 508.5 / CR 508.5a: Filter controller is the defending player for
     /// the source attacking creature, resolved per attacker through
     /// `combat::defending_player_for_attacker`. Used by intervening-if
@@ -2598,6 +2601,11 @@ pub enum FilterProp {
     /// contains an `{X}` shard. Used for "activate an ability with {X} in its
     /// activation cost" on `AbilityActivated` delayed triggers (Magus Lucea Kane).
     HasXInActivationCost,
+    /// CR 702.33d: Matches spells whose kicker additional cost was paid for this
+    /// cast. Used for "the first kicked spell you cast each turn" cost reducers
+    /// (Vine Gecko). Live evaluation reads `pending_cast` / `GameObject.kickers_paid`;
+    /// turn-history evaluation reads `SpellCastRecord.was_kicked`.
+    WasKicked,
     /// CR 605.1: Matches objects that have at least one ability classified as a
     /// mana ability by the engine's authoritative mana-ability classifier.
     /// Used for library filters such as "artifact card with a mana ability".
@@ -3415,6 +3423,15 @@ pub enum CardTypeSetSource {
     ExiledBySource,
     /// CR 109.2: Objects matching a battlefield-style filter.
     Objects { filter: TargetFilter },
+    /// CR 608.2c + CR 205.2a: distinct card types among the current chain
+    /// tracked set, optionally restricted to members produced by `caused_by`.
+    /// Mirrors `QuantityRef::FilteredTrackedSetSize { caused_by }`: a merged
+    /// Draw->Discard set is disambiguated by CAUSE (drawn members are unstamped),
+    /// so Some(Discarded) counts only discarded members. None counts all.
+    TrackedSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<ThisWayCause>,
+    },
 }
 
 /// CR 601.2h: Which cast object a mana-spent quantity reads.
@@ -5074,6 +5091,22 @@ pub enum StaticCondition {
     /// `TargetFilter::Typed` — no attachment prop, no recipient prop.
     RecipientMatchesFilter {
         filter: TargetFilter,
+    },
+    /// CR 509.1b + CR 506.2 + CR 108.3: True when the recipient creature (the
+    /// per-object subject of the continuous effect — i.e. the attacking creature
+    /// this static is gating) is currently attacking a target permitted by
+    /// `target`, evaluated relative to the recipient's OWNER (CR 108.3), not its
+    /// controller. Used to express "can't be blocked unless it's attacking its
+    /// owner or a permanent its owner controls" by wrapping this in
+    /// `StaticCondition::Not` (the "unless"): the creature is unblockable except
+    /// when attacking its owner or a permanent its owner controls. Recipient-scoped
+    /// (mirrors `RecipientMatchesFilter`/`RecipientHasCounters`); the affected
+    /// (attacking) creature is supplied as the recipient by the block-restriction
+    /// gate in `combat.rs`. `target` reuses `AttackTargetFilter` — the same
+    /// owner-relative axis as the attack-side "can't attack its owner …"
+    /// restriction (CR 506.2 / CR 508.1).
+    RecipientAttackingOwnerTarget {
+        target: crate::types::triggers::AttackTargetFilter,
     },
     /// CR 702.95b: True while the source object is paired with another creature.
     SourceIsPaired,
@@ -12989,6 +13022,20 @@ pub enum TriggerCondition {
     /// Checked at both fire-time and resolution-time per CR 603.4.
     EventDamageSourceMatchesFilter { filter: TargetFilter },
 
+    /// CR 120.1 + CR 108.3 + CR 603.4: Intervening-if predicate that holds when
+    /// the player dealt the triggering damage is the OWNER of the object that
+    /// dealt it ("deals combat damage to its owner"). Reads the triggering
+    /// `GameEvent::DamageDealt`: true when `target == Player(p)` and the damage
+    /// source object's `owner == p` (CR 120.1: the object that deals damage is
+    /// the source of that damage). Distinct from `EventDamageSourceMatchesFilter`
+    /// (which filters the damage *source* by a TargetFilter) and from
+    /// `DealtDamageBySourceThisTurn` (which gates a dying creature against
+    /// this-turn damage records) — this gates the recipient↔source-owner
+    /// relation, which no static `TargetFilter` can express. Evaluated at both
+    /// fire-time and resolution-time per CR 603.4, and per synthetic per-source
+    /// event on the aggregate combat-damage path. The Beast, Deathless Prince.
+    DamagedPlayerIsEventSourceOwner,
+
     /// CR 614.12c + CR 607.2d + CR 603.4: True when the trigger source's
     /// persisted `ChosenAttribute::Label` matches the given anchor word.
     /// Used by anchor-word modal permanents (Khans of Tarkir Sieges, Tarkir:
@@ -13806,6 +13853,8 @@ pub enum DamageModification {
 pub enum QuantityModification {
     /// count * 2 — Primal Vigor, Doubling Season, Parallel Lives, Anointed Procession
     Double,
+    /// count / 2 rounded down — Halving Season
+    Half,
     /// count + value — Hardened Scales (+1)
     Plus { value: u32 },
     /// count.saturating_sub(value) — Vizier of Remedies (-1)
