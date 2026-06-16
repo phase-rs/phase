@@ -17214,6 +17214,38 @@ mod tests {
         ));
     }
 
+    /// Exchange-life prefix matching must not swallow trailing clauses on compound
+    /// sorcery/trigger lines (coverage swallowed-clause ratchet).
+    #[test]
+    fn profane_transfusion_exchange_clause_does_not_swallow_create_token() {
+        let parsed = parse(
+            "Two target players exchange life totals. You create an X/X colorless Horror artifact creature token, where X is the difference between those players' life totals.",
+            "Profane Transfusion",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(parsed.parse_warnings.iter().all(|warning| {
+            warning.category_name() != "swallowed-clause"
+                && warning.category_name() != "ignored-remainder"
+        }));
+    }
+
+    #[test]
+    fn mister_negative_exchange_clause_does_not_swallow_draw_followup() {
+        let parsed = parse(
+            "Vigilance, lifelink\nDarkforce Inversion — When Mister Negative enters, you may exchange life totals with target opponent. If you lost life this way, draw that many cards.",
+            "Mister Negative",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(parsed.parse_warnings.iter().all(|warning| {
+            warning.category_name() != "swallowed-clause"
+                && warning.category_name() != "ignored-remainder"
+        }));
+    }
+
     #[test]
     fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
         let oracle =
