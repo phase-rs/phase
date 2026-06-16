@@ -147,23 +147,6 @@ impl ClauseContext {
         self.condition.as_ref()
     }
 
-    pub(crate) fn opponent_may_scope(&self) -> Option<&OpponentMayScope> {
-        self.opponent_may_scope.as_ref()
-    }
-
-    pub(crate) fn may_implicit_player_scope(&self) -> Option<&PlayerFilter> {
-        self.may_implicit_player_scope.as_ref()
-    }
-
-    pub(crate) fn repeat_for(&self) -> Option<&QuantityExpr> {
-        self.repeat_for.as_ref()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn player_scope(&self) -> Option<&PlayerFilter> {
-        self.player_scope.as_ref()
-    }
-
     /// True when no slot has been populated. Callers can short-circuit
     /// `apply_*` when nothing was peeled.
     pub(crate) fn is_empty(&self) -> bool {
@@ -784,11 +767,8 @@ mod tests {
         let (peeled, ctx) = peel_clause("each opponent may sacrifice a creature");
         assert_eq!(peeled, "sacrifice a creature");
         assert!(ctx.optional);
-        assert_eq!(
-            ctx.may_implicit_player_scope(),
-            Some(&PlayerFilter::Opponent)
-        );
-        assert!(ctx.opponent_may_scope().is_none());
+        assert_eq!(ctx.may_implicit_player_scope, Some(PlayerFilter::Opponent));
+        assert!(ctx.opponent_may_scope.is_none());
     }
 
     #[test]
@@ -796,10 +776,7 @@ mod tests {
         let (peeled, ctx) = peel_clause("any opponent may pay {3}");
         assert_eq!(peeled, "pay {3}");
         assert!(ctx.optional);
-        assert_eq!(
-            ctx.opponent_may_scope(),
-            Some(&OpponentMayScope::AnyOpponent)
-        );
+        assert_eq!(ctx.opponent_may_scope, Some(OpponentMayScope::AnyOpponent));
     }
 
     #[test]
@@ -810,7 +787,6 @@ mod tests {
         assert_eq!(rest, "cast the exiled card without paying its mana cost");
     }
 
-    #[test]
     #[test]
     fn peel_player_scope_each_opponent() {
         let (scope, rest) = peel_player_scope_subject("each opponent discards a card");
@@ -828,8 +804,8 @@ mod tests {
     #[test]
     fn peel_clause_combines_for_each_and_player_scope() {
         let (peeled, ctx) = peel_clause("for each opponent, each opponent loses 1 life");
-        assert!(ctx.repeat_for().is_some());
-        assert_eq!(ctx.player_scope(), Some(&PlayerFilter::Opponent));
+        assert!(ctx.repeat_for.is_some());
+        assert_eq!(ctx.player_scope, Some(PlayerFilter::Opponent));
         assert_eq!(peeled, "lose 1 life");
     }
 }
