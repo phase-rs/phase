@@ -32,6 +32,7 @@ use crate::policies::registry::{PolicyId, PolicyReason};
 pub mod aggro_keepables;
 pub mod aristocrats_keepables;
 pub mod cedh_keepables;
+pub mod fixed_deck_keepables;
 pub mod keepables_by_land_count;
 pub mod landfall_keepables;
 pub mod plus_one_counters_keepables;
@@ -43,6 +44,7 @@ pub mod tribal_density;
 pub use aggro_keepables::AggroKeepablesMulligan;
 pub use aristocrats_keepables::AristocratsKeepablesMulligan;
 pub use cedh_keepables::CedhKeepablesMulligan;
+pub use fixed_deck_keepables::FixedDeckKeepMulligan;
 pub use keepables_by_land_count::KeepablesByLandCount;
 pub use landfall_keepables::LandfallKeepablesMulligan;
 pub use plus_one_counters_keepables::PlusOneCountersMulligan;
@@ -120,6 +122,7 @@ impl Default for MulliganRegistry {
                 Box::new(PlusOneCountersMulligan),
                 Box::new(SpellslingerKeepablesMulligan),
                 Box::new(CedhKeepablesMulligan::new()),
+                Box::new(FixedDeckKeepMulligan),
             ],
         }
     }
@@ -205,6 +208,20 @@ mod cedh_registration_tests {
         assert!(
             has,
             "MulliganRegistry::default() must register CedhKeepablesMulligan"
+        );
+    }
+
+    #[test]
+    fn default_registry_contains_fixed_deck_keepables() {
+        let reg = MulliganRegistry::default();
+        let has = reg
+            .policies
+            .iter()
+            .any(|p| p.id() == PolicyId::FixedDeckKeepMulligan);
+        assert!(
+            has,
+            "MulliganRegistry::default() must register FixedDeckKeepMulligan \
+             so Momir-family all-land hands are kept, not mulliganed to zero"
         );
     }
 

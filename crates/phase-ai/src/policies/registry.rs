@@ -94,6 +94,7 @@ pub enum PolicyId {
     ReactiveSelfProtection,
     ComboLineProgress,
     CedhKeepablesMulligan,
+    FixedDeckKeepMulligan,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,

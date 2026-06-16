@@ -3088,6 +3088,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
                 // time here. Fail closed.
@@ -3123,6 +3124,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
                 // time here. Fail closed.
@@ -3254,6 +3256,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
                 | ControllerRef::ParentTargetController
+                | ControllerRef::ParentTargetOwner
                 | ControllerRef::DefendingPlayer
                 | ControllerRef::SourceChosenPlayer
                 | ControllerRef::ChosenPlayer { .. }
@@ -3663,6 +3666,7 @@ pub fn find_applicable_replacements(
                                 crate::types::ability::ControllerRef::ParentTargetController => {
                                     false
                                 }
+                                crate::types::ability::ControllerRef::ParentTargetOwner => false,
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
                                 // CR 613.1: chosen-player scope has no meaning
                                 // for static token-creation replacements.

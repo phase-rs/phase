@@ -941,9 +941,10 @@ pub(crate) enum SearchCreationImperativeAst {
     /// and library for any number of cards with that name and exile them."
     /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
     /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
-    /// scoped to the owner of the parent target's exiled card. Used by
-    /// Deadly Cover-Up.
-    MultiZoneSameNameExile,
+    /// scoped to the player named by the possessive zone phrase.
+    MultiZoneSameNameExile {
+        owner: ControllerRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

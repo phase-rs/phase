@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
-import { formatMetadata } from "../data/formatRegistry";
+import { formatMetadata, formatSuppliesDeck } from "../data/formatRegistry";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
@@ -148,8 +148,12 @@ export function GameSetupPage() {
   );
 
   const handleStartAI = () => {
-    if (!activeDeckName || !formatConfig) return;
-    touchDeckPlayed(activeDeckName);
+    if (!formatConfig) return;
+    // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
+    // active deck is not required to start.
+    const suppliesDeck = formatSuppliesDeck(formatConfig.format);
+    if (!activeDeckName && !suppliesDeck) return;
+    if (activeDeckName) touchDeckPlayed(activeDeckName);
     const gameId = crypto.randomUUID();
     // Snapshot the per-seat AI config from preferences into the active-game
     // record. `AiOpponentConfig`'s `ensureAiSeatCount` effect normally syncs
@@ -180,9 +184,14 @@ export function GameSetupPage() {
 
   // Sidebar deck preview. `selectedCompat` is now state pushed up from MyDecks
   // (active-deck-only) rather than derived from a full compatibilities map.
-  const noDeckSelected = !activeDeckName;
-  const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
-  const noLegalAiDecks = legalAiDeckCount === 0;
+  // Fixed-deck formats (Momir's Madness) supply both the player's deck and the
+  // AI seats automatically (the engine synthesizes them), so the deck-selection
+  // and AI-deck-availability gates do not apply.
+  const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
+  const noDeckSelected = !suppliesDeck && !activeDeckName;
+  const deckBlockedForSelectedFormat =
+    !suppliesDeck && selectedCompat?.selected_format_compatible === false;
+  const noLegalAiDecks = !suppliesDeck && legalAiDeckCount === 0;
   // Block start only while the card DB is actively loading — not on `error`/`idle`,
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
   // trap the user on this screen.
