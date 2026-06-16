@@ -1008,6 +1008,8 @@ pub(crate) enum ChooseImperativeAst {
     },
     NamedChoice {
         choice_type: crate::types::ability::ChoiceType,
+        /// CR 608.2d (override): `Random` for "choose a player at random".
+        selection: crate::types::ability::TargetSelectionMode,
     },
     RevealHandFilter {
         card_filter: TargetFilter,
@@ -1018,6 +1020,8 @@ pub(crate) enum ChooseImperativeAst {
     FromTrackedSet {
         count: u32,
         chooser: crate::types::ability::Chooser,
+        /// CR 608.2d (override): `Random` for "choose one of them at random".
+        selection: crate::types::ability::CardSelectionMode,
     },
     /// "choose a [filter] card in/from [player's] [zone]" — direct selection
     /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.
@@ -1028,6 +1032,8 @@ pub(crate) enum ChooseImperativeAst {
         filter: crate::types::ability::TargetFilter,
         chooser: crate::types::ability::Chooser,
         up_to: bool,
+        /// CR 608.2d (override): `Random` for "choose ... at random".
+        selection: crate::types::ability::CardSelectionMode,
     },
     /// "choose from among the permanents ... an artifact, a creature, ..." —
     /// multi-category selection where each player keeps one per type, then sacrifices the rest.
@@ -1424,6 +1430,10 @@ pub(crate) struct ModalHeaderAst {
     /// CR 700.2e: The player who chooses the mode(s). `Controller` (CR 700.2a)
     /// for standard `Choose one —` headers and the `you choose —` alias.
     pub(crate) chooser: PlayerFilter,
+    /// CR 700.2b (override) + CR 701.9b (analogous): `Random` for "choose one at
+    /// random" headers (Cult of Skaro) — the game selects the mode(s), not the
+    /// chooser. `Chosen` for all standard modal headers.
+    pub(crate) selection: crate::types::ability::TargetSelectionMode,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---

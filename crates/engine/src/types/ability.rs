@@ -2777,6 +2777,13 @@ impl TargetSelectionMode {
     pub fn is_chosen(&self) -> bool {
         matches!(self, TargetSelectionMode::Chosen)
     }
+
+    /// CR 700.2b (override) + CR 701.9b (analogous): The game selects uniformly
+    /// at random instead of the controller choosing (Cult of Skaro "choose one
+    /// at random").
+    pub fn is_random(&self) -> bool {
+        matches!(self, TargetSelectionMode::Random)
+    }
 }
 
 /// CR 701.9a: How cards are selected from a zone during an effect or cost.
@@ -8024,6 +8031,13 @@ pub enum Effect {
         /// Used for ETB choices that other abilities reference ("the chosen type/color").
         #[serde(default)]
         persist: bool,
+        /// CR 608.2d (override) + CR 701.9b (analogous): When `Random`, the game
+        /// selects the value uniformly at random (Strax "choose a player at
+        /// random") instead of `chooser`/controller announcing the choice per
+        /// CR 608.2d. Default `Chosen` preserves controller-choice. Serialized
+        /// as a type-tagged enum (omitted when `Chosen`).
+        #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+        selection: TargetSelectionMode,
     },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
@@ -8515,6 +8529,20 @@ pub enum Effect {
         /// CR 609.3: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,
+        /// CR 608.2d (override): When `Random`, the game selects the card(s)
+        /// uniformly at random (River Song's Diary "choose one of them at
+        /// random") rather than `chooser` announcing the choice per CR 608.2d.
+        /// CR 701.9b (analogous): same random-selection idiom the engine already
+        /// uses for random discard. Orthogonal to `chooser` (who would otherwise
+        /// pick). Serialized as a bare `random` bool to match the
+        /// Discard/RevealHand card-data shape.
+        #[serde(
+            default,
+            with = "card_selection_bool_compat",
+            rename = "random",
+            skip_serializing_if = "CardSelectionMode::is_chosen"
+        )]
+        selection: CardSelectionMode,
         /// Additional validation rules for the chosen subset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
@@ -11117,6 +11145,12 @@ pub struct ModalChoice {
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]
     pub chooser: PlayerFilter,
+    /// CR 700.2b (override) + CR 701.9b (analogous): When `Random`, the game
+    /// selects the mode(s) uniformly at random (Cult of Skaro "choose one at
+    /// random") instead of `chooser` choosing per CR 700.2a/700.2b. Default
+    /// `Chosen` preserves controller-choice; omitted from card-data when default.
+    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+    pub selection: TargetSelectionMode,
 }
 
 /// Selection constraints attached to a modal choice header.

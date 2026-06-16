@@ -170,6 +170,7 @@ mod tests {
             filter: None,
             chooser: Chooser::Controller,
             up_to: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             constraint: None,
         }
     }

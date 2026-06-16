@@ -2478,6 +2478,7 @@ pub(super) fn apply_clause_continuation(
                     filter: None,
                     chooser,
                     up_to: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
                     constraint: None,
                 },
             ));
@@ -6917,6 +6918,7 @@ mod tests {
             chooser: Chooser::Opponent,
             up_to: false,
             constraint: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         };
         let result = parse_followup_continuation_ast(
             "Put the chosen cards into your graveyard and the rest into your hand.",
@@ -6943,6 +6945,7 @@ mod tests {
             chooser: Chooser::Opponent,
             up_to: false,
             constraint: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         };
         let result = parse_followup_continuation_ast(
             "Shuffle the chosen cards into your library and put the rest into your hand.",

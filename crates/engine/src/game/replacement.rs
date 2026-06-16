@@ -5389,6 +5389,7 @@ mod tests {
             Effect::Choose {
                 choice_type: crate::types::ability::ChoiceType::CreatureType,
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         );
         let mut execute = choose;
@@ -6262,6 +6263,7 @@ mod tests {
                         crate::types::mana::ManaColor::Green,
                     ]),
                     persist: true,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)

@@ -3404,6 +3404,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
             filter: None,
             chooser: crate::types::ability::Chooser::Controller,
             up_to: true,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
         },
         duration: None,
@@ -3808,6 +3809,17 @@ fn try_parse_choose_player_to_verb(
         after_player
     };
 
+    // CR 608.2d (override) + CR 701.9b (analogous): "choose a player at random"
+    // (Strax, Sontaran Nurse) — the game selects the player, not the controller.
+    // The "at random" qualifier is the tail after the head noun (e.g. before a
+    // following ". When you do" sentence has already been split off), recorded as
+    // a typed `TargetSelectionMode`.
+    let selection = if nom_primitives::scan_contains(after_player, "at random") {
+        TargetSelectionMode::Random
+    } else {
+        TargetSelectionMode::Chosen
+    };
+
     // The chain index is the count of `Choose(Player)` clauses already
     // finalized in this chain. The chunk loop owns the increment (once per
     // finalized clause) — this function only READS the count and is
@@ -3832,6 +3844,7 @@ fn try_parse_choose_player_to_verb(
     let mut clause = parsed_clause(Effect::Choose {
         choice_type: choice_type.clone(),
         persist: false,
+        selection,
     });
 
     if let Some(verb_lower) = verb_lower {
@@ -3902,6 +3915,7 @@ fn try_parse_an_opponent_to_verb(
     let mut clause = parsed_clause(Effect::Choose {
         choice_type: ChoiceType::Opponent { restriction: None },
         persist: false,
+        selection: TargetSelectionMode::Chosen,
     });
     let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
     sub.sub_ability = verb_clause.sub_ability;
@@ -8362,6 +8376,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
         filter: Some(filter),
         chooser: Chooser::Opponent,
         up_to: false,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
         constraint: None,
     });
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -15247,6 +15262,7 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
         Effect::Choose {
             choice_type: ChoiceType::Color { excluded },
             persist: false,
+            ..
         } if excluded.is_empty()
     ) {
         let can_collapse = def.sub_ability.as_ref().is_some_and(|sub| {
@@ -18123,6 +18139,7 @@ pub(crate) fn parse_effect_chain_ir(
                             filter: None,
                             chooser: *chooser,
                             up_to: false,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,
                         })
                     }
@@ -18156,6 +18173,7 @@ pub(crate) fn parse_effect_chain_ir(
                             filter: None,
                             chooser: *chooser,
                             up_to: false,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,
                         }
                     }
@@ -28629,7 +28647,8 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
-                persist: true
+                persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             }
         );
     }
@@ -29439,7 +29458,8 @@ mod tests {
             e,
             Effect::Choose {
                 choice_type: ChoiceType::color(),
-                persist: false
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             }
         );
     }
@@ -36693,6 +36713,7 @@ mod tests {
         let Effect::Choose {
             choice_type: ChoiceType::Labeled { options },
             persist: true,
+            ..
         } = *def.effect
         else {
             panic!("Expected Choose land/nonland, got {:?}", def.effect);
@@ -44997,6 +45018,7 @@ mod tests {
         let Effect::Choose {
             choice_type,
             persist,
+            ..
         } = &*def.effect
         else {
             panic!("expected Choose, got {:?}", def.effect);
@@ -45550,6 +45572,7 @@ mod tests {
                         restriction: Some(restriction),
                     },
                 persist,
+                ..
             } => {
                 assert!(!persist, "The Master does not need persist");
                 match restriction.as_ref() {
@@ -50267,6 +50290,27 @@ mod snapshot_tests {
     /// to …" chain decomposes into three `Choose(Player)` nodes. The dependent
     /// effects bind to the chosen player via `ControllerRef::ChosenPlayer`, and
     /// the 2nd/3rd choose clauses no longer fall back to `Unimplemented`.
+    #[test]
+    fn strax_choose_a_player_at_random_records_random_selection() {
+        // CR 608.2d (override): Strax, Sontaran Nurse — "Choose a player at
+        // random. When you do, ~ fights another target creature that player
+        // controls." The Choose(Player) must record TargetSelectionMode::Random
+        // and keep the dependent reflexive Fight as a WhenYouDo sub.
+        let def = parse_effect_chain(
+            "Choose a player at random. When you do, Strax fights another target \
+             creature that player controls.",
+            AbilityKind::Spell,
+        );
+        match def.effect.as_ref() {
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                selection,
+                ..
+            } => assert_eq!(*selection, TargetSelectionMode::Random),
+            other => panic!("expected random Choose(Player), got {other:?}"),
+        }
+    }
+
     #[test]
     fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
         let def = parse_effect_chain(

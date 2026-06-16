@@ -1152,6 +1152,28 @@ fn try_begin_reflexive_target_selection(
         return Ok(false);
     }
 
+    // CR 608.2c + CR 109.4: Propagate the parent's resolution-scoped
+    // `chosen_players` onto the reflexive ability BEFORE its target slots are
+    // built, so a `ControllerRef::ChosenPlayer`-scoped target filter (Strax's
+    // "fights another target creature THAT PLAYER controls" after a random
+    // "choose a player") enumerates against the game-selected player. The
+    // interactive path achieves this via the answer handler appending to the
+    // stashed continuation chain; the inline (e.g. random-`Choose`) path has no
+    // such stash, so the slot builder would otherwise see an empty
+    // `chosen_players`. Only clones when the parent actually carries choices the
+    // reflexive lacks, preserving the borrow for every ordinary reflexive.
+    let reflexive_owned;
+    let reflexive = if parent.is_some_and(|p| {
+        !p.chosen_players.is_empty() && p.chosen_players.len() > reflexive.chosen_players.len()
+    }) {
+        let mut owned = reflexive.clone();
+        owned.set_chosen_players_recursive(&parent.unwrap().chosen_players);
+        reflexive_owned = owned;
+        &reflexive_owned
+    } else {
+        reflexive
+    };
+
     // CR 700.2b + CR 603.3c: A reflexive MODAL trigger (Caesar, Legion's
     // Emperor) chooses its mode(s) when it is put on the stack — after the
     // optional cost was paid. Its own effect is a target-less modal marker, so
@@ -4223,6 +4245,38 @@ fn resolve_chain_body(
     };
     let ability = ability.as_ref();
 
+    // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: A random
+    // `Effect::Choose` ("choose a player at random") or `Effect::ChooseFromZone`
+    // ("choose one of them at random") is resolved here, at the chain resolution
+    // point where a mutable ability is available, so the game-selected value
+    // lands on `chosen_players` / `targets` BEFORE the chain descends to a
+    // dependent sub (Strax's reflexive Fight scoped to the chosen player; River
+    // Song's Diary's `CastFromZone { target: ParentTarget }`). No interactive
+    // `WaitingFor::NamedChoice` / `ChooseFromZoneChoice` is raised. This mirrors
+    // the resolution-point handling of `TargetSelectionMode::Random` for targets.
+    let random_choice_owned;
+    let random_is_choose = matches!(
+        &ability.effect,
+        Effect::Choose { selection, .. }
+            if matches!(selection, crate::types::ability::TargetSelectionMode::Random)
+    );
+    let random_is_choose_from_zone = matches!(
+        &ability.effect,
+        Effect::ChooseFromZone { selection, .. } if selection.is_random()
+    );
+    let (ability, random_choice_resolved) = if random_is_choose || random_is_choose_from_zone {
+        let mut owned = ability.clone();
+        if random_is_choose {
+            choose::resolve_random_in_chain(state, &mut owned, events);
+        } else {
+            choose_from_zone::resolve_random_in_chain(state, &mut owned, events);
+        }
+        random_choice_owned = owned;
+        (&random_choice_owned, true)
+    } else {
+        (ability, false)
+    };
+
     if effect_depends_on_missing_chosen_player(ability) {
         state.cost_payment_failed_flag = true;
         if let Some(ref next) = ability.sub_ability {
@@ -4902,11 +4956,14 @@ fn resolve_chain_body(
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
 
-    // Skip no-op unimplemented/runtime-handled effects
-    if !matches!(
-        ability.effect,
-        Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
-    ) {
+    // Skip no-op unimplemented/runtime-handled effects, and a random
+    // `Effect::Choose` already resolved above by `resolve_random_in_chain`.
+    if !random_choice_resolved
+        && !matches!(
+            ability.effect,
+            Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
+        )
+    {
         let hydrated = hydrate_event_context_targets(state, ability);
         let effective = hydrated.as_ref();
 
@@ -8276,6 +8333,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Keyword { options: vec![] },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -8345,6 +8403,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),

@@ -26,6 +26,7 @@ fn the_rack_full_oracle_parses_replacement_and_trigger() {
         Effect::Choose {
             choice_type: ChoiceType::Opponent { .. },
             persist: true,
+            ..
         }
     ));
 

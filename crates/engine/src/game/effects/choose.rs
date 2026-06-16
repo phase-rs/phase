@@ -1,7 +1,13 @@
+use rand::Rng;
+
 use crate::game::players;
-use crate::types::ability::{ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetSelectionMode,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
@@ -16,10 +22,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // NOTE: a random `Effect::Choose` (`selection: Random`) is resolved upstream
+    // in `resolve_ability_chain` via `resolve_random_in_chain` and never reaches
+    // this interactive resolver, so `selection` is intentionally ignored here.
     let (choice_type, persist) = match &ability.effect {
         Effect::Choose {
             choice_type,
             persist,
+            ..
         } => (choice_type.clone(), *persist),
         _ => {
             return Err(EffectError::InvalidParam(
@@ -77,6 +87,141 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: Resolve a random
+/// `Effect::Choose` in place, mutating `ability` so the chain's downstream
+/// sub-ability propagation (`apply_parent_chain_context`) and any
+/// `ControllerRef::ChosenPlayer`-scoped sub (Strax's "When you do, ~ fights
+/// another target creature that player controls") see the game-selected value —
+/// the controller does NOT choose. Mirrors `random_select_targets_for_ability`
+/// for targets: the pick happens at the resolution point with a mutable
+/// ability, so no interactive `WaitingFor::NamedChoice` is ever raised.
+///
+/// Returns `true` when the choice was resolved (random + a value was picked, or
+/// random + impossible/empty so the effect did nothing per CR 609.3). Returns
+/// `false` for a non-random `Effect::Choose`, leaving it to the interactive
+/// `resolve` path. Emits the `EffectResolved` event itself when it resolves.
+pub(crate) fn resolve_random_in_chain(
+    state: &mut GameState,
+    ability: &mut ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let (choice_type, persist) = match &ability.effect {
+        Effect::Choose {
+            choice_type,
+            persist,
+            selection: TargetSelectionMode::Random,
+        } => (choice_type.clone(), *persist),
+        _ => return false,
+    };
+
+    let options = compute_options(
+        state,
+        &choice_type,
+        ability.controller,
+        ability.source_id,
+        &ability.chosen_players,
+    );
+
+    // CR 609.3: An impossible random choice (no legal option) does nothing; the
+    // chain then skips any continuation that depends on the missing value while
+    // independent siblings proceed — mirrors the interactive empty-options path.
+    if options.is_empty() && !choice_type.options_supplied_by_player() {
+        state.cost_payment_failed_flag = true;
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return true;
+    }
+    if options.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return true;
+    }
+
+    // CR 608.2d (override): the game selects uniformly at random.
+    let index = state.rng.random_range(0..options.len());
+    let chosen = options[index].clone();
+
+    let source_id = if persist {
+        Some(ability.source_id)
+    } else {
+        None
+    };
+    bind_named_choice(state, &choice_type, &chosen, source_id);
+
+    // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)` answer binds a
+    // resolution-scoped chosen player. Append it to the resolving ability's
+    // `chosen_players` so the dependent sub (`ControllerRef::ChosenPlayer`) and
+    // any later `Choose(Player)` in this resolution see it; the chain propagates
+    // it to the sub via `apply_parent_chain_context`.
+    if matches!(
+        choice_type,
+        ChoiceType::Player | ChoiceType::Opponent { .. }
+    ) {
+        if let Ok(pid) = chosen.parse::<u8>() {
+            let mut updated = ability.chosen_players.clone();
+            updated.push(PlayerId(pid));
+            ability.set_chosen_players_recursive(&updated);
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+    true
+}
+
+/// CR 607.2d + CR 613.1 + CR 109.4: Bind a resolved named choice into game
+/// state. Single authority shared by the interactive `ChooseOption` answer
+/// handler and the random `Effect::Choose` resolver so the persist-attribute,
+/// layer-recompute, and `last_named_choice` paths stay byte-identical.
+///
+/// Faithfully reproduces the state-side binding the interactive handler
+/// performs (`engine_resolution_choices.rs`): when `source_id` is `Some`, a
+/// persistable choice is pushed onto the source's `chosen_attributes` and (for
+/// the layer-affecting choice kinds) layers are recomputed; `last_named_choice`
+/// is always set. The resolution-scoped `chosen_players` append for
+/// `Player`/`Opponent` choices is the CALLER's responsibility because its
+/// destination differs (the interactive path appends to the stashed
+/// continuation chain; the random path mutates the resolving ability directly).
+pub(crate) fn bind_named_choice(
+    state: &mut GameState,
+    choice_type: &ChoiceType,
+    choice: &str,
+    source_id: Option<ObjectId>,
+) {
+    if let Some(obj_id) = source_id {
+        if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), choice) {
+            if let Some(obj) = state.objects.get_mut(&obj_id) {
+                obj.chosen_attributes.push(attr);
+                // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card name,
+                // creature type, card type, color, etc.) can gate
+                // source-dependent continuous or rule effects. Layer evaluation
+                // may have run before the choice was made — re-run.
+                if matches!(
+                    choice_type,
+                    ChoiceType::CardName
+                        | ChoiceType::CreatureType
+                        | ChoiceType::CardType
+                        | ChoiceType::BasicLandType
+                        | ChoiceType::Color { .. }
+                        | ChoiceType::Keyword { .. }
+                        | ChoiceType::Player
+                        | ChoiceType::Opponent { .. }
+                ) {
+                    crate::game::layers::mark_layers_full(state);
+                }
+            }
+        }
+    }
+
+    state.last_named_choice = ChoiceValue::from_choice(choice_type, choice);
 }
 
 const FALLBACK_CREATURE_TYPES: &[&str] = &[
@@ -267,6 +412,7 @@ mod tests {
             Effect::Choose {
                 choice_type,
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -453,6 +599,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange { min: 0, max: 5 },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -477,6 +624,7 @@ mod tests {
                     options: vec!["Left".to_string(), "Right".to_string()],
                 },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -658,5 +806,51 @@ mod tests {
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
+    }
+
+    /// CR 608.2d (override) + CR 109.4: a random `Choose(Player)` binds a player
+    /// into the ability's `chosen_players` (so a dependent `ChosenPlayer`-scoped
+    /// sub sees it) without raising the interactive `NamedChoice` prompt.
+    #[test]
+    fn resolve_random_in_chain_binds_player_without_prompting() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                persist: false,
+                selection: TargetSelectionMode::Random,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let handled = resolve_random_in_chain(&mut state, &mut ability, &mut events);
+        assert!(handled, "random Choose must be handled inline");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "random selection must not raise an interactive prompt"
+        );
+        assert_eq!(
+            ability.chosen_players.len(),
+            1,
+            "the game-selected player is bound into chosen_players"
+        );
+        assert!(state.last_named_choice.is_some());
+    }
+
+    #[test]
+    fn resolve_random_in_chain_ignores_non_random() {
+        // Building-block regression: a Chosen Choose is left to the interactive
+        // `resolve` path (returns false; raises nothing here).
+        let mut state = GameState::new_two_player(42);
+        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut events = Vec::new();
+        assert!(!resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
     }
 }

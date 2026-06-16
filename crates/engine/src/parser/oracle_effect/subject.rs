@@ -2566,6 +2566,7 @@ fn try_parse_become_choice(
         effect: Effect::Choose {
             choice_type,
             persist: false,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
         duration,
         sub_ability,

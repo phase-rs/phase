@@ -666,6 +666,28 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 120.3 + CR 102.2: True when a damage-recipient `valid_target` names an
+/// *object* recipient that can never be satisfied by a player.
+///
+/// This is the dual of [`is_player_scope_damage_filter`]: a `Typed` filter
+/// carrying a real object type constraint ("to a creature", "to a planeswalker",
+/// "to an artifact creature an opponent controls") describes an object recipient
+/// and must reject every player recipient. The controller-only `Typed` scope
+/// (empty `type_filters`/`properties`) is the "you"/"an opponent" player form
+/// and is NOT object-only. `Or`/composite filters (e.g.
+/// `Or { Player, Planeswalker }` for "to a player or planeswalker") name at
+/// least one player slot and are likewise not object-only.
+fn is_object_only_damage_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) => !type_filters.is_empty() || !properties.is_empty(),
+        _ => false,
+    }
+}
+
 fn is_player_scope_attack_filter(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers => true,
@@ -1136,6 +1158,21 @@ pub(super) fn match_damage_done(
         if let Some(ref vt) = trigger.valid_target {
             match target {
                 TargetRef::Player(pid) => {
+                    // CR 120.3 + CR 102.2: An object-scope `valid_target`
+                    // ("deals damage to a creature/permanent/typed object")
+                    // names an *object* recipient. Damage dealt to a player is
+                    // never "damage to a creature", so a genuine object-type
+                    // filter must reject every player recipient — symmetric to
+                    // the object branch below, which rejects player-scope
+                    // filters. Without this guard `player_matches_filter`'s
+                    // wildcard would let a `Typed(Creature)` filter mis-fire on
+                    // combat damage to a player (e.g. Strax's "deals damage to a
+                    // creature"). Note the `Or { Player, Planeswalker }` filter
+                    // for "to a player or planeswalker" is NOT object-only and
+                    // still reaches `player_matches_filter`.
+                    if is_object_only_damage_filter(vt) {
+                        return false;
+                    }
                     if !player_matches_filter(vt, state, *pid, source_id) {
                         return false;
                     }
@@ -10947,6 +10984,105 @@ mod tests {
             source_id,
             &state
         ));
+    }
+
+    /// Fix B regression: a `DamageDone` trigger whose `valid_target` is a typed
+    /// creature filter (Strax's "deals damage to a creature") fires ONLY on a
+    /// creature object recipient — never on a player and never on a
+    /// non-creature object. This is the now-populated `valid_target` that
+    /// previously fell through to `None` and fired on every recipient.
+    #[test]
+    fn damage_done_creature_valid_target_gates_recipient_type() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strax".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "A Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let planeswalker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "A Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        if let Some(obj) = state.objects.get_mut(&planeswalker) {
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        // "Whenever Strax deals damage to a creature" — SelfRef source + typed
+        // creature recipient.
+        trigger.valid_source = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+
+        let to_creature = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(creature),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        let to_planeswalker = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(planeswalker),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        let to_player = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+
+        assert!(
+            match_damage_done(&to_creature, &trigger, source_id, &state),
+            "creature recipient must fire the trigger"
+        );
+        assert!(
+            !match_damage_done(&to_planeswalker, &trigger, source_id, &state),
+            "non-creature object recipient must not fire"
+        );
+        assert!(
+            !match_damage_done(&to_player, &trigger, source_id, &state),
+            "player recipient must not fire a creature-scoped valid_target"
+        );
+    }
+
+    #[test]
+    fn is_object_only_damage_filter_classifies_object_vs_player() {
+        // CR 120.3: a typed creature filter is object-only; player-scope and
+        // composite (player-or-planeswalker) filters are not.
+        assert!(is_object_only_damage_filter(&TargetFilter::Typed(
+            TypedFilter::creature()
+        )));
+        assert!(!is_object_only_damage_filter(&TargetFilter::Player));
+        assert!(!is_object_only_damage_filter(&TargetFilter::Controller));
+        // Controller-only Typed (the "an opponent" player form) is NOT object-only.
+        assert!(!is_object_only_damage_filter(&TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )));
+        assert!(!is_object_only_damage_filter(&TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+            ],
+        }));
     }
 
     // ---------------------------------------------------------------------------

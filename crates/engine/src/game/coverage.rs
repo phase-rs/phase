@@ -2184,6 +2184,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Choose {
             choice_type,
             persist,
+            ..
         } => {
             d.push(("choice".into(), fmt_choice_type(choice_type)));
             if *persist {

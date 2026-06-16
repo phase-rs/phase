@@ -773,6 +773,7 @@ fn anchor_word_sieges_load_with_no_parse_gaps() {
             Effect::Choose {
                 choice_type: ChoiceType::Labeled { options },
                 persist,
+                ..
             } => {
                 assert!(
                     *persist,

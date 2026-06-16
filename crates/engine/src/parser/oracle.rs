@@ -956,10 +956,12 @@ fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSub
         Effect::Choose {
             choice_type: ChoiceType::CreatureType,
             persist: true,
+            ..
         } => Some(ChosenSubtypeKind::CreatureType),
         Effect::Choose {
             choice_type: ChoiceType::BasicLandType,
             persist: true,
+            ..
         } => Some(ChosenSubtypeKind::BasicLandType),
         _ => def
             .sub_ability
@@ -2974,6 +2976,7 @@ pub(crate) fn parse_oracle_ir(
                 Effect::Choose {
                     choice_type: ChoiceType::color(),
                     persist: true,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -5166,6 +5169,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::Keyword { options },
                     persist: true,
+                    ..
                 } if options.as_slice()
                     == [Keyword::Hexproof, Keyword::Indestructible]
             )),
@@ -16608,6 +16612,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::CardName,
                     persist: true,
+                    ..
                 }
             ),
             "expected Choose{{CardName, persist:true}}, got {:?}",
@@ -18302,6 +18307,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
                 persist: true,
+                ..
             }
         ));
         let counter = execute

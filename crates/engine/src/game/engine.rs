@@ -5039,6 +5039,31 @@ pub(super) fn begin_pending_trigger_target_selection(
             );
             super::triggers::restore_trigger_event_context(state, context_snapshot);
 
+            // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at
+            // random" modal triggers (Cult of Skaro) are resolved inline by
+            // `dispatch_pending_trigger_context` via `state.rng` — they clear
+            // `modal` before this re-entry surfaces a `WaitingFor`, so reaching
+            // here with a `Random` selection means the dispatcher was bypassed.
+            // This router cannot thread `events` into the random resolver, so
+            // emitting `AbilityModeChoice` would (wrongly) prompt the controller.
+            // Drop the trigger defensively instead of prompting incorrectly.
+            debug_assert!(
+                !modal.selection.is_random(),
+                "random modal trigger reached begin_pending_trigger_target_selection; \
+                 dispatch_pending_trigger_context must resolve it inline",
+            );
+            if modal.selection.is_random() {
+                if let Some(entry_id) = state.pending_trigger_entry.take() {
+                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
+                        state.stack.pop_back();
+                        state.stack_paid_facts.remove(&entry_id);
+                        state.stack_trigger_event_batches.remove(&entry_id);
+                    }
+                }
+                state.pending_trigger = None;
+                return Ok(None);
+            }
+
             // CR 700.2b + CR 603.3c: All modes unavailable (previously chosen
             // OR no legal targets) — ability cannot remain on the stack.
             // Under the "push first, choose second" contract, the entry may
@@ -18389,6 +18414,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             Effect::Choose {
                 choice_type: crate::types::ability::ChoiceType::BasicLandType,
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )
         .sub_ability(AbilityDefinition::new(

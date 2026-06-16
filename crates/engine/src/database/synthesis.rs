@@ -8656,6 +8656,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
                 max: final_chapter.min(u8::MAX as u32) as u8,
             },
             persist: true,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -9325,6 +9326,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 Some(Effect::Choose {
                     choice_type: ChoiceType::Opponent { .. },
                     persist: true,
+                    ..
                 })
             )
     });
@@ -9341,6 +9343,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             Effect::Choose {
                 choice_type: ChoiceType::Opponent { restriction: None },
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )));
         face.replacements.push(protector_replacement);
@@ -9444,6 +9447,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
                 Some(Effect::Choose {
                     choice_type: ChoiceType::Opponent { .. },
                     persist: true,
+                    ..
                 }),
             )
             && r.execute
@@ -9465,6 +9469,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
         Effect::Choose {
             choice_type: ChoiceType::Opponent { restriction: None },
             persist: true,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
     )
     .sub_ability(tribute_stage);
@@ -16414,6 +16419,7 @@ mod siege_synthesis_tests {
             Some(Effect::Choose {
                 choice_type: ChoiceType::Opponent { .. },
                 persist: true,
+                ..
             })
         ));
     }
@@ -22221,6 +22227,7 @@ mod devour_synthesis_tests {
         let Effect::Choose {
             choice_type: ChoiceType::NumberRange { min, max },
             persist,
+            ..
         } = &*execute.effect
         else {
             panic!("read-ahead ETB should choose a number");
