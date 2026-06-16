@@ -1778,30 +1778,14 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
         let result: OracleResult<'_, &str> =
             terminated(take_until(suffix), tag(suffix)).parse(lower);
         if let Ok(("", filter_phrase)) = result {
-            // "card"/"cards" is zone-agnostic Oracle phrasing for any permanent
-            // card (e.g. "nonland card discarded this way"). Normalize to
-            // "permanent"/"permanents" so parse_type_phrase can extract the full
-            // filter (e.g. NonLand + Permanent) rather than leaving "card" as an
-            // unrecognised remainder and falling back to the unfiltered TrackedSetSize.
-            // Pattern 2a: terminated(take_until(suffix), tag(suffix)) consumes
-            // "cards"/"card" tail, yielding a prefix we can re-join with the
-            // permanent synonym.
-            let t = filter_phrase.trim();
-            let normalized;
-            let phrase = if let Ok(("", prefix)) =
-                terminated(take_until(" cards"), tag(" cards")).parse(t) as OracleResult<'_, &str>
-            {
-                normalized = format!("{prefix} permanents");
-                &normalized as &str
-            } else if let Ok(("", prefix)) =
-                terminated(take_until(" card"), tag(" card")).parse(t) as OracleResult<'_, &str>
-            {
-                normalized = format!("{prefix} permanent");
-                &normalized as &str
-            } else {
-                t
-            };
-            let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(phrase);
+            // CR 700.1: "card" is the zone-agnostic head noun for the discarded
+            // members ("nonland card discarded this way"). parse_type_phrase maps
+            // it to TypeFilter::Card (matches every card type), so "nonland card"
+            // yields [Card, Non(Land)] — counting nonland instants/sorceries too.
+            // It must NOT be narrowed to TypeFilter::Permanent: a nonland instant
+            // discarded by Seasoned Pyromancer is still counted (CR 701.9a).
+            let (filter, remainder) =
+                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
             if remainder.trim().is_empty() {
                 return Some((Some(filter), cause));
             }
@@ -5895,11 +5879,12 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.9a: "nonland card discarded this way" (Seasoned
-    /// Pyromancer) must emit `FilteredTrackedSetSize` with a NonLand filter,
-    /// not the plain `TrackedSetSize` fallback. Without the "card" → "permanent"
-    /// normalisation in `parse_destroyed_or_sacrificed_this_way_filter`, the
-    /// "card" tail is left as an unrecognised remainder and the filter is dropped,
-    /// so discarding 1 land + 1 nonland would create 2 tokens instead of 1.
+    /// Pyromancer) must emit `FilteredTrackedSetSize` with a `[Card, NonLand]`
+    /// filter, not the plain `TrackedSetSize` fallback. The filter must include
+    /// `TypeFilter::Card` (every card type) and `Non(Land)`, and must NOT be
+    /// narrowed to `TypeFilter::Permanent` — a discarded nonland INSTANT or
+    /// SORCERY is still a nonland card and must be counted, so the token count
+    /// equals every nonland card discarded (CR 701.9a).
     /// (Primary engine fix for issue #740 is in `ability_or_branch_references_tracked_set`.)
     #[test]
     fn nonland_card_discarded_this_way_uses_filtered_tracked_set_nonland() {
@@ -5917,6 +5902,12 @@ mod tests {
                             tf.type_filters
                                 .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
                             "filter must include NonLand; got {tf:?}"
+                        );
+                        // CR 701.9a: must NOT narrow to Permanent — a nonland
+                        // instant/sorcery discarded by Seasoned Pyromancer counts.
+                        assert!(
+                            !tf.type_filters.contains(&TypeFilter::Permanent),
+                            "filter must not exclude nonland instants/sorceries; got {tf:?}"
                         );
                     }
                     other => panic!("expected Typed filter, got {other:?}"),

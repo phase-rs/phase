@@ -7172,6 +7172,30 @@ mod tests {
     }
 
     #[test]
+    fn repeat_for_tracked_set_marks_ability_as_referencing_tracked_set() {
+        // Issue #740 (Seasoned Pyromancer): "for each nonland card discarded this
+        // way, create a token" carries its loop count as `repeat_for: TrackedSetSize`
+        // on the ResolvedAbility, NOT inside Effect. The publish predicate must
+        // detect it so the forced-discard path (no WaitingFor pause) still publishes
+        // the tracked set; without this check the token loop sees size 0.
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        // Control: a plain GainLife with no `repeat_for` references no tracked set.
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+        // With a tracked-set loop count, the predicate must return true.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    #[test]
     fn optional_trigger_prompt_includes_may_trigger_key() {
         let mut state = GameState::new_two_player(42);
         let source_id = ObjectId(100);
