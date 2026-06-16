@@ -26,8 +26,8 @@ use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
     CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
-    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -825,6 +825,56 @@ fn any_ability_has_dealt_damage_this_way_life_lock(parsed: &ParsedAbilities) -> 
             t.execute
                 .as_deref()
                 .is_some_and(def_tree_has_parent_target_cant_gain_life)
+        })
+}
+
+fn draw_uses_event_context_amount(count: &QuantityExpr) -> bool {
+    matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    )
+}
+
+/// CR 608.2c + CR 119.5: Optional `ExchangeLifeTotals` followed by a draw whose
+/// count is `EventContextAmount` — Mister Negative's "If you lost life this way,
+/// draw that many cards" rider. The chained draw count IS the "that many cards"
+/// anaphor scoped to the exchange resolution.
+fn def_tree_has_exchange_life_event_context_draw(def: &AbilityDefinition) -> bool {
+    if matches!(*def.effect, Effect::ExchangeLifeTotals { .. }) {
+        if let Some(sub) = &def.sub_ability {
+            if let Effect::Draw { count, .. } = &*sub.effect {
+                if draw_uses_event_context_amount(count) {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(sub) = &def.sub_ability {
+        if def_tree_has_exchange_life_event_context_draw(sub) {
+            return true;
+        }
+    }
+    if let Some(else_ab) = &def.else_ability {
+        if def_tree_has_exchange_life_event_context_draw(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_exchange_life_event_context_draw)
+}
+
+fn any_ability_has_exchange_life_event_context_draw(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_exchange_life_event_context_draw)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_exchange_life_event_context_draw)
         })
 }
 
@@ -1872,6 +1922,16 @@ fn detect_condition_if(
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 608.2c + CR 119.5: Optional exchange-life totals followed by "If you
+    // lost life this way, draw that many cards" (Mister Negative). The draw
+    // sub_ability's EventContextAmount count is the "that many cards" anaphor
+    // scoped to the exchange resolution; the exchange→draw chain IS the
+    // representation, not a separate AbilityCondition leaf.
+    if stripped.contains("if you lost life this way")
+        && any_ability_has_exchange_life_event_context_draw(parsed)
+    {
+        return;
+    }
     // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
     // the "if you do" is the optional-exile linkage, represented by the
     // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
@@ -3520,6 +3580,21 @@ mod tests {
             &["Creature"],
         );
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
+    }
+
+    /// CR 608.2c + CR 119.5: Mister Negative's optional exchange-life rider
+    /// followed by "If you lost life this way, draw that many cards" is encoded
+    /// as ExchangeLifeTotals chained to Draw(EventContextAmount).
+    #[test]
+    fn condition_if_accepts_exchange_life_lost_draw_rider() {
+        let mister = parse_named(
+            "Vigilance, lifelink\nDarkforce Inversion — When Mister Negative enters, \
+             you may exchange life totals with target opponent. If you lost life this way, \
+             draw that many cards.",
+            "Mister Negative",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&mister, "Condition_If"));
     }
 
     /// CR 702.170c + CR 608.2c: "You may exile a card … If you do, it becomes

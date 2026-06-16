@@ -17246,6 +17246,46 @@ mod tests {
         }));
     }
 
+    /// Cards newly supported by ExchangeLifeTotals must not introduce swallowed-clause
+    /// diagnostics (coverage ratchet).
+    #[test]
+    fn exchange_life_totals_gained_cards_have_no_swallowed_clause() {
+        let cases = [
+            (
+                "Soul Conduit",
+                "{6}, {T}: Two target players exchange life totals.",
+                &["Artifact"][..],
+            ),
+            (
+                "Mirror Universe",
+                "{T}, Sacrifice this artifact: Exchange life totals with target opponent. Activate only during your upkeep.",
+                &["Artifact"][..],
+            ),
+            (
+                "Magus of the Mirror",
+                "{T}, Sacrifice this creature: Exchange life totals with target opponent. Activate only during your upkeep.",
+                &["Creature"][..],
+            ),
+            (
+                "Cliffside Market",
+                "When you planeswalk to Cliffside Market and at the beginning of your upkeep, you may exchange life totals with target player.\nWhenever chaos ensues, exchange control of two target permanents that share a card type.",
+                &["Plane"][..],
+            ),
+        ];
+        for (name, oracle, types) in cases {
+            let parsed = parse(oracle, name, &[], types, &[]);
+            let swallowed: Vec<_> = parsed
+                .parse_warnings
+                .iter()
+                .filter(|w| w.category_name() == "swallowed-clause")
+                .collect();
+            assert!(
+                swallowed.is_empty(),
+                "{name}: unexpected swallowed-clause warnings: {swallowed:?}"
+            );
+        }
+    }
+
     #[test]
     fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
         let oracle =
