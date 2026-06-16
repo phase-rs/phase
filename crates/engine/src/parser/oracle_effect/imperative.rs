@@ -7021,24 +7021,34 @@ fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
 
 /// CR 701.12a: "exchange life totals with target opponent/player" and "two target
 /// players exchange life totals". Returns the two participant filters.
+///
+/// Uses `all_consuming` so compound lines (Profane Transfusion, Mister Negative)
+/// do not partially match and leave trailing clauses as swallowed diagnostics.
 pub(super) fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFilter)> {
-    let trimmed = lower.trim_end_matches(['.', ';']).trim();
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exchange life totals with ").parse(trimmed)
+    let trimmed = lower.trim();
+    if let Ok((_, filter)) = all_consuming(terminated(
+        preceded(
+            tag::<_, _, OracleError<'_>>("exchange life totals with "),
+            alt((
+                value(
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    tag::<_, _, OracleError<'_>>("target opponent"),
+                ),
+                value(TargetFilter::Player, tag("target player")),
+            )),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(trimmed)
     {
-        let (_, filter) = alt((
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag::<_, _, OracleError<'_>>("target opponent"),
-            ),
-            value(TargetFilter::Player, tag("target player")),
-        ))
-        .parse(rest.trim())
-        .ok()?;
         return Some((TargetFilter::Controller, filter));
     }
-    if tag::<_, _, OracleError<'_>>("two target players exchange life totals")
-        .parse(trimmed)
-        .is_ok()
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("two target players exchange life totals"),
+        opt(tag(".")),
+    ))
+    .parse(trimmed)
+    .is_ok()
     {
         return Some((TargetFilter::Player, TargetFilter::Player));
     }
@@ -13369,7 +13379,7 @@ mod tests {
         assert_eq!(
             replace_fixed_quantity(QuantityExpr::Fixed { value: 3 }, for_each.clone()),
             QuantityExpr::Multiply {
-                factor: 3,
+                factor: 3,`
                 inner: Box::new(for_each.clone()),
             },
         );
