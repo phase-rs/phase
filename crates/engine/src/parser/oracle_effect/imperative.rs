@@ -2790,6 +2790,51 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
     })
 }
 
+/// CR 101.4 + CR 608.2c: "For each player, choose a `<filter>` card in that
+/// player's `<zone>`" — the spell's controller picks one card from EVERY
+/// player's zone in APNAP order, accumulating the picks for a downstream "put
+/// those cards onto the battlefield" reanimation. The leading "for each player,"
+/// is stripped here (the chain splitter keeps the prefix attached because the
+/// comma-delimited body is the clause), then the shared `try_parse_choose_from_zone`
+/// combinator extracts the filter + zone from "that player's `<zone>`"; the
+/// per-player iteration is encoded by overriding `zone_owner` to `EachPlayer`.
+/// Building block for Breach the Multiverse (issue #3302).
+pub(super) fn parse_for_each_player_choose_from_zone(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (_, body) = preceded(
+        alt((tag::<_, _, E>("for each player, "), tag("for each player "))),
+        rest,
+    )
+    .parse(lower)
+    .ok()?;
+
+    // The body's zone reference is "that player's <zone>", which
+    // `parse_choose_zone_connector` maps to `TargetedPlayer`; the "for each
+    // player" prefix promotes it to per-player iteration (`EachPlayer`).
+    match try_parse_choose_from_zone(body, ctx)? {
+        ChooseImperativeAst::FromZone {
+            count,
+            zones,
+            zone_owner: ZoneOwner::TargetedPlayer,
+            filter,
+            chooser,
+            up_to,
+        } => Some(ChooseImperativeAst::FromZone {
+            count,
+            zones,
+            zone_owner: ZoneOwner::EachPlayer,
+            filter,
+            chooser,
+            up_to,
+        }),
+        _ => None,
+    }
+}
+
 fn strip_choose_article(input: &str) -> Option<&str> {
     type E<'a> = OracleError<'a>;
 
@@ -4001,7 +4046,11 @@ pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     }
 }
 
-pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
+pub(super) fn parse_put_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<PutImperativeAst> {
     tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
 
     if nom_on_lower(text, lower, |input| {
@@ -4131,18 +4180,36 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                 up_to,
                 enter_with_counters,
                 ..
-            } => Some(PutImperativeAst::ZoneChange {
-                origin,
-                destination,
-                target,
-                enters_under,
-                enter_tapped: enter_tapped.is_tapped(),
-                enter_transformed,
-                enters_attacking,
-                up_to,
-                choice_count: choice_count.map(Box::new),
-                enter_with_counters,
-            }),
+            } => {
+                // CR 608.2c + CR 400.7: A bare "put those cards / put them onto
+                // the battlefield" anaphor names a tracked set whose members
+                // never moved as part of THIS clause, so the clause text gives
+                // no origin (`infer_origin_zone` → None). When a producer clause
+                // earlier in the chain published the set's source zone
+                // (`pending_tracked_set_origin`, e.g. Breach the Multiverse's
+                // graveyard choose), bind it here. An impulse/cascade producer
+                // leaves the context unset, so the exile default in
+                // `lower_put_ast` still governs those reanimations.
+                let origin = match (&origin, &target) {
+                    (
+                        None,
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ) => ctx.pending_tracked_set_origin.or(origin),
+                    _ => origin,
+                };
+                Some(PutImperativeAst::ZoneChange {
+                    origin,
+                    destination,
+                    target,
+                    enters_under,
+                    enter_tapped: enter_tapped.is_tapped(),
+                    enter_transformed,
+                    enters_attacking,
+                    up_to,
+                    choice_count: choice_count.map(Box::new),
+                    enter_with_counters,
+                })
+            }
             _ => None,
         };
     }
@@ -4208,10 +4275,22 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             ) && enter_with_counters.is_empty()
             {
                 Effect::ChangeZoneAll {
-                    origin: Some(Zone::Exile),
+                    // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
+                    // defaults to scanning Exile (cascade, impulse-draw, and the
+                    // `ExiledBySource` class all leave their members in exile).
+                    // When the producer published a non-exile source zone
+                    // (Breach the Multiverse's graveyard choose stamps
+                    // `origin: Some(Graveyard)` in `parse_put_ast`), honor it so
+                    // the chosen cards are read out of the right zone.
+                    origin: origin.or(Some(Zone::Exile)),
                     destination,
                     target,
-                    enters_under: None,
+                    // CR 110.2a: Preserve the parsed entering-controller override
+                    // ("put those cards onto the battlefield UNDER YOUR CONTROL"
+                    // → Some(You) for Breach the Multiverse). Impulse/cascade
+                    // text carries no such phrase, so `enters_under` stays None
+                    // for them — identical to the prior hardcoded default.
+                    enters_under,
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enter_with_counters: vec![],
                     face_down_profile: None,
@@ -6688,13 +6767,13 @@ pub(super) fn parse_imperative_family_ast(
                 .or_else(|| {
                     parse_zone_counter_ast(text, lower, ctx)
                         .map(ImperativeFamilyAst::ZoneCounter)
-                        .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put))
+                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
                 })
         }
         // "put" → counter (step 2) first, then zone-change (step 12)
         "put" => parse_zone_counter_ast(text, lower, ctx)
             .map(ImperativeFamilyAst::ZoneCounter)
-            .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put)),
+            .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put)),
 
         // "remove" → "remove from combat" (CR 506.4) → counter removal (step 2)
         "remove" => parse_remove_from_combat_ast(lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through

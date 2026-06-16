@@ -4388,6 +4388,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         }
     }
 
+    // CR 101.4 + CR 608.2c: "For each player, choose a <filter> card in that
+    // player's <zone>" — the controller picks one card from EVERY player's zone
+    // (Breach the Multiverse). Lowers to `ChooseFromZone { zone_owner:
+    // EachPlayer }`, which parks one choice per player and accumulates the picks
+    // into the chain tracked set for a downstream "put those cards" reanimation.
+    if let Some(ast) = imperative::parse_for_each_player_choose_from_zone(tp.lower, ctx) {
+        return parsed_clause(imperative::lower_choose_ast(ast));
+    }
+
     if tp.lower == "start your engines!" || tp.lower == "start your engines" {
         return parsed_clause(Effect::StartYourEngines {
             player_scope: PlayerFilter::Controller,
@@ -15922,6 +15931,11 @@ pub(crate) fn parse_effect_chain_ir(
         .map_or(text, |(_, body)| *body);
     let full_text = text; // bind AFTER the strip so diagnostics track the parsed chunks
     ctx.effect_chain_full_lower = Some(full_text.to_ascii_lowercase());
+    // CR 608.2c: A tracked-set source-zone binding is scoped to the chain that
+    // publishes it. The per-chunk `chunk_ctx` re-seeds `pending_tracked_set_origin`
+    // from the `chain_pending_tracked_set_origin` loop-local (initialized to
+    // None) each iteration, so a binding from one chain can never leak into the
+    // next; the outer `ctx` field is left untouched here.
     // CR 701.42a: The meld effect clause "exile them, then meld them into
     // [result]" is a single atomic instruction whose ", then " comma would
     // otherwise be split into two clauses by `split_clause_sequence`. Intercept
@@ -16007,6 +16021,14 @@ pub(crate) fn parse_effect_chain_ir(
     // made in earlier chunks. Seeded into each `chunk_ctx` and read back after.
     let mut chain_chosen_player_count: u8 = 0;
     let mut chain_chosen_player_scope: Option<ControllerRef> = None;
+    // CR 608.2c + CR 400.7: Chain-spanning source zone of a "choose card(s) in
+    // <zone>" producer, carried to a following "put those cards onto the
+    // battlefield" consumer so the `TrackedSet` move scans the right zone
+    // (Breach the Multiverse: graveyard, not the impulse-default exile). Like
+    // the chosen-player locals, the per-chunk `chunk_ctx` is rebuilt fresh each
+    // iteration, so this loop-local seeds each `chunk_ctx.pending_tracked_set_origin`
+    // and is refreshed from the finalized `ChooseFromZone` clause after parse.
+    let mut chain_pending_tracked_set_origin: Option<crate::types::zones::Zone> = None;
     // CR 608.2e + CR 109.5: Sticky across chunks of a "For each opponent who
     // doesn't, <body>" decline-consequence sentence. Set true on the chunk that
     // carries the "for each opponent who doesn't" prefix; every chunk while
@@ -17503,6 +17525,11 @@ pub(crate) fn parse_effect_chain_ir(
             parent_target_available,
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
+            // CR 608.2c + CR 400.7: seed the zone published by an earlier
+            // "choose card(s) in <zone>" producer so this chunk's "put those
+            // cards onto the battlefield" anaphor binds its `TrackedSet` move to
+            // that origin instead of the impulse-default exile.
+            pending_tracked_set_origin: chain_pending_tracked_set_origin,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -17784,6 +17811,20 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 608.2c + CR 400.7: Carry the source zone of a "choose card(s) in
+        // <zone>" producer forward to the NEXT chunk. The chosen cards stay in
+        // that zone until a downstream "put those cards onto the battlefield"
+        // anaphor moves them, so the consumer's `TrackedSet` move must scan THIS
+        // zone — not the impulse-default exile. Derived from the finalized
+        // `ChooseFromZone` clause's own `zone`, so it covers the whole class
+        // (Breach the Multiverse and any future "choose in <zone> … put those
+        // cards" chain), never a single hardcoded card. Any chunk that is not
+        // itself such a producer clears it, so the binding never leaks past the
+        // immediately-following consumer.
+        chain_pending_tracked_set_origin = match &clause.effect {
+            Effect::ChooseFromZone { zone, .. } => Some(*zone),
+            _ => None,
+        };
         if let Some(target) = &for_each_reference_target {
             bind_search_library_for_each_antecedent(&mut clause.effect, target, &text_no_qty_lower);
         }

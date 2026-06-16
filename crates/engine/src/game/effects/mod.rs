@@ -488,6 +488,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if waits_for_resolution_choice(&state.waiting_for) {
         return;
     }
+    // CR 101.4 + CR 608.2c: A `ChooseFromZone { EachPlayer }` iteration that is
+    // still mid-flight (more players to prompt) must not let the parked
+    // continuation ("put those cards onto the battlefield") run until every
+    // player's graveyard pick has accumulated into the tracked set. The
+    // per-player drain re-parks the next prompt; this guard ensures the
+    // continuation waits for the whole sweep (Breach the Multiverse).
+    if state.pending_per_player_zone_choice.is_some() {
+        return;
+    }
     if let Some(cont) = state.pending_continuation.take() {
         let PendingContinuation { chain, parent_kind } = cont;
         let source_id = chain.source_id;

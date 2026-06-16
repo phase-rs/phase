@@ -57,6 +57,13 @@ pub enum ZoneOwner {
     /// pool is "permanents owned by the voter". For Battlefield, filters
     /// by `obj.owner` (ownership) rather than `obj.controller` (control).
     ScopedPlayer,
+    /// CR 101.4 + CR 608.2c: Every player owns a referenced zone, iterated in
+    /// APNAP order. A `ChooseFromZone { zone_owner: EachPlayer }` parks one
+    /// choice per player, drawing candidates from THAT player's zone, and
+    /// accumulates each pick into the resolution chain's tracked object set.
+    /// Building block for Breach the Multiverse ("For each player, choose a
+    /// creature or planeswalker card in that player's graveyard").
+    EachPlayer,
 }
 
 /// CR 101.4: Who selects permanents in a multi-player category choice effect
@@ -15275,6 +15282,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 101.4 + CR 608.2c (issue #3302): `ZoneOwner::EachPlayer` is a shared
+    /// serialized engine type (card-data export, WASM/IPC transport). A
+    /// serialize→deserialize round-trip must reproduce the exact variant so a
+    /// Breach the Multiverse `ChooseFromZone { zone_owner: EachPlayer }` survives
+    /// the wire. Every variant is checked so adding `EachPlayer` did not perturb
+    /// the others' tags.
+    #[test]
+    fn zone_owner_serde_round_trips_each_variant() {
+        for owner in [
+            ZoneOwner::Controller,
+            ZoneOwner::TargetedPlayer,
+            ZoneOwner::Opponent,
+            ZoneOwner::ScopedPlayer,
+            ZoneOwner::EachPlayer,
+        ] {
+            let json = serde_json::to_string(&owner).expect("ZoneOwner serializes");
+            let round_tripped: ZoneOwner =
+                serde_json::from_str(&json).expect("ZoneOwner deserializes");
+            assert_eq!(round_tripped, owner, "round-trip must preserve {owner:?}");
+        }
+        // The new variant's external tag is its identifier (default enum repr).
+        assert_eq!(
+            serde_json::to_string(&ZoneOwner::EachPlayer).unwrap(),
+            "\"EachPlayer\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ZoneOwner>("\"EachPlayer\"").unwrap(),
+            ZoneOwner::EachPlayer
+        );
+    }
 
     /// #506: `AbilityCost::consumes_source` classifies a self-discard cost
     /// (cycling, Channel) as source-consuming so the UI confirms a lone such

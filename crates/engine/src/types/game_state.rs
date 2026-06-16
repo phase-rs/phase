@@ -1047,6 +1047,33 @@ pub struct PendingChooseOneOf {
     pub remaining_players: Vec<PlayerId>,
 }
 
+/// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { zone_owner: EachPlayer }`
+/// iteration state. A single chooser (the spell's controller) picks one card
+/// from EACH player's zone in APNAP order; this stashes the players not yet
+/// prompted while the current player's `WaitingFor::ChooseFromZoneChoice` is
+/// outstanding. Created when the first player's choice is parked, drained after
+/// each pick accumulates into the resolution chain's tracked set, and disposed
+/// once every player has been prompted — at which point the parked
+/// `pending_continuation` (e.g. "put those cards onto the battlefield") runs.
+/// Building block for Breach the Multiverse.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPerPlayerZoneChoice {
+    /// The `Effect::ChooseFromZone` ability whose per-player body repeats. Its
+    /// `zone`/`filter`/`count`/`chooser` describe each player's prompt.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet prompted, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// CR 603.7 + CR 608.2c: Whether a pick from THIS per-player iteration has
+    /// already started its fresh chosen-card tracked set. The first non-empty
+    /// pick must START a fresh set (so the chosen cards do NOT merge with an
+    /// earlier producer's set — e.g. Breach the Multiverse's preceding mill,
+    /// whose milled cards would otherwise reanimate alongside the chosen ones);
+    /// every later pick EXTENDS that fresh set. `false` until the first pick is
+    /// published, then `true` for the remainder of the iteration.
+    #[serde(default)]
+    pub accumulated: bool,
+}
+
 /// CR 701.38d + CR 608.2c: Stores the remaining voters whose per-ballot
 /// interactive body has not yet been resolved. Created when the first
 /// ballot's ChooseFromZone parks WaitingFor::ChooseFromZoneChoice; drained
@@ -6103,6 +6130,13 @@ pub struct GameState {
     /// before `pending_repeat_iteration`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
+    /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
+    /// iteration paused by the current player's interactive choice. Drained
+    /// alongside `pending_vote_ballot_iteration`, BEFORE `pending_continuation`
+    /// runs, so every player's graveyard pick accumulates into the chain's
+    /// tracked set before "put those cards onto the battlefield" resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
 
     /// CR 122.5: Pending atomic counter moves selected during a resolution-time
     /// distribution prompt. Drained before normal pending continuations so
@@ -7006,6 +7040,7 @@ impl GameState {
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
+            pending_per_player_zone_choice: None,
             pending_counter_moves: None,
             pending_batch_deliveries: None,
             pending_counter_additions: None,
@@ -7475,6 +7510,7 @@ impl PartialEq for GameState {
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
+            && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
