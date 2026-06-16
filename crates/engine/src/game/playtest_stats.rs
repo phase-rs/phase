@@ -218,8 +218,9 @@ pub fn run_simulation(deck: &[CardFace], config: &SimulationConfig) -> Simulatio
                         .collect();
                     spell_slots.sort_by(|a, b| {
                         b.face
-                            .mana_value
-                            .partial_cmp(&a.face.mana_value)
+                            .mana_cost
+                            .mana_value()
+                            .partial_cmp(&a.face.mana_cost.mana_value())
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });
                     spell_slots.iter().map(|c| c.id).take(to_bottom).collect()
@@ -262,9 +263,9 @@ pub fn run_simulation(deck: &[CardFace], config: &SimulationConfig) -> Simulatio
                             .collect();
                         slots.sort_by(|a, b| {
                             b.face
-                                .mana_value
-                                .partial_cmp(&a.face.mana_value)
-                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .mana_cost
+                                .mana_value()
+                                .cmp(&a.face.mana_cost.mana_value())
                         });
                         slots.iter().map(|c| c.id).take(to_discard).collect()
                     };

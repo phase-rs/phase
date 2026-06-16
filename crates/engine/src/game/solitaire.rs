@@ -206,7 +206,7 @@ impl PlaytestSession {
     }
 
     /// Return true if this card face represents a land (CR 305.1).
-    fn is_land(face: &CardFace) -> bool {
+    pub(crate) fn is_land(face: &CardFace) -> bool {
         face.card_type.core_types.contains(&CoreType::Land)
     }
 
@@ -216,7 +216,7 @@ impl PlaytestSession {
         if Self::is_land(face) {
             return true;
         }
-        let oracle = face.oracle_text.to_lowercase();
+        let oracle = face.oracle_text.as_deref().unwrap_or("").to_lowercase();
         oracle.contains("add {") || oracle.starts_with("{t}: add")
     }
 
@@ -241,7 +241,7 @@ impl PlaytestSession {
             .hand
             .iter()
             .filter(|c| {
-                !Self::is_land(&c.face) && c.face.mana_value.unwrap_or(0) as usize <= available_mana
+                !Self::is_land(&c.face) && c.face.mana_cost.mana_value() as usize <= available_mana
             })
             .count();
         TurnSnapshot {
@@ -568,7 +568,7 @@ impl PlaytestSession {
         let mana = self.available_mana();
         self.hand
             .iter()
-            .filter(|c| !Self::is_land(&c.face) && c.face.mana_value.unwrap_or(0) as usize <= mana)
+            .filter(|c| !Self::is_land(&c.face) && c.face.mana_cost.mana_value() as usize <= mana)
             .map(|c| c.id)
             .collect()
     }
