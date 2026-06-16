@@ -1549,83 +1549,7 @@ pub(super) fn strip_optional_effect_prefix(
     Option<PlayerFilter>,
     String,
 ) {
-    let lower = text.to_lowercase();
-    // CR 608.2d + CR 115.7: "you may choose new targets for …" is a retarget
-    // effect, not a generic optional wrapper. Only that narrow class keeps the
-    // full surface form; other specialized `you may cast/play/…` clauses still
-    // peel here so `optional: true` is stamped (Beseech the Mirror, etc.).
-    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
-        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(input)
-    }) {
-        let rest_lower = rest.to_lowercase();
-        if crate::parser::clause_shell::is_specialized_you_may_retarget_phrase(&rest_lower) {
-            return (false, None, None, text.to_string());
-        }
-        return (true, None, None, rest.to_string());
-    }
-    // CR 608.2d: "each opponent may" — per-opponent optional effect.
-    // "any opponent may" — first-accept-wins opponent-choice optional effect.
-    if let Some(((scope, player_scope), rest)) = nom_on_lower(text, &lower, |input| {
-        alt((
-            value(
-                (None, Some(PlayerFilter::Opponent)),
-                tag("each opponent may "),
-            ),
-            value(
-                (
-                    Some(crate::types::ability::OpponentMayScope::AnyOpponent),
-                    None,
-                ),
-                tag("any opponent may "),
-            ),
-            // CR 608.2d + CR 101.4: "any player may" — every player INCLUDING the
-            // controller is offered in APNAP order; first accept wins (group
-            // bargain / punisher cards: Browbeat, Argothian Wurm, …). Diverges
-            // from "any opponent may " at byte 5 — no ordering hazard.
-            value(
-                (
-                    Some(crate::types::ability::OpponentMayScope::AnyPlayer),
-                    None,
-                ),
-                tag("any player may "),
-            ),
-            // CR 608.2c: "the first player may" — Oath of Mages and analogous
-            // cross-clause patterns where the chooser of a prior sentence
-            // (= TriggeringPlayer for upkeep/event triggers) is invited to
-            // take an optional action in a later sentence. Marks the chunk
-            // optional and scopes the actor to the triggering player.
-            value(
-                (None, Some(PlayerFilter::TriggeringPlayer)),
-                tag("the first player may "),
-            ),
-            // CR 608.2d: "Target opponent may have ~ deal … to them" (Risk Factor).
-            value(
-                (None, Some(PlayerFilter::Opponent)),
-                tag("target opponent may "),
-            ),
-            // CR 506.2 + CR 608.2d + CR 121.3a: "Defending player may have you
-            // draw a card" (Shakedown Heavy) — on an attack trigger, the
-            // defending player is the may-actor who decides whether the
-            // controller performs the granted action. CR 121.3a: the chooser
-            // need not be the player who draws. Parallels the targeted-opponent
-            // arm above; the actor scope is the attack's defending player.
-            value(
-                (None, Some(PlayerFilter::DefendingPlayer)),
-                tag("defending player may "),
-            ),
-            // CR 608.2d: "That creature's controller may have this artifact deal …"
-            // (Requiem Monolith) — the targeted creature's controller chooses.
-            value(
-                (None, Some(PlayerFilter::ParentObjectTargetController)),
-                tag("that creature's controller may "),
-            ),
-        ))
-        .parse(input)
-    }) {
-        (true, scope, player_scope, rest.to_string())
-    } else {
-        (false, None, None, text.to_string())
-    }
+    crate::parser::clause_shell::peel_optional_slots(text)
 }
 
 /// CR 107.1: Detect and strip a trailing "a number of times equal to the
@@ -1664,7 +1588,7 @@ fn is_chain_veil_for_each_grant(lower: &str) -> bool {
     )
 }
 
-pub(super) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
         let rest_lower = &lower[text.len() - rest.len()..];
@@ -1857,7 +1781,7 @@ pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>,
 /// CR 609.3 "do as much as possible" rule. Unified with `strip_for_each_prefix`
 /// at the chain level so the base action is parsed normally and the resolver
 /// loops it N times.
-pub(super) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
+pub(crate) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     let suffixes: &[(&str, i32)] = &[
         (" twice", 2),
@@ -1901,7 +1825,7 @@ pub(super) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, St
 /// "Each opponent discards a card" → (Some(Opponent), "discard a card")
 /// "Each other player sacrifices a creature" → (Some(Opponent), "sacrifice a creature")
 /// "Each player draws a card" → (Some(All), "draw a card")
-pub(super) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
+pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let (scope, stripped) = strip_linked_exile_owner_subject(text);
     if scope.is_some() {
         return (scope, stripped);
@@ -1926,6 +1850,18 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     let Some((scope, rest)) = scope_rest else {
         return (None, text.to_string());
     };
+
+    // CR 611.2a + CR 400.7i: "each player may play/cast …" is a per-grantee
+    // casting permission (`try_parse_per_grantee_play_grant`), not a player-scoped
+    // imperative subject. Stripping "each player " leaves "may play …", which
+    // misroutes to `Effect::CastFromZone` instead of `GrantCastingPermission`.
+    let rest_lower = rest.trim_start().to_lowercase();
+    if alt((tag::<_, _, OracleError<'_>>("may play "), tag("may cast ")))
+        .parse(rest_lower.as_str())
+        .is_ok()
+    {
+        return (None, text.to_string());
+    }
 
     // CR 109.4 + CR 109.5: A "who controls [comparator] [count] [type-phrase]"
     // relative clause restricts the player set to those whose controlled-permanent

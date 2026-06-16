@@ -23616,6 +23616,233 @@ mod afflict_training_poisonous_synthesis_tests {
         assert!(face.triggers.is_empty());
     }
 
+    // ---- Afflict runtime (CR 702.130a) ----
+
+    #[test]
+    fn afflict_resolution_defending_player_loses_n_life() {
+        // CR 702.130a full-pipeline: synthesized Afflict trigger fires on
+        // BlockersDeclared, lands on the stack, and resolve_top makes the
+        // defending player lose N life.  DefendingPlayer resolves from
+        // state.combat.attackers by source_id (CR 506.3d).
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::printed_cards::apply_card_face_to_object;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        // Build Afflict(2) creature and run the full synthesis pipeline.
+        let mut face = CardFace {
+            name: "Ammit Eternal".to_string(),
+            power: Some(PtValue::Fixed(3)),
+            toughness: Some(PtValue::Fixed(3)),
+            keywords: vec![Keyword::Afflict(2)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareBlockers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let p1_starting_life = state.players[1].life;
+        assert_eq!(p1_starting_life, 20, "sanity: two-player game starts at 20");
+
+        // Place attacker with synthesized Afflict triggers.
+        let attacker_card = CardId(state.next_object_id);
+        let attacker_id = create_object(
+            &mut state,
+            attacker_card,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            apply_card_face_to_object(obj, &face);
+        }
+
+        // CR 506.3d: DefendingPlayer resolves from state.combat.attackers.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // Place a blocker on P1's side.
+        let blocker_card = CardId(state.next_object_id);
+        let blocker_id = create_object(
+            &mut state,
+            blocker_card,
+            PlayerId(1),
+            "Chump Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            state
+                .objects
+                .get_mut(&blocker_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // CR 509.1: BlockersDeclared event fires; Afflict trigger is collected.
+        process_triggers(
+            &mut state,
+            &[GameEvent::BlockersDeclared {
+                assignments: vec![(blocker_id, attacker_id)],
+            }],
+        );
+
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(&e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "CR 702.130a: Afflict trigger must land on the stack after becoming blocked"
+        );
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        // CR 702.130a: defending player (P1) loses N life; controller (P0) is unaffected.
+        assert_eq!(
+            state.players[1].life,
+            p1_starting_life - 2,
+            "CR 702.130a: defending player must lose 2 life (Afflict 2)"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "attacker's controller does not lose life"
+        );
+    }
+
+    #[test]
+    fn afflict_multiple_instances_each_trigger_independently() {
+        // CR 702.130b: each Afflict instance generates a separate trigger.
+        // Two Afflict 2 instances on one creature → two pending triggers collected
+        // (proven by OrderTriggers prompt with 2 entries) → both dispatch to the
+        // stack → 4 life lost total.
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::printed_cards::apply_card_face_to_object;
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        let mut face = CardFace {
+            name: "Double-Cursed Horror".to_string(),
+            power: Some(PtValue::Fixed(4)),
+            toughness: Some(PtValue::Fixed(4)),
+            keywords: vec![Keyword::Afflict(2), Keyword::Afflict(2)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareBlockers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let attacker_card = CardId(state.next_object_id);
+        let attacker_id = create_object(
+            &mut state,
+            attacker_card,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            apply_card_face_to_object(obj, &face);
+        }
+
+        // CR 506.3d: both triggers share the same attacker entry; DefendingPlayer
+        // resolves to P1 for each.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let blocker_card = CardId(state.next_object_id);
+        let blocker_id = create_object(
+            &mut state,
+            blocker_card,
+            PlayerId(1),
+            "Chump Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&blocker_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::BlockersDeclared {
+                assignments: vec![(blocker_id, attacker_id)],
+            }],
+        );
+
+        // CR 603.3b: two triggers from the same controller require ordering.
+        // The WaitingFor::OrderTriggers prompt proves both were collected.
+        let trigger_count = match &state.waiting_for {
+            WaitingFor::OrderTriggers { triggers, .. } => triggers.len(),
+            _ => {
+                // No ordering needed (single-controller fast path): check stack directly.
+                state
+                    .stack
+                    .iter()
+                    .filter(|e| matches!(&e.kind, StackEntryKind::TriggeredAbility { .. }))
+                    .count()
+            }
+        };
+        assert_eq!(
+            trigger_count, 2,
+            "CR 702.130b: two Afflict 2 instances must produce two collected triggers"
+        );
+
+        // Dispatch any pending ordering choice, then resolve both stack entries.
+        if matches!(&state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::OrderTriggers { order: vec![0, 1] },
+            )
+            .unwrap();
+        }
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        assert_eq!(
+            state.players[1].life, 16,
+            "CR 702.130b: two Afflict 2 triggers each cause 2 life loss = 4 total"
+        );
+    }
+
     // ---- Training (CR 702.149a) ----
 
     #[test]

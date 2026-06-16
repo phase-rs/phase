@@ -3433,12 +3433,11 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
-    // Phase 2 PoC: peel structural slots off the head of the clause before
-    // body parsing. The recursive shell strips slot-bearing prefixes
-    // (currently just "you may " for the Optional slot) and accumulates them
+    // Phase 2: peel structural slots off the head of the clause before
+    // body parsing. The recursive shell strips slot-bearing prefixes/suffixes
+    // (optional, opponent-may, condition, duration, for-each, player-scope)
     // into a `ClauseContext`. The bare imperative remainder is parsed by the
-    // existing pipeline; the context is applied onto the result before
-    // return so no slot is silently dropped.
+    // existing pipeline; the context is applied onto the result before return.
     //
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
@@ -17229,7 +17228,7 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text, None)
         } else {
             let reference_target = for_each_clause_target_controller_filter(&text);
-            let (repeat_for, text) = strip_for_each_prefix(&text);
+            let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
             let reference_target = repeat_for.as_ref().and(reference_target);
             (repeat_for, text, reference_target)
         };
@@ -17241,7 +17240,8 @@ pub(crate) fn parse_effect_chain_ir(
         };
         // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
-            let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
+            let (repeat_count, stripped_text) =
+                super::clause_shell::peel_repeat_count_suffix(&text_without_where_x);
             if repeat_count.is_some() {
                 (repeat_count, stripped_text)
             } else {
@@ -17256,7 +17256,7 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = strip_player_scope_subject(&text);
+        let (player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -19091,15 +19091,42 @@ pub(super) fn counter_unless_pay_modifier(cost: AbilityCost) -> UnlessPayModifie
     }
 }
 
-/// CR 118.12: Parse "unless its controller pays {X}" from counter/trigger text.
+/// CR 118.12 / CR 119.4 / CR 608.2c: Parse "unless its controller pays {X} /
+/// pays N life / sacrifices a [filter] / discards a card [or ...]" from
+/// counter/trigger text.
+///
 /// Returns `AbilityCost::Mana` for static costs ({3}, {1}{U}),
 /// `AbilityCost::ManaDynamic` for "pays {X}, where X is this creature's power",
-/// and `AbilityCost::PayEnergy` for "{E}{E}" patterns.
+/// `AbilityCost::PayEnergy` for "{E}{E}" patterns, and — for the **non-mana**
+/// forms — the corresponding `PayLife` / `Sacrifice` / `Discard` (or `OneOf`
+/// disjunction) cost. The non-mana shapes are delegated to the single
+/// non-mana unless-cost authority (`oracle_trigger::parse_unless_they_alt_cost_chain`)
+/// so counter spells and triggered abilities recognize the same cost grammar.
 pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
-    // Find "unless" followed by a subject and "pays {cost}"
+    // Find "unless" followed by a subject ("its controller", "that player", …).
     let after_unless = strip_after(lower, "unless ")?;
-    // Skip the subject ("its controller", "that player", "he or she", etc.)
-    let cost_str = strip_after(after_unless, "pays ")?;
+    // CR 117.3: the mana / energy / {X} forms require the "pays " verb. Try
+    // them first so existing behavior is preserved exactly for mana costs.
+    if let Some(cost_str) = strip_after(after_unless, "pays ") {
+        if let Some(cost) = parse_unless_mana_or_energy_payment(cost_str) {
+            return Some(cost);
+        }
+    }
+    // CR 118.12 / CR 119.4 / CR 608.2c: non-mana alternative costs — "pays N
+    // life", "sacrifices a [filter]", "discards a card", and `or`-disjunctions
+    // thereof. Normalize the counter subject to the "they" pronoun the shared
+    // authority anchors on, then delegate. The payer is fixed to the targeted
+    // spell's controller by `counter_unless_pay_modifier` at the call site, so
+    // rewriting the recognized subject does not affect resolution.
+    let normalized = normalize_counter_unless_subject(after_unless)?;
+    crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(&normalized)
+}
+
+/// CR 117.3 + CR 107.14: Parse the mana / energy / dynamic-{X} forms of an
+/// "unless … pays …" alternative cost. Operates on the text immediately after
+/// the "pays " verb. Returns `None` for non-mana shapes (life / sacrifice /
+/// discard), which the caller routes to the shared non-mana authority.
+fn parse_unless_mana_or_energy_payment(cost_str: &str) -> Option<AbilityCost> {
     // CR 107.14 + CR 202.3: dynamic energy unless-cost — checked before the
     // brace-run truncation below, which collapses "an amount of {e} …" to "an".
     if let Some(amount) = parse_dynamic_energy_unless_cost(cost_str) {
@@ -19146,6 +19173,29 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
         return None;
     }
     Some(AbilityCost::Mana { cost })
+}
+
+/// CR 118.12 / CR 119.4 / CR 608.2c: Normalize the subject of a counter
+/// spell's non-mana "unless" cost to the "they" pronoun recognized by the
+/// shared non-mana cost authority (`parse_unless_they_alt_cost_chain`).
+///
+/// Counter spells phrase the alternative-cost payer as "its controller" (the
+/// targeted spell's controller); the shared chain combinator anchors on
+/// "they" / "that player" / "that opponent". Rewriting the recognized subject
+/// prefix to "they " lets the single authority parse life / sacrifice /
+/// discard (and `or`-disjunctions) without duplicating the verb dispatch here.
+/// Returns `None` when no recognized subject is present.
+fn normalize_counter_unless_subject(after_unless: &str) -> Option<String> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("its controller "),
+        tag("their controller "),
+        tag("that player "),
+        tag("that opponent "),
+        tag("they "),
+    ))
+    .parse(after_unless)
+    .ok()?;
+    Some(format!("they {rest}"))
 }
 
 /// CR 118.12a: Tail of "deal N damage to them" unless-cost alternatives.
@@ -24722,6 +24772,87 @@ mod tests {
                 }
             ),
             "token count should be a Ref quantity, not Fixed"
+        );
+    }
+
+    /// CR 701.9 + CR 603.4: "draw a card for each card you've discarded this
+    /// turn" must produce a dynamic Draw count referencing the controller's
+    /// per-turn discard tally, not a dropped `Fixed(1)`.
+    ///
+    /// Class: Misty Knight, Green Goblin (Revenant), Astonishing Spider-Man,
+    /// and other "for each card you've discarded this turn" draws.
+    #[test]
+    fn for_each_cards_discarded_this_turn_draw_count_replaced() {
+        let e = parse_effect("draw a card for each card you've discarded this turn");
+        match e {
+            Effect::Draw { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                "draw count must scale with cards discarded this turn, not Fixed(1)"
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+    }
+
+    /// The "you have discarded" surface variant must resolve identically.
+    #[test]
+    fn for_each_cards_discarded_this_turn_long_form_draw_count_replaced() {
+        let e = parse_effect("draw a card for each card you have discarded this turn");
+        match e {
+            Effect::Draw { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                }
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+    }
+
+    /// Discriminating runtime test: parse the real clause and resolve its Draw
+    /// count through the live quantity resolver against recorded discard state.
+    /// If the parser fix is reverted, the count is `Fixed(1)` and resolves to 1
+    /// regardless of discards, so the `resolved == 3` assertion flips and fails.
+    #[test]
+    fn for_each_cards_discarded_this_turn_resolves_dynamic_draw_count() {
+        use crate::game::quantity::resolve_quantity;
+        use crate::game::restrictions::record_discard;
+        use crate::game::zones::create_object;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        let count = match parse_effect("draw a card for each card you've discarded this turn") {
+            Effect::Draw { count, .. } => count,
+            other => panic!("expected Draw, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Misty Knight, Hero for Hire".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller has discarded three cards this turn.
+        record_discard(&mut state, controller);
+        record_discard(&mut state, controller);
+        record_discard(&mut state, controller);
+
+        let resolved = resolve_quantity(&state, &count, controller, source);
+        assert_eq!(
+            resolved, 3,
+            "draw count must resolve to the controller's discard tally (3), not Fixed(1)"
         );
     }
 

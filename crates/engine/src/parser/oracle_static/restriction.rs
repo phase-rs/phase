@@ -453,9 +453,13 @@ pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option
     }
 
     // Mindlock Orb class: "Players can't search libraries." / "Each player can't
-    // search libraries." Keep this branch all-players only.
+    // search libraries." (all players), and opponent-scoped direct search
+    // prohibitions ("Your opponents can't search libraries.").
     let (cause, predicate) = strip_casting_prohibition_subject(tp.lower)?;
-    if cause != ProhibitionScope::AllPlayers {
+    if !matches!(
+        cause,
+        ProhibitionScope::AllPlayers | ProhibitionScope::Opponents
+    ) {
         return None;
     }
     let predicate_lower = predicate.to_lowercase();
