@@ -5308,7 +5308,9 @@ pub(crate) fn check_trigger_condition(
             source_id.is_some_and(|id| {
                 state.objects.get(&id).is_some_and(|source| {
                     // The source must be attached to something
-                    if let Some(crate::game::game_object::AttachTarget::Object(host_id)) = source.attached_to {
+                    if let Some(crate::game::game_object::AttachTarget::Object(host_id)) =
+                        source.attached_to
+                    {
                         // The host must be controlled by the trigger's controller
                         // and must be a creature
                         state.objects.get(&host_id).is_some_and(|host| {
