@@ -1834,7 +1834,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
 /// `Effect::ChangeZoneAll` directly (multi-zone origin + filter + destination
 /// are fixed by the matched pattern). Returns `None` for any other shape so
 /// the regular library-search branch can run.
-fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
+pub(super) fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
     fn run(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         // search <possessive> graveyard, hand, and library
         let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;

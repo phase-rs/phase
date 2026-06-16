@@ -44935,6 +44935,78 @@ mod tests {
         );
     }
 
+    fn chain_contains_multi_zone_same_name_exile(def: &AbilityDefinition) -> bool {
+        fn matches(effect: &Effect) -> bool {
+            let Effect::ChangeZoneAll { target, .. } = effect else {
+                return false;
+            };
+            let TargetFilter::Typed(typed) = target else {
+                return false;
+            };
+            typed.properties.iter().any(|p| {
+                matches!(p, FilterProp::SameNameAsParentTarget)
+            }) && typed.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::InAnyZone { zones }
+                        if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+                )
+            })
+        }
+        if matches(def.effect.as_ref()) {
+            return true;
+        }
+        let mut cursor = def.sub_ability.as_deref();
+        while let Some(sub) = cursor {
+            if matches(sub.effect.as_ref()) {
+                return true;
+            }
+            cursor = sub.sub_ability.as_deref();
+        }
+        false
+    }
+
+    /// CR 201.2 + CR 400.7 + CR 701.23 + CR 701.24: Name-hate spells search GY,
+    /// hand, and library for all cards sharing the exiled/countered/chosen card's
+    /// name and exile them, then shuffle. Issue #3436 — the runtime infra already
+    /// existed (`MultiZoneSameNameExile`); these cards gap'd on parser routing.
+    #[test]
+    fn name_hate_spells_parse_multi_zone_same_name_exile_chain() {
+        for (label, text) in [
+            (
+                "Eradicate",
+                "Exile target nonblack creature. Search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them. Then that player shuffles.",
+            ),
+            (
+                "Quash",
+                "Counter target instant or sorcery spell. Search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them. Then that player shuffles.",
+            ),
+            (
+                "Counterbore",
+                "Counter target spell. Search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them. Then that player shuffles.",
+            ),
+            (
+                "Crumble to Dust",
+                "Exile target nonbasic land. Search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them. Then that player shuffles.",
+            ),
+            (
+                "Surgical Extraction",
+                "Choose target card in a graveyard. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+                "{label}: root effect must not be Unimplemented: {:?}",
+                def.effect
+            );
+            assert!(
+                chain_contains_multi_zone_same_name_exile(&def),
+                "{label}: expected ChangeZoneAll {{ InAnyZone[GY,Hand,Lib], SameNameAsParentTarget }} in chain"
+            );
+        }
+    }
+
     /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
     /// <player>'s life total with ~'s power/toughness" parses to
     /// `ExchangeLifeWithStat` with the right player filter and stat, not the
