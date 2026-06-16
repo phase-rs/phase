@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
+import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
@@ -79,6 +80,11 @@ export function AiOpponentConfig({
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
   const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
   const effectiveCedhMode = cedhMode && isCedhFormat;
+  // Fixed-deck formats (Momir's Madness) have the engine supply every AI seat's
+  // deck, so there is no AI deck catalog, no deck picker, and no "no legal
+  // decks" condition — only the per-seat difficulty matters. Drives off the
+  // engine-derived registry flag, never a format literal.
+  const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
 
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
@@ -192,6 +198,7 @@ export function AiOpponentConfig({
             cedhMode={effectiveCedhMode}
             candidates={candidates}
             filteredDecks={filteredDecks}
+            hideDeckPicker={suppliesDeck}
             expanded={!isMulti || expandedIndex === i}
             collapsible={isMulti}
             onToggle={() => setExpandedIndex((cur) => (cur === i ? null : i))}
@@ -201,7 +208,7 @@ export function AiOpponentConfig({
         ))}
       </div>
 
-      {!loading && candidates.length === 0 && (
+      {!loading && candidates.length === 0 && !suppliesDeck && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           {t("aiOpponent.noLegalDecks")}
         </div>
@@ -213,7 +220,10 @@ export function AiOpponentConfig({
         </div>
       )}
 
-      {/* Global pool filters — apply to every seat set to Random. */}
+      {/* Global pool filters — apply to every seat set to Random. Hidden for
+          fixed-deck formats, where the engine supplies every AI deck and there
+          is no Random pool to filter. */}
+      {!suppliesDeck && (
       <div className="mt-1 flex flex-col gap-3 rounded-lg border border-white/5 bg-black/20 px-3 py-2.5">
         <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
           {t("aiOpponent.randomPoolFilters")}
@@ -264,6 +274,7 @@ export function AiOpponentConfig({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -277,6 +288,9 @@ interface AiSeatPanelProps {
   cedhMode: boolean;
   candidates: AiDeckCandidate[];
   filteredDecks: AiDeckCandidate[];
+  /** When true (fixed-deck formats), the engine supplies this seat's deck — the
+   *  deck picker is hidden and only the difficulty selector is shown. */
+  hideDeckPicker: boolean;
   expanded: boolean;
   collapsible: boolean;
   onToggle: () => void;
@@ -290,6 +304,7 @@ function AiSeatPanel({
   cedhMode,
   candidates,
   filteredDecks,
+  hideDeckPicker,
   expanded,
   collapsible,
   onToggle,
@@ -358,6 +373,7 @@ function AiSeatPanel({
 
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
+      {!hideDeckPicker && (
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
         <MenuSelect
@@ -372,6 +388,7 @@ function AiSeatPanel({
           className={`${AI_MENU_CLASS} text-white`}
         />
       </label>
+      )}
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>

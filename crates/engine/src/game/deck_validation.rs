@@ -5006,19 +5006,12 @@ mod tests {
     }
 
     /// The fixed Momir's Madness deck: 12 copies of each of the five snow basic
-    /// lands (no Snow-Covered Wastes), totaling 60.
+    /// lands (no Snow-Covered Wastes), totaling 60. Delegates to the engine's
+    /// canonical `momir_fixed_deck_names()` so the auto-supplied deck and this
+    /// validator are exercised against the same single source of truth — if they
+    /// ever drift, `momir_madness_snow_basics_pass` below catches it.
     fn momir_madness_deck() -> Vec<String> {
-        let mut deck = Vec::with_capacity(60);
-        for name in [
-            "Snow-Covered Plains",
-            "Snow-Covered Island",
-            "Snow-Covered Swamp",
-            "Snow-Covered Mountain",
-            "Snow-Covered Forest",
-        ] {
-            deck.extend(expand(name, 12));
-        }
-        deck
+        crate::game::deck_loading::momir_fixed_deck_names()
     }
 
     #[test]
