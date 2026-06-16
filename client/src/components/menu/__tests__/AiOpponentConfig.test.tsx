@@ -92,8 +92,9 @@ describe("AiOpponentConfig — cEDH toggle", () => {
 
     // Expand the first seat panel and change only seat 0.
     await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
-    const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
-    await user.selectOptions(difficultySelects[0], "Medium");
+    const difficultyTriggers = screen.getAllByRole("button", { name: /^Difficulty$/i });
+    await user.click(difficultyTriggers[0]);
+    await user.click(screen.getByRole("option", { name: /Medium/i }));
 
     // Seat 1 must still be Hard — changing one seat never affects another.
     await waitFor(() => {
@@ -150,13 +151,13 @@ describe("AiOpponentConfig — cEDH badge + disabled difficulty", () => {
 
     // Before enabling: no badge, dropdown enabled.
     expect(screen.queryByLabelText("cEDH")).not.toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /Difficulty/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^Difficulty$/i })).toBeEnabled();
 
     await user.click(screen.getByRole("switch", { name: /cEDH mode/i }));
 
     await waitFor(() => {
       expect(screen.getByLabelText("cEDH")).toBeInTheDocument();
-      expect(screen.getByRole("combobox", { name: /Difficulty/i })).toBeDisabled();
+      expect(screen.getByRole("button", { name: /^Difficulty$/i })).toBeDisabled();
     });
   });
 
@@ -210,7 +211,7 @@ describe("AiOpponentConfig — bracket filter", () => {
 
   it("filter off (empty selection) keeps untagged candidates in the random pool", () => {
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
-    expect(screen.getByRole("option", { name: /Random \(4\)/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(4\)/);
   });
 
   it("selecting brackets {2, 4} narrows the pool to those candidates and excludes untagged", async () => {
@@ -221,7 +222,7 @@ describe("AiOpponentConfig — bracket filter", () => {
     await user.click(screen.getByRole("button", { name: "4 Optimized" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("option", { name: /Random \(2\)/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(2\)/);
     });
   });
 });

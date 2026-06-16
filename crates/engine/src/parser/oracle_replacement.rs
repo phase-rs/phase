@@ -4,7 +4,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{char, multispace1};
-use nom::combinator::{all_consuming, eof, opt, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -35,6 +35,7 @@ use crate::types::ability::{
     ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
     TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
@@ -217,6 +218,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If enchanted land would be destroyed, instead {effect}" ---
+    if let Some(def) =
+        parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &normalized, &text)
+    {
+        return Some(def);
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -395,10 +403,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
-    if nom_primitives::scan_contains(&lower, "would lose life") {
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string()),
-        );
+    if let Some(def) = parse_lose_life_replacement(&text, &lower) {
+        return Some(def);
     }
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
@@ -461,6 +467,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if let Some(def) = parse_xorn_subtype_token_replacement(&lower, &text) {
             return Some(def);
         }
+        if let Some(def) = parse_generic_additional_token_replacement(&lower, &text) {
+            return Some(def);
+        }
     }
 
     // CR 614.1a + CR 111.1: Manufactor-class ensure-all token replacement —
@@ -488,6 +497,11 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
+
+    if let Some(def) = parse_energy_get_replacement(&lower, &text) {
+        return Some(def);
+    }
+
     if nom_primitives::scan_contains(&lower, "counters would be put on")
         || nom_primitives::scan_contains(&lower, "counter would be put on")
         || nom_primitives::scan_contains(&lower, "would put one or more counters")
@@ -746,6 +760,66 @@ fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
 }
 
+/// CR 614.1a: "instead" marks the enchanted-land destruction event as replaced
+/// by the parsed sacrifice/grant effect chain.
+fn parse_enchanted_land_destroy_sacrifice_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), rest) = nom_on_lower(normalized, norm_lower, |i| {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, _) = tag("enchanted land").parse(i)?;
+        let (i, _) = tag(" would be destroyed, ").parse(i)?;
+        let (i, _) = tag("instead ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let effect_text = rest.trim_end_matches('.');
+    if effect_text.is_empty() {
+        return None;
+    }
+    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    bind_enchanted_land_grant_to_replaced_object(&mut execute);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::AttachedTo)
+            .execute(execute)
+            .description(original_text.to_string()),
+    )
+}
+
+fn bind_enchanted_land_grant_to_replaced_object(def: &mut AbilityDefinition) {
+    // CR 614.1a + CR 608.2c: in "If enchanted land would be destroyed, instead
+    // sacrifice ~ and that land gains ...", "that land" refers to the object
+    // whose destruction is being replaced, not to every land.
+    if let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &mut *def.effect
+    {
+        let mut binds_replaced_land = false;
+        for static_ability in static_abilities {
+            if matches!(
+                static_ability.affected.as_ref(),
+                Some(TargetFilter::Typed(filter))
+                    if filter.type_filters == [TypeFilter::Land]
+            ) {
+                static_ability.affected = Some(TargetFilter::ParentTarget);
+                binds_replaced_land = true;
+            }
+        }
+        if binds_replaced_land {
+            *target = None;
+        }
+    }
+
+    if let Some(sub_ability) = def.sub_ability.as_mut() {
+        bind_enchanted_land_grant_to_replaced_object(sub_ability);
+    }
+}
+
 /// CR 705.1 + CR 614.1a: Krark's Thumb — "If you would flip a coin, instead flip
 /// two coins and ignore one."
 ///
@@ -788,6 +862,73 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
     // CR 614.1a: "If you would flip a coin" — controller-scoped.
     def.valid_player = Some(ReplacementPlayerScope::You);
     Some(def)
+}
+
+/// CR 614.1a + CR 119.3: Lose-life replacement effects.
+///
+/// Handles Bloodletter-style doublers and preserves generic "If you would lose
+/// life, instead ..." replacement recognition without substring dispatch.
+fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    let ((scope, quantity_modification), rest) = nom_on_lower(text, lower, |i| {
+        let (i, _) = tag("if ").parse(i)?;
+        let (i, scope) = parse_lose_life_subject(i)?;
+        let (i, _) = tag(" would lose life").parse(i)?;
+        let (i, _) = opt(preceded(tag(" "), tag("during your turn"))).parse(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        let (i, quantity_modification) = alt((
+            value(
+                Some(QuantityModification::Double),
+                terminated(parse_double_lose_life_consequence, opt(char('.'))),
+            ),
+            value(None, parse_lose_life_instead_consequence),
+        ))
+        .parse(i)?;
+        Ok((i, (scope, quantity_modification)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def =
+        ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string());
+    if let Some(scope) = scope {
+        def.valid_player = Some(scope);
+    }
+    if let Some(quantity_modification) = quantity_modification {
+        def = def.quantity_modification(quantity_modification);
+    }
+    Some(def)
+}
+
+fn parse_lose_life_subject(input: &str) -> OracleResult<'_, Option<ReplacementPlayerScope>> {
+    alt((
+        value(
+            Some(ReplacementPlayerScope::Opponent),
+            alt((tag("an opponent"), tag("opponent"))),
+        ),
+        value(None, tag("you")),
+    ))
+    .parse(input)
+}
+
+fn parse_double_lose_life_consequence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag("they "), tag("that opponent "), tag("you "))),
+            alt((tag("lose "), tag("loses "))),
+            tag("twice that much life instead"),
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_lose_life_instead_consequence(input: &str) -> OracleResult<'_, ()> {
+    let (remaining, body) = preceded(tag("instead "), rest).parse(input)?;
+    if body.trim().is_empty() {
+        return Err(oracle_err(body));
+    }
+    Ok((remaining, ()))
 }
 
 fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
@@ -4758,48 +4899,7 @@ fn parse_xorn_subtype_token_replacement(
         return None;
     }
 
-    // Extract the additional-token descriptor after
-    // "instead create those tokens plus [an additional ]?", up to a
-    // terminating comma or "." Track the post-strip position via input length.
-    let total_len = lower.len();
-    let ((desc_start, desc_len, needs_article), _) = nom_on_lower(lower, lower, |i| {
-        let (i, _) =
-            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
-        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
-        // Strip the "additional " modifier (with its optional leading article)
-        // so parse_token_description sees the canonical token tail. Factor as
-        // (opt article) + required "additional " to avoid the cartesian-product
-        // expansion of {a_, an_, ε} × additional_.
-        let (i, _) = opt(value(
-            (),
-            preceded(opt(alt((tag("a "), tag("an ")))), tag("additional ")),
-        ))
-        .parse(i)?;
-        let start_offset = total_len - i.len();
-        let (i, article) =
-            peek(opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))).parse(i)?;
-        let needs_article = article.is_none();
-        let (i, descriptor) = alt((
-            take_until::<_, _, OracleError<'_>>("."),
-            nom::combinator::rest,
-        ))
-        .parse(i)?;
-        Ok((i, (start_offset, descriptor.len(), needs_article)))
-    })?;
-
-    let descriptor_raw = lower.get(desc_start..desc_start + desc_len)?.trim();
-    // CR 111.1: parse_token_description's count-prefix requirement
-    // (parser/oracle_effect/token.rs:169-175) needs an article or numeric
-    // count. Re-add "a " when the modifier strip above consumed the article.
-    let descriptor_owned;
-    let descriptor: &str = if needs_article {
-        descriptor_owned = format!("a {descriptor_raw}");
-        &descriptor_owned
-    } else {
-        descriptor_raw
-    };
-    let token = super::oracle_effect::parse_token_description(descriptor)?;
-    let spec = token_description_to_spec(&token)?;
+    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
 
     // Capitalize the subtype to match the parser's existing convention
     // (TokenSpec.subtypes uses title-case: "Treasure", not "treasure").
@@ -4817,6 +4917,54 @@ fn parse_xorn_subtype_token_replacement(
             .additional_token_spec(spec)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 614.1a + CR 111.1: Tippy-Toe class — generic additional token without subtype gate.
+fn parse_generic_additional_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "would create one or more tokens") {
+        return None;
+    }
+    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            // CR 614.1a + CR 109.5: "If you would create..." scopes this
+            // replacement to the source's controller, without Xorn's subtype gate.
+            .token_owner_scope(ControllerRef::You)
+            .additional_token_spec(spec)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a + CR 111.1: Extract the appended token spec from the
+/// "instead create those tokens plus ..." wording shared by Xorn- and
+/// Tippy-Toe-class replacement effects.
+fn parse_instead_create_those_tokens_plus_spec(
+    lower: &str,
+) -> Option<crate::types::proposed_event::TokenSpec> {
+    let total_len = lower.len();
+    let ((descriptor_start, descriptor_len), _) = nom_on_lower(lower, lower, |i| {
+        let (i, _) =
+            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
+        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
+        let start_offset = total_len - i.len();
+        let (i, descriptor) = alt((
+            take_until::<_, _, OracleError<'_>>("."),
+            nom::combinator::rest,
+        ))
+        .parse(i)?;
+        Ok((i, (start_offset, descriptor.len())))
+    })?;
+
+    let descriptor = lower
+        .get(descriptor_start..descriptor_start + descriptor_len)?
+        .trim();
+    let descriptor = normalize_additional_token_descriptor(descriptor)?;
+    let token = super::oracle_effect::parse_token_description(&descriptor)?;
+    token_description_to_spec(&token)
 }
 
 /// Title-case a single-word subtype string for canonical TokenSpec storage.
@@ -5008,6 +5156,24 @@ fn token_description_to_spec(
 /// applier saturates at 0 because counters are markers per CR 122.1 — you
 /// can't put a negative number of markers on a permanent — and the
 /// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
+/// CR 107.14 + CR 614.1a: Izzet Generatorium — additional {E} on would-get events.
+fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    all_consuming(value(
+        (),
+        (
+            tag::<_, _, OracleError<'_>>("if you would get one or more {e}, "),
+            tag("you get an additional {e} instead."),
+        ),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .quantity_modification(QuantityModification::Plus { value: 1 })
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
+}
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
@@ -5876,6 +6042,7 @@ fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<Repla
         && !nom_primitives::scan_contains(norm_lower, "tapped for mana")
         && !nom_primitives::scan_contains(norm_lower, "tap a permanent for mana")
         && !nom_primitives::scan_contains(norm_lower, "tap a land for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a basic land for mana")
     {
         return None;
     }
@@ -5922,6 +6089,16 @@ fn parse_mana_multiplier_replacement(
         value(
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             tag("a permanent"),
+        ),
+        value(
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Basic,
+                    }]),
+            ),
+            tag("a basic land"),
         ),
         value(
             TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
@@ -7397,7 +7574,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::LoseLife);
-        assert!(def.description.is_some());
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Double)
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+    }
+
+    #[test]
+    fn replacement_lose_life_instead_preserves_generic_shape() {
+        let def = parse_replacement_line(
+            "If you would lose life, instead put one of your shields into your hand.",
+            "Lich's Duel Mastery",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::LoseLife);
+        assert_eq!(def.quantity_modification, None);
+        assert_eq!(def.valid_player, None);
     }
 
     #[test]
@@ -11817,6 +12010,106 @@ mod tests {
             scan_damage_modification("it deals that much damage minus 1 instead"),
             Some(DamageModification::Minus { value: 1 })
         );
+    }
+
+    #[test]
+    fn parses_enchanted_land_destroy_sacrifice_indestructible() {
+        let def = parse_replacement_line(
+            "If enchanted land would be destroyed, instead sacrifice ~ and that land gains indestructible until end of turn.",
+            "Harmonious Emergence",
+        )
+        .expect("enchanted land destroy");
+
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+
+        let execute = def.execute.as_ref().expect("replacement execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+
+        let grant = execute.sub_ability.as_ref().expect("indestructible grant");
+        match &*grant.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            } => {
+                assert!(static_abilities.iter().any(|static_ability| {
+                    static_ability.affected == Some(TargetFilter::ParentTarget)
+                        && static_ability.modifications.contains(
+                            &ContinuousModification::AddKeyword {
+                                keyword: Keyword::Indestructible,
+                            },
+                        )
+                }));
+            }
+            other => panic!("expected indestructible grant to enchanted land, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_generic_additional_food_token_replacement() {
+        let def = parse_replacement_line(
+            "If you would create one or more tokens, instead create those tokens plus an additional Food token.",
+            "Tippy-Toe, Terrific Partner",
+        )
+        .expect("generic additional token");
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+        assert!(
+            def.condition.is_none(),
+            "generic token wording must not inherit Xorn's subtype gate"
+        );
+        let spec = def
+            .additional_token_spec
+            .as_ref()
+            .expect("additional Food token spec");
+        assert_eq!(spec.characteristics.display_name, "Food");
+        assert_eq!(spec.characteristics.core_types, vec![CoreType::Artifact]);
+        assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);
+        assert_eq!(spec.characteristics.power, None);
+        assert_eq!(spec.characteristics.toughness, None);
+    }
+
+    #[test]
+    fn parses_basic_land_triple_mana_replacement() {
+        let def = parse_replacement_line(
+            "If you tap a basic land for mana, it produces three times as much of that mana instead.",
+            "Virtue of Strength",
+        )
+        .expect("basic land 3x mana");
+        assert_eq!(
+            def.mana_modification,
+            Some(ManaModification::Multiply { factor: 3 })
+        );
+        let Some(TargetFilter::Typed(filter)) = def.valid_card else {
+            panic!("basic land replacement should carry a typed source filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Basic,
+        }));
+    }
+
+    #[test]
+    fn parses_energy_get_additional_replacement() {
+        let def = parse_replacement_line(
+            "If you would get one or more {E}, you get an additional {E} instead.",
+            "Izzet Generatorium",
+        )
+        .expect("energy get replacement");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
     }
 }
 

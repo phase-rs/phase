@@ -18,12 +18,18 @@ import type {
   ObjectId,
   OutsideGameChoiceEntry,
   OutsideGameSelection,
+  PlayerId,
   TargetFilter,
   WaitingFor,
   Zone,
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
-import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
+import {
+  CancelButton,
+  ChoiceOverlay,
+  ConfirmButton,
+  ScrollableCardStrip,
+} from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
@@ -34,7 +40,10 @@ import {
   SeparatePilesPartitionModal,
 } from "./SeparatePilesModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
-import { BlockerDamageAssignmentModal, DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
+import {
+  BlockerDamageAssignmentModal,
+  DamageAssignmentModal,
+} from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
 import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.tsx";
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
@@ -58,21 +67,39 @@ import {
   type EffectZoneMode,
 } from "./cardChoice/shared.tsx";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
-type SearchPartitionChoice = Extract<WaitingFor, { type: "SearchPartitionChoice" }>;
+type SearchPartitionChoice = Extract<
+  WaitingFor,
+  { type: "SearchPartitionChoice" }
+>;
 type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
-type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
+type ChooseFromZoneChoice = Extract<
+  WaitingFor,
+  { type: "ChooseFromZoneChoice" }
+>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
-type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
+type DrawnThisTurnTopdeckChoice = Extract<
+  WaitingFor,
+  { type: "DrawnThisTurnTopdeckChoice" }
+>;
 type PayCost = Extract<WaitingFor, { type: "PayCost" }>;
-type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
+type MultiTargetSelection = Extract<
+  WaitingFor,
+  { type: "MultiTargetSelection" }
+>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
-type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
+type CollectEvidenceChoice = Extract<
+  WaitingFor,
+  { type: "CollectEvidenceChoice" }
+>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type CommanderZoneChoice = Extract<WaitingFor, { type: "CommanderZoneChoice" }>;
-type RevealUntilKeptChoice = Extract<WaitingFor, { type: "RevealUntilKeptChoice" }>;
+type RevealUntilKeptChoice = Extract<
+  WaitingFor,
+  { type: "RevealUntilKeptChoice" }
+>;
 type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
@@ -117,7 +144,12 @@ export function CardChoiceModal() {
       return <SearchPartitionModal data={waitingFor.data} />;
     case "OutsideGameChoice":
       if (!canActForWaitingState) return null;
-      return <OutsideGameModal key={outsideGameChoiceKey(waitingFor.data)} data={waitingFor.data} />;
+      return (
+        <OutsideGameModal
+          key={outsideGameChoiceKey(waitingFor.data)}
+          data={waitingFor.data}
+        />
+      );
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
       return <ChooseFromZoneModal data={waitingFor.data} />;
@@ -145,6 +177,9 @@ export function CardChoiceModal() {
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} />;
+    case "ChooseUntapSubset":
+      if (!canActForWaitingState) return null;
+      return <ChooseUntapSubsetModal data={waitingFor.data} />;
     case "PayCost":
       if (!canActForWaitingState) return null;
       return <PayCostDispatch data={waitingFor.data} />;
@@ -198,13 +233,38 @@ export function CardChoiceModal() {
       return <RepeatDecisionModal data={waitingFor.data} />;
     case "ConniveDiscard":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title={t("cardChoice.discard.titleConnive", { count: waitingFor.data.count })} />;
+      return (
+        <DiscardModal
+          data={waitingFor.data}
+          title={t("cardChoice.discard.titleConnive", {
+            count: waitingFor.data.count,
+          })}
+        />
+      );
     case "DiscardChoice":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title={waitingFor.data.up_to ? t("cardChoice.discard.titleUpTo", { count: waitingFor.data.count }) : t("cardChoice.discard.titleExact", { count: waitingFor.data.count })} />;
+      return (
+        <DiscardModal
+          data={waitingFor.data}
+          title={
+            waitingFor.data.up_to
+              ? t("cardChoice.discard.titleUpTo", {
+                  count: waitingFor.data.count,
+                })
+              : t("cardChoice.discard.titleExact", {
+                  count: waitingFor.data.count,
+                })
+          }
+        />
+      );
     case "WardDiscardChoice":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={{ ...waitingFor.data, count: 1 }} title={t("cardChoice.discard.titleWard")} />;
+      return (
+        <DiscardModal
+          data={{ ...waitingFor.data, count: 1 }}
+          title={t("cardChoice.discard.titleWard")}
+        />
+      );
     case "WardSacrificeChoice":
       if (!canActForWaitingState) return null;
       return <WardSacrificeModal data={waitingFor.data} />;
@@ -237,7 +297,11 @@ export function CardChoiceModal() {
       return (
         <ProliferateModal
           data={waitingFor.data}
-          variant={waitingFor.data.phase === "Add" ? "timeTravelAdd" : "timeTravelRemove"}
+          variant={
+            waitingFor.data.phase === "Add"
+              ? "timeTravelAdd"
+              : "timeTravelRemove"
+          }
         />
       );
     case "ChooseObjectsSelection":
@@ -295,7 +359,9 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.ringBearer.title")}
       subtitle={t("cardChoice.ringBearer.subtitle")}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
+      footer={
+        <ConfirmButton onClick={handleConfirm} disabled={selected === null} />
+      }
     >
       <ScrollableCardStrip>
         {data.candidates.map((id, index) => {
@@ -327,7 +393,9 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
                     : "bg-slate-800/90 text-slate-300"
                 }`}
               >
-                {isSelected ? t("cardChoice.badges.selected") : t("cardChoice.badges.choose")}
+                {isSelected
+                  ? t("cardChoice.badges.selected")
+                  : t("cardChoice.badges.choose")}
               </span>
             </motion.button>
           );
@@ -378,7 +446,10 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
             disabled={selected === null}
             label={t("cardChoice.learn.labelRummage")}
           />
-          <CancelButton onClick={handleSkip} label={t("cardChoice.learn.labelSkip")} />
+          <CancelButton
+            onClick={handleSkip}
+            label={t("cardChoice.learn.labelSkip")}
+          />
         </div>
       }
     >
@@ -412,7 +483,9 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
                     : "bg-slate-800/90 text-slate-300"
                 }`}
               >
-                {isSelected ? t("cardChoice.badges.selected") : t("cardChoice.badges.choose")}
+                {isSelected
+                  ? t("cardChoice.badges.selected")
+                  : t("cardChoice.badges.choose")}
               </span>
             </motion.button>
           );
@@ -511,14 +584,20 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   );
 }
 
-function SearchPartitionModal({ data }: { data: SearchPartitionChoice["data"] }) {
+function SearchPartitionModal({
+  data,
+}: {
+  data: SearchPartitionChoice["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
   const countValid = selectedSet.size === data.primary_count;
-  const tappedText = data.primary_enter_tapped ? t("cardChoice.searchPartition.tapped") : "";
+  const tappedText = data.primary_enter_tapped
+    ? t("cardChoice.searchPartition.tapped")
+    : "";
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -553,7 +632,10 @@ function SearchPartitionModal({ data }: { data: SearchPartitionChoice["data"] })
   return (
     <ChoiceOverlay
       title={t("cardChoice.searchPartition.title")}
-      subtitle={t("cardChoice.searchPartition.subtitle", { count: data.primary_count, tapped: tappedText })}
+      subtitle={t("cardChoice.searchPartition.subtitle", {
+        count: data.primary_count,
+        tapped: tappedText,
+      })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <ScrollableCardStrip>
@@ -635,7 +717,9 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   // Map keyed by `entryKey(entry)` → number of copies the user has selected.
-  const [selectedCounts, setSelectedCounts] = useState<Map<string, number>>(new Map());
+  const [selectedCounts, setSelectedCounts] = useState<Map<string, number>>(
+    new Map(),
+  );
 
   const entriesByKey = useMemo(() => {
     const map = new Map<string, OutsideGameChoiceEntry>();
@@ -657,15 +741,22 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
   );
 
   const minCount = data.up_to ? 0 : data.count;
-  const countValid = selections.length >= minCount && selections.length <= data.count;
+  const countValid =
+    selections.length >= minCount && selections.length <= data.count;
 
   const toggleSelect = useCallback(
     (key: string, maxCopies: number) => {
       setSelectedCounts((prev) => {
         const next = new Map(prev);
         const current = next.get(key) ?? 0;
-        const selectedTotal = Array.from(prev.values()).reduce((sum, count) => sum + count, 0);
-        if (current > 0 && (current >= maxCopies || selectedTotal >= data.count)) {
+        const selectedTotal = Array.from(prev.values()).reduce(
+          (sum, count) => sum + count,
+          0,
+        );
+        if (
+          current > 0 &&
+          (current >= maxCopies || selectedTotal >= data.count)
+        ) {
           next.delete(key);
         } else if (selectedTotal < data.count) {
           next.set(key, current + 1);
@@ -698,7 +789,10 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
       <div className="flex max-h-[60vh] min-w-[280px] flex-col gap-2 overflow-y-auto p-1">
         {data.choices.map((entry) => {
           const key = entryKey(entry);
-          const selectedCount = Math.min(selectedCounts.get(key) ?? 0, entry.count);
+          const selectedCount = Math.min(
+            selectedCounts.get(key) ?? 0,
+            entry.count,
+          );
           const isSelected = selectedCount > 0;
           const sourceLabel =
             entry.source.type === "FaceUpExile"
@@ -733,17 +827,15 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
 }
 
 function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
-  const choicesKey = data.choices.map((entry) => `${entryKey(entry)}:${entry.count}`).join(",");
+  const choicesKey = data.choices
+    .map((entry) => `${entryKey(entry)}:${entry.count}`)
+    .join(",");
   return `${data.player}:${data.source_id}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 
 // ── Choose From Zone Modal ───────────────────────────────────────────────────
 
-function ChooseFromZoneModal({
-  data,
-}: {
-  data: ChooseFromZoneChoice["data"];
-}) {
+function ChooseFromZoneModal({ data }: { data: ChooseFromZoneChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -755,7 +847,11 @@ function ChooseFromZoneModal({
     !!objects &&
     (!selectionRule ||
       (selectionRule.type === "DistinctCardTypes" &&
-        canAssignDistinctCardTypes(objects, selectedIds, selectionRule.categories)));
+        canAssignDistinctCardTypes(
+          objects,
+          selectedIds,
+          selectionRule.categories,
+        )));
   const countValid = data.up_to
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
@@ -787,11 +883,14 @@ function ChooseFromZoneModal({
 
   if (!objects) return null;
 
-  const subtitle = selectionRule?.type === "DistinctCardTypes"
-    ? t("cardChoice.chooseFromZone.subtitleDistinctCardTypes", { count: data.count })
-    : data.up_to
-      ? t("cardChoice.chooseFromZone.subtitleUpTo", { count: data.count })
-      : t("cardChoice.chooseFromZone.subtitleExact", { count: data.count });
+  const subtitle =
+    selectionRule?.type === "DistinctCardTypes"
+      ? t("cardChoice.chooseFromZone.subtitleDistinctCardTypes", {
+          count: data.count,
+        })
+      : data.up_to
+        ? t("cardChoice.chooseFromZone.subtitleUpTo", { count: data.count })
+        : t("cardChoice.chooseFromZone.subtitleExact", { count: data.count });
 
   return (
     <ChoiceOverlay
@@ -861,11 +960,14 @@ function PairChoiceModal({ data }: { data: PairChoice["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.pair.title")}
       subtitle={t("cardChoice.pair.subtitle")}
-      footer={(
+      footer={
         <div className="mx-auto w-full max-w-xl">
-          <CancelButton onClick={() => handleChoose(null)} label={t("cardChoice.buttons.decline")} />
+          <CancelButton
+            onClick={() => handleChoose(null)}
+            label={t("cardChoice.buttons.decline")}
+          />
         </div>
-      )}
+      }
     >
       <ScrollableCardStrip>
         {data.choices.map((id) => {
@@ -897,8 +999,12 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-  const isTapUntapChoice = data.effect_kind === "Untap" || data.effect_kind === "Tap";
-  const isSacrifice = data.zone === "Battlefield" && data.destination == null && !isTapUntapChoice;
+  const isTapUntapChoice =
+    data.effect_kind === "Untap" || data.effect_kind === "Tap";
+  const isSacrifice =
+    data.zone === "Battlefield" &&
+    data.destination == null &&
+    !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
@@ -940,7 +1046,9 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           : "Battlefield";
   const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
   const selectedOrder = isTopdeck ? Array.from(selected) : [];
-  const selectedOrderLabels = selectedOrder.map((_, index) => formatTopdeckOrderLabel(index, t));
+  const selectedOrderLabels = selectedOrder.map((_, index) =>
+    formatTopdeckOrderLabel(index, t),
+  );
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
     : selected.size === data.count;
@@ -951,17 +1059,31 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     : `cardChoice.effectZone.subtitle${mode}Exact`;
   const title = t(`cardChoice.effectZone.title${mode}`);
   const subtitle = t(subtitleKey, { min: minCount, count: data.count });
-  const actionLabel = selected.size === 0 && isUpTo && minCount === 0
-    ? (isSacrifice ? t("cardChoice.effectZone.labelSkip") : t("cardChoice.effectZone.labelDecline"))
-    : isTopdeck && selectedOrderLabels.length > 0
-      ? t("cardChoice.effectZone.labelPutOnTop", { order: selectedOrderLabels.join(" -> ") })
-      : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], { selected: selected.size, count: data.count });
+  const actionLabel =
+    selected.size === 0 && isUpTo && minCount === 0
+      ? isSacrifice
+        ? t("cardChoice.effectZone.labelSkip")
+        : t("cardChoice.effectZone.labelDecline")
+      : isTopdeck && selectedOrderLabels.length > 0
+        ? t("cardChoice.effectZone.labelPutOnTop", {
+            order: selectedOrderLabels.join(" -> "),
+          })
+        : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
+            selected: selected.size,
+            count: data.count,
+          });
 
   return (
     <ChoiceOverlay
       title={title}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={actionLabel} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={actionLabel}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -969,7 +1091,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           if (!obj) return null;
           const isSelected = selected.has(id);
           const selectedIndex = selectedOrder.indexOf(id);
-          const badgeLabel = isTopdeck && selectedIndex >= 0
+          const badgeLabel =
+            isTopdeck && selectedIndex >= 0
               ? formatTopdeckOrderLabel(selectedIndex, t)
               : t(EFFECT_ZONE_BADGE_KEYS[mode]);
           return (
@@ -993,8 +1116,12 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
-                <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${visualClasses.overlay}`}>
-                  <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${visualClasses.badge}`}>
+                <div
+                  className={`absolute inset-0 flex items-center justify-center rounded-lg ${visualClasses.overlay}`}
+                >
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-bold text-white ${visualClasses.badge}`}
+                  >
                     {badgeLabel}
                   </span>
                 </div>
@@ -1014,7 +1141,11 @@ function formatTopdeckOrderLabel(index: number, t: TFunction<"game">): string {
   return `${position}${suffix}`;
 }
 
-function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice["data"] }) {
+function DrawnThisTurnTopdeckModal({
+  data,
+}: {
+  data: DrawnThisTurnTopdeckChoice["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1048,15 +1179,29 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
   const payments = data.count - selected.size;
   const actionLabel =
     selected.size === 0
-      ? t("cardChoice.drawnThisTurn.labelPayLife", { life: payments * data.life_payment })
-      : t("cardChoice.drawnThisTurn.labelConfirm", { selected: selected.size, count: data.count });
+      ? t("cardChoice.drawnThisTurn.labelPayLife", {
+          life: payments * data.life_payment,
+        })
+      : t("cardChoice.drawnThisTurn.labelConfirm", {
+          selected: selected.size,
+          count: data.count,
+        });
   const disabled = selected.size < data.min_count || selected.size > data.count;
 
   return (
     <ChoiceOverlay
       title={t("cardChoice.drawnThisTurn.title")}
-      subtitle={t("cardChoice.drawnThisTurn.subtitle", { count: data.count, life: data.life_payment })}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={disabled} label={actionLabel} />}
+      subtitle={t("cardChoice.drawnThisTurn.subtitle", {
+        count: data.count,
+        life: data.life_payment,
+      })}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={disabled}
+          label={actionLabel}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -1078,7 +1223,11 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
               onClick={() => toggleSelect(id)}
               {...hoverProps(id)}
             >
-              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-sky-500/20">
                   <span className="rounded-full bg-sky-500/90 px-3 py-1 text-xs font-bold text-white">
@@ -1116,6 +1265,100 @@ function SacrificeModal({ data }: { data: PayCost["data"] }) {
   );
 }
 
+// CR 502.3: a MaxUntapPerType cap (Smoke / Stoic Angel / Damping Field / Winter
+// Orb class) left more than `max` eligible tapped permanents, so the active
+// player directly chooses the bounded subset (up to `max`) that untaps. The
+// complement stays tapped. Answered with `SelectCards { cards }`.
+function ChooseUntapSubsetModal({
+  data,
+}: {
+  data: { player: PlayerId; group: ObjectId[]; max: number };
+}) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.max) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.max],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.untapSubset.title")}
+      subtitle={t("cardChoice.untapSubset.subtitle", { count: data.max })}
+      footer={
+        // CR 502.3: a max-untap cap ("can't untap more than one <type>") bounds
+        // the untap count from above only — choosing zero is legal (the whole
+        // group simply stays tapped). Never force an at-least-one selection here.
+        <ConfirmButton
+          onClick={handleConfirm}
+          label={t("cardChoice.buttons.labelCount", {
+            label: t("gamePage.untap.untap"),
+            selected: selected.size,
+            count: data.max,
+          })}
+        />
+      }
+    >
+      <ScrollableCardStrip>
+        {data.group.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-emerald-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                    {t("gamePage.untap.untap")}
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
 function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -1150,7 +1393,16 @@ function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.sacrifice.title")}
       subtitle={t("cardChoice.sacrifice.subtitle", { count: data.count })}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.sacrificeCount", { selected: selected.size, count: data.count })} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={t("cardChoice.buttons.sacrificeCount", {
+            selected: selected.size,
+            count: data.count,
+          })}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.choices.map((id, index) => {
@@ -1179,7 +1431,9 @@ function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
               />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">{t("cardChoice.badges.sacrifice")}</span>
+                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
+                    {t("cardChoice.badges.sacrifice")}
+                  </span>
                 </div>
               )}
             </motion.button>
@@ -1192,7 +1446,13 @@ function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
 
 // ── Exile For Mana Ability Modal ──────────────────────────────────────────────
 
-function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone: Zone }) {
+function ExileForManaAbilityModal({
+  data,
+  zone,
+}: {
+  data: PayCost["data"];
+  zone: Zone;
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1223,8 +1483,20 @@ function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone:
   return (
     <ChoiceOverlay
       title={t("cardChoice.exileForManaAbility.title")}
-      subtitle={t("cardChoice.exileForManaAbility.subtitle", { count: data.count, source: sourceLabel })}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.exileCount", { selected: selected.size, count: data.count })} />}
+      subtitle={t("cardChoice.exileForManaAbility.subtitle", {
+        count: data.count,
+        source: sourceLabel,
+      })}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={t("cardChoice.buttons.exileCount", {
+            selected: selected.size,
+            count: data.count,
+          })}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.choices.map((id, index) => {
@@ -1242,10 +1514,16 @@ function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone:
               onClick={() => toggleSelect(id)}
               {...hoverProps(id)}
             >
-              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-amber-500/20">
-                  <span className="rounded-full bg-amber-500/90 px-3 py-1 text-xs font-bold text-white">{t("cardChoice.badges.exile")}</span>
+                  <span className="rounded-full bg-amber-500/90 px-3 py-1 text-xs font-bold text-white">
+                    {t("cardChoice.badges.exile")}
+                  </span>
                 </div>
               )}
             </motion.button>
@@ -1258,7 +1536,11 @@ function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone:
 
 // ── Multi-Target Selection Modal ──────────────────────────────────────────────
 
-function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"] }) {
+function MultiTargetSelectionModal({
+  data,
+}: {
+  data: MultiTargetSelection["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1283,16 +1565,30 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
 
   if (!objects) return null;
 
-  const isReady = selected.size >= data.min_targets && selected.size <= data.max_targets;
-  const subtitle = data.min_targets === data.max_targets
-    ? t("cardChoice.multiTarget.subtitleExact", { count: data.max_targets })
-    : t("cardChoice.multiTarget.subtitleRange", { min: data.min_targets, max: data.max_targets });
+  const isReady =
+    selected.size >= data.min_targets && selected.size <= data.max_targets;
+  const subtitle =
+    data.min_targets === data.max_targets
+      ? t("cardChoice.multiTarget.subtitleExact", { count: data.max_targets })
+      : t("cardChoice.multiTarget.subtitleRange", {
+          min: data.min_targets,
+          max: data.max_targets,
+        });
 
   return (
     <ChoiceOverlay
       title={t("cardChoice.multiTarget.title")}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.confirmCount", { selected: selected.size, count: data.max_targets })} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={t("cardChoice.buttons.confirmCount", {
+            selected: selected.size,
+            count: data.max_targets,
+          })}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.legal_targets.map((id, index) => {
@@ -1310,10 +1606,16 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
               onClick={() => toggleSelect(id)}
               {...hoverProps(id)}
             >
-              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-cyan-500/20">
-                  <span className="rounded-full bg-cyan-500/90 px-3 py-1 text-xs font-bold text-white">{t("cardChoice.badges.target")}</span>
+                  <span className="rounded-full bg-cyan-500/90 px-3 py-1 text-xs font-bold text-white">
+                    {t("cardChoice.badges.target")}
+                  </span>
                 </div>
               )}
             </motion.button>
@@ -1326,18 +1628,15 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
 
 // ── Paradigm Cast Offer Modal ─────────────────────────────────────────────────
 
-function ParadigmCastOfferModal({
-  offers,
-}: {
-  offers: ObjectId[];
-}) {
+function ParadigmCastOfferModal({ offers }: { offers: ObjectId[] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
 
   const handleSelect = useCallback(
-    (id: ObjectId) => dispatch({ type: "CastParadigmCopy", data: { source: id } }),
+    (id: ObjectId) =>
+      dispatch({ type: "CastParadigmCopy", data: { source: id } }),
     [dispatch],
   );
   const handlePass = useCallback(
@@ -1354,7 +1653,10 @@ function ParadigmCastOfferModal({
       footer={
         <div className="mx-auto flex w-full max-w-xl gap-2">
           <div className="flex-1">
-            <CancelButton onClick={handlePass} label={t("cardChoice.buttons.pass")} />
+            <CancelButton
+              onClick={handlePass}
+              label={t("cardChoice.buttons.pass")}
+            />
           </div>
         </div>
       }
@@ -1374,7 +1676,11 @@ function ParadigmCastOfferModal({
               onClick={() => handleSelect(id)}
               {...hoverProps(id)}
             >
-              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
             </motion.button>
           );
         })}
@@ -1404,7 +1710,8 @@ function ReturnToHandModal({ data }: { data: PayCost["data"] }) {
 function RemoveCounterModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   const isAmongObjects =
-    data.kind.type === "RemoveCounter" && data.kind.selection === "AmongObjects";
+    data.kind.type === "RemoveCounter" &&
+    data.kind.selection === "AmongObjects";
   if (isAmongObjects) {
     return <RemoveCounterDistributionCostModal data={data} />;
   }
@@ -1433,11 +1740,17 @@ function removableCounterCostEntries(
     const count = obj.counters[counterType.data] ?? 0;
     return count > 0 ? [[counterType.data, count]] : [];
   }
-  return Object.entries(obj.counters)
-    .filter((entry): entry is [CounterType, number] => typeof entry[1] === "number" && entry[1] > 0);
+  return Object.entries(obj.counters).filter(
+    (entry): entry is [CounterType, number] =>
+      typeof entry[1] === "number" && entry[1] > 0,
+  );
 }
 
-function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] }) {
+function RemoveCounterDistributionCostModal({
+  data,
+}: {
+  data: PayCost["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1453,13 +1766,22 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
 
   const counterKind = data.kind;
   const requiredCount = data.kind.count;
-  const assigned = Object.values(amounts).reduce((sum, amount) => sum + amount, 0);
+  const assigned = Object.values(amounts).reduce(
+    (sum, amount) => sum + amount,
+    0,
+  );
   const remaining = requiredCount - assigned;
   const isReady = assigned === requiredCount;
 
-  const amountKey = (id: ObjectId, counterType: CounterType) => `${id}:${counterType}`;
+  const amountKey = (id: ObjectId, counterType: CounterType) =>
+    `${id}:${counterType}`;
 
-  const setAmount = (id: ObjectId, counterType: CounterType, value: number, max: number) => {
+  const setAmount = (
+    id: ObjectId,
+    counterType: CounterType,
+    value: number,
+    max: number,
+  ) => {
     setAmounts((prev) => ({
       ...prev,
       [amountKey(id, counterType)]: Math.max(0, Math.min(max, value)),
@@ -1472,11 +1794,13 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
       .flatMap((id) => {
         const obj = objects[id];
         if (!obj) return [];
-        return removableCounterCostEntries(obj, counterKind.counter_type).map(([counterType]) => ({
-          object_id: id,
-          counter_type: counterType,
-          count: amounts[amountKey(id, counterType)] ?? 0,
-        }));
+        return removableCounterCostEntries(obj, counterKind.counter_type).map(
+          ([counterType]) => ({
+            object_id: id,
+            counter_type: counterType,
+            count: amounts[amountKey(id, counterType)] ?? 0,
+          }),
+        );
       })
       .filter((choice) => choice.count > 0);
     dispatch({
@@ -1507,9 +1831,13 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
         {data.choices.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
-          const entries = removableCounterCostEntries(obj, counterKind.counter_type);
+          const entries = removableCounterCostEntries(
+            obj,
+            counterKind.counter_type,
+          );
           const selectedAmount = entries.reduce(
-            (sum, [counterType]) => sum + (amounts[amountKey(id, counterType)] ?? 0),
+            (sum, [counterType]) =>
+              sum + (amounts[amountKey(id, counterType)] ?? 0),
             0,
           );
           return (
@@ -1517,7 +1845,11 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
               key={id}
               className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: selectedAmount > 0 ? 1 : 0.7, y: 0, scale: 1 }}
+              animate={{
+                opacity: selectedAmount > 0 ? 1 : 0.7,
+                y: 0,
+                scale: 1,
+              }}
               transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
               whileHover={{ scale: 1.05, y: -6 }}
               {...hoverProps(id)}
@@ -1532,7 +1864,10 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
                   const key = amountKey(id, counterType);
                   const amount = amounts[key] ?? 0;
                   return (
-                    <div key={key} className="flex items-center justify-center gap-2">
+                    <div
+                      key={key}
+                      className="flex items-center justify-center gap-2"
+                    >
                       {counterKind.counter_type.type === "Any" && (
                         <span className="w-14 truncate text-xs font-semibold text-gray-200">
                           {formatCounterType(counterType)}
@@ -1541,7 +1876,9 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
                       <button
                         type="button"
                         className="h-7 w-7 rounded-full bg-gray-700 text-sm font-bold text-white disabled:opacity-40"
-                        onClick={() => setAmount(id, counterType, amount - 1, maxAmount)}
+                        onClick={() =>
+                          setAmount(id, counterType, amount - 1, maxAmount)
+                        }
                         disabled={amount <= 0}
                       >
                         -
@@ -1552,7 +1889,9 @@ function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] })
                       <button
                         type="button"
                         className="h-7 w-7 rounded-full bg-gray-700 text-sm font-bold text-white disabled:opacity-40"
-                        onClick={() => setAmount(id, counterType, amount + 1, maxAmount)}
+                        onClick={() =>
+                          setAmount(id, counterType, amount + 1, maxAmount)
+                        }
                         disabled={remaining <= 0 || amount >= maxAmount}
                       >
                         +
@@ -1639,7 +1978,15 @@ function PermanentCostModal({
       subtitle={subtitle}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.labelCount", { label, selected: selected.size, count: confirmCount })} />
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.labelCount", {
+              label,
+              selected: selected.size,
+              count: confirmCount,
+            })}
+          />
         </CostActionFooter>
       }
     >
@@ -1726,7 +2073,14 @@ function BlightModal({ data }: { data: BlightChoice["data"] }) {
       subtitle={t("cardChoice.blight.subtitle", { count: data.count })}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.confirmCount", { selected: selected.size, count: data.count })} />
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.confirmCount", {
+              selected: selected.size,
+              count: data.count,
+            })}
+          />
         </CostActionFooter>
       }
     >
@@ -1811,7 +2165,16 @@ function CrewModal({ data }: { data: CrewVehicle["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.crew.title")}
       subtitle={t("cardChoice.crew.subtitle", { power: data.crew_power })}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.crew.label", { total: totalPower, power: data.crew_power })} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={t("cardChoice.crew.label", {
+            total: totalPower,
+            power: data.crew_power,
+          })}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.eligible_creatures.map((id, index) => {
@@ -1874,9 +2237,8 @@ function StationTargetModal({ data }: { data: StationTarget["data"] }) {
 
   if (!objects) return null;
 
-  const selectedPower = selected != null
-    ? Math.max(objects[selected]?.power ?? 0, 0)
-    : 0;
+  const selectedPower =
+    selected != null ? Math.max(objects[selected]?.power ?? 0, 0) : 0;
 
   return (
     <ChoiceOverlay
@@ -1886,7 +2248,13 @@ function StationTargetModal({ data }: { data: StationTarget["data"] }) {
         <ConfirmButton
           onClick={handleConfirm}
           disabled={selected == null}
-          label={selected != null ? t("cardChoice.station.labelWithCharge", { charge: selectedPower }) : t("cardChoice.station.label")}
+          label={
+            selected != null
+              ? t("cardChoice.station.labelWithCharge", {
+                  charge: selectedPower,
+                })
+              : t("cardChoice.station.label")
+          }
         />
       }
     >
@@ -1918,7 +2286,9 @@ function StationTargetModal({ data }: { data: StationTarget["data"] }) {
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-blue-500/20">
                   <span className="rounded-full bg-blue-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.station", { power: Math.max(obj.power ?? 0, 0) })}
+                    {t("cardChoice.badges.station", {
+                      power: Math.max(obj.power ?? 0, 0),
+                    })}
                   </span>
                 </div>
               )}
@@ -1973,7 +2343,16 @@ function SaddleModal({ data }: { data: SaddleMount["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.saddle.title")}
       subtitle={t("cardChoice.saddle.subtitle", { power: data.saddle_power })}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.saddle.label", { total: totalPower, power: data.saddle_power })} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={t("cardChoice.saddle.label", {
+            total: totalPower,
+            power: data.saddle_power,
+          })}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.eligible_creatures.map((id, index) => {
@@ -2040,7 +2419,13 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.wardSacrifice.title", { count: data.remaining })}
       subtitle={t("cardChoice.wardSacrifice.subtitle")}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selected == null} label={t("cardChoice.badges.sacrifice")} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={selected == null}
+          label={t("cardChoice.badges.sacrifice")}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.permanents.map((id, index) => {
@@ -2107,7 +2492,13 @@ function UnlessBounceModal({ data }: { data: UnlessBounceChoice["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.unlessBounce.title", { count: data.remaining })}
       subtitle={t("cardChoice.unlessBounce.subtitle")}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selected == null} label={t("cardChoice.badges.return")} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={selected == null}
+          label={t("cardChoice.badges.return")}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.permanents.map((id, index) => {
@@ -2210,7 +2601,15 @@ function ExileForCostModal({
       subtitle={subtitle}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.labelCount", { label: confirmLabel, selected: selected.size, count })} />
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.labelCount", {
+              label: confirmLabel,
+              selected: selected.size,
+              count,
+            })}
+          />
         </CostActionFooter>
       }
     >
@@ -2279,7 +2678,10 @@ function ExileForCostDispatch({
       cards={data.choices}
       count={data.count}
       title={title}
-      subtitle={t("cardChoice.exileForCost.subtitle", { count: data.count, source: sourceLabel })}
+      subtitle={t("cardChoice.exileForCost.subtitle", {
+        count: data.count,
+        source: sourceLabel,
+      })}
       confirmLabel={t("cardChoice.badges.exile")}
     />
   );
@@ -2299,8 +2701,16 @@ function BeholdModal({
       cards={data.choices}
       count={data.count}
       title={t("cardChoice.behold.title")}
-      subtitle={exilesChosen ? t("cardChoice.behold.subtitleExile") : t("cardChoice.behold.subtitleChoose")}
-      confirmLabel={exilesChosen ? t("cardChoice.behold.labelExile") : t("cardChoice.behold.labelBehold")}
+      subtitle={
+        exilesChosen
+          ? t("cardChoice.behold.subtitleExile")
+          : t("cardChoice.behold.subtitleChoose")
+      }
+      confirmLabel={
+        exilesChosen
+          ? t("cardChoice.behold.labelExile")
+          : t("cardChoice.behold.labelBehold")
+      }
     />
   );
 }
@@ -2370,7 +2780,10 @@ function ExilePermanentForCostModal({ data }: { data: PayCost["data"] }) {
       subtitle={
         exact
           ? t("cardChoice.exilePermanent.subtitle", { count: data.count })
-          : t("cardChoice.exilePermanent.subtitleRange", { min: data.min_count, count: data.count })
+          : t("cardChoice.exilePermanent.subtitleRange", {
+              min: data.min_count,
+              count: data.count,
+            })
       }
       confirmLabel={t("cardChoice.badges.exile")}
     />
@@ -2393,7 +2806,10 @@ function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
       subtitle={
         exact
           ? t("cardChoice.craft.subtitle", { count: data.count })
-          : t("cardChoice.craft.subtitleRange", { min: data.min_count, count: data.count })
+          : t("cardChoice.craft.subtitleRange", {
+              min: data.min_count,
+              count: data.count,
+            })
       }
       confirmLabel={t("cardChoice.badges.exile")}
     />
@@ -2421,7 +2837,10 @@ function manaValueOfCost(cost: ManaCost): number {
     case "SelfManaCost":
       return 0;
     case "Cost":
-      return cost.generic + cost.shards.reduce((sum, shard) => sum + manaValueOfShard(shard), 0);
+      return (
+        cost.generic +
+        cost.shards.reduce((sum, shard) => sum + manaValueOfShard(shard), 0)
+      );
   }
 }
 
@@ -2429,7 +2848,11 @@ function manaValueOfObject(obj: { mana_cost: ManaCost }): number {
   return manaValueOfCost(obj.mana_cost);
 }
 
-function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] }) {
+function CollectEvidenceModal({
+  data,
+}: {
+  data: CollectEvidenceChoice["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -2470,10 +2893,19 @@ function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] })
   return (
     <ChoiceOverlay
       title={t("cardChoice.collectEvidence.title")}
-      subtitle={t("cardChoice.collectEvidence.subtitle", { minimum: data.minimum_mana_value })}
+      subtitle={t("cardChoice.collectEvidence.subtitle", {
+        minimum: data.minimum_mana_value,
+      })}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.collectCount", { total, minimum: data.minimum_mana_value })} />
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.collectCount", {
+              total,
+              minimum: data.minimum_mana_value,
+            })}
+          />
         </CostActionFooter>
       }
     >
@@ -2590,10 +3022,24 @@ function DiscardModal({
       footer={
         canCancel ? (
           <CostActionFooter onCancel={handleCancel}>
-            <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.discardCount", { selected: selected.size, count: data.count })} />
+            <ConfirmButton
+              onClick={handleConfirm}
+              disabled={!isReady}
+              label={t("cardChoice.buttons.discardCount", {
+                selected: selected.size,
+                count: data.count,
+              })}
+            />
           </CostActionFooter>
         ) : (
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.discardCount", { selected: selected.size, count: data.count })} />
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.discardCount", {
+              selected: selected.size,
+              count: data.count,
+            })}
+          />
         )
       }
     >
@@ -2668,7 +3114,10 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
       subtitle={t("cardChoice.harmonize.subtitle")}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleSkip} label={t("cardChoice.harmonize.labelSkip")} />
+          <ConfirmButton
+            onClick={handleSkip}
+            label={t("cardChoice.harmonize.labelSkip")}
+          />
         </CostActionFooter>
       }
     >
@@ -2729,11 +3178,16 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
           if (!obj) return null;
           const isCurrentTurnEntry =
             turnNumber != null && obj.entered_battlefield_turn === turnNumber;
-          const entryLabel = isCurrentTurnEntry ? t("cardChoice.legend.statusJustEntered") : t("cardChoice.legend.statusAlready");
+          const entryLabel = isCurrentTurnEntry
+            ? t("cardChoice.legend.statusJustEntered")
+            : t("cardChoice.legend.statusAlready");
           return (
             <motion.button
               key={id}
-              aria-label={t("cardChoice.legend.keepAria", { name: obj.name, status: entryLabel })}
+              aria-label={t("cardChoice.legend.keepAria", {
+                name: obj.name,
+                status: entryLabel,
+              })}
               className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
               animate={{ opacity: 0.85, y: 0, scale: 1 }}
@@ -2752,9 +3206,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
               <div className="absolute top-2 left-1/2 -translate-x-1/2">
                 <span
                   className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
-                    isCurrentTurnEntry
-                      ? "bg-amber-500/95"
-                      : "bg-sky-700/95"
+                    isCurrentTurnEntry ? "bg-amber-500/95" : "bg-sky-700/95"
                   }`}
                 >
                   {entryLabel}
@@ -2770,7 +3222,11 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
 
 // ── Commander Zone Choice Modal (CR 903.9a) ───────────────────────────────
 
-function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] }) {
+function CommanderZoneChoiceModal({
+  data,
+}: {
+  data: CommanderZoneChoice["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -2779,12 +3235,16 @@ function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] 
   if (!objects) return null;
 
   const obj = objects[data.commander_id];
-  const zoneName = data.current_zone.charAt(0).toUpperCase() + data.current_zone.slice(1);
+  const zoneName =
+    data.current_zone.charAt(0).toUpperCase() + data.current_zone.slice(1);
 
   return (
     <ChoiceOverlay
       title={t("cardChoice.commanderZone.title")}
-      subtitle={t("cardChoice.commanderZone.subtitle", { name: obj?.name ?? t("cardChoice.commanderZone.commanderFallback"), zone: zoneName })}
+      subtitle={t("cardChoice.commanderZone.subtitle", {
+        name: obj?.name ?? t("cardChoice.commanderZone.commanderFallback"),
+        zone: zoneName,
+      })}
     >
       <div className="flex items-center gap-6">
         <motion.div
@@ -2803,11 +3263,18 @@ function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] 
         <div className="flex flex-col gap-3">
           <ConfirmButton
             label={t("cardChoice.commanderZone.labelCommandZone")}
-            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+            onClick={() =>
+              dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
+            }
           />
           <ConfirmButton
             label={t("cardChoice.commanderZone.labelLeave", { zone: zoneName })}
-            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+            onClick={() =>
+              dispatch({
+                type: "DecideOptionalEffect",
+                data: { accept: false },
+              })
+            }
           />
         </div>
       </div>
@@ -2817,7 +3284,11 @@ function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] 
 
 // ── Reveal Until Kept Choice Modal (CR 701.20a) ───────────────────────────
 
-function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["data"] }) {
+function RevealUntilKeptChoiceModal({
+  data,
+}: {
+  data: RevealUntilKeptChoice["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -2826,12 +3297,15 @@ function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["dat
   if (!objects) return null;
 
   const obj = objects[data.hit_card];
-  const declineZone = data.decline_zone.charAt(0).toUpperCase() + data.decline_zone.slice(1);
+  const declineZone =
+    data.decline_zone.charAt(0).toUpperCase() + data.decline_zone.slice(1);
 
   return (
     <ChoiceOverlay
       title={t("cardChoice.revealUntil.title")}
-      subtitle={t("cardChoice.revealUntil.subtitle", { name: obj?.name ?? t("cardChoice.revealUntil.cardFallback") })}
+      subtitle={t("cardChoice.revealUntil.subtitle", {
+        name: obj?.name ?? t("cardChoice.revealUntil.cardFallback"),
+      })}
     >
       <div className="flex items-center gap-6">
         <motion.div
@@ -2850,11 +3324,18 @@ function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["dat
         <div className="flex flex-col gap-3">
           <ConfirmButton
             label={t("cardChoice.revealUntil.labelBattlefield")}
-            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+            onClick={() =>
+              dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
+            }
           />
           <ConfirmButton
             label={t("cardChoice.revealUntil.labelInto", { zone: declineZone })}
-            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+            onClick={() =>
+              dispatch({
+                type: "DecideOptionalEffect",
+                data: { accept: false },
+              })
+            }
           />
         </div>
       </div>
@@ -2864,7 +3345,11 @@ function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["dat
 
 // ── Repeat Decision Modal ──────────────────────────────────────────────────
 
-function RepeatDecisionModal({ data: _data }: { data: RepeatDecision["data"] }) {
+function RepeatDecisionModal({
+  data: _data,
+}: {
+  data: RepeatDecision["data"];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
 
@@ -2876,11 +3361,15 @@ function RepeatDecisionModal({ data: _data }: { data: RepeatDecision["data"] }) 
       <div className="flex flex-col gap-3">
         <ConfirmButton
           label={t("cardChoice.buttons.repeat")}
-          onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+          onClick={() =>
+            dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
+          }
         />
         <ConfirmButton
           label={t("cardChoice.buttons.stop")}
-          onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+          onClick={() =>
+            dispatch({ type: "DecideOptionalEffect", data: { accept: false } })
+          }
         />
       </div>
     </ChoiceOverlay>
@@ -2955,7 +3444,13 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.manifestDread.title")}
       subtitle={t("cardChoice.manifestDread.subtitle")}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} label={t("cardChoice.manifestDread.label")} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={selected === null}
+          label={t("cardChoice.manifestDread.label")}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -3002,12 +3497,15 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
 type ChooseManaColor = Extract<WaitingFor, { type: "ChooseManaColor" }>;
 
 const MANA_COLOR_STYLES: Record<ManaType, string> = {
-  White: "border-yellow-400 bg-yellow-400/20 text-yellow-200 hover:bg-yellow-400/40",
+  White:
+    "border-yellow-400 bg-yellow-400/20 text-yellow-200 hover:bg-yellow-400/40",
   Blue: "border-blue-400 bg-blue-500/20 text-blue-200 hover:bg-blue-500/40",
   Black: "border-gray-400 bg-gray-700/40 text-gray-200 hover:bg-gray-700/60",
   Red: "border-red-400 bg-red-500/20 text-red-200 hover:bg-red-500/40",
-  Green: "border-green-400 bg-green-600/20 text-green-200 hover:bg-green-600/40",
-  Colorless: "border-gray-400 bg-gray-500/20 text-gray-200 hover:bg-gray-500/40",
+  Green:
+    "border-green-400 bg-green-600/20 text-green-200 hover:bg-green-600/40",
+  Colorless:
+    "border-gray-400 bg-gray-500/20 text-gray-200 hover:bg-gray-500/40",
 };
 
 const MANA_COLOR_SELECTED: Record<ManaType, string> = {
@@ -3056,11 +3554,18 @@ function ManaColorChoiceModal({ data }: { data: ChooseManaColor["data"] }) {
       ? (data.context.data.batch_siblings?.length ?? 0) + 1
       : 1;
   return (
-    <ManaSingleColorChoiceModal options={data.choice.data.options} batchMax={batchMax} />
+    <ManaSingleColorChoiceModal
+      options={data.choice.data.options}
+      batchMax={batchMax}
+    />
   );
 }
 
-function PayManaAbilityManaModal({ data }: { data: PayManaAbilityMana["data"] }) {
+function PayManaAbilityManaModal({
+  data,
+}: {
+  data: PayManaAbilityMana["data"];
+}) {
   const { t } = useTranslation("game");
   return (
     <ManaCombinationChoiceModal
@@ -3095,7 +3600,10 @@ function ManaSingleColorChoiceModal({
   }, [dispatch, selected, count]);
 
   const canBatch = batchMax > 1;
-  const confirmLabel = selected && count > 1 ? t("cardChoice.manaColor.labelAdd", { count }) : t("cardChoice.manaColor.labelConfirm");
+  const confirmLabel =
+    selected && count > 1
+      ? t("cardChoice.manaColor.labelAdd", { count })
+      : t("cardChoice.manaColor.labelConfirm");
 
   return (
     <ChoiceOverlay
@@ -3108,7 +3616,11 @@ function ManaSingleColorChoiceModal({
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-md"
       footer={
-        <ConfirmButton onClick={handleConfirm} disabled={selected === null} label={confirmLabel} />
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={selected === null}
+          label={confirmLabel}
+        />
       }
     >
       <div className="mx-auto flex w-fit items-center justify-center gap-3 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6">
@@ -3118,7 +3630,9 @@ function ManaSingleColorChoiceModal({
             <motion.button
               key={color}
               className={`flex h-14 w-14 items-center justify-center rounded-full border-2 transition sm:h-[4.5rem] sm:w-[4.5rem] ${
-                isSelected ? MANA_COLOR_SELECTED[color] : MANA_COLOR_STYLES[color]
+                isSelected
+                  ? MANA_COLOR_SELECTED[color]
+                  : MANA_COLOR_STYLES[color]
               }`}
               initial={{ opacity: 0, y: 20, scale: 0.9 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -3133,7 +3647,9 @@ function ManaSingleColorChoiceModal({
       </div>
       {canBatch && (
         <div className="mx-auto mb-4 flex w-fit items-center gap-4">
-          <span className="text-sm text-white/70">{t("cardChoice.manaColor.howMany")}</span>
+          <span className="text-sm text-white/70">
+            {t("cardChoice.manaColor.howMany")}
+          </span>
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -3218,7 +3734,9 @@ function ManaAnyCombinationChoiceModal({
                 <motion.button
                   key={`${slot}-${color}`}
                   className={`flex h-12 w-12 items-center justify-center rounded-full border-2 transition sm:h-14 sm:w-14 ${
-                    isSelected ? MANA_COLOR_SELECTED[color] : MANA_COLOR_STYLES[color]
+                    isSelected
+                      ? MANA_COLOR_SELECTED[color]
+                      : MANA_COLOR_STYLES[color]
                   }`}
                   initial={{ opacity: 0, y: 10, scale: 0.95 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -3280,7 +3798,10 @@ function ManaCombinationChoiceModal({
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-lg"
       footer={
-        <ConfirmButton onClick={handleConfirm} disabled={selectedIndex === null} />
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={selectedIndex === null}
+        />
       }
     >
       <div className="mx-auto flex w-fit flex-col items-center justify-center gap-3 px-4 py-4 sm:gap-4 sm:px-6 sm:py-6">

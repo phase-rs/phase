@@ -259,10 +259,13 @@ pub fn turn_face_up(
 /// 2. Moves it to the battlefield
 /// 3. Applies face-down 2/2 creature overrides
 /// 4. Stores originals in `back_face` for later turn-face-up
+///
+/// `source_id` is the spell or ability source responsible for the manifest entry.
 pub fn manifest_card(
     state: &mut GameState,
     _player: PlayerId,
     object_id: ObjectId,
+    source_id: ObjectId,
     profile: crate::types::ability::FaceDownProfile,
     controller: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
@@ -291,9 +294,10 @@ pub fn manifest_card(
     // a controller other than the object's owner ("under your control"). When
     // `controller` is `Some`, the manifested card enters under that player's
     // control instead of the library owner's (Cybership routes the damaged
-    // player's cards under the Cybership controller).
+    // player's cards under the Cybership controller). The move is attributed to
+    // `source_id` (the manifesting spell/ability), not the moved object.
     let mut request =
-        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
+        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, source_id)
             .face_down(profile);
     if let Some(controller) = controller {
         request = request.under_control_of(controller);
@@ -353,6 +357,7 @@ pub fn manifest(
         state,
         player,
         object_id,
+        object_id,
         crate::types::ability::FaceDownProfile::vanilla_2_2(),
         None,
         events,
@@ -371,6 +376,7 @@ pub fn cloak(
     manifest_card(
         state,
         player,
+        object_id,
         object_id,
         crate::types::ability::FaceDownProfile::cloaked_2_2(),
         None,

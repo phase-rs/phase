@@ -1,8 +1,8 @@
 use crate::database::CardDatabase;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
-    CounterSourceRider, Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TriggerDefinition,
+    CounterSourceRider, Effect, PtValue, QuantityExpr, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -11,6 +11,7 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -385,6 +386,50 @@ pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
         }
     }
     counters
+}
+
+/// CR 614.1c: The counters a permanent enters with from a "~ enters with N
+/// <type> counters on it" ability (Atraxa's Skitterfang → three oil counters;
+/// Hangarback Walker / Walking Ballista copies → +1/+1). The parser models this
+/// as a `Moved`→Battlefield replacement whose `execute` puts counters on the
+/// entering object itself.
+///
+/// Cast/play/effect entries apply these by running the replacement during the
+/// ZoneChange pass. The token-copy path, however, builds the object directly on
+/// the battlefield (CR 707.2) and never runs that pass, so it must seed these
+/// counters the same way it seeds intrinsic loyalty (`intrinsic_face_counters`).
+/// This extracts them from the copiable replacement set so a token copy of an
+/// "enters with counters" creature enters with them.
+///
+/// Only the unconditional, mandatory, fixed-count self form is recognized:
+/// variable or conditional counts ("a +1/+1 counter for each artifact you
+/// control") need resolution context this static extraction lacks, and on
+/// non-copy entries the normal replacement pass still handles every form.
+pub fn self_etb_counter_replacements(
+    replacements: &[ReplacementDefinition],
+) -> Vec<(CounterType, u32)> {
+    replacements
+        .iter()
+        .filter_map(|repl| {
+            if repl.event != ReplacementEvent::Moved
+                || repl.destination_zone != Some(Zone::Battlefield)
+                || !matches!(repl.mode, ReplacementMode::Mandatory)
+                || repl.condition.is_some()
+                || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
+            {
+                return None;
+            }
+            let Effect::PutCounter {
+                counter_type,
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::SelfRef,
+            } = &*repl.execute.as_ref()?.effect
+            else {
+                return None;
+            };
+            (*value > 0).then(|| (counter_type.clone(), *value as u32))
+        })
+        .collect()
 }
 
 pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
@@ -1172,13 +1217,22 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // CR 707.2 + CR 202.3: Build the Momir Basic random-token pool. Gated on the
     // format AND emptiness: `rehydrate_card_db_metadata` also runs on the
     // mid-game debug-spawn path (engine-wasm), so without the emptiness guard we
-    // would rescan the full creature corpus on every spawn. The deserialize case
-    // is covered — `format_config` is serialized, so a peer deserializing a Momir
-    // game sees `format == Momir && momir_pool.is_empty()` and rebuilds the same
-    // pool from its own copy of the card DB (the keys are sorted, so the index is
-    // deterministic across peers).
+    // would rescan the full creature corpus on every spawn.
+    //
+    // The emptiness check must watch `momir_pool_faces`, NOT just `momir_pool`:
+    // `momir_pool` is serialized but `momir_pool_faces` is `#[serde(skip)]`
+    // (it holds full `CardFace` values, too heavy to ship). After ANY
+    // deserialize — `restore_game_state` on worker restart/PWA update, or a peer
+    // syncing — `momir_pool` comes back populated while `momir_pool_faces` is
+    // empty. Gating on `momir_pool.is_empty()` alone would then refuse to rebuild
+    // the faces map, leaving `CreateTokenCopyFromPool` with zero hydratable
+    // candidates (every name in the pool misses the empty faces map) and the
+    // emblem silently makes no token. Rebuilding when EITHER is empty restores
+    // the faces map; the rebuild overwrites `momir_pool` wholesale, so a
+    // non-empty pool is regenerated identically (keys are sorted → deterministic
+    // across peers), never duplicated.
     if state.format_config.format == crate::types::format::GameFormat::Momir
-        && state.momir_pool.is_empty()
+        && (state.momir_pool.is_empty() || state.momir_pool_faces.is_empty())
     {
         let mut pool: std::collections::BTreeMap<i32, Vec<String>> =
             std::collections::BTreeMap::new();
@@ -1187,6 +1241,16 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
             .face_index
             .values()
             .filter(|face| face.card_type.core_types.contains(&CoreType::Creature))
+            // CR 202.1b + CR 202.3b + CR 712.8a: `face_index` holds BOTH faces of
+            // every multi-face card, so a transform/flip/meld BACK face (which has
+            // no printed mana cost → `ManaCost::NoCost`, mana value 0) would key
+            // into the pool at MV 0. A back face is not a separately castable
+            // creature *card* (outside the battlefield a DFC has only its front
+            // face's characteristics), so it is never a valid Momir pick. Exclude
+            // costless faces by their data signal: only an ABSENT manaCost maps to
+            // `NoCost`, so modal-DFC creature backs (explicit cost → `Cost{..}`)
+            // and genuine `{0}` creatures (`Cost{generic:0}`) are preserved.
+            .filter(|face| !matches!(face.mana_cost, ManaCost::NoCost))
         {
             let mv = face.mana_cost.mana_value() as i32;
             pool.entry(mv).or_default().push(face.name.clone());
@@ -1663,6 +1727,108 @@ mod tests {
             ),
             "non-legendary token copies must not trigger the legend rule on load"
         );
+    }
+
+    /// CR 707.2 + CR 202.3: The Momir random-token pool's hydration map
+    /// (`momir_pool_faces`) is `#[serde(skip)]`, while `momir_pool` is
+    /// serialized. After a deserialize-then-rehydrate cycle (`restore_game_state`
+    /// on worker restart / PWA update, or a peer sync), `momir_pool` is populated
+    /// but `momir_pool_faces` is empty. Rehydration MUST rebuild the faces map in
+    /// that state — otherwise `CreateTokenCopyFromPool` finds zero hydratable
+    /// candidates and the Momir emblem silently makes no creature token. This is
+    /// the discriminating guard: it fails if the rebuild is gated on
+    /// `momir_pool.is_empty()` alone (the pre-fix behavior).
+    #[test]
+    fn momir_pool_faces_rebuilt_after_restore_drops_serde_skip_map() {
+        // A mana-value-4 creature ({3}{G} = MV 4) is the only card in the pool.
+        let creature = test_face(
+            "Test Pool Beast",
+            "test-pool-beast-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 3,
+            },
+        );
+        let export = serde_json::json!({
+            "test pool beast": serde_json::to_value(&creature).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::momir();
+
+        // First hydration builds both the pool and the faces map.
+        rehydrate_game_from_card_db(&mut state, &db);
+        assert_eq!(
+            state.momir_pool.get(&4).map(Vec::as_slice),
+            Some(["Test Pool Beast".to_string()].as_slice()),
+            "MV-4 creature must land in the pool keyed by mana value"
+        );
+        assert!(
+            state.momir_pool_faces.contains_key("test pool beast"),
+            "faces map must hydrate the MV-4 creature on first build"
+        );
+
+        // Simulate the serde round-trip: `momir_pool` survives, the
+        // `#[serde(skip)]` faces map comes back empty.
+        state.momir_pool_faces = std::sync::Arc::new(HashMap::new());
+        assert!(!state.momir_pool.is_empty(), "pool persists across serde");
+
+        // Rehydrating a restored game must repopulate the faces map even though
+        // `momir_pool` is non-empty.
+        rehydrate_game_from_card_db(&mut state, &db);
+        assert!(
+            state.momir_pool_faces.contains_key("test pool beast"),
+            "faces map must be rebuilt after a restore that dropped the skip map"
+        );
+    }
+
+    fn self_etb_plus_one_replacement(count: i32) -> ReplacementDefinition {
+        crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: count },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+    }
+
+    /// CR 614.1c: "~ enters with N +1/+1 counters on it" (Hangarback Walker /
+    /// Walking Ballista class, like Atraxa's Skitterfang's oil counters) is
+    /// modeled as a Moved→Battlefield self-replacement. The extractor must
+    /// surface `(counter, N)` so a token copy — which bypasses the ZoneChange
+    /// replacement pass — can seed those counters on entry.
+    #[test]
+    fn self_etb_counter_replacement_extracts_fixed_self_counters() {
+        assert_eq!(
+            self_etb_counter_replacements(&[self_etb_plus_one_replacement(3)]),
+            vec![(CounterType::Plus1Plus1, 3)],
+        );
+    }
+
+    /// A conditional "enters with" replacement is NOT a plain fixed-count self
+    /// seed — it must be left to the normal replacement pass, not statically
+    /// extracted (where the condition would be silently ignored). A replacement
+    /// whose destination is not the battlefield must also be ignored.
+    #[test]
+    fn self_etb_counter_replacement_skips_conditional_and_non_self() {
+        let conditional = ReplacementDefinition {
+            condition: Some(
+                crate::types::ability::ReplacementCondition::UnlessPlayerLifeAtMost { amount: 5 },
+            ),
+            ..self_etb_plus_one_replacement(1)
+        };
+        let wrong_zone = ReplacementDefinition {
+            destination_zone: Some(Zone::Graveyard),
+            ..self_etb_plus_one_replacement(1)
+        };
+        assert!(self_etb_counter_replacements(&[conditional, wrong_zone]).is_empty());
     }
 
     /// CR 111.1 + CR 707.2: The same token-copy rehydration rule applies to a

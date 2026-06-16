@@ -620,6 +620,19 @@ fn parent_target_controller_player(
     })
 }
 
+fn parent_target_owner_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    ability.and_then(|a| {
+        crate::game::targeting::resolve_effect_player_ref(
+            state,
+            a,
+            &TargetFilter::ParentTargetOwner,
+        )
+    })
+}
+
 #[derive(Clone, Copy)]
 enum ControllerLookup {
     /// Normal filter matching: off-stack/off-battlefield objects may need
@@ -682,6 +695,7 @@ pub(crate) fn controller_ref_player(
             })
         }),
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
+        ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
@@ -818,6 +832,8 @@ fn stack_entry_controller_matches(
             parent_target_controller_player(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
         }
+        Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, ctx.ability)
+            .is_some_and(|pid| pid == entry_controller),
         Some(ControllerRef::DefendingPlayer) => {
             crate::game::combat::defending_player_for_attacker(state, ctx.source_id)
                 .is_some_and(|pid| pid == entry_controller)
@@ -1383,6 +1399,13 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::ParentTargetController => {
                         let target_player = parent_target_controller_player(state, ability);
+                        match target_player {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    ControllerRef::ParentTargetOwner => {
+                        let target_player = parent_target_owner_player(state, ability);
                         match target_player {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -2014,6 +2037,7 @@ pub fn spell_record_matches_filter(
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 613.1: "the chosen player" has no meaning for a
@@ -3010,6 +3034,7 @@ fn matches_filter_prop(
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
+                    (Some(ControllerRef::ParentTargetOwner), Some(pid)) => perm.owner == pid,
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
@@ -3046,6 +3071,8 @@ fn matches_filter_prop(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
             }
+            ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
+                .is_some_and(|pid| pid == obj.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
@@ -3612,6 +3639,8 @@ fn zone_change_record_matches_property(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == record.owner)
             }
+            ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
+                .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
@@ -3831,6 +3860,8 @@ fn attachment_controller_matches(
             parent_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
         }
+        Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, source.ability)
+            .is_some_and(|pid| pid == attachment_controller),
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -4410,6 +4441,7 @@ fn player_matches_target_filter_with(
             // established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: "the chosen player" has no meaning in this name-filter
             // context. Fail closed (mirrors `TargetPlayer`).

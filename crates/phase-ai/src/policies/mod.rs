@@ -28,6 +28,7 @@ mod land_sequencing;
 mod landfall_timing;
 mod lethality_awareness;
 mod life_total_resource;
+mod lifegain_payoff;
 mod mana_efficiency;
 mod mill_targeting;
 pub mod mulligan;

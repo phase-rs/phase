@@ -45,6 +45,7 @@ pub fn resolve(
             state,
             player,
             card_id,
+            ability.source_id,
             crate::types::ability::FaceDownProfile::vanilla_2_2(),
             None,
             events,
@@ -57,7 +58,11 @@ pub fn resolve(
             state.revealed_cards.insert(card_id);
         }
 
-        state.waiting_for = WaitingFor::ManifestDreadChoice { player, cards };
+        state.waiting_for = WaitingFor::ManifestDreadChoice {
+            player,
+            cards,
+            source_id: ability.source_id,
+        };
     }
 
     events.push(GameEvent::EffectResolved {
@@ -106,10 +111,15 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::ManifestDreadChoice { player: p, cards } => {
+            WaitingFor::ManifestDreadChoice {
+                player: p,
+                cards,
+                source_id,
+            } => {
                 assert_eq!(*p, player);
                 assert_eq!(cards.len(), 2);
                 assert_eq!(*cards, top_2);
+                assert_eq!(*source_id, ObjectId(100));
             }
             other => panic!("Expected ManifestDreadChoice, got {:?}", other),
         }

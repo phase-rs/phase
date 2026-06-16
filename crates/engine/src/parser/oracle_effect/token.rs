@@ -496,9 +496,29 @@ fn parse_token_description_with_context(
     {
         let suffix_lower = suffix.to_lowercase();
         if suffix_lower.contains("for each") && suffix_lower.contains("this way") {
-            count = QuantityExpr::Ref {
-                qty: QuantityRef::TrackedSetSize,
-            };
+            // CR 608.2c + CR 205.2a: route ONLY "card type among cards <verb> this
+            // way" to the cause-filtered distinct-card-types count (Occult
+            // Epiphany #3307); every other "... this way" token keeps
+            // `TrackedSetSize`. The dispatch decision is the nom combinator's
+            // Ok/Err — the post-"for each " clause is extracted with nom
+            // (`take_until` + `tag`), not string-method splitting.
+            let after_for_each = take_until::<_, _, OracleError<'_>>("for each ")
+                .parse(suffix_lower.as_str())
+                .and_then(|(rest, _)| tag("for each ").parse(rest))
+                .map(|(clause, _)| clause.trim_end_matches('.').trim());
+            count = after_for_each
+                .ok()
+                .and_then(|clause| {
+                    crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(
+                        clause,
+                    )
+                    .ok()
+                    .filter(|(rest, _)| rest.is_empty())
+                    .map(|(_, qty)| QuantityExpr::Ref { qty })
+                })
+                .unwrap_or(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                });
         }
     }
 
@@ -1179,6 +1199,48 @@ mod tests {
     use super::*;
     use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TypeFilter};
     use crate::types::card_type::CoreType;
+
+    #[test]
+    fn occult_epiphany_token_counts_distinct_types_of_discarded() {
+        // Occult Epiphany #3307: the token count must be DISTINCT CARD TYPES
+        // among the DISCARDED chain members (cause-filtered), NOT TrackedSetSize.
+        let txt = "Create a 1/1 white Spirit creature token with flying for each card type among cards discarded this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCardTypes {
+                    source: crate::types::ability::CardTypeSetSource::TrackedSet {
+                        caused_by: Some(crate::types::ability::ThisWayCause::Discarded),
+                    },
+                },
+            },
+            "Occult Epiphany must count distinct discarded card types, not TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn bare_for_each_card_discarded_this_way_keeps_tracked_set_size() {
+        // No-regression: a plain "for each card discarded this way" token (member
+        // count, NOT distinct types) must still resolve to TrackedSetSize.
+        let txt = "Create a 1/1 white Spirit creature token with flying for each card discarded this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
 
     #[test]
     fn copy_x_tokens_of_target_parses_variable_count() {

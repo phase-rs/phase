@@ -2316,6 +2316,14 @@ fn parse_for_each_clause_with_they_controller(
         if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
             return Some(qty);
         }
+        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" —
+        // distinct card types among the cause-filtered chain tracked set (Occult
+        // Epiphany #3307). Must precede the bare `TrackedSetSize` fallback.
+        if let Ok(("", qty)) =
+            crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(&lower)
+        {
+            return Some(qty);
+        }
         return Some(QuantityRef::TrackedSetSize);
     }
 
