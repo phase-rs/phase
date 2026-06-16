@@ -113,8 +113,7 @@ fn explore_keyword_with_additional_land_and_draw() {
     let lands_granted = additional_land_drops(outcome.state(), P0);
     println!("Additional land drops: {}", lands_granted);
     assert_eq!(
-        lands_granted,
-        1,
+        lands_granted, 1,
         "Card with explore keyword + land permission must grant 1 additional land drop"
     );
 
