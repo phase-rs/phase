@@ -213,11 +213,11 @@ pub fn apply_life_gain_after_replacement(
     gain_amount
 }
 
-/// CR 120.3: Damage to a player causes that much life loss.
+/// CR 119.3: An effect causes a player to lose life (not damage).
 /// Returns the actual amount of life lost (may differ due to replacements like doubling).
 /// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
 /// the player must choose which applies first (CR 614.7).
-pub fn apply_damage_life_loss(
+pub fn apply_life_loss(
     state: &mut GameState,
     player_id: PlayerId,
     amount: u32,
@@ -226,8 +226,8 @@ pub fn apply_damage_life_loss(
     if amount == 0 {
         return Ok(0);
     }
-    // CR 119.8 + CR 120.3: When a player "can't lose life," damage-to-life-loss
-    // conversion is suppressed. Short-circuit BEFORE the replacement pipeline.
+    // CR 119.8: When a player "can't lose life," the loss is suppressed.
+    // Short-circuit BEFORE the replacement pipeline.
     if crate::game::static_abilities::player_has_cant_lose_life(state, player_id) {
         return Ok(0);
     }
@@ -253,6 +253,17 @@ pub fn apply_damage_life_loss(
             Err(ReplacementDeferred)
         }
     }
+}
+
+/// CR 120.3: Damage to a player causes that much life loss.
+/// Delegates to [`apply_life_loss`] once damage has been resolved to a life-loss amount.
+pub fn apply_damage_life_loss(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, ReplacementDeferred> {
+    apply_life_loss(state, player_id, amount, events)
 }
 
 /// CR 120.3: Apply a post-replacement `ProposedEvent::LifeLoss` to the game state.
@@ -398,7 +409,7 @@ fn resolve_life_loss_target(
 /// Per CR 119.5: "If an effect sets a player's life total to a specific number,
 /// the player gains or loses the necessary amount of life to end up with the
 /// new total." The delta is therefore dispatched as either a `LifeGain` or
-/// `LifeLoss` event through [`apply_life_gain`] / [`apply_damage_life_loss`] so
+/// `LifeLoss` event through [`apply_life_gain`] / [`apply_life_loss`] so
 /// the full replacement pipeline fires and the CantGainLife / CantLoseLife
 /// short-circuits are consistent with every other life-change event.
 pub fn resolve_set_life_total(
@@ -434,9 +445,9 @@ pub fn resolve_set_life_total(
     };
 
     // CR 119.5: Set each player's life total one at a time, decomposing into the
-    // matching gain/loss event. apply_life_gain / apply_damage_life_loss each
-    // handle their own CR 119.7 / CR 119.8 short-circuits and replacement
-    // pipeline routing.
+    // matching gain/loss event. apply_life_gain / apply_life_loss each handle
+    // their own CR 119.7 / CR 119.8 short-circuits and replacement pipeline
+    // routing.
     for target_player_id in target_player_ids {
         let current_life = state
             .players
@@ -448,7 +459,7 @@ pub fn resolve_set_life_total(
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-            -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
+            -1 => apply_life_loss(state, target_player_id, (-diff) as u32, events).err(),
             _ => None,
         };
         if deferred.is_some() {
