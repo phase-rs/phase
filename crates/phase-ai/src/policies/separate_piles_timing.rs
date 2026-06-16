@@ -77,7 +77,7 @@ impl TacticalPolicy for SeparatePilesTimingPolicy {
         let has_separate_piles = obj
             .abilities
             .iter()
-            .any(|ability| ability_is_opponent_separate_piles_ai_chooses(ability));
+            .any(ability_is_opponent_separate_piles_ai_chooses);
         if !has_separate_piles {
             return PolicyVerdict::neutral(PolicyReason::new("separate_piles_na"));
         }
