@@ -28,6 +28,7 @@ use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
+use super::separate_piles_timing::SeparatePilesTimingPolicy;
 use super::spellslinger_casting::SpellslingerCastingPolicy;
 use super::sweeper_timing::SweeperTimingPolicy;
 use super::tokens_wide::TokensWidePolicy;
@@ -106,6 +107,7 @@ pub enum PolicyId {
     MillTargeting,
     ChaliceAvoidance,
     PaymentSelection,
+    SeparatePilesTiming,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -312,6 +314,7 @@ impl Default for PolicyRegistry {
             Box::new(super::mill_targeting::MillTargetingPolicy),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(SeparatePilesTimingPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

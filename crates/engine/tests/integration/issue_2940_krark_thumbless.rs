@@ -69,6 +69,7 @@ fn krark_oracle_text_trigger_branches_match_direct_parse() {
     let Effect::FlipCoin {
         win_effect,
         lose_effect,
+        ..
     } = execute.effect.as_ref()
     else {
         panic!("expected FlipCoin, got {:?}", execute.effect);
@@ -125,6 +126,7 @@ fn krark_battlefield_trigger_has_correct_flip_branches() {
     let Effect::FlipCoin {
         win_effect,
         lose_effect,
+        ..
     } = execute.effect.as_ref()
     else {
         panic!("expected FlipCoin, got {:?}", execute.effect);

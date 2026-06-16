@@ -304,6 +304,16 @@ pub enum ManaRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// The `String` is the chosen creature type (e.g., "Elf").
     OnlyForCreatureType(String),
+    /// CR 106.6 + CR 205.3m + CR 903.3: "a creature spell that shares a creature
+    /// type with your commander" — relational spend filter for Path of Ancestry.
+    /// This is a distinct *relational-to-commander* axis, not a fixed-subtype
+    /// parameterization of `OnlyForCreatureType`: the matching subtype set is
+    /// computed from live commander state per spend, so it cannot be evaluated
+    /// from `SpellMeta` alone. `allows_spell` returns `false` (no commander
+    /// context here); the real relational evaluation happens at the
+    /// `apply_mana_spell_grants` spend-check site, which has game-state access —
+    /// mirroring how `OnlyForXCosts` defers full detection to its call site.
+    SharesCreatureTypeWithCommander,
     /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
     /// Allows spending for spells of `spell_type` (checked via `allows_spell`) OR for ability
     /// activations whose scope is described by `ability` (checked via `allows_activation`):
@@ -388,6 +398,14 @@ impl ManaRestriction {
                     .any(|s| s.eq_ignore_ascii_case(required_subtype));
                 is_creature && has_subtype
             }
+            // CR 106.6 + CR 903.3: Relational commander-subtype filter. `SpellMeta`
+            // carries no commander context, so this restriction can never
+            // independently authorize a spend here — it returns `false` and the
+            // authoritative relational evaluation (comparing the spell's creature
+            // subtypes against the controller's commander's creature types) is done
+            // at the `apply_mana_spell_grants` call site, which has `&GameState`.
+            // Mirrors the deferral contract of `OnlyForXCosts`.
+            ManaRestriction::SharesCreatureTypeWithCommander => false,
             // CR 106.6: The spell-casting half of the OR — allows if the spell has the
             // required type, consulting both core card types (Creature, Instant, ...)
             // and subtypes (Elemental, Goblin, ...). Flamebraider's "Elemental" names
@@ -443,6 +461,7 @@ impl ManaRestriction {
             ManaRestriction::OnlyForSpell
             | ManaRestriction::OnlyForSpellType(_)
             | ManaRestriction::OnlyForCreatureType(_)
+            | ManaRestriction::SharesCreatureTypeWithCommander
             | ManaRestriction::OnlyForSpellWithKeywordKind(_)
             | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _)
             | ManaRestriction::OnlyForSpellWithManaValue { .. }
@@ -1523,6 +1542,28 @@ mod tests {
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
         assert!(!restriction.allows_spell(&elf_instant));
+    }
+
+    #[test]
+    fn shares_creature_type_with_commander_defers_to_call_site() {
+        // CR 106.6 + CR 903.3: The relational commander-subtype filter carries no
+        // commander context in `SpellMeta`, so `allows_spell`/`allows_activation`
+        // must return `false` for every payment context. The authoritative
+        // relational evaluation happens at the `apply_mana_spell_grants` spend
+        // site (game-state aware). This documents the deferral contract.
+        let restriction = ManaRestriction::SharesCreatureTypeWithCommander;
+        let elf_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elf".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        assert!(!restriction.allows_spell(&elf_creature));
+        let source_types = vec!["Creature".to_string()];
+        let source_subtypes = vec!["Elf".to_string()];
+        assert!(!restriction.allows_activation(&source_types, &source_subtypes));
     }
 
     #[test]

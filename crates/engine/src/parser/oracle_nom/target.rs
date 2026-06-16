@@ -6,11 +6,11 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
-use nom::combinator::{opt, value};
+use nom::combinator::{map, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::error::{OracleError, OracleResult};
+use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
 use crate::parser::oracle_util::{parse_subtype, OUTLAW_SUBTYPES};
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
@@ -340,6 +340,13 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
 pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         // "spell or ability" / "spell and/or ability" → both spells and abilities.
+        // This literal arm stays FIRST so the simple two-word form keeps its
+        // canonical `Or { StackSpell, StackAbility }` shape (asserted by
+        // `test_stack_object_spell_or_ability`). The general driver below would
+        // otherwise emit a `Typed { [Card], InZone{Stack} }` bare-spell leg for
+        // the same phrase — runtime-equivalent for legality (CR 112.1; see
+        // `parse_ability_spell_disjunction`), but the literal arm preserves the
+        // asserted canonical shape with zero risk.
         value(
             TargetFilter::Or {
                 filters: vec![
@@ -356,53 +363,155 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
                 tag("ability or spell"),
             )),
         ),
-        // Ability-kind phrase, optionally followed by an "[,] or <type> spell"
-        // tail. The two axes are composed independently rather than enumerated.
-        parse_ability_kind_with_optional_spell,
+        // Order-free disjunction of any mix of (type-restricted) spell legs and
+        // activated/triggered-ability legs. Each leg kind is composed as one
+        // axis and tried at every list position, so leg order is free.
+        parse_ability_spell_disjunction,
     ))
     .parse(input)
 }
 
-/// Parse the ability-kind disjunct of a stack-object phrase, optionally
-/// followed by a trailing spell disjunct.
+/// Parse a single ability-kind leg of a stack-object phrase.
 ///
 /// CR 113.3b/113.3c: the only ability kinds that exist on the stack are
-/// activated and triggered abilities; both map to `StackAbility { None }`
-/// (the ability-kind axis carries no type, so the three spellings collapse to
-/// one filter). An optional ", or <type> spell" / " or <type> spell" tail adds
-/// the restricted spell disjunct, producing the `Or` for Louisoix's Sacrifice.
-fn parse_ability_kind_with_optional_spell(input: &str) -> OracleResult<'_, TargetFilter> {
-    // Axis 1: the ability-kind phrase. All spellings denote the same legal set
-    // (any activated/triggered ability on the stack) — longest-match-first so
-    // the comma-separated form is consumed whole before the shorter alternates.
-    let (rest, _) = alt((
-        tag("activated ability, triggered ability"),
-        tag("activated or triggered ability"),
-        tag("triggered or activated ability"),
-        tag("triggered ability or activated ability"),
-        tag("activated ability or triggered ability"),
-        tag("triggered ability"),
-        tag("activated ability"),
-    ))
-    .parse(input)?;
-
-    // Axis 2 (optional): a trailing spell disjunct. The connector is "[,] or "
-    // (Oracle uses a serial comma in the three-way list).
-    let (rest, spell_leg) = opt(preceded(
-        alt((tag(", or "), tag(" or "), tag(", "))),
-        parse_restricted_spell,
-    ))
-    .parse(rest)?;
-
-    let ability = TargetFilter::StackAbility {
-        controller: None,
-        tag: None,
-    };
-    let filter = match spell_leg {
-        Some(spell) => TargetFilter::Or {
-            filters: vec![ability, spell],
+/// activated and triggered abilities; both denote the same legal set (any
+/// ability on the stack), so every spelling maps to one
+/// `StackAbility { controller: None, tag: None }`. Longest-match-first so the
+/// comma/`or`-joined two-word forms are consumed whole before the shorter
+/// single-word alternates.
+fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
         },
-        None => ability,
+        alt((
+            tag("activated ability, triggered ability"),
+            tag("activated or triggered ability"),
+            tag("triggered or activated ability"),
+            tag("triggered ability or activated ability"),
+            tag("activated ability or triggered ability"),
+            tag("triggered ability"),
+            tag("activated ability"),
+        )),
+    )
+    .parse(input)
+}
+
+/// Parse an order-free disjunction of stack-object legs — any mix of
+/// (type-restricted) spell phrases and activated/triggered-ability phrases,
+/// joined by commas and a final "or" / "and/or".
+///
+/// CR 701.6a: the legal target set of a counter effect is one of spells and/or
+/// abilities on the stack. CR 112.1: a "spell" is a card on the stack.
+/// CR 113.3b/113.3c: activated and triggered abilities are the two ability
+/// kinds that exist as objects on the stack. CR 115.1: the target is chosen
+/// from the legal set the effect defines, so each listed leg (including each
+/// spell-type restriction) must be reproduced faithfully.
+///
+/// Covers Spider-Sense ("instant spell, sorcery spell, or triggered ability"),
+/// the 3-way "spell, activated ability, or triggered ability" (Disallow /
+/// Voidslime / Overcharged Amalgam / Ertai Resurrected), the 4-way "instant
+/// spell, sorcery spell, activated ability, or triggered ability", and
+/// Louisoix's Sacrifice ("activated ability, triggered ability, or noncreature
+/// spell") — in any leg order, with any number of spell legs.
+///
+/// Ability-kind legs fold into a single `StackAbility` (CR 113.3b/113.3c: both
+/// kinds are just abilities on the stack). Spell legs accumulate as distinct
+/// stack-pinned `Typed` legs. A bare "spell" leg becomes
+/// `Typed { [TypeFilter::Card], InZone{Stack} }`, which is runtime-equivalent
+/// to `StackSpell` for legality: a spell stack entry's id is registered in
+/// `state.objects`, while an ability stack entry's id is not (its entry id is
+/// allocated fresh and never inserted as an object), so a stack-residency-gated
+/// `TypeFilter::Card` predicate matches spells but never abilities. CR 112.1
+/// (a spell is a card on the stack) + CR 113.3b/113.3c (abilities on the stack
+/// are not card-backed objects) justify the encoding.
+///
+/// Legs are assembled in source-encounter order, with all ability-kind legs
+/// folded into the FIRST ability slot seen, so an ability-first phrasing yields
+/// `[StackAbility, <spell legs…>]` (preserving the exact Louisoix AST shape).
+///
+/// CONTRACT (preserved): returns `Err` unless at least one ABILITY leg is
+/// present. A purely-spell phrase ("noncreature spell", "instant or sorcery
+/// spell", "spell") is owned by `parse_target` + `constrain_filter_to_stack`;
+/// this combinator only fires for what bare `parse_target` cannot represent —
+/// an ability disjunct.
+fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
+    enum StackLeg {
+        Spell(TargetFilter),
+        Ability,
+    }
+
+    fn parse_leg(input: &str) -> OracleResult<'_, StackLeg> {
+        // Ability-kind leg tried first: "spell" is a prefix of nothing the
+        // ability combinator matches, and an ability phrase is never a valid
+        // spell phrase, so the two leg kinds are disjoint and the order is for
+        // determinism only.
+        alt((
+            map(parse_ability_kind_leg, |_| StackLeg::Ability),
+            map(parse_restricted_spell, StackLeg::Spell),
+        ))
+        .parse(input)
+    }
+
+    // Source-encounter-ordered assembly. Ability legs fold into the first
+    // ability slot: push a single `StackAbility` marker at the position it is
+    // first seen, and ignore later ability legs (they denote the same set).
+    fn push_leg(filters: &mut Vec<TargetFilter>, saw_ability: &mut bool, leg: StackLeg) {
+        match leg {
+            StackLeg::Spell(f) => filters.push(f),
+            StackLeg::Ability => {
+                if !*saw_ability {
+                    *saw_ability = true;
+                    filters.push(TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // First leg is mandatory.
+    let (mut rest, first) = parse_leg(input)?;
+    let mut filters: Vec<TargetFilter> = Vec::new();
+    let mut saw_ability = false;
+    push_leg(&mut filters, &mut saw_ability, first);
+
+    // Subsequent legs joined by a list connector. Longest-match-first so
+    // ", or " / ", and/or " win over the bare ", " separator.
+    loop {
+        let connector = alt((
+            tag(", or "),
+            tag(", and/or "),
+            tag(" and/or "),
+            tag(" or "),
+            tag(", "),
+        ));
+        match opt(preceded(connector, parse_leg)).parse(rest)? {
+            (next, Some(leg)) => {
+                rest = next;
+                push_leg(&mut filters, &mut saw_ability, leg);
+            }
+            (next, None) => {
+                rest = next;
+                break;
+            }
+        }
+    }
+
+    // CONTRACT: an ability disjunct is required — pure-spell phrases go to
+    // `parse_target` so the existing single-leg contracts hold.
+    if !saw_ability {
+        return Err(oracle_err(input));
+    }
+
+    let filter = match filters.len() {
+        // Unreachable given the `saw_ability` guard (a true `saw_ability`
+        // implies at least one pushed leg), but kept total.
+        0 => return Err(oracle_err(input)),
+        1 => filters.into_iter().next().unwrap(),
+        _ => TargetFilter::Or { filters },
     };
     Ok((rest, filter))
 }
@@ -894,10 +1003,106 @@ mod tests {
         // A phrase that is purely a spell type restriction (no ability
         // disjunct) must NOT be matched — `parse_target` handles those.
         assert!(parse_stack_object_target("noncreature spell").is_err());
+        // The inner " or " of "artifact or enchantment spell" is consumed whole
+        // by `parse_type_phrase` BEFORE the connector loop runs, so it is never
+        // mistaken for a leg connector and the phrase stays a single (rejected)
+        // spell leg.
         assert!(parse_stack_object_target("artifact or enchantment spell").is_err());
         assert!(parse_stack_object_target("spell").is_err());
         // A battlefield type phrase must likewise not be swallowed.
         assert!(parse_stack_object_target("creature you control").is_err());
         assert!(parse_stack_object_target("permanent").is_err());
+        // A multi-spell phrase with NO ability leg is still pure-spell and must
+        // be rejected — the ability-disjunct contract guards the spell-first
+        // path too, not just the single-leg one.
+        assert!(parse_stack_object_target("instant spell, or sorcery spell").is_err());
+    }
+
+    /// A single typed spell leg with its `InZone{Stack}` constraint — the shape
+    /// each accumulated spell leg takes for a concrete card type.
+    fn typed_spell_leg(ty: TypeFilter) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![ty],
+            controller: None,
+            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
+        })
+    }
+
+    #[test]
+    fn test_stack_object_spell_first_disjunction() {
+        // Spider-Sense — spell-first phrasing. Legs appear in source-encounter
+        // order: instant spell, sorcery spell, then the folded ability.
+        let (rest, filter) =
+            parse_stack_object_target("instant spell, sorcery spell, or triggered ability")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    typed_spell_leg(TypeFilter::Instant),
+                    typed_spell_leg(TypeFilter::Sorcery),
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_stack_object_four_way_disjunction() {
+        // Two spell legs + two ability spellings → the two ability legs fold
+        // into exactly ONE `StackAbility`.
+        let (rest, filter) = parse_stack_object_target(
+            "instant spell, sorcery spell, activated ability, or triggered ability",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert!(
+            filters.contains(&typed_spell_leg(TypeFilter::Instant)),
+            "missing instant spell leg: {filters:?}"
+        );
+        assert!(
+            filters.contains(&typed_spell_leg(TypeFilter::Sorcery)),
+            "missing sorcery spell leg: {filters:?}"
+        );
+        assert_eq!(
+            filters
+                .iter()
+                .filter(|f| matches!(f, TargetFilter::StackAbility { .. }))
+                .count(),
+            1,
+            "the two ability spellings must fold to exactly one StackAbility: {filters:?}"
+        );
+    }
+
+    #[test]
+    fn test_stack_object_spell_first_three_way() {
+        // Disallow's phrasing — bare "spell" first, then both ability spellings.
+        let (rest, filter) =
+            parse_stack_object_target("spell, activated ability, or triggered ability").unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        // First leg is the bare-spell stack-pinned `Typed { [Card], Stack }`.
+        assert_eq!(
+            filters.first(),
+            Some(&typed_spell_leg(TypeFilter::Card)),
+            "first leg must be the stack-pinned bare-spell Typed leg: {filters:?}"
+        );
+        assert_eq!(
+            filters
+                .iter()
+                .filter(|f| matches!(f, TargetFilter::StackAbility { .. }))
+                .count(),
+            1,
+            "both ability spellings must fold to exactly one StackAbility: {filters:?}"
+        );
     }
 }

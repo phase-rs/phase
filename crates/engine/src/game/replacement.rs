@@ -10389,6 +10389,71 @@ mod tests {
         );
     }
 
+    /// CR 614.1a + CR 111.1: Halving Season halves opponent token batches.
+    #[test]
+    fn halving_season_halves_opponent_token_creation() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let halving_season = ObjectId(10);
+        let halver_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Half)
+            .token_owner_scope(ControllerRef::Opponent);
+
+        let mut state = GameState::new_two_player(42);
+        let mut hs = GameObject::new(
+            halving_season,
+            CardId(1),
+            PlayerId(0),
+            "Halving Season".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![halver_repl].into();
+        state.objects.insert(halving_season, hs);
+        state.battlefield.push_back(halving_season);
+
+        let soldier_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Soldier".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Soldier".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "Soldier".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: PlayerId(1),
+            attach_to: None,
+        };
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            spec: Box::new(soldier_spec),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 5,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute, got {:?}", result);
+        };
+        let ProposedEvent::CreateToken { count, .. } = primary else {
+            panic!("expected CreateToken");
+        };
+        assert_eq!(count, 2, "five tokens halved (rounded down) → two");
+    }
+
     /// CR 616.1: Mixed `Double` and `Plus` quantity modifications do NOT commute
     /// and should trigger a CR 616.1 ordering prompt. Doubling Season (`Double`)
     /// and Hardened Scales (`Plus{1}`) on a counter placement must prompt the player.

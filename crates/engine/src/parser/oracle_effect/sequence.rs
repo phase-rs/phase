@@ -4808,6 +4808,14 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 ///
 /// Returns `TokenEntersWithCounters` so it shares the continuation absorption
 /// path with `try_parse_token_enters_with_counters` (declarative form).
+/// CR 122.6a + CR 301.5b: Returns true when the counter followup consumed the
+/// entire clause. A trailing `"and attach …"` conjunct (Fractal Harness) must
+/// not be absorbed here — the bare-and splitter needs to peel it into its own
+/// attach clause.
+fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
+    rest.trim().trim_start_matches(['.', ' ']).is_empty()
+}
+
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the verb. Both `put ` (imperative) and `puts ` (third-person,
@@ -4827,9 +4835,12 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // <quantity>". Delegates to the shared building block in `oracle_effect/
     // mod.rs`. The body consumes the full clause (including trailing period),
     // so on success we're done — emit the continuation directly.
-    if let Ok((_, (counter_type, count))) =
+    if let Ok((remainder, (counter_type, count))) =
         super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
     {
+        if !token_counter_followup_tail_is_clean(remainder) {
+            return None;
+        }
         return Some(ContinuationAst::TokenEntersWithCounters {
             counter_type,
             count,
@@ -4897,6 +4908,10 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         } else {
             None
         };
+
+    if quantity.is_none() && !token_counter_followup_tail_is_clean(rest) {
+        return None;
+    }
 
     let count = if let Some(qty) = quantity {
         qty
@@ -6836,6 +6851,144 @@ mod tests {
         assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
     }
 
+    /// CR 400.7 + CR 608.2c + CR 110.2a + CR 205.1b: Breach the Multiverse's
+    /// full four-clause text must assemble into a `Mill → ChooseFromZone{
+    /// zone_owner: EachPlayer, filter: creature-or-planeswalker } →
+    /// ChangeZoneAll{ origin: Graveyard, enters_under: You, target: tracked-set }
+    /// → GenericEffect(AddSubtype("Phyrexian"))` chain — with NO `Unimplemented`.
+    /// Clause 1 (Mill) already parsed before this fix; clauses 2-4 were dropped.
+    #[test]
+    fn breach_multiverse_assembles_per_player_reanimation_chain() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::ZoneOwner;
+
+        let def = parse_effect_chain(
+            "Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        // No clause may fall through to Unimplemented.
+        for d in &effects {
+            assert!(
+                !matches!(&*d.effect, Effect::Unimplemented { .. }),
+                "no clause may be Unimplemented, got {:?}",
+                d.effect
+            );
+        }
+
+        // Clause 1: the ten-card mill survives untouched.
+        assert!(
+            effects
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::Mill { .. })),
+            "clause 1 mill must remain in the chain, chain was {:?}",
+            effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+        );
+
+        // Clause 2: per-player graveyard choice (controller chooses one
+        // creature-or-planeswalker card from EACH player's graveyard).
+        let choose = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::ChooseFromZone { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "clause 2 must lower to ChooseFromZone, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+        let Effect::ChooseFromZone {
+            count,
+            zone,
+            zone_owner,
+            filter,
+            chooser,
+            ..
+        } = &*choose.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*count, 1, "one card per player");
+        assert_eq!(*zone, Zone::Graveyard);
+        assert_eq!(
+            *zone_owner,
+            ZoneOwner::EachPlayer,
+            "BLOCKER: 'for each player ... in that player's graveyard' must iterate every player"
+        );
+        assert_eq!(
+            *chooser,
+            Chooser::Controller,
+            "the spell's controller chooses"
+        );
+        let filter = filter
+            .as_ref()
+            .expect("clause 2 filter must restrict to creature/planeswalker cards");
+        // The filter must admit a creature AND a planeswalker (Or/Typed over both).
+        assert!(
+            matches!(filter, TargetFilter::Or { .. } | TargetFilter::Typed(_)),
+            "filter must be a creature-or-planeswalker type filter, got {filter:?}"
+        );
+
+        // Clause 3: "put those cards onto the battlefield under your control"
+        // must bind the tracked set from clause 2 and enter under the controller.
+        let put = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "clause 3 must lower to ChangeZoneAll, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            ..
+        } = &*put.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard), "scan the graveyards");
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*enters_under, Some(ControllerRef::You));
+        assert!(
+            matches!(
+                target,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            ),
+            "'those cards' must bind the clause-2 tracked set, got {target:?}"
+        );
+
+        // Clause 4: "each creature you control becomes a Phyrexian in addition
+        // to its other types" → GenericEffect granting AddSubtype("Phyrexian").
+        let phyrexian = effects.iter().any(|d| match &*d.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().any(|sa| {
+                sa.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype } if subtype == "Phyrexian"
+                    )
+                })
+            }),
+            _ => false,
+        });
+        assert!(
+            phyrexian,
+            "clause 4 must grant AddSubtype(\"Phyrexian\"), chain was {:?}",
+            effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+        );
+    }
+
     /// CR 708.2a: A bare "put all creature cards milled this way onto the
     /// battlefield face down." with no trailing characteristics sentence keeps
     /// the default vanilla 2/2 profile.
@@ -7287,6 +7440,17 @@ mod tests {
         } else {
             panic!("expected TokenEntersWithCounters");
         }
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_rejects_trailing_attach_conjunct() {
+        assert!(
+            try_parse_put_counters_on_token_followup(
+                "put x +1/+1 counters on it and attach this equipment to it"
+            )
+            .is_none(),
+            "trailing attach conjunct must split as its own clause (Fractal Harness)"
+        );
     }
 
     #[test]

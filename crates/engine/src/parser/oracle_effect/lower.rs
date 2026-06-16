@@ -845,6 +845,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
+    rewire_cross_sentence_token_counter_attach(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
@@ -1257,6 +1258,57 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
     }
 
     rewrite_populated_anaphor_in_effect(&mut def.effect);
+    // CR 608.2c + CR 701.36a: recurse into sub_ability chains so anaphoric
+    // rewrites apply to sibling followups (Fractal Harness PutCounter/Attach).
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_populated_anaphor_in_def(sub);
+    }
+}
+
+/// CR 608.2c + CR 122.6 + CR 614.1c: Fractal Harness class — sentence
+/// splitting lowers token creation and a sibling `PutCounter` targeting
+/// `SelfRef` (the ETB source). Preserve `Token -> PutCounter -> Attach` as
+/// separate instructions; rebind anaphoric targets to `LastCreated`.
+fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Token { .. }) {
+        return;
+    }
+    let Some(put_box) = def.sub_ability.take() else {
+        return;
+    };
+    let mut put_sub = *put_box;
+    if put_sub.sub_link != SubAbilityLink::SequentialSibling {
+        def.sub_ability = Some(Box::new(put_sub));
+        return;
+    }
+    let Effect::PutCounter { target, .. } = put_sub.effect.as_ref() else {
+        def.sub_ability = Some(Box::new(put_sub));
+        return;
+    };
+    if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+        def.sub_ability = Some(Box::new(put_sub));
+        return;
+    }
+    let attach_sub = match put_sub.sub_ability.take() {
+        Some(sub) if matches!(&*sub.effect, Effect::Attach { .. }) => sub,
+        other => {
+            put_sub.sub_ability = other;
+            def.sub_ability = Some(Box::new(put_sub));
+            return;
+        }
+    };
+
+    if let Effect::PutCounter { target, .. } = &mut *put_sub.effect {
+        *target = TargetFilter::LastCreated;
+    }
+    put_sub.sub_link = SubAbilityLink::ContinuationStep;
+
+    let mut attach_sub = *attach_sub;
+    attach_sub.sub_link = SubAbilityLink::ContinuationStep;
+    rewrite_parent_target_to_last_created(&mut attach_sub.effect);
+
+    put_sub.sub_ability = Some(Box::new(attach_sub));
+    def.sub_ability = Some(Box::new(put_sub));
 }
 
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
@@ -1284,6 +1336,11 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     // (God-Pharaoh's Gift: "create a token … It gains haste"). Rebind to the
     // just-created token.
     rebind_self_ref_grant_to_last_created(effect);
+
+    // Case 4 (CR 301.5b + CR 122.6a): imperative followups like Fractal Harness's
+    // "attach this Equipment to it" parse "it" as ParentTarget (Self-ETB trigger
+    // subject). After a token creator in the same chain, rewrite to LastCreated.
+    rewrite_parent_target_to_last_created(effect);
 }
 
 /// If `effect` is `Unimplemented { description: "<anaphor> <verb-phrase>" }`,
@@ -1364,6 +1421,7 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ..
         }
         | Effect::Pump { target, .. }
+        | Effect::Attach { target, .. }
         | Effect::ChangeZone { target, .. } => {
             if matches!(target, TargetFilter::ParentTarget) {
                 *target = TargetFilter::LastCreated;
@@ -1447,14 +1505,17 @@ fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut AbilityDefini
 pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
     let mut i = 0;
     while i < defs.len() {
-        // CR 705: Consolidate coin flip branches
-        if matches!(
-            &*defs[i].effect,
-            Effect::FlipCoin {
-                win_effect: None,
-                lose_effect: None,
-            }
-        ) {
+        // CR 705: Consolidate coin flip branches. CR 705.2: the bare flip carries
+        // the `flipper` (which player flips); the following branch-only flips are
+        // stubs with the default `Controller` flipper, so preserve the bare flip's
+        // flipper rather than the stubs'.
+        if let Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper,
+        } = &*defs[i].effect
+        {
+            let flipper = flipper.clone();
             let mut win = None;
             let mut lose = None;
             let mut j = i + 1;
@@ -1463,6 +1524,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                     Effect::FlipCoin {
                         win_effect: Some(w),
                         lose_effect: None,
+                        ..
                     } if win.is_none() => {
                         win = Some(w.clone());
                         j += 1;
@@ -1470,6 +1532,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                     Effect::FlipCoin {
                         win_effect: None,
                         lose_effect: Some(l),
+                        ..
                     } if lose.is_none() => {
                         lose = Some(l.clone());
                         j += 1;
@@ -1481,6 +1544,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                 *defs[i].effect = Effect::FlipCoin {
                     win_effect: win,
                     lose_effect: lose,
+                    flipper,
                 };
                 defs.drain(i + 1..j);
             }
@@ -1505,15 +1569,18 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             win_effect: None,
             lose_effect: None,
             count,
+            flipper,
         } = &*defs[i].effect
         {
             if i + 1 < defs.len() {
                 let count = count.clone();
+                let flipper = flipper.clone();
                 let next = defs.remove(i + 1);
                 *defs[i].effect = Effect::FlipCoins {
                     count,
                     win_effect: Some(Box::new(next)),
                     lose_effect: None,
+                    flipper,
                 };
             }
         }

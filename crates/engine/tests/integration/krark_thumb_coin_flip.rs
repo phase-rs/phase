@@ -197,6 +197,7 @@ fn setup_single_flip(seed: u64) -> (engine::game::scenario::GameRunner, ObjectId
         Effect::FlipCoin {
             win_effect: None,
             lose_effect: None,
+            flipper: engine::types::ability::TargetFilter::Controller,
         },
     );
     let mut runner = scenario.build();
@@ -302,6 +303,7 @@ fn flip_coins_three_with_krark_prompts_three_times() {
             count: QuantityExpr::Fixed { value: 3 },
             win_effect: None,
             lose_effect: None,
+            flipper: engine::types::ability::TargetFilter::Controller,
         },
     );
     let mut runner = scenario.build();

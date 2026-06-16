@@ -176,7 +176,8 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::SourceEnteredThisTurn
-        | AbilityCondition::SourceIsTapped => true,
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature => true,
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
             condition_refs_source_object(condition)
@@ -1456,6 +1457,25 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
     }))
 }
 
+/// CR 601.2f + CR 115.1: subject of a next-spell limiter — whose next spell is
+/// modified. "you cast" / "of the chosen type you cast" resolve to the
+/// controller; "they cast" / "that player casts" resolve to the player this
+/// ability targets. The two `Controller` arms come first so `ReduceNextSpellCost`
+/// and every existing "you cast" grant continue to parse under
+/// `PlayerScope::Controller`.
+fn parse_next_spell_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+    alt((
+        value(PlayerScope::Controller, tag("you cast this turn ")),
+        value(
+            PlayerScope::Controller,
+            tag("of the chosen type you cast this turn "),
+        ),
+        value(PlayerScope::Target, tag("they cast this turn ")),
+        value(PlayerScope::Target, tag("that player casts this turn ")),
+    ))
+    .parse(input)
+}
+
 /// CR 601.2f: Parse "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
 ///
 /// Handles patterns like:
@@ -1464,6 +1484,7 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
 /// - "the next sorcery spell you cast this turn can be cast as though it had flash"
 /// - "the next instant or sorcery spell you cast this turn has cascade"
 /// - "the next face-down creature spell you cast this turn costs {3} less to cast"
+/// - "the next spell they cast this turn has cascade" (granted to a targeted player)
 fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause> {
     // Must start with "the next "
     let rest = tag::<_, _, OracleError<'_>>("the next ")
@@ -1474,13 +1495,23 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     // Extract optional spell type filter before "spell you cast this turn"
     // Patterns: "spell you cast this turn", "creature spell you cast this turn",
     // "instant or sorcery spell you cast this turn", "noncreature spell you cast this turn",
-    // "face-down creature spell you cast this turn"
-    let (ability_text, filter_text) = nom::sequence::terminated(
+    // "face-down creature spell you cast this turn", and the third-person
+    // subject variants ("spell they cast this turn", "spell that player casts
+    // this turn") for grants to a targeted player.
+    //
+    // `filter_text` is the `take_until("spell")` capture — the spell-type
+    // filter slice ("creature ", "instant or sorcery ", "noncreature ", …)
+    // fed to parse_type_phrase below. Preserving it is REQUIRED: dropping it
+    // regresses filtered next-spell grants to no filter. `scope` is the parsed
+    // subject (you = Controller, they/that player = Target). `pair` keeps BOTH
+    // the `take_until` slice and the `parse_next_spell_subject` output — unlike
+    // `terminated`, which would discard the subject scope.
+    let (ability_text, (filter_text, scope)) = nom::sequence::pair(
         take_until::<_, _, OracleError<'_>>("spell"),
-        alt((
-            tag::<_, _, OracleError<'_>>("spell you cast this turn "),
-            tag("spell of the chosen type you cast this turn "),
-        )),
+        preceded(
+            tag::<_, _, OracleError<'_>>("spell "),
+            parse_next_spell_subject,
+        ),
     )
     .parse(rest)
     .ok()?;
@@ -1503,6 +1534,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::CantBeCountered,
+            player: scope,
             spell_filter,
         }));
     }
@@ -1514,6 +1546,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::CastAsThoughFlash,
+            player: scope,
             spell_filter,
         }));
     }
@@ -1525,6 +1558,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::WithoutPayingManaCost,
+            player: scope,
             spell_filter,
         }));
     }
@@ -1556,6 +1590,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
         if let Some(kw) = keyword {
             return Some(parsed_clause(Effect::GrantNextSpellAbility {
                 modifier: NextSpellModifier::HasKeyword { keyword: kw },
+                player: scope,
                 spell_filter,
             }));
         }
@@ -4415,6 +4450,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         }
     }
 
+    // CR 101.4 + CR 608.2c: "For each player, choose a <filter> card in that
+    // player's <zone>" — the controller picks one card from EVERY player's zone
+    // (Breach the Multiverse). Lowers to `ChooseFromZone { zone_owner:
+    // EachPlayer }`, which parks one choice per player and accumulates the picks
+    // into the chain tracked set for a downstream "put those cards" reanimation.
+    if let Some(ast) = imperative::parse_for_each_player_choose_from_zone(tp.lower, ctx) {
+        return parsed_clause(imperative::lower_choose_ast(ast));
+    }
+
     if tp.lower == "start your engines!" || tp.lower == "start your engines" {
         return parsed_clause(Effect::StartYourEngines {
             player_scope: PlayerFilter::Controller,
@@ -4557,11 +4601,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
             parsed_clause(Effect::FlipCoin {
                 win_effect: Some(Box::new(branch_def)),
                 lose_effect: None,
+                // CR 705.2: branch-only flip stub; `consolidate_die_and_coin_defs`
+                // merges it into the preceding flip, which carries the flipper.
+                flipper: TargetFilter::Controller,
             })
         } else {
             parsed_clause(Effect::FlipCoin {
                 win_effect: None,
                 lose_effect: Some(Box::new(branch_def)),
+                flipper: TargetFilter::Controller,
             })
         };
     }
@@ -12047,6 +12095,18 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         {
             *target = Some(subject_filter);
         }
+        // CR 705.2: "that player flips a coin" / "target player flips a coin" —
+        // bind the named flipper so the flip (and its win/lose result) belongs to
+        // that player, not the source's controller (Mirrored Depths, Planar
+        // Chaos). The bare "flip a coin" lowering leaves `flipper = Controller`;
+        // only a genuine player subject overrides it. "each player flips a coin"
+        // routes through `player_scope` iteration instead (see `lower_clause_ast`),
+        // never reaching this arm with an "each player" class filter.
+        Effect::FlipCoin { flipper, .. } | Effect::FlipCoins { flipper, .. }
+            if *flipper == TargetFilter::Controller =>
+        {
+            *flipper = subject_filter;
+        }
         // CR 122.1: "target player gets a poison counter" — inject subject target
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
@@ -16010,6 +16070,11 @@ pub(crate) fn parse_effect_chain_ir(
         .map_or(text, |(_, body)| *body);
     let full_text = text; // bind AFTER the strip so diagnostics track the parsed chunks
     ctx.effect_chain_full_lower = Some(full_text.to_ascii_lowercase());
+    // CR 608.2c: A tracked-set source-zone binding is scoped to the chain that
+    // publishes it. The per-chunk `chunk_ctx` re-seeds `pending_tracked_set_origin`
+    // from the `chain_pending_tracked_set_origin` loop-local (initialized to
+    // None) each iteration, so a binding from one chain can never leak into the
+    // next; the outer `ctx` field is left untouched here.
     // CR 701.42a: The meld effect clause "exile them, then meld them into
     // [result]" is a single atomic instruction whose ", then " comma would
     // otherwise be split into two clauses by `split_clause_sequence`. Intercept
@@ -16095,6 +16160,14 @@ pub(crate) fn parse_effect_chain_ir(
     // made in earlier chunks. Seeded into each `chunk_ctx` and read back after.
     let mut chain_chosen_player_count: u8 = 0;
     let mut chain_chosen_player_scope: Option<ControllerRef> = None;
+    // CR 608.2c + CR 400.7: Chain-spanning source zone of a "choose card(s) in
+    // <zone>" producer, carried to a following "put those cards onto the
+    // battlefield" consumer so the `TrackedSet` move scans the right zone
+    // (Breach the Multiverse: graveyard, not the impulse-default exile). Like
+    // the chosen-player locals, the per-chunk `chunk_ctx` is rebuilt fresh each
+    // iteration, so this loop-local seeds each `chunk_ctx.pending_tracked_set_origin`
+    // and is refreshed from the finalized `ChooseFromZone` clause after parse.
+    let mut chain_pending_tracked_set_origin: Option<crate::types::zones::Zone> = None;
     // CR 608.2e + CR 109.5: Sticky across chunks of a "For each opponent who
     // doesn't, <body>" decline-consequence sentence. Set true on the chunk that
     // carries the "for each opponent who doesn't" prefix; every chunk while
@@ -16873,15 +16946,19 @@ pub(crate) fn parse_effect_chain_ir(
                 let ir = parse_effect_chain_ir(effect_text, kind, ctx);
                 lower_effect_chain_ir(&ir)
             };
+            // CR 705.2: branch-only flip stub; the flipper rides the preceding
+            // bare flip and is preserved by `consolidate_die_and_coin_defs`.
             let flip_effect = if is_win {
                 Effect::FlipCoin {
                     win_effect: Some(Box::new(branch_def)),
                     lose_effect: None,
+                    flipper: TargetFilter::Controller,
                 }
             } else {
                 Effect::FlipCoin {
                     win_effect: None,
                     lose_effect: Some(Box::new(branch_def)),
+                    flipper: TargetFilter::Controller,
                 }
             };
             clauses.push(ClauseIr {
@@ -17592,6 +17669,11 @@ pub(crate) fn parse_effect_chain_ir(
             parent_target_available,
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
+            // CR 608.2c + CR 400.7: seed the zone published by an earlier
+            // "choose card(s) in <zone>" producer so this chunk's "put those
+            // cards onto the battlefield" anaphor binds its `TrackedSet` move to
+            // that origin instead of the impulse-default exile.
+            pending_tracked_set_origin: chain_pending_tracked_set_origin,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -17873,6 +17955,20 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 608.2c + CR 400.7: Carry the source zone of a "choose card(s) in
+        // <zone>" producer forward to the NEXT chunk. The chosen cards stay in
+        // that zone until a downstream "put those cards onto the battlefield"
+        // anaphor moves them, so the consumer's `TrackedSet` move must scan THIS
+        // zone — not the impulse-default exile. Derived from the finalized
+        // `ChooseFromZone` clause's own `zone`, so it covers the whole class
+        // (Breach the Multiverse and any future "choose in <zone> … put those
+        // cards" chain), never a single hardcoded card. Any chunk that is not
+        // itself such a producer clears it, so the binding never leaks past the
+        // immediately-following consumer.
+        chain_pending_tracked_set_origin = match &clause.effect {
+            Effect::ChooseFromZone { zone, .. } => Some(*zone),
+            _ => None,
+        };
         if let Some(target) = &for_each_reference_target {
             bind_search_library_for_each_antecedent(&mut clause.effect, target, &text_no_qty_lower);
         }
@@ -26635,6 +26731,7 @@ mod tests {
         let Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         } = &*def.effect
         else {
             panic!("expected FlipCoin, got {:?}", def.effect);
@@ -41906,6 +42003,7 @@ mod tests {
         let Effect::FlipCoin {
             win_effect: Some(win),
             lose_effect: Some(lose),
+            ..
         } = def.effect.as_ref()
         else {
             panic!("expected FlipCoin with both branches, got {:?}", def.effect);
@@ -44416,6 +44514,98 @@ mod tests {
     }
 
     #[test]
+    fn parse_next_spell_you_cast_has_controller_scope() {
+        // CR 109.5: "you cast" subject → PlayerScope::Controller.
+        let def = parse_effect_chain(
+            "The next spell you cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Cascade,
+                    },
+                    player: crate::types::ability::PlayerScope::Controller,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(Cascade, Controller), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_they_cast_has_target_scope() {
+        // CR 115.1: "they cast" subject (Bigger on the Inside) →
+        // PlayerScope::Target (the targeted player whose mana clause precedes).
+        let def = parse_effect_chain(
+            "The next spell they cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Cascade,
+                    },
+                    player: crate::types::ability::PlayerScope::Target,
+                    spell_filter: None,
+                }
+            ),
+            "Expected GrantNextSpellAbility(Cascade, Target), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_that_player_casts_has_target_scope() {
+        // CR 115.1: "that player casts" subject → PlayerScope::Target.
+        let def = parse_effect_chain(
+            "The next spell that player casts this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    player: crate::types::ability::PlayerScope::Target,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(Target), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_filtered_next_spell_they_cast_preserves_filter() {
+        // Regression guard: the type-filter slice ("creature ") must survive the
+        // subject-combinator rewrite for the third-person subject too — a
+        // filtered "they" grant must keep both Target scope AND the spell filter.
+        let def = parse_effect_chain(
+            "The next creature spell they cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GrantNextSpellAbility {
+                player,
+                spell_filter,
+                ..
+            } => {
+                assert_eq!(*player, crate::types::ability::PlayerScope::Target);
+                assert!(
+                    spell_filter.is_some(),
+                    "Expected a creature spell_filter, got None"
+                );
+            }
+            other => panic!("Expected GrantNextSpellAbility, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_cast_spells_this_turn_as_though_flash() {
         // Emergence Zone (issue #1542): "this turn" is part of the permission
         // phrase, not a separate duration prefix — must not fall through to
@@ -44738,6 +44928,7 @@ mod tests {
             count,
             win_effect,
             lose_effect,
+            ..
         } = &*def.effect
         else {
             panic!("expected FlipCoins, got {:?}", def.effect);
@@ -44791,6 +44982,7 @@ mod tests {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
                     win_effect: None,
                     lose_effect: None,
+                    ..
                 }
             ),
             "expected FlipCoins count=2, got {:?}",

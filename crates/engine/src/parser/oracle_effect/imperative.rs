@@ -2790,6 +2790,51 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
     })
 }
 
+/// CR 101.4 + CR 608.2c: "For each player, choose a `<filter>` card in that
+/// player's `<zone>`" — the spell's controller picks one card from EVERY
+/// player's zone in APNAP order, accumulating the picks for a downstream "put
+/// those cards onto the battlefield" reanimation. The leading "for each player,"
+/// is stripped here (the chain splitter keeps the prefix attached because the
+/// comma-delimited body is the clause), then the shared `try_parse_choose_from_zone`
+/// combinator extracts the filter + zone from "that player's `<zone>`"; the
+/// per-player iteration is encoded by overriding `zone_owner` to `EachPlayer`.
+/// Building block for Breach the Multiverse (issue #3302).
+pub(super) fn parse_for_each_player_choose_from_zone(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (_, body) = preceded(
+        alt((tag::<_, _, E>("for each player, "), tag("for each player "))),
+        rest,
+    )
+    .parse(lower)
+    .ok()?;
+
+    // The body's zone reference is "that player's <zone>", which
+    // `parse_choose_zone_connector` maps to `TargetedPlayer`; the "for each
+    // player" prefix promotes it to per-player iteration (`EachPlayer`).
+    match try_parse_choose_from_zone(body, ctx)? {
+        ChooseImperativeAst::FromZone {
+            count,
+            zones,
+            zone_owner: ZoneOwner::TargetedPlayer,
+            filter,
+            chooser,
+            up_to,
+        } => Some(ChooseImperativeAst::FromZone {
+            count,
+            zones,
+            zone_owner: ZoneOwner::EachPlayer,
+            filter,
+            chooser,
+            up_to,
+        }),
+        _ => None,
+    }
+}
+
 fn strip_choose_article(input: &str) -> Option<&str> {
     type E<'a> = OracleError<'a>;
 
@@ -4001,7 +4046,11 @@ pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     }
 }
 
-pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
+pub(super) fn parse_put_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<PutImperativeAst> {
     tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
 
     if nom_on_lower(text, lower, |input| {
@@ -4131,18 +4180,36 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                 up_to,
                 enter_with_counters,
                 ..
-            } => Some(PutImperativeAst::ZoneChange {
-                origin,
-                destination,
-                target,
-                enters_under,
-                enter_tapped: enter_tapped.is_tapped(),
-                enter_transformed,
-                enters_attacking,
-                up_to,
-                choice_count: choice_count.map(Box::new),
-                enter_with_counters,
-            }),
+            } => {
+                // CR 608.2c + CR 400.7: A bare "put those cards / put them onto
+                // the battlefield" anaphor names a tracked set whose members
+                // never moved as part of THIS clause, so the clause text gives
+                // no origin (`infer_origin_zone` → None). When a producer clause
+                // earlier in the chain published the set's source zone
+                // (`pending_tracked_set_origin`, e.g. Breach the Multiverse's
+                // graveyard choose), bind it here. An impulse/cascade producer
+                // leaves the context unset, so the exile default in
+                // `lower_put_ast` still governs those reanimations.
+                let origin = match (&origin, &target) {
+                    (
+                        None,
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ) => ctx.pending_tracked_set_origin.or(origin),
+                    _ => origin,
+                };
+                Some(PutImperativeAst::ZoneChange {
+                    origin,
+                    destination,
+                    target,
+                    enters_under,
+                    enter_tapped: enter_tapped.is_tapped(),
+                    enter_transformed,
+                    enters_attacking,
+                    up_to,
+                    choice_count: choice_count.map(Box::new),
+                    enter_with_counters,
+                })
+            }
             _ => None,
         };
     }
@@ -4208,10 +4275,22 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             ) && enter_with_counters.is_empty()
             {
                 Effect::ChangeZoneAll {
-                    origin: Some(Zone::Exile),
+                    // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
+                    // defaults to scanning Exile (cascade, impulse-draw, and the
+                    // `ExiledBySource` class all leave their members in exile).
+                    // When the producer published a non-exile source zone
+                    // (Breach the Multiverse's graveyard choose stamps
+                    // `origin: Some(Graveyard)` in `parse_put_ast`), honor it so
+                    // the chosen cards are read out of the right zone.
+                    origin: origin.or(Some(Zone::Exile)),
                     destination,
                     target,
-                    enters_under: None,
+                    // CR 110.2a: Preserve the parsed entering-controller override
+                    // ("put those cards onto the battlefield UNDER YOUR CONTROL"
+                    // → Some(You) for Breach the Multiverse). Impulse/cascade
+                    // text carries no such phrase, so `enters_under` stays None
+                    // for them — identical to the prior hardcoded default.
+                    enters_under,
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enter_with_counters: vec![],
                     face_down_profile: None,
@@ -5662,6 +5741,18 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
         });
     }
 
+    // CR 118.8: "pay half your life[, rounded up]" — delegate the life-fraction
+    // phrase to the shared quantity expression parser (`DivideRounded` over the
+    // controller's `LifeTotal`), so the rounding mode and life-total wording
+    // recognized everywhere else compose here too. Gated on a "half " prefix so
+    // only fraction phrases reach the (non-dispatch) all-consuming delegation.
+    if tag::<_, _, OracleError<'_>>("half ").parse(rest).is_ok() {
+        let qty_text = rest.trim_end().trim_end_matches('.').trim_end();
+        if let Ok(("", expr)) = crate::parser::oracle_nom::quantity::parse_quantity(qty_text) {
+            return Some(expr);
+        }
+    }
+
     // CR 118.8: "pay N life" — literal amount via `parse_number` (digit words
     // or numerals, never "X" — handled above). Same word-boundary guard so
     // hypothetical phrases like "3 lifelink" cannot false-match.
@@ -6536,6 +6627,26 @@ pub(super) fn parse_imperative_family_ast(
         .parse(lower)
         .ok()
         .map(|(_, ast)| ast),
+        // CR 701.31c: "planeswalk" — an ability instructs a player to
+        // planeswalk (TARDIS, Start the TARDIS, TARDIS Bay). Rules-correct
+        // no-op outside a Planechase game (CR 701.31a); handled by
+        // effects::planeswalk via game::planechase. The "you may " / "then "
+        // prefix and the `optional` flag are already stripped upstream, so the
+        // family parser sees only the bare verb body for both the optional
+        // (TARDIS, Start the TARDIS) and mandatory (TARDIS Bay) forms. The
+        // anchored all-consuming guard prevents matching a longer clause.
+        "planeswalk" | "planeswalks" => all_consuming(terminated(
+            // Longer alternative first so "planeswalks" matches the full token
+            // before the "planeswalk" prefix can short-circuit the `alt`.
+            alt((
+                tag::<_, _, OracleError<'_>>("planeswalks"),
+                tag("planeswalk"),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(lower.trim())
+        .ok()
+        .map(|_| ImperativeFamilyAst::Planeswalk),
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
@@ -6688,13 +6799,13 @@ pub(super) fn parse_imperative_family_ast(
                 .or_else(|| {
                     parse_zone_counter_ast(text, lower, ctx)
                         .map(ImperativeFamilyAst::ZoneCounter)
-                        .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put))
+                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
                 })
         }
         // "put" → counter (step 2) first, then zone-change (step 12)
         "put" => parse_zone_counter_ast(text, lower, ctx)
             .map(ImperativeFamilyAst::ZoneCounter)
-            .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put)),
+            .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put)),
 
         // "remove" → "remove from combat" (CR 506.4) → counter removal (step 2)
         "remove" => parse_remove_from_combat_ast(lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
@@ -7790,6 +7901,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        // CR 701.31c: An ability instructs a player to planeswalk.
+        ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
@@ -7813,14 +7926,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             results: vec![],
             modifier,
         },
+        // CR 705.2: the bare imperative lowers with `flipper = Controller`; a
+        // player subject ("that player flips a coin") is stamped onto `flipper`
+        // afterward by `inject_subject_target`.
         ImperativeFamilyAst::FlipCoin => Effect::FlipCoin {
             win_effect: None,
             lose_effect: None,
+            flipper: TargetFilter::Controller,
         },
         ImperativeFamilyAst::FlipCoins { count } => Effect::FlipCoins {
             count,
             win_effect: None,
             lose_effect: None,
+            flipper: TargetFilter::Controller,
         },
         ImperativeFamilyAst::FlipCoinUntilLose => Effect::FlipCoinUntilLose {
             // Stub — subsequent "For each flip you won, ..." clauses are
@@ -8606,6 +8724,104 @@ mod tests {
         assert!(
             has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
             "the spell leg must be pinned to the stack zone"
+        );
+    }
+
+    /// Spider-Sense — "Counter target instant spell, sorcery spell, or
+    /// triggered ability." must parse to the full three-way disjunction, not
+    /// the buggy bare `Typed { [Instant] }` that dropped the sorcery and
+    /// triggered-ability legs. CR 701.6a + CR 115.1: every listed leg of the
+    /// legal target set must be reproduced.
+    #[test]
+    fn parse_counter_spider_sense_spell_first_disjunction() {
+        let text = "Counter target instant spell, sorcery spell, or triggered ability.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Spider-Sense counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // Regression guard for the exact bug: it must NOT be the bare
+        // instant-only `Typed` filter.
+        assert!(
+            !matches!(&target, TargetFilter::Typed(_)),
+            "Spider-Sense must not parse to a bare Typed filter (the instant-only bug): {target:?}"
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ instant, sorcery, ability }}, got {target:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
+            "missing the triggered-ability disjunct: {target:?}"
+        );
+        let instant_leg = filters
+            .iter()
+            .filter_map(typed_leg)
+            .find(|tf| has_type(tf, TypeFilter::Instant))
+            .expect("missing the instant-spell disjunct");
+        assert!(
+            has_prop(instant_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the instant leg must be pinned to the stack zone: {instant_leg:?}"
+        );
+        let sorcery_leg = filters
+            .iter()
+            .filter_map(typed_leg)
+            .find(|tf| has_type(tf, TypeFilter::Sorcery))
+            .expect("missing the sorcery-spell disjunct (the dropped leg)");
+        assert!(
+            has_prop(sorcery_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the sorcery leg must be pinned to the stack zone: {sorcery_leg:?}"
+        );
+    }
+
+    /// Disallow / Voidslime / Overcharged Amalgam / Ertai Resurrected —
+    /// "Counter target spell, activated ability, or triggered ability." must
+    /// parse to `Or { spell, ability }`, not the buggy bare `StackSpell` that
+    /// dropped BOTH ability legs (the highest-printing member of the class).
+    /// CR 701.6a + CR 113.3b/113.3c.
+    #[test]
+    fn parse_counter_disallow_three_way_disjunction() {
+        let text = "Counter target spell, activated ability, or triggered ability.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Disallow counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // Regression guard for the exact bug: it must NOT be the bare
+        // StackSpell that silently dropped both ability legs.
+        assert!(
+            !matches!(&target, TargetFilter::StackSpell),
+            "Disallow must not parse to bare StackSpell (the dropped-abilities bug): {target:?}"
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ spell, ability }}, got {target:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
+            "missing the activated/triggered ability disjunct: {target:?}"
+        );
+        let spell_leg = filters
+            .iter()
+            .find_map(typed_leg)
+            .expect("missing the bare-spell disjunct");
+        assert!(
+            has_type(spell_leg, TypeFilter::Card),
+            "the bare-spell leg must carry TypeFilter::Card: {spell_leg:?}"
+        );
+        assert!(
+            has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the bare-spell leg must be pinned to the stack zone: {spell_leg:?}"
         );
     }
 
@@ -10657,6 +10873,49 @@ mod tests {
             shards.as_slice(),
             [crate::types::mana::ManaCostShard::X]
         ));
+    }
+
+    #[test]
+    fn parse_pay_half_your_life_rounded_up() {
+        // CR 118.8: delegate the life-fraction phrase to the shared quantity
+        // parser (DivideRounded over the controller's life total).
+        let text = "pay half your life, rounded up";
+        let lower = text.to_lowercase();
+        let Some(CostResourceImperativeAst::Pay {
+            cost: AbilityCost::PayLife { amount },
+        }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("expected PayLife cost for {text:?}");
+        };
+        assert!(
+            matches!(
+                amount,
+                QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                    ..
+                }
+            ),
+            "expected half-life DivideRounded, got {amount:?}"
+        );
+    }
+
+    #[test]
+    fn parse_pay_does_not_false_match_lifelink_or_lifeless() {
+        // Word-boundary guard: "any amount of life" must be a complete token.
+        for text in ["pay any amount of lifelink", "pay any amount of lifeforce"] {
+            let lower = text.to_lowercase();
+            let res = parse_cost_resource_ast(text, &lower, &mut ParseContext::default());
+            assert!(
+                !matches!(
+                    res,
+                    Some(CostResourceImperativeAst::Pay {
+                        cost: AbilityCost::PayLife { .. }
+                    })
+                ),
+                "{text:?} must not parse as a life payment"
+            );
+        }
     }
 
     #[test]
@@ -13086,6 +13345,209 @@ mod tests {
         assert_eq!(
             replace_fixed_quantity(dynamic_base.clone(), for_each),
             dynamic_base,
+        );
+    }
+
+    /// CR 705.1 + CR 705.2: Subject-prefixed coin flips lower to `FlipCoin` AND
+    /// carry the subject as the typed `flipper` so the right player flips and
+    /// wins/loses (CR 705.2: "only the player who flips wins or loses the flip").
+    ///   - "you flip a coin" → `flipper = Controller` (the default).
+    ///   - "that player flips a coin" → the anaphoric parent-target controller
+    ///     (a SpellCast trigger resolves this to `TriggeringPlayer`; see
+    ///     `flip_coin.rs` runtime tests).
+    ///   - "its controller flips a coin" → likewise the parent-target controller.
+    ///   - "each player flips a coin" → `flipper = Controller` but the whole
+    ///     ability is tagged `player_scope = All`, so the resolver flips once for
+    ///     EACH player (CR 101.4 APNAP) rather than collapsing to one flip.
+    #[test]
+    fn subject_prefixed_flip_a_coin_binds_flipper() {
+        // "you flip a coin" — controller flipper, no player_scope.
+        let mut ctx = ParseContext::default();
+        let you = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "you flip a coin",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                &*you.effect,
+                Effect::FlipCoin {
+                    flipper: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected FlipCoin {{ flipper: Controller }}, got {:?}",
+            you.effect
+        );
+        assert_eq!(you.player_scope, None);
+
+        // "that player" / "its controller" → parent-target controller anaphor.
+        for text in ["that player flips a coin", "its controller flips a coin"] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            assert!(
+                matches!(
+                    &*ability.effect,
+                    Effect::FlipCoin {
+                        flipper: TargetFilter::ParentTargetController,
+                        ..
+                    }
+                ),
+                "expected FlipCoin {{ flipper: ParentTargetController }} for {text:?}, got {:?}",
+                ability.effect
+            );
+        }
+
+        // "each player flips a coin" → controller flipper iterated over ALL
+        // players via player_scope, NOT a single controller flip.
+        let mut ctx = ParseContext::default();
+        let each = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "each player flips a coin",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                &*each.effect,
+                Effect::FlipCoin {
+                    flipper: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected FlipCoin {{ flipper: Controller }} for each-player, got {:?}",
+            each.effect
+        );
+        assert_eq!(
+            each.player_scope,
+            Some(crate::types::ability::PlayerFilter::All),
+            "each player must iterate ALL players, not collapse to one flip"
+        );
+    }
+
+    /// CR 705.1 + CR 705.2: End-to-end — a trigger whose effect is "that player
+    /// flips a coin" (Mirrored Depths, Planar Chaos) must emit a `FlipCoin` whose
+    /// `flipper` is the TRIGGERING player, not the source's controller. This is
+    /// the heart of the maintainer's CHANGES_REQUESTED: a non-controller who casts
+    /// must be the one who flips and wins/loses (the runtime consequence is
+    /// asserted in `flip_coin.rs`).
+    #[test]
+    fn trigger_subject_flip_a_coin_binds_triggering_player_flipper() {
+        fn flip_coin_flipper(def: &AbilityDefinition) -> Option<&TargetFilter> {
+            match &*def.effect {
+                Effect::FlipCoin { flipper, .. } | Effect::FlipCoins { flipper, .. } => {
+                    Some(flipper)
+                }
+                _ => def.sub_ability.as_ref().and_then(|s| flip_coin_flipper(s)),
+            }
+        }
+        for (text, name) in [
+            (
+                "Whenever a player casts a spell, that player flips a coin. If the player loses the flip, counter that spell.",
+                "Mirrored Depths",
+            ),
+            (
+                "Whenever a player casts a spell, that player flips a coin. If the flip comes up tails, counter that spell.",
+                "Planar Chaos",
+            ),
+        ] {
+            let parsed = crate::parser::oracle::parse_oracle_text(text, name, &[], &[], &[]);
+            let flipper = parsed
+                .triggers
+                .iter()
+                .find_map(|t| t.execute.as_ref().and_then(|e| flip_coin_flipper(e)))
+                .unwrap_or_else(|| panic!("{name}: trigger must lower to FlipCoin, got:\n{parsed:#?}"));
+            assert_eq!(
+                *flipper,
+                TargetFilter::TriggeringPlayer,
+                "{name}: the casting (triggering) player must be the flipper, not the controller"
+            );
+        }
+    }
+
+    /// CR 710.4 vs CR 705.1: The Kamigawa "flip <permanent>" flip-card mechanic
+    /// ("flip ~" / "flip it") must NOT be mis-routed to the coin-flip `FlipCoin`
+    /// effect — the flip arm only matches when "a coin" is present. Adding "flip"
+    /// to `PREDICATE_VERBS` (so subject-prefixed coin flips strip) must not
+    /// regress this: a bare object-form "flip" never produces FlipCoin.
+    #[test]
+    fn flip_permanent_transform_is_not_coin_flip() {
+        for text in ["flip ~", "flip it"] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            assert!(
+                !matches!(&*ability.effect, Effect::FlipCoin { .. }),
+                "object-form flip {text:?} must not route to FlipCoin, got {:?}",
+                ability.effect
+            );
+        }
+    }
+
+    /// CR 701.31c: the bare "planeswalk" verb dispatches to the
+    /// `Planeswalk` imperative-family leaf (the "you may " / "then " prefix and
+    /// the optional flag are stripped upstream, so the family parser only ever
+    /// sees the bare verb body).
+    #[test]
+    fn planeswalk_verb_dispatches_to_planeswalk_leaf() {
+        // The family parser sees the bare verb body (subject + optional-prefix +
+        // trailing-period normalization happen upstream — see the end-to-end
+        // `parse_effect_chain` tests below for the "you may planeswalk." /
+        // "then planeswalk." forms). Both singular and plural verb tokens map to
+        // the same leaf.
+        for input in ["planeswalk", "planeswalks"] {
+            let ast = parse_imperative_family_ast(input, input, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("'{input}' should parse to a Planeswalk leaf"));
+            assert!(
+                matches!(ast, ImperativeFamilyAst::Planeswalk),
+                "expected Planeswalk leaf for '{input}', got {ast:?}"
+            );
+        }
+    }
+
+    /// CR 701.31c: "you may planeswalk" → optional `Effect::Planeswalk`
+    /// (TARDIS, Start the TARDIS rider). The optional shell is produced by the
+    /// upstream optional-prefix strip.
+    #[test]
+    fn effect_you_may_planeswalk_is_optional_planeswalk() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "You may planeswalk.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Planeswalk),
+            "expected Effect::Planeswalk, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.optional,
+            "expected optional: true for 'you may planeswalk'"
+        );
+    }
+
+    /// CR 701.31c: "Then planeswalk." → mandatory `Effect::Planeswalk`
+    /// (TARDIS Bay). The mandatory form must parse to the same effect with
+    /// `optional: false`.
+    #[test]
+    fn effect_then_planeswalk_is_mandatory_planeswalk() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Then planeswalk.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Planeswalk),
+            "expected Effect::Planeswalk, got {:?}",
+            def.effect
+        );
+        assert!(
+            !def.optional,
+            "expected optional: false for 'then planeswalk'"
         );
     }
 }

@@ -56,6 +56,11 @@ pub fn resolve(
         copy_obj.is_token = true;
         copy_obj.additional_cost_payment_count = 0;
         copy_obj.kickers_paid.clear();
+        // CR 707.10: A copy of a spell is put on the stack; it is not cast.
+        // Inherit no cast-from-zone provenance — otherwise "if this spell was
+        // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
+        // re-fire when a flashback copy resolves.
+        copy_obj.cast_from_zone = None;
         state.objects.insert(copy_id, copy_obj);
     }
 
@@ -79,6 +84,7 @@ pub fn resolve(
                 ..
             } => {
                 set_resolved_source_recursive(a, copy_id);
+                clear_cast_from_zone_recursive(a);
                 a.context.additional_cost_paid = false;
                 a.context.alternative_mana_cost_paid = false;
                 a.context.additional_cost_payment_count = 0;
@@ -543,6 +549,18 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
     if let Some(else_ability) = ability.else_ability.as_mut() {
         set_resolved_source_recursive(else_ability, source_id);
+    }
+}
+
+/// CR 707.10: Spell copies are not cast, so strip cast-origin metadata from
+/// the copied ability chain before the copy resolves.
+fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
+    ability.context.cast_from_zone = None;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        clear_cast_from_zone_recursive(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        clear_cast_from_zone_recursive(else_ability);
     }
 }
 
