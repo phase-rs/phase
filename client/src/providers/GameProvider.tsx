@@ -25,6 +25,7 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
 import { loadDraftRun } from "../services/quickDraftPersistence";
@@ -252,6 +253,11 @@ function pickOpponentDeck(
   return randomPickDistinct(filtered.length > 0 ? filtered : catalog, excludeIds);
 }
 
+// Placeholder decklist for fixed-deck formats (Momir's Madness): the player
+// builds nothing, and the engine synthesizes the real deck for every seat. The
+// builders below ignore its contents for such formats.
+const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
+
 function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
   const expanded = expandParsedDeck(deck);
   const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
@@ -271,6 +277,29 @@ async function buildLocalAiDeckList(
   selectedMatchType?: MatchType,
   playerBracket?: CommanderBracket | null,
 ): Promise<DeckListPayload> {
+  // Fixed-deck formats (Momir's Madness) supply the deck for every seat from the
+  // engine, so there is no AI deck catalog to draw from — submit empty seats and
+  // let `load_and_hydrate_decks` synthesize the identical fixed deck per player.
+  if (formatConfig && formatSuppliesDeck(formatConfig.format)) {
+    const { aiSeats, cedhMode } = usePreferencesStore.getState();
+    const opponentCount = Math.max(1, playerCount - 1);
+    const emptySeat = (): ExpandedDeckWithTier => ({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      bracket_tier: "core",
+    });
+    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
+      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+    );
+    return {
+      player: emptySeat(),
+      opponent: emptySeat(),
+      ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
+      ai_difficulties: aiDifficulties,
+    };
+  }
+
   const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
@@ -566,7 +595,10 @@ export function GameProvider({
 
     if (isP2P) {
       const parsedDeck = loadActiveDeck();
-      if (!parsedDeck) {
+      // Fixed-deck formats (Momir's Madness) supply the deck from the engine for
+      // host and guests alike, so no active deck is required to host/join.
+      const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
+      if (!parsedDeck && !suppliesDeck) {
         onNoDeckRef.current?.();
         return;
       }
@@ -603,7 +635,10 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = buildPlayerOnlyDeckList(parsedDeck, loadActiveDeckBracket());
+        const deckList = buildPlayerOnlyDeckList(
+          parsedDeck ?? EMPTY_PARSED_DECK,
+          loadActiveDeckBracket(),
+        );
         signal.throwIfAborted();
 
         // Resources that may need undoing on abort/error. `broker` is
@@ -1092,7 +1127,8 @@ export function GameProvider({
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
           const parsedDeck = loadActiveDeck();
-          if (!parsedDeck) {
+          const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
+          if (!parsedDeck && !suppliesDeck) {
             onNoDeckRef.current?.();
             return;
           }
@@ -1100,7 +1136,7 @@ export function GameProvider({
           try {
             deckList = await buildLocalAiDeckList(
               tRef.current,
-              parsedDeck,
+              parsedDeck ?? EMPTY_PARSED_DECK,
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
@@ -1198,7 +1234,8 @@ export function GameProvider({
       }
 
       const parsedDeck = loadActiveDeck();
-      if (!parsedDeck) {
+      const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
+      if (!parsedDeck && !suppliesDeck) {
         onNoDeckRef.current?.();
         return;
       }
@@ -1207,7 +1244,7 @@ export function GameProvider({
       try {
         deckList = await buildLocalAiDeckList(
           tRef.current,
-          parsedDeck,
+          parsedDeck ?? EMPTY_PARSED_DECK,
           playerCount ?? 2,
           formatConfig,
           matchConfig?.match_type,
