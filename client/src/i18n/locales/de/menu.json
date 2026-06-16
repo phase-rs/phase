@@ -157,7 +157,9 @@
     "errorNetworkFailure": "Der Deck-Import-Dienst ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
     "errorGeneric": "Deck-Import fehlgeschlagen.",
     "fileSupports": "Unterstützt .dck, .dec, .txt und MTGA-Format",
-    "chooseFile": "Datei wählen"
+    "chooseFile": "Datei wählen",
+    "importedSuccessTitle": "Deck importiert",
+    "importedSuccessDescription": "„{{name}}“ wurde zu deinen Decks hinzugefügt."
   },
   "precon": {
     "savePrompt": "Vorkonstruiertes Deck speichern als:",

@@ -337,6 +337,7 @@ describe("DeckBuilder", () => {
   });
 
   it("opens and closes the mobile filter sheet", async () => {
+    vi.mocked(useIsMobile).mockReturnValue(true);
     const user = userEvent.setup();
     render(
       <DeckBuilder

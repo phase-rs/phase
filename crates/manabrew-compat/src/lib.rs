@@ -1267,7 +1267,7 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
         | WaitingFor::ChooseFromZoneChoice { player, cards, .. }
         | WaitingFor::EffectZoneChoice { player, cards, .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { player, cards, .. }
-        | WaitingFor::ManifestDreadChoice { player, cards }
+        | WaitingFor::ManifestDreadChoice { player, cards, .. }
         | WaitingFor::WardDiscardChoice { player, cards, .. }
         | WaitingFor::ConniveDiscard { player, cards, .. }
         | WaitingFor::PairChoice {

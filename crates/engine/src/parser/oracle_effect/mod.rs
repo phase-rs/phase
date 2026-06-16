@@ -602,6 +602,64 @@ fn extract_when_next_spell_filter(payload: &str) -> Option<TargetFilter> {
     })
 }
 
+const WHEN_NEXT_OR_ACTIVATE_ABILITY: &str = " or activate an ability ";
+
+/// CR 603.7: Parse a disjunctive delayed-trigger condition of the form
+/// "cast a <spell-qualifier> or activate an ability <activation-qualifier>".
+/// Each branch lowers into a normal `TriggerDefinition` filter via the shared
+/// spell/activation post-modifier combinators.
+fn try_parse_when_next_spell_or_activate_disjunction(
+    condition_fragment: &str,
+) -> Option<(TargetFilter, TargetFilter)> {
+    use nom::bytes::complete::{tag, take_until};
+    use nom::Parser;
+
+    let (rest, spell_part) = take_until::<_, _, OracleError<'_>>(WHEN_NEXT_OR_ACTIVATE_ABILITY)
+        .parse(condition_fragment.trim())
+        .ok()?;
+    let (activation_part, _) = tag::<_, _, OracleError<'_>>(WHEN_NEXT_OR_ACTIVATE_ABILITY)
+        .parse(rest)
+        .ok()?;
+    let spell_filter = extract_when_next_spell_filter(spell_part.trim())?;
+    let ability_filter =
+        crate::parser::oracle_trigger::parse_post_activation_modifier(activation_part.trim())?;
+    Some((spell_filter, ability_filter))
+}
+
+fn build_when_next_delayed_trigger(
+    mode: crate::types::triggers::TriggerMode,
+    valid_card: TargetFilter,
+    inner: AbilityDefinition,
+    or_branch: Option<(crate::types::triggers::TriggerMode, TargetFilter)>,
+) -> ParsedEffectClause {
+    let mut trigger_def = crate::types::ability::TriggerDefinition::new(mode);
+    trigger_def.valid_card = Some(valid_card);
+    trigger_def.valid_target = Some(TargetFilter::Controller);
+    let or_trigger = or_branch.map(|(or_mode, or_filter)| {
+        let mut alt = crate::types::ability::TriggerDefinition::new(or_mode);
+        alt.valid_card = Some(or_filter);
+        alt.valid_target = Some(TargetFilter::Controller);
+        Box::new(alt)
+    });
+    ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(trigger_def),
+                or_trigger,
+            },
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    }
+}
+
 /// CR 603.7: Parse "when you next cast a [type] spell [post-spell modifier] this turn, [effect]"
 /// delayed triggers. Creates a one-shot delayed trigger that fires once on the next matching
 /// SpellCast event.
@@ -627,14 +685,6 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     // — e.g. "creature spell" (type only), "instant or sorcery spell" (disjunction),
     // "spell with {x} in its mana cost" (post only).
     let condition_fragment = &before_this_turn.lower[matched_prefix.len()..];
-    let combined_filter = extract_when_next_spell_filter(condition_fragment)?;
-
-    // Build a SpellCast trigger definition with the combined filter
-    let mut trigger_def = crate::types::ability::TriggerDefinition::new(TriggerMode::SpellCast);
-    trigger_def.valid_card = Some(combined_filter);
-    // "when YOU next cast" — scope to the source's controller.
-    trigger_def.valid_target = Some(TargetFilter::Controller);
-
     let effect_text = after.original;
     let effect_lower = after.lower;
 
@@ -645,10 +695,32 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         parse_effect_chain(effect_text, AbilityKind::Spell)
     };
 
+    if let Some((spell_filter, ability_filter)) =
+        try_parse_when_next_spell_or_activate_disjunction(condition_fragment)
+    {
+        use crate::types::triggers::TriggerMode;
+
+        return Some(build_when_next_delayed_trigger(
+            TriggerMode::SpellCast,
+            spell_filter,
+            inner,
+            Some((TriggerMode::AbilityActivated, ability_filter)),
+        ));
+    }
+
+    let combined_filter = extract_when_next_spell_filter(condition_fragment)?;
+
+    // Build a SpellCast trigger definition with the combined filter
+    let mut trigger_def = crate::types::ability::TriggerDefinition::new(TriggerMode::SpellCast);
+    trigger_def.valid_card = Some(combined_filter);
+    // "when YOU next cast" — scope to the source's controller.
+    trigger_def.valid_target = Some(TargetFilter::Controller);
+
     Some(ParsedEffectClause {
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
+                or_trigger: None,
             },
             effect: Box::new(inner),
             uses_tracked_set: false,
@@ -1272,6 +1344,7 @@ fn try_parse_inline_delayed_trigger(
     {
         DelayedTriggerCondition::WhenNextEvent {
             trigger: Box::new(trigger),
+            or_trigger: None,
         }
     } else {
         match scan_delayed_condition_kind(condition_text) {
@@ -8450,9 +8523,17 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        // CR 115.6: preserve "up to N target …" optionality through the AST so
+        // the compound-splitter path lowers it onto the clause's multi_target.
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
-        return Some((TargetedImperativeAst::Fight { target }, rem));
+        return Some((
+            TargetedImperativeAst::Fight {
+                target,
+                multi_target,
+            },
+            rem,
+        ));
     }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
@@ -16405,6 +16486,134 @@ pub(crate) fn parse_effect_chain_ir(
                 )
             })
         {
+            // CR 608.2c + CR 109.2 + CR 614.1a: Disintegrate / Carbonize print a
+            // CONDITIONAL rider gated on "if it's a creature, it" (the damage
+            // targets "any target", so the regen prohibition + die-exile only
+            // apply when the target is a creature), with both riders in one
+            // sentence: "If it's a creature, it can't be regenerated this turn,
+            // and if it would die this turn, exile it instead." `starts_prefix_clause`
+            // keeps the leading-"if" sentence as one chunk; COMPOSE the existing
+            // building blocks (no byte math, no string dispatch): strip the
+            // card-type conditional, convert the CoreType gate into a present-
+            // target match (the "it" is the damage target, not a revealed card —
+            // see card_type_condition_as_target_match), split the regen vs exile
+            // clauses on ", and ", validate the regen segment, and build both
+            // riders carrying that condition. Push CantBeRegenerated FIRST and
+            // DieExile SECOND so `append_to_deepest_sub_ability` nests them
+            // DealDamage -> CantBeRegenerated -> AddTargetReplacement (CR 614.8:
+            // exile-instead is a destruction-replacement layered after the regen
+            // prohibition). Pre-empts both the unconditional damage-rider arm and
+            // the generic `strip_card_type_conditional` fallthrough below.
+            //
+            // CR 109.2: the unqualified "it's a creature" anaphor refers to the
+            // permanent the spell targeted. CR 608.2c: later text ("if it's a
+            // creature, it ...") modifies the earlier "deals N damage to any
+            // target". The condition is carried on each rider's
+            // `AbilityDefinition.condition` (evaluated per sub_ability at
+            // resolution; skipped when false; the empty-target sub inherits the
+            // parent's chosen targets so `TargetMatchesFilter` resolves the damage
+            // target). The SpecialClause lowering arms move the def as-is, so the
+            // condition must be stamped on the DEF, not the ClauseIr.
+            let conditional_regen_matched = 'conditional_regen: {
+                let regen_body = normalized_text.trim_end_matches('.').trim();
+                let (Some(card_type_cond), remainder) = strip_card_type_conditional(regen_body)
+                else {
+                    break 'conditional_regen false;
+                };
+                let Some(creature_match) = card_type_condition_as_target_match(&card_type_cond)
+                else {
+                    break 'conditional_regen false;
+                };
+                // Strip the leading "it " anaphor that `strip_card_type_conditional`
+                // leaves on the remainder ("it can't be regenerated ...").
+                let Ok((after_it, _)) =
+                    tag::<_, _, OracleError<'_>>("it ").parse(remainder.as_str())
+                else {
+                    break 'conditional_regen false;
+                };
+                // Split regen vs exile on ", and " (no byte math).
+                let Ok((_, (regen_seg, exile_seg))) =
+                    nom_primitives::split_once_on(after_it, ", and ")
+                else {
+                    break 'conditional_regen false;
+                };
+                // Validate the (now-bounded) regen segment with the all_consuming
+                // predicate; bail if it isn't "can't be regenerated [this turn]".
+                if subject::parse_cant_be_regenerated_predicate(regen_seg.trim()).is_err() {
+                    break 'conditional_regen false;
+                }
+                // All-or-nothing for the two-rider grammar: parse the die-exile
+                // rider BEFORE pushing anything. If the second segment is not a
+                // die-exile rider (e.g. "..., and draw a card."), fall through to
+                // normal parsing rather than keep the regen rider and silently
+                // swallow the tail.
+                let Some(mut exile_def) = try_parse_die_exile_rider(exile_seg.trim(), kind) else {
+                    break 'conditional_regen false;
+                };
+                // Both riders parsed. Build the regen rider and stamp the
+                // creature-gate condition; push it first.
+                let mut regen_def = subject::build_cant_be_regenerated_rider(
+                    kind,
+                    &subject::cant_be_regenerated_tracked_set_application(),
+                );
+                regen_def.condition = Some(creature_match.clone());
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::unimplemented(
+                        "cant_be_regenerated_rider_placeholder",
+                        "",
+                    )),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::CantBeRegeneratedRider(Box::new(regen_def))),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                // Stamp the same creature-gate condition on the die-exile rider
+                // (it swallowed the leading "if " during parse) and push it second.
+                exile_def.condition = Some(creature_match);
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::unimplemented("die_exile_rider_placeholder", "")),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::DieExileRider(Box::new(exile_def))),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                true
+            };
+            if conditional_regen_matched {
+                continue;
+            }
             if let Some(rider_def) = subject::try_parse_cant_be_regenerated_damage_rider(
                 normalized_text.trim_end_matches('.').trim(),
                 kind,
@@ -19138,6 +19347,38 @@ pub(crate) fn parse_dynamic_energy_unless_cost(input: &str) -> Option<QuantityEx
     Some(QuantityExpr::Ref { qty })
 }
 
+/// CR 400.1: A for-each subject that lives in a zone OTHER than the
+/// battlefield (graveyard, library, exile, hand) cannot be faithfully counted
+/// by the shared `parse_for_each_clause` building block: its "named X in
+/// <zone>" / "<filter> in <zone>" handling swallows the zone phrase into the
+/// preceding name/filter and then defaults the count to the battlefield
+/// (e.g. Rune Snag's "card named Rune Snag in each graveyard" becomes
+/// `Named{name:"rune snag in each graveyard"}` counted on the battlefield).
+/// Rather than emit a silently-wrong dynamic cost, the unless-for-each arm
+/// declines (returns `None`) when such an off-battlefield zone keyword is
+/// present, leaving the card honestly gapped (flat cost + SwallowedClause
+/// warning) until the shared name/zone parser is fixed.
+///
+/// Scans at word boundaries (CLAUDE.md word-boundary idiom) so only complete
+/// zone tokens match — never "party"/"battlefield"/"control", which belong to
+/// faithfully-modeled battlefield subjects (Concerted Defense's "creature in
+/// your party", Spell Stutter's "Faerie you control") and must keep flipping
+/// to a correct dynamic cost.
+fn for_each_clause_references_offbattlefield_zone(clause: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(clause, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("graveyards"),
+            tag("graveyard"),
+            tag("libraries"),
+            tag("library"),
+            tag("exile"),
+            tag("hand"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 pub(crate) fn parse_unless_for_each_payment(
     after_cost: &str,
     cost: &ManaCost,
@@ -19147,6 +19388,65 @@ pub(crate) fn parse_unless_for_each_payment(
     };
     if !shards.is_empty() || *generic == 0 {
         return None;
+    }
+
+    // CR 118.12 + CR 118.12a: "unless [a player] pays {N} plus an additional {M}
+    // for each <filter>" — the interposed " plus an additional {M}" increment
+    // sits between the base {N} and the " for each " per-each clause. Recognize
+    // this infix BEFORE the bare " for each " arm so the dynamic per-each term is
+    // not dropped (otherwise the whole remainder fails to start with " for each "
+    // and parsing falls through to a flat generic cost). Emits
+    // `Sum[Fixed{N}, per_each]` where `per_each` mirrors the bare-arm collapse:
+    // {M}==1 stays a plain `Ref`, otherwise a `Multiply{factor: M}`. The
+    // `ControllerRef` is supplied by the filter text itself ("you control" →
+    // `ControllerRef::You`; the default is `ControllerRef::ScopedPlayer`) — not
+    // hard-coded here.
+    if let Ok((clause, (_, increment, _))) = (
+        tag::<_, _, OracleError<'_>>(" plus an additional "),
+        nom_primitives::parse_mana_cost,
+        tag::<_, _, OracleError<'_>>(" for each "),
+    )
+        .parse(after_cost)
+    {
+        let ManaCost::Cost {
+            shards: m_shards,
+            generic: m_generic,
+        } = increment
+        else {
+            return None;
+        };
+        if !m_shards.is_empty() || m_generic == 0 {
+            return None;
+        }
+        // CR 400.1: an off-battlefield-zone for-each subject (e.g. Rune Snag's
+        // "card named Rune Snag in each graveyard") is mis-modeled by the shared
+        // `parse_for_each_clause` — it folds the zone phrase into the name and
+        // counts on the battlefield. `parse_for_each_clause` returns a wrong
+        // `Some` here (not `None`), so the `?` below does NOT protect us. Decline
+        // explicitly so parsing falls through to the flat cost and the card keeps
+        // its honest SwallowedClause/DynamicQty gap until the shared parser is fixed.
+        if for_each_clause_references_offbattlefield_zone(clause) {
+            return None;
+        }
+        let qty = parse_for_each_clause(clause.trim())?;
+        let per_each = if m_generic == 1 {
+            QuantityExpr::Ref { qty }
+        } else {
+            QuantityExpr::Multiply {
+                factor: i32::try_from(m_generic).ok()?,
+                inner: Box::new(QuantityExpr::Ref { qty }),
+            }
+        };
+        return Some(AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed {
+                        value: i32::try_from(*generic).ok()?,
+                    },
+                    per_each,
+                ],
+            },
+        });
     }
 
     let (_, clause) = preceded(
@@ -23398,6 +23698,207 @@ mod tests {
             "unless payment should multiply the discarded-this-way tracked-set count, \
              got {:?}",
             unless_pay.cost
+        );
+    }
+
+    // Issue #3308: "unless pays {N} plus an additional {M} for each <filter>" —
+    // the interposed " plus an additional {M}" must not drop the dynamic per-each
+    // term. Spell Stutter ("{2} plus an additional {1} for each Faerie you
+    // control") lowers to Sum[Fixed{2}, Ref{ObjectCount{Faerie, controller:You}}]
+    // (NOT a flat Mana{generic:2}). The "you control" in the filter text supplies
+    // ControllerRef::You.
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_spell_stutter() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {2} plus an additional {1} for each Faerie you control",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        let AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum { exprs },
+        } = &unless_pay.cost
+        else {
+            panic!("expected ManaDynamic Sum, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(exprs.len(), 2, "Sum should have base + per-each: {exprs:?}");
+        assert_eq!(
+            exprs[0],
+            QuantityExpr::Fixed { value: 2 },
+            "base {{2}} term"
+        );
+        // {M}==1 → plain Ref (no Multiply collapse), per-each = Faerie you control.
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &exprs[1]
+        else {
+            panic!("expected Ref ObjectCount per-each, got {:?}", exprs[1]);
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed Faerie filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "\"you control\" must bind ControllerRef::You: {tf:?}"
+        );
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Faerie")),
+            "filter should match Faerie subtype: {tf:?}"
+        );
+    }
+
+    // Issue #3308: Concerted Defense — "{1} plus an additional {1} for each
+    // creature in your party" lowers to Sum[Fixed{1}, Ref{PartySize}] (the real
+    // shape parse_for_each_clause yields for "creature in your party"), proving
+    // the second affected card flips to a CORRECT dynamic form, not flat.
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_concerted_defense() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {1} plus an additional {1} for each creature in your party",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        let AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum { exprs },
+        } = &unless_pay.cost
+        else {
+            panic!("expected ManaDynamic Sum, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(exprs.len(), 2, "Sum should have base + per-each: {exprs:?}");
+        assert_eq!(exprs[0], QuantityExpr::Fixed { value: 1 }, "base {{1}}");
+        assert!(
+            matches!(
+                &exprs[1],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PartySize { .. }
+                }
+            ),
+            "per-each should be the party-size count, got {:?}",
+            exprs[1]
+        );
+    }
+
+    // Issue #3308 GAP A — Rune Snag's "card named Rune Snag in each graveyard"
+    // for-each subject lives OFF the battlefield, where the shared
+    // `parse_for_each_clause` mis-models it (it folds " in each graveyard" into
+    // the card name and counts on the battlefield, yielding a silently-wrong
+    // dynamic cost). The off-battlefield-zone honesty guard
+    // (`for_each_clause_references_offbattlefield_zone`) declines that case, so
+    // the unless-for-each arm returns None and parsing falls through to the flat
+    // cost: Rune Snag STAYS GAPPED as a static `Mana{generic:2}` (the announced
+    // {2} base), preserving its honest SwallowedClause/DynamicQty warning until
+    // the shared name/zone parser is fixed. (Spell Stutter / Concerted Defense
+    // reference battlefield subjects and still flip to a correct dynamic cost.)
+    #[test]
+    fn effect_counter_unless_pays_plus_additional_for_each_rune_snag_offbattlefield_zone_stays_gapped(
+    ) {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        // The guard declines → fall through to the flat-cost fallthrough, which
+        // constructs `AbilityCost::Mana { cost: ManaCost::Cost { shards: [], generic: 2 } }`
+        // from the parsed base {2}. NOT a ManaDynamic.
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 2 }
+                } if shards.is_empty()
+            ),
+            "off-battlefield-zone for-each must stay gapped as flat Mana{{generic:2}}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // Issue #3308 no-regression: a flat "unless pays {3}" (no for-each, no
+    // "plus an additional") must still yield a flat static Mana{generic:3} —
+    // the new infix arm must not capture plain costs.
+    #[test]
+    fn effect_counter_unless_pays_flat_generic_stays_static() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {3}",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert!(
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost { shards, generic: 3 }
+                } if shards.is_empty()
+            ),
+            "flat unless-cost should stay static Mana{{generic:3}}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    // Issue #3308 GAP A — full-card swallow/parse-warning check. Spell Stutter
+    // and Concerted Defense are single-clause counterspells; once the dynamic
+    // per-each term is captured there must be NO remaining swallowed-clause /
+    // unimplemented warning (so CI's card-data coverage gate stays green).
+    // Concerted Defense's "(Your party consists of ...)" reminder text is
+    // stripped before parsing and must not surface a warning.
+    #[test]
+    fn issue_3308_full_card_parse_has_no_swallow_warnings() {
+        let instant = ["Instant".to_string()];
+        for (name, text) in [
+            (
+                "Spell Stutter",
+                "Counter target spell unless its controller pays {2} plus an additional {1} for each Faerie you control.",
+            ),
+            (
+                "Concerted Defense",
+                "Counter target spell unless its controller pays {1} plus an additional {1} for each creature in your party. (Your party consists of up to one each of Cleric, Rogue, Warrior, and Wizard.)",
+            ),
+        ] {
+            let r = crate::parser::parse_oracle_text(text, name, &[], &instant, &[]);
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
+            assert!(
+                matches!(*r.abilities[0].effect, Effect::Counter { .. }),
+                "{name}: expected Counter, got {:?}",
+                r.abilities[0].effect
+            );
+            assert!(
+                r.parse_warnings.is_empty(),
+                "{name}: clean flip must leave no swallow/unimplemented warning, got {:?}",
+                r.parse_warnings
+            );
+        }
+    }
+
+    // Issue #3308 GAP A — honest gap preserved. Rune Snag's off-battlefield
+    // for-each subject is declined by the honesty guard, so its full-card parse
+    // must STILL surface a SwallowedClause/DynamicQty warning (the dynamic
+    // "for each card named Rune Snag in each graveyard" increment is not
+    // faithfully captured). This is the coverage-honest counterpart to the
+    // no-warnings test above: a correct dynamic flip would clear the warning,
+    // but a silently-wrong flip must not — the gap stays visible to CI.
+    #[test]
+    fn issue_3308_rune_snag_keeps_swallow_warning() {
+        let instant = ["Instant".to_string()];
+        let r = crate::parser::parse_oracle_text(
+            "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard.",
+            "Rune Snag",
+            &[],
+            &instant,
+            &[],
+        );
+        assert!(
+            r.parse_warnings.iter().any(|warning| matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "DynamicQty"
+            )),
+            "Rune Snag's off-battlefield for-each must keep a DynamicQty swallow warning, got {:?}",
+            r.parse_warnings
         );
     }
 
@@ -32089,6 +32590,419 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Issue #3343: conditional ("if it's a creature") regen rider + die-exile
+    // -----------------------------------------------------------------------
+
+    /// Walk a def's sub_ability/else_ability chain, returning true if any node
+    /// satisfies `pred`.
+    #[cfg(test)]
+    fn chain_any(
+        def: &crate::types::ability::AbilityDefinition,
+        pred: &dyn Fn(&crate::types::ability::AbilityDefinition) -> bool,
+    ) -> bool {
+        pred(def)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(|d| chain_any(d, pred))
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(|d| chain_any(d, pred))
+    }
+
+    #[cfg(test)]
+    fn chain_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+        chain_any(def, &|d| matches!(&*d.effect, Effect::Unimplemented { .. }))
+    }
+
+    #[cfg(test)]
+    fn chain_has_cant_be_regenerated_rider(def: &crate::types::ability::AbilityDefinition) -> bool {
+        use crate::types::statics::StaticMode;
+        chain_any(def, &|d| {
+            matches!(
+                &*d.effect,
+                Effect::GenericEffect {
+                    static_abilities,
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: Some(TargetFilter::TrackedSet { id: TrackedSetId(0) }),
+                } if static_abilities.first().is_some_and(|sd| {
+                    matches!(sd.mode, StaticMode::CantBeRegenerated)
+                        && sd.affected == Some(TargetFilter::ParentTarget)
+                })
+            )
+        })
+    }
+
+    #[cfg(test)]
+    fn chain_has_add_target_replacement(def: &crate::types::ability::AbilityDefinition) -> bool {
+        chain_any(def, &|d| {
+            matches!(&*d.effect, Effect::AddTargetReplacement { .. })
+        })
+    }
+
+    #[cfg(test)]
+    fn chain_has_change_zone_exile(def: &crate::types::ability::AbilityDefinition) -> bool {
+        use crate::types::zones::Zone;
+        chain_any(def, &|d| {
+            matches!(
+                &*d.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Issue #3343 / CR 608.2c + CR 701.19c: Disintegrate — "Disintegrate deals
+    /// X damage to any target. If it's a creature, it can't be regenerated this
+    /// turn, and if it would die this turn, exile it instead." The conditional
+    /// regen rider must produce a `CantBeRegenerated` GenericEffect (bound to the
+    /// damage clause's TrackedSet) AND the die-exile rider must produce an
+    /// AddTargetReplacement — with NO Unimplemented anywhere.
+    #[test]
+    fn conditional_cant_be_regenerated_disintegrate() {
+        let def = parse_effect_chain(
+            "Disintegrate deals X damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "root must be DealDamage, got {:?}",
+            def.effect
+        );
+        assert!(
+            chain_has_cant_be_regenerated_rider(&def),
+            "expected a CantBeRegenerated rider (TrackedSet(0)/ParentTarget/EOT) in the chain: {def:?}"
+        );
+        assert!(
+            chain_has_add_target_replacement(&def),
+            "expected the die-exile rider to lower to AddTargetReplacement: {def:?}"
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "no Unimplemented clause may remain: {def:?}"
+        );
+    }
+
+    /// Issue #3343 / CR 608.2c + CR 701.19c: Carbonize — same rider shape with a
+    /// fixed-3 damage clause ("Carbonize deals 3 damage to any target.").
+    #[test]
+    fn conditional_cant_be_regenerated_carbonize() {
+        let def = parse_effect_chain(
+            "Carbonize deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "root must be DealDamage Fixed{{value:3}}, got {:?}",
+            def.effect
+        );
+        assert!(
+            chain_has_cant_be_regenerated_rider(&def),
+            "expected a CantBeRegenerated rider in the chain: {def:?}"
+        );
+        assert!(
+            chain_has_add_target_replacement(&def),
+            "expected an AddTargetReplacement (die-exile) in the chain: {def:?}"
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "no Unimplemented clause may remain: {def:?}"
+        );
+    }
+
+    /// Issue #3343: boundary-split proof — the second sentence (one chunk under
+    /// `starts_prefix_clause`) must split into BOTH riders, and the exile clause
+    /// must be an AddTargetReplacement, NOT a degenerate `ChangeZone { Exile }`
+    /// (the pre-fix bug routed it through `strip_card_type_conditional`).
+    #[test]
+    fn conditional_cant_be_regenerated_boundary_split_proof() {
+        let def = parse_effect_chain(
+            "Disintegrate deals X damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            chain_has_cant_be_regenerated_rider(&def),
+            "both riders must be present: missing CantBeRegenerated: {def:?}"
+        );
+        assert!(
+            chain_has_add_target_replacement(&def),
+            "both riders must be present: missing AddTargetReplacement: {def:?}"
+        );
+        assert!(
+            !chain_has_change_zone_exile(&def),
+            "exile-instead must be AddTargetReplacement, not a degenerate ChangeZone {{ Exile }}: {def:?}"
+        );
+    }
+
+    /// Collect every node in the def chain satisfying `pred` (the rider defs we
+    /// want to inspect `.condition` on). Mirrors `chain_any` but returns refs.
+    #[cfg(test)]
+    fn chain_collect<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        pred: &dyn Fn(&crate::types::ability::AbilityDefinition) -> bool,
+        out: &mut Vec<&'a crate::types::ability::AbilityDefinition>,
+    ) {
+        if pred(def) {
+            out.push(def);
+        }
+        if let Some(d) = def.sub_ability.as_deref() {
+            chain_collect(d, pred, out);
+        }
+        if let Some(d) = def.else_ability.as_deref() {
+            chain_collect(d, pred, out);
+        }
+    }
+
+    /// The exact condition the conditional damage-form must carry on BOTH riders:
+    /// the "it's a creature" gate converted from a reveal-context CoreType into a
+    /// present-target match against the spell's chosen damage target (CR 109.2 +
+    /// CR 608.2c). NOT `None`, NOT `RevealedHasCardType` (which evaluates
+    /// always-false for a damage spell and would silently drop the riders).
+    #[cfg(test)]
+    fn expected_creature_target_match() -> AbilityCondition {
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            use_lki: true,
+        }
+    }
+
+    /// Assert a parsed damage-form def carries the creature-gate condition on BOTH
+    /// the CantBeRegenerated rider def AND the AddTargetReplacement (die-exile)
+    /// rider def — explicitly NOT `None` and NOT `RevealedHasCardType`. This is the
+    /// discriminator the rejected impl failed (it emitted `condition: None`).
+    #[cfg(test)]
+    fn assert_both_riders_carry_creature_condition(def: &crate::types::ability::AbilityDefinition) {
+        use crate::types::statics::StaticMode;
+        let expected = expected_creature_target_match();
+
+        let mut regen = Vec::new();
+        chain_collect(
+            def,
+            &|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities
+                            .first()
+                            .is_some_and(|sd| matches!(sd.mode, StaticMode::CantBeRegenerated))
+                )
+            },
+            &mut regen,
+        );
+        assert_eq!(
+            regen.len(),
+            1,
+            "expected exactly one CantBeRegenerated rider def: {def:?}"
+        );
+        let regen_cond = regen[0].condition.as_ref();
+        assert!(
+            regen_cond.is_some(),
+            "CantBeRegenerated rider condition must NOT be None (the rejected bug): {:?}",
+            regen[0]
+        );
+        assert!(
+            !matches!(
+                regen_cond,
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ),
+            "CantBeRegenerated rider condition must NOT be RevealedHasCardType \
+             (always-false for a damage spell): {regen_cond:?}"
+        );
+        assert_eq!(
+            regen_cond,
+            Some(&expected),
+            "CantBeRegenerated rider must carry TargetMatchesFilter{{Typed(creature), use_lki:true}}"
+        );
+
+        let mut exile = Vec::new();
+        chain_collect(
+            def,
+            &|d| matches!(&*d.effect, Effect::AddTargetReplacement { .. }),
+            &mut exile,
+        );
+        assert_eq!(
+            exile.len(),
+            1,
+            "expected exactly one AddTargetReplacement (die-exile) rider def: {def:?}"
+        );
+        let exile_cond = exile[0].condition.as_ref();
+        assert!(
+            exile_cond.is_some(),
+            "die-exile rider condition must NOT be None (the rejected bug): {:?}",
+            exile[0]
+        );
+        assert!(
+            !matches!(
+                exile_cond,
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ),
+            "die-exile rider condition must NOT be RevealedHasCardType: {exile_cond:?}"
+        );
+        assert_eq!(
+            exile_cond,
+            Some(&expected),
+            "die-exile rider must carry TargetMatchesFilter{{Typed(creature), use_lki:true}}"
+        );
+    }
+
+    /// GAP 3 (maintainer's #3): the discriminating parser test the rejected impl
+    /// lacked. Both riders must carry the "if it's a creature" gate as a
+    /// present-target match — this FAILS if `condition` is `None` (the rejected
+    /// bug) or a raw `RevealedHasCardType`. Covers Disintegrate AND Carbonize.
+    #[test]
+    fn conditional_cant_be_regenerated_condition_carried_disintegrate() {
+        let def = parse_effect_chain(
+            "Disintegrate deals X damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert_both_riders_carry_creature_condition(&def);
+    }
+
+    #[test]
+    fn conditional_cant_be_regenerated_condition_carried_carbonize() {
+        let def = parse_effect_chain(
+            "Carbonize deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert_both_riders_carry_creature_condition(&def);
+    }
+
+    /// GAP 3 grammar-class proof: a SYNTHETIC card (not Disintegrate/Carbonize)
+    /// in the same grammar class parses to the same gated shape — both riders,
+    /// condition carried, no Unimplemented. Proves we matched the class, not a
+    /// card name.
+    #[test]
+    fn conditional_cant_be_regenerated_grammar_class_synthetic() {
+        let def = parse_effect_chain(
+            "Foo deals 2 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "root must be DealDamage, got {:?}",
+            def.effect
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "no Unimplemented clause may remain: {def:?}"
+        );
+        assert_both_riders_carry_creature_condition(&def);
+    }
+
+    /// Maintainer #3376: the conditional rider branch is ALL-OR-NOTHING for the
+    /// two-rider grammar. When the second segment after ", and " is NOT a
+    /// die-exile rider (here "..., and draw a card."), the branch must NOT keep
+    /// the regen rider and swallow the tail — it must fall through to normal
+    /// parsing so "draw a card" survives.
+    #[test]
+    fn conditional_cant_be_regenerated_non_die_exile_tail_not_swallowed() {
+        let def = parse_effect_chain(
+            "Foo deals 2 damage to any target. If it's a creature, it can't be regenerated this turn, and draw a card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            !chain_has_cant_be_regenerated_rider(&def),
+            "the two-rider branch must not match without a die-exile tail, so no \
+             regen rider should be attached: {def:?}"
+        );
+        assert!(
+            chain_any(&def, &|d| matches!(&*d.effect, Effect::Draw { .. })),
+            "the 'draw a card' tail must be preserved, not swallowed: {def:?}"
+        );
+    }
+
+    /// GAP 3 RUNTIME discrimination (minimal level): the carried condition itself
+    /// must evaluate FALSE against a planeswalker-target ability and TRUE against
+    /// a creature-target ability. This is the runtime semantics that prove the
+    /// riders are skipped for a planeswalker (so it dies normally / is not exiled)
+    /// and applied for a creature. A raw `RevealedHasCardType` condition would
+    /// evaluate FALSE for BOTH (no revealed id), which is the silent-wrong bug.
+    #[test]
+    fn conditional_creature_gate_evaluates_per_target_type() {
+        use crate::game::effects::evaluate_condition;
+        use crate::game::zones;
+        use crate::types::ability::{ResolvedAbility, TargetRef};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        // The exact condition the parser stamps on the riders.
+        let cond = expected_creature_target_match();
+
+        let mut state = GameState::new_two_player(42);
+
+        // A creature on the battlefield.
+        let creature = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // A planeswalker on the battlefield.
+        let planeswalker = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Test Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+
+        // Ability targeting the CREATURE → condition TRUE (riders apply).
+        let creature_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            evaluate_condition(&cond, &state, &creature_ability),
+            "creature-target damage ability: 'if it's a creature' must be TRUE"
+        );
+
+        // Ability targeting the PLANESWALKER → condition FALSE (riders skipped:
+        // it goes to the graveyard normally, no regen lock, no exile-instead).
+        let pw_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(planeswalker)],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &pw_ability),
+            "planeswalker-target damage ability: 'if it's a creature' must be FALSE"
+        );
+    }
+
     #[test]
     fn pump_compound_with_extra_blockers() {
         // Give No Ground: the trailing blocking permission is a second
@@ -32260,7 +33174,7 @@ mod tests {
         );
         match e {
             Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::WhenNextEvent { trigger },
+                condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
                 uses_tracked_set: false,
                 ..
             } => {
@@ -34883,6 +35797,21 @@ mod tests {
             strip_optional_target_prefix("up to one other target creature or spell");
         assert_eq!(rest, "other target creature or spell");
         assert_eq!(multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    }
+
+    /// CR 115.6: "up to one target creature defending player controls" (Ace,
+    /// Fearless Rebel's Fight leg) must strip to the bare target text and yield
+    /// `up_to(1)` (min=0). Pins the Fight-suffix variant of the optional-target
+    /// combinator.
+    #[test]
+    fn strip_optional_target_prefix_up_to_one_defending_player_controls() {
+        let (rest, multi_target) =
+            strip_optional_target_prefix("up to one target creature defending player controls");
+        assert_eq!(rest, "target creature defending player controls");
+        assert_eq!(
+            multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]
@@ -43826,7 +44755,11 @@ mod tests {
         else {
             panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
         };
-        let DelayedTriggerCondition::WhenNextEvent { trigger } = condition else {
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } = condition
+        else {
             panic!("expected WhenNextEvent, got {:?}", condition);
         };
         assert_eq!(
@@ -43842,10 +44775,130 @@ mod tests {
             Some(&expected),
             "valid_card must carry HasXInManaCost filter"
         );
+        assert!(
+            or_trigger.is_none(),
+            "single-branch when-next-cast must not carry or_trigger"
+        );
         // Scoped to the source's controller — "when YOU next cast".
         assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
         // Inner effect should parse as a draw.
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
+    }
+
+    /// CR 603.7 + CR 707.10: Magus Lucea Kane Psychic Stimulus delayed copy.
+    #[test]
+    fn magus_lucea_kane_psychic_stimulus_parses_delayed_copy() {
+        use crate::types::ability::{
+            CopyRetargetPermission, DelayedTriggerCondition, FilterProp, TypedFilter,
+        };
+        let def = parse_effect_chain(
+            "When you next cast a spell with {X} in its mana cost or activate an ability with {X} in its activation cost this turn, copy that spell or ability. You may choose new targets for the copy.",
+            AbilityKind::Activated,
+        );
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*def.effect
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } = condition
+        else {
+            panic!("expected WhenNextEvent, got {:?}", condition);
+        };
+        assert_eq!(
+            trigger.valid_card.as_ref(),
+            Some(&TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+            )),
+        );
+        let alt = or_trigger
+            .as_ref()
+            .expect("Magus disjunction must use or_trigger, not chained sub_abilities");
+        assert_eq!(
+            alt.mode,
+            crate::types::triggers::TriggerMode::AbilityActivated
+        );
+        assert_eq!(
+            alt.valid_card.as_ref(),
+            Some(&TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+            )),
+        );
+        assert!(
+            matches!(
+                *effect.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::TriggeringSource,
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "expected CopySpell on triggering source, got {:?}",
+            effect.effect
+        );
+    }
+
+    /// CR 603.7: disjunctive when-next conditions compose spell and activation
+    /// qualifiers through the shared post-modifier combinators rather than an
+    /// exact full-clause string match.
+    #[test]
+    fn when_next_spell_or_activate_disjunction_composes_spell_type_filter() {
+        use crate::types::ability::{DelayedTriggerCondition, FilterProp, TypedFilter};
+        let def = parse_effect_chain(
+            "When you next cast a creature spell with {X} in its mana cost or activate an ability with {X} in its activation cost this turn, copy that spell or ability.",
+            AbilityKind::Activated,
+        );
+        let Effect::CreateDelayedTrigger { condition, .. } = &*def.effect else {
+            panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        let DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+        } = condition
+        else {
+            panic!("expected WhenNextEvent, got {:?}", condition);
+        };
+        assert_eq!(
+            trigger.valid_card.as_ref(),
+            Some(&TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+                    ),
+                ],
+            }),
+        );
+        let alt = or_trigger
+            .as_ref()
+            .expect("disjunctive when-next must carry or_trigger");
+        assert_eq!(
+            alt.valid_card.as_ref(),
+            Some(&TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+            )),
+        );
+    }
+
+    /// CR 605.1a: Magus tap ability remains a mana ability; the delayed copy
+    /// clause resolves inline on the mana-ability path.
+    #[test]
+    fn magus_lucea_kane_tap_ability_is_mana_ability() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Psychic Stimulus — {T}: Add {C}{C}. When you next cast a spell with {X} in its mana cost or activate an ability with {X} in its activation cost this turn, copy that spell or ability. You may choose new targets for the copy.",
+            "Magus Lucea Kane",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let ability = parsed.abilities.last().expect("tap ability");
+        assert!(
+            crate::game::mana_abilities::is_mana_ability(ability),
+            "Psychic Stimulus must remain a mana ability per CR 605.1"
+        );
     }
 
     /// CR 201.2: "Destroy target nonland permanent and all other permanents

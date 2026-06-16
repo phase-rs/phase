@@ -727,6 +727,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 502.3: bounded untap-subset selection under a MaxUntapPerType cap
+        // (Smoke / Stoic Angel / Damping Field). The active player chooses which
+        // `max` of `group` untap. Offer the cap-saturating choice — untap the
+        // first `max` members — as the single AI candidate; untapping fewer is
+        // never advantageous to the AI, and the engine validates `len() <= max`.
+        // Search may still enumerate alternative subsets via legal-actions if a
+        // richer policy is wired later; this guarantees the AI never wedges.
+        WaitingFor::ChooseUntapSubset { player, group, max } => {
+            let chosen: Vec<ObjectId> = group.iter().copied().take(*max).collect();
+            vec![candidate(
+                GameAction::SelectCards { cards: chosen },
+                TacticalClass::Utility,
+                Some(*player),
+            )]
+        }
         // CR 508.1g + CR 701.43d: exert-as-attack is optional — offer both
         // paying the exert cost and declining so search can weigh the linked
         // "when you do" payoff against losing the next untap.
@@ -2360,7 +2375,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             )]
         }
         // CR 701.62a: AI selects one card to manifest — one action per card option
-        WaitingFor::ManifestDreadChoice { player, cards } => {
+        WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
                 vec![candidate(
                     GameAction::SelectCards { cards: vec![] },
@@ -3957,6 +3972,7 @@ fn crew_vehicle_candidates(
         player,
         eligible_creatures,
         crew_power as i32,
+        crate::types::statics::CrewAction::Crew,
         |creature_ids| GameAction::CrewVehicle {
             vehicle_id,
             creature_ids,
@@ -3979,6 +3995,7 @@ fn saddle_mount_candidates(
         player,
         eligible_creatures,
         saddle_power as i32,
+        crate::types::statics::CrewAction::Saddle,
         |creature_ids| GameAction::SaddleMount {
             mount_id,
             creature_ids,
@@ -3995,6 +4012,7 @@ fn minimal_power_subset_candidates<F>(
     player: PlayerId,
     eligible_creatures: &[crate::types::identifiers::ObjectId],
     threshold: i32,
+    action: crate::types::statics::CrewAction,
     wrap: F,
 ) -> Vec<CandidateAction>
 where
@@ -4002,14 +4020,25 @@ where
 {
     const MAX_CANDIDATES: usize = 20;
 
+    // CR 702.122c / 702.171a: a creature's contribution toward the crew/saddle
+    // threshold may be modified ("as though its power were N greater" / "using
+    // its toughness rather than its power"). The activation gate and the
+    // announcement validator both measure power via `object_crew_power_contribution`,
+    // so the candidate enumerator must use the same authority — measuring raw
+    // `power` here disagrees with those seams and yields zero valid covers for
+    // Pilot-style creatures (e.g. Deathless Pilot, "crews as though its power
+    // were 2 greater"), hanging the controller with an empty legal-action set.
     let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
         eligible_creatures
             .iter()
-            .filter_map(|&id| {
-                state
-                    .objects
-                    .get(&id)
-                    .map(|o| (id, o.power.unwrap_or(0).max(0)))
+            .filter(|&&id| state.objects.contains_key(&id))
+            .map(|&id| {
+                (
+                    id,
+                    crate::game::static_abilities::object_crew_power_contribution(
+                        state, id, action,
+                    ),
+                )
             })
             .collect();
     // Ascending-power sort with id tie-break makes enumeration deterministic

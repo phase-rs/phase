@@ -20,6 +20,7 @@ use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
+use super::lifegain_payoff::LifegainPayoffPolicy;
 use super::payment_selection::PaymentSelectionPolicy;
 use super::plus_one_counters::PlusOneCountersPolicy;
 use super::ramp_timing::RampTimingPolicy;
@@ -66,6 +67,7 @@ pub enum PolicyId {
     RecursionAwareness,
     BoardWipeTelegraph,
     LifeTotalResource,
+    LifegainPayoff,
     CardAdvantage,
     LandfallTiming,
     RampTiming,
@@ -281,6 +283,7 @@ impl Default for PolicyRegistry {
             Box::new(RecursionAwarenessPolicy),
             Box::new(BoardWipeTelegraphPolicy),
             Box::new(LifeTotalResourcePolicy),
+            Box::new(LifegainPayoffPolicy),
             Box::new(CardAdvantagePolicy),
             Box::new(LandfallTimingPolicy),
             Box::new(RampTimingPolicy),

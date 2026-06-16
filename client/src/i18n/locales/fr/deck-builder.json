@@ -5,6 +5,8 @@
     "reset": "Réinitialiser",
     "textPlaceholder": "Rechercher des cartes...",
     "allTypes": "Tous les types",
+    "cardType": "Type de carte",
+    "browseFormatFilter": "Légal en format",
     "cmcMax": "CMC max :",
     "sets": "Extensions",
     "addSetPlaceholder": "Ajouter un code d'extension...",

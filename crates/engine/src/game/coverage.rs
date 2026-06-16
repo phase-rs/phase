@@ -148,6 +148,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // scans active statics whose `affected` filter matches the entering
             // object. Parameterized — no registry entry; coverage support here.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 502.3: MaxUntapPerType carries the permanent-type filter + cap
+            // (Smoke / Damping Field / Winter Orb). Runtime: the active player
+            // determines the bounded untap subset via
+            // turns.rs::max_untap_subset_prompt (→ WaitingFor::ChooseUntapSubset),
+            // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
+            // safety net. Parameterized — no registry entry; coverage support here.
+            | StaticMode::MaxUntapPerType { .. }
     )
 }
 
@@ -469,6 +476,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::BlockingSource => parts.push("blocking source".into()),
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
+            FilterProp::AttackingAlone => parts.push("attacking alone".into()),
+            FilterProp::BlockingAlone => parts.push("blocking alone".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
@@ -714,7 +723,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let inner_tf = TypedFilter::default().properties(props.clone());
                 parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
             }
+            // CR 608.2c: Negation label wraps the inner prop's rendering.
+            FilterProp::Not { prop } => {
+                let inner_tf = TypedFilter::default().properties(vec![(**prop).clone()]);
+                parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
+            }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
         }
@@ -1124,6 +1139,22 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             CardTypeSetSource::Objects { filter } => {
                 format!("card types among {}", fmt_target(filter))
             }
+            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+                Some(cause) => {
+                    use crate::types::ability::ThisWayCause;
+                    let verb = match cause {
+                        ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Exiled => "exiled",
+                        ThisWayCause::Milled => "milled",
+                        ThisWayCause::Destroyed => "destroyed",
+                        ThisWayCause::Sacrificed => "sacrificed",
+                        ThisWayCause::Returned => "returned",
+                        ThisWayCause::Bounced => "bounced",
+                    };
+                    format!("card types among cards {verb} this way")
+                }
+                None => "card types among tracked cards".into(),
+            },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ZoneCardCount {
@@ -5755,6 +5786,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
+        StaticCondition::RecipientAttackingOwnerTarget { .. } => {
+            ("RecipientAttackingOwnerTarget", Handled)
+        }
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
@@ -7060,6 +7094,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 502.3: Smoke / Damping Field / Winter Orb max-untap cap. Anchor
+            // on the verb phrase; the type filter half is the reused TargetFilter
+            // and is validated by parser tests.
+            StaticMode::MaxUntapPerType { .. } => effective_lower.contains("can't untap more than"),
             // CR 301.5 + CR 303.4: positive "can be attached only to {filter}"
             // restriction. Anchor on the verb phrase; the filter half is the
             // reused TargetFilter and is validated by parser tests.

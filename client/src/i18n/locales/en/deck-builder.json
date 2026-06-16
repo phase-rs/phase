@@ -5,6 +5,8 @@
     "reset": "Reset",
     "textPlaceholder": "Search cards...",
     "allTypes": "All types",
+    "cardType": "Card type",
+    "browseFormatFilter": "Legal in format",
     "cmcMax": "CMC max:",
     "sets": "Sets",
     "addSetPlaceholder": "Add set code...",

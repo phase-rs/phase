@@ -8,11 +8,12 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
-    FilterProp, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
+    EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2684,7 +2685,11 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => {
             matches!(
                 qty,
-                QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+                QuantityRef::TrackedSetSize
+                    | QuantityRef::FilteredTrackedSetSize { .. }
+                    | QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::TrackedSet { .. }
+                    }
             )
         }
         QuantityExpr::Offset { inner, .. }

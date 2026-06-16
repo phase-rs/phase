@@ -2751,6 +2751,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
+        // CR 509.1b: recipient-scoped block-evasion gate; no intervening-if
+        // (`TriggerCondition`) equivalent — lowering returns `None`.
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
@@ -3407,15 +3410,27 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
     ))
     .parse(input)?;
 
-    let (rest, prop) = alt((
-        value(FilterProp::Blocking, tag("blocking")),
-        map_attachment_kind_filter_prop,
+    // CR 506.5: combat-alone predicates are tried first, with the disjunctive
+    // "attacking or blocking alone" form ordered ahead of the single-phrase
+    // forms so longest-match wins (the same ordering discipline as the other
+    // disjunctive look-back conditions in this module). They map to the
+    // sole-attacker / sole-blocker `FilterProp`s, which evaluate via the
+    // zone-change snapshot per CR 603.10a.
+    let (rest, props) = alt((
+        parse_combat_alone_props,
+        map(
+            alt((
+                value(FilterProp::Blocking, tag("blocking")),
+                map_attachment_kind_filter_prop,
+            )),
+            |prop| vec![prop],
+        ),
     ))
     .parse(rest)?;
     let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
         origin: Some(Zone::Battlefield),
         destination: Zone::Graveyard,
-        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(props)),
     };
 
     if negated {
@@ -3428,6 +3443,27 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
     } else {
         Ok((rest, condition))
     }
+}
+
+/// CR 506.5: Parse the combat-alone predicate phrase of a zone-change
+/// look-back intervening-if ("attacking or blocking alone", "attacking alone",
+/// "blocking alone"). The disjunctive form is ordered first so it is not
+/// shadowed by the single-phrase forms (longest-match precedence). Returns the
+/// `FilterProp` list to drop into the creature filter — the disjunction is
+/// expressed via the existing typed `FilterProp::AnyOf` rather than bespoke
+/// parsing, so it composes with the surrounding negation axis for free.
+fn parse_combat_alone_props(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
+    alt((
+        value(
+            vec![FilterProp::AnyOf {
+                props: vec![FilterProp::AttackingAlone, FilterProp::BlockingAlone],
+            }],
+            tag("attacking or blocking alone"),
+        ),
+        value(vec![FilterProp::AttackingAlone], tag("attacking alone")),
+        value(vec![FilterProp::BlockingAlone], tag("blocking alone")),
+    ))
+    .parse(input)
 }
 
 fn zone_change_object_token_condition(negated: bool) -> TriggerCondition {
@@ -10598,6 +10634,37 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
         if rest.trim().is_empty() {
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![FilterProp::InZone { zone }]),
+            ));
+        }
+    }
+
+    None
+}
+
+/// Parse an activated-ability qualifier phrase for "when you next … or activate
+/// an ability <qualifier>" delayed triggers.
+///
+/// Currently supports:
+/// - "with {x} in its activation cost" — CR 107.3 + CR 601.2f. Produces a
+///   `TargetFilter` containing `FilterProp::HasXInActivationCost`.
+///
+/// Shared with `oracle_effect::try_parse_when_next_event` — exposed as
+/// `pub(crate)` to keep the combinator definition in a single place.
+pub(crate) fn parse_post_activation_modifier(modifier: &str) -> Option<TargetFilter> {
+    use crate::types::ability::{FilterProp, TypedFilter};
+
+    if let Ok((rest, ())) = alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("with {x} in its activation cost"),
+        ),
+        value((), tag("with an {x} in its activation cost")),
+    ))
+    .parse(modifier)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
             ));
         }
     }
@@ -26241,6 +26308,84 @@ mod tests {
         );
     }
 
+    /// CR 506.5: the disjunctive "attacking or blocking alone" intervening-if
+    /// (Thijarian Witness "Bear Witness") becomes a zone-change look-back over
+    /// an `AnyOf([AttackingAlone, BlockingAlone])` creature filter, and the
+    /// clause is stripped from the residual effect text.
+    #[test]
+    fn extract_if_it_was_attacking_or_blocking_alone_as_zone_change_lookback() {
+        let (cleaned, cond) =
+            extract_if_condition("if it was attacking or blocking alone, exile it and investigate");
+        assert_eq!(cleaned, "exile it and investigate");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Graveyard,
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::AnyOf {
+                        props: vec![FilterProp::AttackingAlone, FilterProp::BlockingAlone],
+                    },
+                ])),
+            }
+        );
+    }
+
+    /// CR 506.5: the single-phrase "attacking alone" form (building-block
+    /// coverage — the class, not just the disjunctive card text).
+    #[test]
+    fn extract_if_it_was_attacking_alone_as_zone_change_lookback() {
+        let (cleaned, cond) = extract_if_condition("if it was attacking alone, draw a card");
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Graveyard,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::AttackingAlone])
+                ),
+            }
+        );
+    }
+
+    /// CR 506.5: the single-phrase "blocking alone" form.
+    #[test]
+    fn extract_if_it_was_blocking_alone_as_zone_change_lookback() {
+        let (cleaned, cond) = extract_if_condition("if it was blocking alone, draw a card");
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Graveyard,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::BlockingAlone])
+                ),
+            }
+        );
+    }
+
+    /// CR 506.5 + CR 603.4: the negated polarity composes through the existing
+    /// negation axis ("if it wasn't attacking alone" → `Not(...)`).
+    #[test]
+    fn extract_if_it_wasnt_attacking_alone_negates_zone_change_lookback() {
+        let (cleaned, cond) = extract_if_condition("if it wasn't attacking alone, draw a card");
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Graveyard,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::AttackingAlone])
+                    ),
+                }),
+            }
+        );
+    }
+
     #[test]
     fn extract_if_it_was_enchanted_or_equipped_as_zone_change_lookback() {
         let (cleaned, cond) =
@@ -27895,6 +28040,100 @@ mod tests {
                 other => panic!("expected Typed target, got {other:?}"),
             },
             other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 508.5 / CR 508.5a + CR 701.14a: Ace, Fearless Rebel —
+    /// "…then it fights up to one target creature defending player controls."
+    /// The Fight is the tail of a `then`-sequence sub-ability chain, so it lands
+    /// on a nested `sub_ability`. Both axes must survive: the "up to one" target
+    /// cardinality (`multi_target == up_to(1)`, min=0) AND the defending-player
+    /// scope (`ControllerRef::DefendingPlayer`). Regression guard for the
+    /// dropped optionality (cluster #17) and the landed controller-scope fix.
+    #[test]
+    fn attack_trigger_fight_up_to_one_defending_player_controls() {
+        use crate::types::ability::{Effect, MultiTargetSpec};
+
+        let def = parse_trigger_line(
+            "Whenever Ace attacks, put a +1/+1 counter on Ace, then it fights up to one target creature defending player controls.",
+            "Ace, Fearless Rebel",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_deref().expect("execute ability");
+        // Walk the `then`-sequence chain to the Fight sub-ability.
+        let fight = walk_to_fight_sub_ability(execute);
+        assert_eq!(
+            fight.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "fight leg must carry up-to-one multi_target (min=0)",
+        );
+        match fight.effect.as_ref() {
+            Effect::Fight { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "fight target must scope to the defending player, not null",
+                ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
+    /// CR 115.6 + CR 508.5 / CR 508.5a: the "up to one" optionality and the
+    /// `DefendingPlayer` scope are orthogonal axes — an Or-target Fight must fan
+    /// the scope onto each `Or` disjunct AND retain `up_to(1)`.
+    #[test]
+    fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
+        use crate::types::ability::{Effect, MultiTargetSpec};
+
+        let def = parse_trigger_line(
+            "Whenever Ace attacks, put a +1/+1 counter on Ace, then it fights up to one target artifact or enchantment defending player controls.",
+            "Ace, Fearless Rebel",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_deref().expect("execute ability");
+        let fight = walk_to_fight_sub_ability(execute);
+        assert_eq!(
+            fight.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "or-target fight leg must carry up-to-one multi_target (min=0)",
+        );
+        match fight.effect.as_ref() {
+            Effect::Fight { target, .. } => match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+                    for (i, leg) in filters.iter().enumerate() {
+                        match leg {
+                            TargetFilter::Typed(t) => assert_eq!(
+                                t.controller,
+                                Some(ControllerRef::DefendingPlayer),
+                                "or-leg {i} must scope to the defending player, not null",
+                            ),
+                            other => panic!("or-leg {i} expected Typed, got {other:?}"),
+                        }
+                    }
+                }
+                other => panic!("expected Or target, got {other:?}"),
+            },
+            other => panic!("expected Fight effect, got {other:?}"),
+        }
+    }
+
+    /// Walk a `then`-sequence sub-ability chain to the `Effect::Fight` link.
+    fn walk_to_fight_sub_ability(
+        execute: &crate::types::ability::AbilityDefinition,
+    ) -> &crate::types::ability::AbilityDefinition {
+        use crate::types::ability::Effect;
+        let mut current = execute;
+        loop {
+            if matches!(current.effect.as_ref(), Effect::Fight { .. }) {
+                return current;
+            }
+            current = current
+                .sub_ability
+                .as_deref()
+                .expect("fight link must exist in the sub_ability chain");
         }
     }
 

@@ -25,8 +25,8 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter, TypeFilter,
-    TypedFilter, ZoneRef,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
+    ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterMatch;
 use crate::types::keywords::Keyword;
@@ -496,7 +496,15 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_chosen_commander_mana_value_ref,
         )),
         parse_distinct_card_types_in_zone,
-        parse_distinct_card_types_among_objects,
+        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
+        // precede the generic `among <objects>` arm so the chain-tracked-set,
+        // cause-filtered count wins on the "card type among cards" prefix. Nested
+        // with `parse_distinct_card_types_among_objects` to keep the outer `alt`
+        // within nom's tuple arity (nom 8.0 max: 21 items).
+        alt((
+            parse_distinct_card_types_among_tracked_set,
+            parse_distinct_card_types_among_objects,
+        )),
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
         parse_cards_exiled_with_source,
@@ -823,7 +831,14 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
-        parse_distinct_card_types_among_objects,
+        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
+        // precede the generic `among <objects>` arm (same ordering as
+        // `parse_quantity_ref`). Nested with `parse_distinct_card_types_among_objects`
+        // to stay within nom's top-level `alt` arity (nom 8.0 max: 21 items).
+        alt((
+            parse_distinct_card_types_among_tracked_set,
+            parse_distinct_card_types_among_objects,
+        )),
         // CR 201.2 + CR 603.4: "differently named <type-phrase>" — distinct-by-
         // name population count. Must precede `parse_number_of_controlled_type`
         // so the adjective prefix is consumed before the generic typed-filter
@@ -843,13 +858,15 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — the trailing "in your party" is what
         // distinguishes party-size from a controlled-creature count.
         parse_creatures_in_your_party_tail,
-        // CR 400.7 + CR 700.4: entered-this-turn and died-this-turn zone-change
-        // counts share a nested alt to stay within nom's top-level `alt` arity.
-        // The died arm must precede `parse_number_of_controlled_type` so the
-        // leading "creatures" token does not commit to the generic controlled-type arm.
+        // CR 400.7 + CR 700.4 + CR 701.21a: entered-this-turn, died-this-turn,
+        // and sacrificed-this-turn zone-change counts share a nested alt to stay
+        // within nom's top-level `alt` arity (nom 8.0 max: 21 items).
+        // All three arms must precede `parse_number_of_controlled_type` so the
+        // leading type-word token does not commit to the generic controlled-type arm.
         alt((
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
+            parse_number_of_sacrificed_this_turn,
         )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
@@ -1329,6 +1346,33 @@ fn parse_distinct_card_types_among_objects(input: &str) -> OracleResult<'_, Quan
         &input[consumed..],
         QuantityRef::DistinctCardTypes {
             source: CardTypeSetSource::Objects { filter },
+        },
+    ))
+}
+
+/// CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" -> distinct
+/// card types among the chain tracked set, cause-filtered to <verb> (Occult Epiphany #3307).
+pub(crate) fn parse_distinct_card_types_among_tracked_set(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among cards ").parse(rest)?;
+    let (rest, cause) = alt((
+        value(ThisWayCause::Discarded, tag("discarded")),
+        value(ThisWayCause::Exiled, tag("exiled")),
+        value(ThisWayCause::Milled, tag("milled")),
+        value(ThisWayCause::Destroyed, tag("destroyed")),
+        value(ThisWayCause::Sacrificed, tag("sacrificed")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this way").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::TrackedSet {
+                caused_by: Some(cause),
+            },
         },
     ))
 }
@@ -2277,6 +2321,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_subtype_died_this_turn,
         parse_for_each_creature_died_this_turn,
+        // CR 701.21a: "[type] you['ve] sacrificed this turn" — event-based count
+        // of sacrifice events. Must precede `parse_for_each_controlled_type` so the
+        // leading type token does not commit to the generic `<type> you control` arm.
+        parse_for_each_sacrificed_this_turn,
         // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
         // control this turn" — destination-agnostic zone-change count, distinct
         // from the graveyard-only "died" arm above.
@@ -2962,6 +3010,60 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
 fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, controller) = parse_creatures_died_this_turn_tail(input)?;
     Ok((rest, creatures_died_this_turn_ref(controller)))
+}
+
+/// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" -> `TargetFilter`.
+/// Shared inner combinator for both `parse_number_of_sacrificed_this_turn` and
+/// `parse_for_each_sacrificed_this_turn`.
+fn parse_sacrificed_this_turn_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    // CR 701.21a: sacrifice moves the permanent directly to its owner's graveyard
+    // (not destroyed — bypasses indestructible and regeneration).
+    let (filter, rest) = parse_type_phrase(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    let (rest, _) = (tag(" you"), opt(tag("'ve")), tag(" sacrificed this turn")).parse(rest)?;
+    Ok((rest, filter))
+}
+
+/// CR 701.21a: "the number of [type] you['ve] sacrificed this turn" →
+/// `QuantityRef::SacrificedThisTurn`. Wired into the nested inner alt of
+/// `parse_number_of_inner` alongside `parse_entered_this_turn_ref` and
+/// `parse_number_of_creatures_died_this_turn`.
+///
+/// Structurally identical to `parse_for_each_sacrificed_this_turn` by convention
+/// (mirrors the `parse_number_of_/parse_for_each_creature_died_this_turn` pair).
+/// If opponent/any-player sacrifice forms are ever added, diverge the logic here.
+fn parse_number_of_sacrificed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, filter) = parse_sacrificed_this_turn_filter(input)?;
+    Ok((
+        rest,
+        QuantityRef::SacrificedThisTurn {
+            player: PlayerScope::Controller,
+            filter,
+        },
+    ))
+}
+
+/// CR 701.21a: "[type] you['ve] sacrificed this turn" in a "for each" context →
+/// `QuantityRef::SacrificedThisTurn`. Separate named fn per the
+/// `parse_number_of_/parse_for_each_creature_died_this_turn` convention.
+///
+/// Structurally identical to `parse_number_of_sacrificed_this_turn` by convention.
+/// If opponent/any-player sacrifice forms are ever added, diverge the logic here.
+fn parse_for_each_sacrificed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, filter) = parse_sacrificed_this_turn_filter(input)?;
+    Ok((
+        rest,
+        QuantityRef::SacrificedThisTurn {
+            player: PlayerScope::Controller,
+            filter,
+        },
+    ))
 }
 
 /// CR 400.7 + CR 603.10a: Parse "creature that left the battlefield under your
@@ -4850,6 +4952,56 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::Another)));
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_among_cards_discarded_this_way() {
+        // Occult Epiphany #3307: singular "card type" + Discarded cause.
+        let (rest, q) =
+            parse_distinct_card_types_among_tracked_set("card type among cards discarded this way")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Discarded),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_among_cards_exiled_this_way() {
+        // Plural "card types" + Exiled cause.
+        let (rest, q) =
+            parse_distinct_card_types_among_tracked_set("card types among cards exiled this way")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Exiled),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_distinct_card_types_among_tracked_set_via_parse_quantity_ref() {
+        // The combinator must win over `parse_distinct_card_types_among_objects`
+        // when reached through the top-level `parse_quantity_ref` alt chain.
+        let (rest, q) = parse_quantity_ref("card types among cards discarded this way").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet {
+                    caused_by: Some(ThisWayCause::Discarded),
+                },
+            }
+        );
     }
 
     #[test]

@@ -514,7 +514,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(1)),
         (
-            WaitingFor::ManifestDreadChoice { player: _, cards },
+            WaitingFor::ManifestDreadChoice {
+                player: _, cards, ..
+            },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(1)),
         (

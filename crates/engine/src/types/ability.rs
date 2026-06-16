@@ -1952,7 +1952,14 @@ pub enum DelayedTriggerCondition {
     /// CR 603.7: "When you next [event] this turn" — fires once on the next matching
     /// event, then is removed. One-shot variant of `WheneverEvent`.
     /// Uses existing trigger matching infrastructure to detect the event.
-    WhenNextEvent { trigger: Box<TriggerDefinition> },
+    WhenNextEvent {
+        trigger: Box<TriggerDefinition>,
+        /// Optional alternate matcher for disjunctive "when you next … or …"
+        /// clauses (Magus Lucea Kane). Either branch satisfies the condition;
+        /// only the first matching event fires the delayed ability.
+        #[serde(default)]
+        or_trigger: Option<Box<TriggerDefinition>>,
+    },
 }
 
 /// Specifies variable-count targeting for "any number of" effects.
@@ -2238,6 +2245,15 @@ pub enum FilterProp {
     },
     /// CR 509.1h: Matches attacking creatures with no blockers assigned.
     Unblocked,
+    /// CR 506.5: Matches a creature that is (or, via the zone-change look-back
+    /// snapshot, was) the sole attacker — "attacking alone". Live evaluation
+    /// reads combat; look-back evaluation reads
+    /// `ZoneChangeCombatStatus::attacking_alone`.
+    AttackingAlone,
+    /// CR 506.5: Matches a creature that is (or was) the sole blocker —
+    /// "blocking alone". Look-back evaluation reads
+    /// `ZoneChangeCombatStatus::blocking_alone`.
+    BlockingAlone,
     Tapped,
     /// CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
     Untapped,
@@ -2488,6 +2504,17 @@ pub enum FilterProp {
     AnyOf {
         props: Vec<FilterProp>,
     },
+    /// CR 608.2c: Logical negation of a filter property — matches objects for
+    /// which the inner property does NOT hold ("apply the rules of English").
+    /// General recursive combinator mirroring `TargetFilter::Not`,
+    /// `StaticCondition::Not`, `AbilityCondition::Not`, and `TriggerCondition::Not`.
+    /// Composes with the AND-combined `properties` vector, so a negated-verb
+    /// relative clause like "that didn't attack or enter this turn" decomposes
+    /// (De Morgan) into `Not(AttackedThisTurn)` AND `Not(EnteredThisTurn)` rather
+    /// than a bespoke `NotAttacked`/`NotEntered` sibling cluster. Boxed for recursion.
+    Not {
+        prop: Box<FilterProp>,
+    },
     /// CR 700.9: A permanent is modified if it has one or more counters on it
     /// (CR 122), if it is equipped (CR 301.5), or if it is enchanted by an Aura
     /// that is controlled by that permanent's controller (CR 303.4).
@@ -2581,6 +2608,10 @@ pub enum FilterProp {
     /// Evaluated against `SpellCastRecord.has_x_in_cost` in the spell-history
     /// filter path and against `cost_has_x(&obj.mana_cost)` for live objects.
     HasXInManaCost,
+    /// CR 107.3 + CR 602.1: Matches activated abilities whose activation cost
+    /// contains an `{X}` shard. Used for "activate an ability with {X} in its
+    /// activation cost" on `AbilityActivated` delayed triggers (Magus Lucea Kane).
+    HasXInActivationCost,
     /// CR 605.1: Matches objects that have at least one ability classified as a
     /// mana ability by the engine's authoritative mana-ability classifier.
     /// Used for library filters such as "artifact card with a mana ability".
@@ -3398,6 +3429,15 @@ pub enum CardTypeSetSource {
     ExiledBySource,
     /// CR 109.2: Objects matching a battlefield-style filter.
     Objects { filter: TargetFilter },
+    /// CR 608.2c + CR 205.2a: distinct card types among the current chain
+    /// tracked set, optionally restricted to members produced by `caused_by`.
+    /// Mirrors `QuantityRef::FilteredTrackedSetSize { caused_by }`: a merged
+    /// Draw->Discard set is disambiguated by CAUSE (drawn members are unstamped),
+    /// so Some(Discarded) counts only discarded members. None counts all.
+    TrackedSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<ThisWayCause>,
+    },
 }
 
 /// CR 601.2h: Which cast object a mana-spent quantity reads.
@@ -5066,6 +5106,22 @@ pub enum StaticCondition {
     /// `TargetFilter::Typed` — no attachment prop, no recipient prop.
     RecipientMatchesFilter {
         filter: TargetFilter,
+    },
+    /// CR 509.1b + CR 506.2 + CR 108.3: True when the recipient creature (the
+    /// per-object subject of the continuous effect — i.e. the attacking creature
+    /// this static is gating) is currently attacking a target permitted by
+    /// `target`, evaluated relative to the recipient's OWNER (CR 108.3), not its
+    /// controller. Used to express "can't be blocked unless it's attacking its
+    /// owner or a permanent its owner controls" by wrapping this in
+    /// `StaticCondition::Not` (the "unless"): the creature is unblockable except
+    /// when attacking its owner or a permanent its owner controls. Recipient-scoped
+    /// (mirrors `RecipientMatchesFilter`/`RecipientHasCounters`); the affected
+    /// (attacking) creature is supplied as the recipient by the block-restriction
+    /// gate in `combat.rs`. `target` reuses `AttackTargetFilter` — the same
+    /// owner-relative axis as the attack-side "can't attack its owner …"
+    /// restriction (CR 506.2 / CR 508.1).
+    RecipientAttackingOwnerTarget {
+        target: crate::types::triggers::AttackTargetFilter,
     },
     /// CR 702.95b: True while the source object is paired with another creature.
     SourceIsPaired,
@@ -9377,6 +9433,9 @@ fn normalized_filter_prop(prop: FilterProp) -> FilterProp {
         },
         FilterProp::Targets { filter } => FilterProp::Targets {
             filter: Box::new(filter.normalized()),
+        },
+        FilterProp::Not { prop } => FilterProp::Not {
+            prop: Box::new(normalized_filter_prop(*prop)),
         },
         prop => prop,
     }

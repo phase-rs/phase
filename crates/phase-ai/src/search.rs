@@ -352,6 +352,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                     untap: true,
                 })
         }
+        // CR 502.3: bounded untap-subset selection under a MaxUntapPerType cap.
+        // The conservative fallback untaps the cap-maximizing first `max` of the
+        // group (untapping more would be illegal, untapping fewer is never
+        // beneficial), guaranteeing the AI resolves the prompt without wedging.
+        WaitingFor::ChooseUntapSubset { group, max, .. } => Some(GameAction::SelectCards {
+            cards: group.iter().copied().take(*max).collect(),
+        }),
         // CR 508.1g: exert-as-attack is optional; the conservative fallback
         // declines (never has a downside). Real exert decisions come from the
         // evaluated candidate actions.

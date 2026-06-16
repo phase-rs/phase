@@ -7563,6 +7563,39 @@ pub fn cost_has_x(cost: &crate::types::mana::ManaCost) -> bool {
     }
 }
 
+/// Return true when an activated ability's cost contains `{X}` anywhere in its
+/// cost tree (including composite costs like `{T}, Pay {X}`).
+pub fn ability_cost_has_x(cost: &crate::types::ability::AbilityCost) -> bool {
+    use crate::types::ability::AbilityCost;
+    match cost {
+        AbilityCost::Mana { cost } => cost_has_x(cost),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(ability_cost_has_x)
+        }
+        _ => false,
+    }
+}
+
+/// Return true when `source_id`'s most recent pending activation carries an
+/// `{X}` activation cost. Used by `AbilityActivated` trigger matchers.
+pub fn pending_activation_cost_has_x(state: &GameState, source_id: ObjectId) -> bool {
+    let Some((_, ability_index)) = state
+        .pending_activations
+        .iter()
+        .rev()
+        .find(|(id, _)| *id == source_id)
+    else {
+        return false;
+    };
+    let Some(obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    let Some(ability) = obj.abilities.get(*ability_index) else {
+        return false;
+    };
+    ability.cost.as_ref().is_some_and(ability_cost_has_x)
+}
+
 /// Extract a mana sub-cost containing X from an activated ability cost.
 ///
 /// CR 107.1b + CR 601.2f: X must be chosen before mana is paid. For composite
