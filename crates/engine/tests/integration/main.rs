@@ -219,6 +219,7 @@ mod issue_3283_sevinne_reclamation_copy_no_self_copy;
 mod issue_3285_face_down_public_zone;
 mod issue_3295_scrapwork_mutt_unearth_zone;
 mod issue_3302_breach_multiverse;
+mod issue_3309_rise_etb_returns;
 mod issue_3311_manifest_dread_land;
 mod issue_3320_peregrine_drake_untap_prompt;
 mod issue_3321_volcanic_spite_optional;
