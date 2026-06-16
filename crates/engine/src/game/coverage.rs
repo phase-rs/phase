@@ -5553,6 +5553,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
         // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
         AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        // CR 301.5 + CR 303.4: Source attached-to-creature check — resolved by
+        // `evaluate_condition` against the source's `attached_to` host.
+        AbilityCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -10676,6 +10679,10 @@ mod tests {
                 "ZoneChangedThisWay",
             ),
             (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+            (
+                AbilityCondition::SourceAttachedToCreature,
+                "SourceAttachedToCreature",
+            ),
         ];
 
         for (condition, expected_name) in conditions {

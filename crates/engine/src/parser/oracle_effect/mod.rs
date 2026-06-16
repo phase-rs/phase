@@ -176,7 +176,8 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::SourceEnteredThisTurn
-        | AbilityCondition::SourceIsTapped => true,
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature => true,
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
             condition_refs_source_object(condition)

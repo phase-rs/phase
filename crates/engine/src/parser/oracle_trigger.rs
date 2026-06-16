@@ -2710,9 +2710,6 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         // CR 110.5b: Source tapped state bridges for trigger conditions like
         // "At the beginning of your upkeep, if this land is tapped, ..."
         StaticCondition::SourceIsTapped => Some(TriggerCondition::SourceIsTapped),
-        // CR 301.5 + CR 303.4: Source attachment state bridges for trigger conditions like
-        // "Whenever a land enters, if this permanent is attached to a creature you control..."
-        StaticCondition::SourceAttachedToCreature => Some(TriggerCondition::SourceAttachedToCreature),
         // CR 113.6b: Source zone bridges for trigger conditions like
         // "At the beginning of your upkeep, if this card is in your graveyard, ..."
         StaticCondition::SourceInZone { zone } => {
@@ -2773,6 +2770,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         // CR 702.171b: the saddled designation has no intervening-if
         // (`TriggerCondition`) equivalent.
         | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceAttachedToCreature
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -3150,24 +3148,6 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // five verbatim phrases.
     if let Some(result) = try_extract_that_players_turn(&tp, &lower, text) {
         return result;
-    }
-
-    // CR 301.5 + CR 303.4 + CR 603.4: "if this permanent is attached to a creature you control" —
-    // intervening-if for bestow triggers that only apply when the Aura is attached.
-    // Used by Springheart Nantuko and similar bestow creatures.
-    // CR 603.4: source-referential intervening-if — recognizes the trigger source ("this
-    // permanent") being attached, needing the trigger context this inline parser holds;
-    // CLAUDE.md permits source-referential patterns ("if it's attaching") outside the combinator.
-    // allow-noncombinator: source-referential intervening-if; matches sibling escapes in this file.
-    if let Some(pos) = tp.find("if this permanent is attached to a creature you control") {
-        return (
-            strip_condition_clause(
-                text,
-                pos,
-                "if this permanent is attached to a creature you control".len(),
-            ),
-            Some(TriggerCondition::SourceAttachedToCreature),
-        );
     }
 
     // CR 506.2 + CR 508.1b + CR 603.4: Mangara-class attack-batch

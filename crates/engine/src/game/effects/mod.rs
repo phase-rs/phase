@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_initiative, eval_is_monarch, eval_source_entered_this_turn,
+    eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
 use crate::game::filter;
@@ -1655,6 +1656,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::ZoneChangedThisWay { .. }
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
             | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
             | AbilityCondition::ConditionInstead { .. }
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
@@ -6323,6 +6325,17 @@ pub(crate) fn evaluate_condition(
         // For the untapped sense, wrap with `Not`. No battlefield zone guard
         // (ability conditions; zone constrained by functioning-abilities path).
         AbilityCondition::SourceIsTapped => eval_source_is_tapped(state, ability.source_id),
+        // CR 301.5 + CR 303.4: "if this permanent is attached to a creature you
+        // control" — check the source Aura/Equipment's host. False when the
+        // source is unattached or its host isn't a creature controlled by the
+        // ability's controller. Lets bestow triggers like Springheart Nantuko
+        // skip their optional payment branch silently while still resolving
+        // the fallback sub-ability.
+        AbilityCondition::SourceAttachedToCreature => eval_source_attached_to_controlled_creature(
+            state,
+            ability.source_id,
+            ability.controller,
+        ),
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),

@@ -12330,6 +12330,14 @@ pub enum AbilityCondition {
     /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// For the untapped sense, wrap with `AbilityCondition::Not`.
     SourceIsTapped,
+    /// CR 301.5 + CR 303.4: "if this permanent is attached to a creature you control" —
+    /// checks whether the source Aura/Equipment is currently attached to a creature
+    /// controlled by the ability's controller. Used at the effect-resolution seam by
+    /// optional bestow-trigger branches like Springheart Nantuko's landfall pay
+    /// (the trigger itself fires regardless; only the optional payment / copy-token
+    /// sub-ability is gated on attachment so the fallback Insect token branch can
+    /// still resolve when the Aura is unattached).
+    SourceAttachedToCreature,
     /// CR 614.1a / CR 614.15: General "instead" self-replacement — wraps any
     /// `AbilityCondition` with replacement semantics. When the inner condition is
     /// met at resolution, the sub's
@@ -12923,11 +12931,6 @@ pub enum TriggerCondition {
     /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
     SourceIsTapped,
-    /// CR 301.5 + CR 303.4: "if this permanent is attached to a creature you control" —
-    /// checks whether the source Aura/Equipment is currently attached to a creature
-    /// controlled by the trigger source's controller. Used by bestow triggers like
-    /// Springheart Nantuko's landfall ability that only apply when attached.
-    SourceAttachedToCreature,
     /// CR 701.27g: "if this [permanent] is transformed" — checks the source's transformed status.
     /// A "transformed permanent" is a double-faced permanent on the battlefield with its
     /// back face up. Negation ("not transformed") is expressed via

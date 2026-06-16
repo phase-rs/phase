@@ -2507,6 +2507,15 @@ pub(crate) fn static_condition_to_ability_condition(
             })
         }
         StaticCondition::SourceIsTapped => Some(AbilityCondition::SourceIsTapped),
+        // CR 301.5 + CR 303.4: Bridge the source-attached predicate to the
+        // effect-resolution seam. Used by bestow triggers whose optional
+        // payment / copy-token branch must only fire when the Aura is
+        // attached, while the surrounding trigger (and its fallback
+        // continuation) still resolves when unattached — Springheart Nantuko's
+        // landfall ability.
+        StaticCondition::SourceAttachedToCreature => {
+            Some(AbilityCondition::SourceAttachedToCreature)
+        }
         // CR 608.2c: Compound static predicates map recursively to ability
         // conditions. If any child is unmappable, reject the whole compound so
         // the parser does not silently drop part of the condition.
@@ -2584,7 +2593,6 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 702.171b: the saddled designation is a static-only predicate with no
         // effect-resolution (`AbilityCondition`) equivalent.
         | StaticCondition::SourceIsSaddled
-        | StaticCondition::SourceAttachedToCreature
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -2634,6 +2642,12 @@ pub(crate) fn ability_condition_to_static_condition(
 ) -> Option<StaticCondition> {
     match ac {
         AbilityCondition::IsYourTurn => Some(StaticCondition::DuringYourTurn),
+        // CR 301.5 + CR 303.4: round-trips the bidirectional bridge in
+        // `static_condition_to_ability_condition` (a continuous "attached to a
+        // creature" gate can ride per-`StaticDefinition`).
+        AbilityCondition::SourceAttachedToCreature => {
+            Some(StaticCondition::SourceAttachedToCreature)
+        }
         AbilityCondition::QuantityCheck {
             lhs,
             comparator,

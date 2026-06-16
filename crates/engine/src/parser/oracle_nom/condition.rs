@@ -1119,14 +1119,21 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     value(StaticCondition::SourceIsSaddled, tag("is saddled")).parse(rest)
 }
 
-/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature" → SourceAttachedToCreature.
+/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature [you control]"
+/// → SourceAttachedToCreature.
+///
+/// The optional " you control" suffix covers bestow-trigger gates like Springheart
+/// Nantuko ("if this permanent is attached to a creature you control"). All printed
+/// Oracle uses controller=You for this gate (the host of an Aura/bestow card is
+/// always under its controller by CR 303.4d/CR 702.103b), so the controller axis
+/// is parameter-free at the AST layer — the runtime evaluator checks the host's
+/// controller against the ability's controller.
 fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
-    value(
-        StaticCondition::SourceAttachedToCreature,
-        tag("is attached to a creature"),
-    )
-    .parse(rest)
+    let (rest, _) = tag("is attached to a creature").parse(rest)?;
+    // Optional trailing " you control" — consumed but not represented in the AST.
+    let (rest, _) = opt(tag(" you control")).parse(rest)?;
+    Ok((rest, StaticCondition::SourceAttachedToCreature))
 }
 
 /// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
@@ -7588,6 +7595,17 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
 
         let (rest, c) = parse_inner_condition("this creature is attached to a creature").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceAttachedToCreature);
+
+        // CR 303.4 + CR 702.103: Springheart Nantuko's bestow landfall gate
+        // — the optional " you control" suffix must be consumed and treated
+        // the same as the bare form (the host of a bestow Aura is always under
+        // its controller, so the controller axis adds no AST information; the
+        // evaluator already binds the host's controller to the ability's
+        // controller).
+        let (rest, c) =
+            parse_inner_condition("this permanent is attached to a creature you control").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
     }
