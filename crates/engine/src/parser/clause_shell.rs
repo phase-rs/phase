@@ -795,6 +795,17 @@ mod tests {
     }
 
     #[test]
+    fn peel_player_scope_skips_per_grantee_play_permission() {
+        let text = "each player may play the card they exiled this way";
+        let (scope, rest) = peel_player_scope_subject(text);
+        assert_eq!(scope, None);
+        assert_eq!(rest, text);
+        let (peeled, ctx) = peel_clause(text);
+        assert!(ctx.player_scope.is_none());
+        assert_eq!(peeled, text);
+    }
+
+    #[test]
     fn peel_for_each_prefix_strips_repeat_quantity() {
         let (qty, rest) = peel_for_each_prefix("for each creature you control, draw a card");
         assert!(qty.is_some());

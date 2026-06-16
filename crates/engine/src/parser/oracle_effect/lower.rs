@@ -1850,6 +1850,18 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (None, text.to_string());
     };
 
+    // CR 611.2a + CR 400.7i: "each player may play/cast …" is a per-grantee
+    // casting permission (`try_parse_per_grantee_play_grant`), not a player-scoped
+    // imperative subject. Stripping "each player " leaves "may play …", which
+    // misroutes to `Effect::CastFromZone` instead of `GrantCastingPermission`.
+    let rest_lower = rest.trim_start().to_lowercase();
+    if alt((tag::<_, _, OracleError<'_>>("may play "), tag("may cast ")))
+        .parse(rest_lower.as_str())
+        .is_ok()
+    {
+        return (None, text.to_string());
+    }
+
     // CR 109.4 + CR 109.5: A "who controls [comparator] [count] [type-phrase]"
     // relative clause restricts the player set to those whose controlled-permanent
     // count satisfies the comparison (Thornbow Archer: "each opponent who doesn't
