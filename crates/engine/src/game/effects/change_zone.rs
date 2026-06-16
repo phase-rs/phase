@@ -5029,6 +5029,13 @@ mod tests {
             "Grizzly Bears".to_string(),
             Zone::Library,
         );
+        let caster_bear_hand = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
 
         // Distractor: a card in the graveyard with a different name. Must not exile.
         let other_gy = create_object(
@@ -5044,12 +5051,14 @@ mod tests {
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::default().properties(vec![
-                        FilterProp::InAnyZone {
-                            zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
-                        },
-                        FilterProp::SameNameAsParentTarget,
-                    ]),
+                    crate::types::ability::TypedFilter::default()
+                        .controller(ControllerRef::ParentTargetController)
+                        .properties(vec![
+                            FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                            },
+                            FilterProp::SameNameAsParentTarget,
+                        ]),
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -5077,6 +5086,11 @@ mod tests {
         }
         // Distractor untouched.
         assert_eq!(state.objects[&other_gy].zone, Zone::Graveyard);
+        assert_eq!(
+            state.objects[&caster_bear_hand].zone,
+            Zone::Hand,
+            "same-name cards outside the searched player's zones must stay put"
+        );
 
         // Per-resolution counter equals the number of cards exiled FROM HAND only.
         assert_eq!(

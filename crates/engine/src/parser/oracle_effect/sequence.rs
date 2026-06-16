@@ -625,7 +625,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // is a single compound search-and-exile action — keep it together so
                         // the imperative dispatcher can recognize the multi-zone pattern.
                         // Accepts "search ..." and "then search ..." prefixes, and either
-                        // "with that name" or "with the same name as that card" suffixes.
+                        // "with that name" or "with the same name as that {card,creature,…}"
+                        // suffixes (Eradicate / Counterbore / Surgical Extraction class).
                         let has_search_prefix =
                             nom_primitives::scan_contains(&before_lower, "search ");
                         let search_with_that_name = has_search_prefix
@@ -865,9 +866,24 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with that name"),
-        tag("with the chosen name"),
-        tag("with the same name as that card"),
+        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        value((), tag("with the chosen name")),
+        value(
+            (),
+            (
+                tag("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
+        ),
     ))
     .parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
@@ -1618,7 +1634,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             ),
         ),
         value((), starts_they_continuous_clause_lower),
-        // Singular anaphoric subjects: "that {creature,permanent,token}" +
+        // Singular anaphoric subjects: "that {creature,land,permanent,token}" +
         // singular-conjugation continuous verb (gains/gets/has/loses).
         // Single-token grants ("create one X token, that token gains haste")
         // are rarer than the plural form but real, so all three subject
@@ -1628,6 +1644,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             (
                 alt((
                     tag("that creature "),
+                    tag("that land "),
                     tag("that permanent "),
                     tag("that token "),
                 )),
@@ -2974,6 +2991,14 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 return None;
             }
             let full_lower = full_text.to_ascii_lowercase();
+            // CR 400.7 + CR 701.23 + CR 701.24: Name-hate compounds ("search … graveyard,
+            // hand, and library … with the same name as that {creature,spell,…} and exile
+            // them") lower to `ChangeZoneAll { SameNameAsParentTarget }`, not SearchLibrary
+            // + SearchDestination. Suppress the generic put/exile step when the full
+            // sentence matches the multi-zone same-name exile recognizer.
+            if super::imperative::try_parse_multi_zone_same_name_exile(&full_lower).is_some() {
+                return None;
+            }
             // CR 608.2c: Conditional result destinations ("put it onto the
             // battlefield tapped if it's a land card. Otherwise, put it into
             // your hand" — Archdruid's Charm) are represented by the parsed
@@ -5031,6 +5056,32 @@ mod tests {
         // standalone ChangeZone.
         let chunks = clause_texts(
             "search target opponent's graveyard, hand, and library for any number of cards with the chosen name and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_creature_search_exile_compound() {
+        // CR 201.2 + CR 701.23a + CR 701.18a: Eradicate-class "same name as that
+        // creature" must stay one compound so `MultiZoneSameNameExile` wins.
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_spell_search_exile_compound() {
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_land_search_exile_compound() {
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
@@ -7372,6 +7423,9 @@ mod tests {
         assert!(starts_bare_and_clause("that creature loses flying"));
         assert!(starts_bare_and_clause(
             "that permanent gains indestructible"
+        ));
+        assert!(starts_bare_and_clause(
+            "that land gains indestructible until end of turn"
         ));
         // Token anaphors — "create N tokens. Those tokens gain haste."
         assert!(starts_bare_and_clause("those tokens gain haste"));

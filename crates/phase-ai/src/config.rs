@@ -299,6 +299,13 @@ pub struct PolicyPenalties {
     /// value clears the loss), so this demotes rather than vetoes.
     #[serde(default = "default_opponent_chalice_counter_penalty")]
     pub opponent_chalice_counter_penalty: f64,
+    /// CR 119.3 / CR 702.15a: Bonus for casting a lifegain *source* (lifelink or
+    /// "you gain N life") in a deck that has lifegain payoffs — each life-gain
+    /// event feeds those payoffs. Consumed by `LifegainPayoffPolicy`, which is
+    /// payoff-gated so this never applies to incidental lifegain in non-lifegain
+    /// decks.
+    #[serde(default = "default_lifegain_source_bonus")]
+    pub lifegain_source_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -340,6 +347,7 @@ impl Default for PolicyPenalties {
             combo_progress_next_turn_bonus: default_combo_progress_next_turn_bonus(),
             own_chalice_counter_penalty: default_own_chalice_counter_penalty(),
             opponent_chalice_counter_penalty: default_opponent_chalice_counter_penalty(),
+            lifegain_source_bonus: default_lifegain_source_bonus(),
         }
     }
 }
@@ -404,6 +412,9 @@ fn default_own_chalice_counter_penalty() -> f64 {
 fn default_opponent_chalice_counter_penalty() -> f64 {
     -4.0
 }
+fn default_lifegain_source_bonus() -> f64 {
+    0.4
+}
 
 /// Policy penalty fields present in the active CMA-ES `--group penalties`
 /// vector. Adding a `PolicyPenalties` field requires listing it here or in
@@ -449,7 +460,10 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
-pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[];
+pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[(
+    "lifegain_source_bonus",
+    "new LifegainPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+)];
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
 #[derive(Debug, Clone)]

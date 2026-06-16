@@ -7,6 +7,7 @@ import { menuButtonClass } from "./buttonStyles";
 import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
 import { deriveImportedDeckName, detectAndParseDeck, resolveCommander } from "../../services/deckParser";
 import { fetchDeckFromUrl } from "../../services/deckUrlImport";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 
 // Frontend-authored error messages from deckUrlImport.ts arrive as translation
 // keys prefixed `importDeck.`. Worker-authored messages flow through as-is
@@ -52,6 +53,7 @@ function resolveImportDeckName(
 
 export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalProps) {
   const { t } = useTranslation("menu");
+  const showNotification = useAppNotificationStore((s) => s.showNotification);
   const [tab, setTab] = useState<ImportTab>("paste");
   const [pasteText, setPasteText] = useState("");
   const [urlText, setUrlText] = useState("");
@@ -60,15 +62,22 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
   const [deckName, setDeckName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const finishImport = (name: string) => {
+    onImported(name, listSavedDeckNames());
+    resetAndClose();
+    showNotification({
+      title: t("importDeck.importedSuccessTitle"),
+      description: t("importDeck.importedSuccessDescription", { name }),
+    });
+  };
+
   const handlePasteImport = async () => {
     if (!pasteText.trim()) return;
     const deck = await resolveCommander(detectAndParseDeck(pasteText));
     const name = resolveImportDeckName(deckName, pasteText, deck);
     localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
     stampDeckMeta(name);
-    const names = listSavedDeckNames();
-    onImported(name, names);
-    resetAndClose();
+    finishImport(name);
   };
 
   const handleUrlImport = async () => {
@@ -82,8 +91,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
       const name = resolveImportDeckName(deckName, content, deck);
       localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
       stampDeckMeta(name);
-      onImported(name, listSavedDeckNames());
-      resetAndClose();
+      finishImport(name);
     } catch (err) {
       const raw = err instanceof Error ? err.message : t("importDeck.errorGeneric");
       setUrlError(raw.startsWith(I18N_KEY_PREFIX) ? t(raw) : raw);
@@ -103,9 +111,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
       const name = resolveImportDeckName("", content, deck, fallbackName);
       localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
       stampDeckMeta(name);
-      const names = listSavedDeckNames();
-      onImported(name, names);
-      resetAndClose();
+      finishImport(name);
     };
     reader.readAsText(file);
     e.target.value = "";

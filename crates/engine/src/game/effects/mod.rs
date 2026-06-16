@@ -8,11 +8,12 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
-    FilterProp, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
+    EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2564,7 +2565,17 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || effect_references_tracked_set(&ability.effect);
+    ) || effect_references_tracked_set(&ability.effect)
+        // CR 608.2c + CR 609.3: `repeat_for` is a loop-count quantity on the
+        // ResolvedAbility, not inside Effect — e.g. "for each nonland card
+        // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
+        // Without this check, the forced-discard path (no WaitingFor pause)
+        // never publishes the tracked set, so the downstream token loop sees
+        // size 0 and creates no tokens (Seasoned Pyromancer bug #740).
+        || ability
+            .repeat_for
+            .as_ref()
+            .is_some_and(quantity_expr_references_tracked_set);
 
     consumes
         || ability
@@ -2684,7 +2695,11 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => {
             matches!(
                 qty,
-                QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+                QuantityRef::TrackedSetSize
+                    | QuantityRef::FilteredTrackedSetSize { .. }
+                    | QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::TrackedSet { .. }
+                    }
             )
         }
         QuantityExpr::Offset { inner, .. }
@@ -7154,6 +7169,30 @@ mod tests {
         );
         ability.optional = true;
         ability
+    }
+
+    #[test]
+    fn repeat_for_tracked_set_marks_ability_as_referencing_tracked_set() {
+        // Issue #740 (Seasoned Pyromancer): "for each nonland card discarded this
+        // way, create a token" carries its loop count as `repeat_for: TrackedSetSize`
+        // on the ResolvedAbility, NOT inside Effect. The publish predicate must
+        // detect it so the forced-discard path (no WaitingFor pause) still publishes
+        // the tracked set; without this check the token loop sees size 0.
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        // Control: a plain GainLife with no `repeat_for` references no tracked set.
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+        // With a tracked-set loop count, the predicate must return true.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
     }
 
     #[test]

@@ -157,7 +157,9 @@
     "errorNetworkFailure": "No se pudo contactar con el servicio de importación. Comprueba tu conexión e inténtalo de nuevo.",
     "errorGeneric": "No se pudo importar el mazo.",
     "fileSupports": "Admite formatos .dck, .dec, .txt y MTGA",
-    "chooseFile": "Elegir archivo"
+    "chooseFile": "Elegir archivo",
+    "importedSuccessTitle": "Mazo importado",
+    "importedSuccessDescription": "\"{{name}}\" se añadió a tus mazos."
   },
   "precon": {
     "savePrompt": "Guardar mazo preconstruido como:",

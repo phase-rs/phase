@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
+import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
@@ -13,9 +14,14 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
+
+const AI_MENU_CLASS =
+  "min-h-[44px] rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm sm:min-h-0";
+const AI_MENU_LAYOUT = "dropdown" as const;
+const AI_MENU_WRAPPER = "w-full min-w-0";
 
 interface Props {
   selectedFormat?: GameFormat | null;
@@ -74,6 +80,11 @@ export function AiOpponentConfig({
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
   const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
   const effectiveCedhMode = cedhMode && isCedhFormat;
+  // Fixed-deck formats (Momir's Madness) have the engine supply every AI seat's
+  // deck, so there is no AI deck catalog, no deck picker, and no "no legal
+  // decks" condition — only the per-seat difficulty matters. Drives off the
+  // engine-derived registry flag, never a format literal.
+  const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
 
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
@@ -187,6 +198,7 @@ export function AiOpponentConfig({
             cedhMode={effectiveCedhMode}
             candidates={candidates}
             filteredDecks={filteredDecks}
+            hideDeckPicker={suppliesDeck}
             expanded={!isMulti || expandedIndex === i}
             collapsible={isMulti}
             onToggle={() => setExpandedIndex((cur) => (cur === i ? null : i))}
@@ -196,7 +208,7 @@ export function AiOpponentConfig({
         ))}
       </div>
 
-      {!loading && candidates.length === 0 && (
+      {!loading && candidates.length === 0 && !suppliesDeck && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           {t("aiOpponent.noLegalDecks")}
         </div>
@@ -208,27 +220,29 @@ export function AiOpponentConfig({
         </div>
       )}
 
-      {/* Global pool filters — apply to every seat set to Random. */}
+      {/* Global pool filters — apply to every seat set to Random. Hidden for
+          fixed-deck formats, where the engine supplies every AI deck and there
+          is no Random pool to filter. */}
+      {!suppliesDeck && (
       <div className="mt-1 flex flex-col gap-3 rounded-lg border border-white/5 bg-black/20 px-3 py-2.5">
         <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
           {t("aiOpponent.randomPoolFilters")}
         </div>
         <label className="flex flex-col gap-1">
           <span className="text-xs text-slate-400">{t("aiOpponent.archetype")}</span>
-          <SelectField
-            wrapperClassName="w-full"
-            value={archetypeFilter}
-            onChange={(e) => setArchetypeFilter(e.target.value as AiArchetypeFilter)}
-            className={`w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm font-medium ${archetypeAccent(
+          <MenuSelect
+            ariaLabel={t("aiOpponent.archetype")}
+            label={archetypeFilter}
+            selectedValue={archetypeFilter}
+            items={ARCHETYPE_OPTIONS.map((opt) => ({ value: opt, label: opt }))}
+            onSelect={(value) => setArchetypeFilter(value as AiArchetypeFilter)}
+            menuLayout={AI_MENU_LAYOUT}
+            fitContainer
+            wrapperClassName={AI_MENU_WRAPPER}
+            className={`${AI_MENU_CLASS} font-medium ${archetypeAccent(
               archetypeFilter === "Any" ? null : (archetypeFilter as DeckArchetype),
             )}`}
-          >
-            {ARCHETYPE_OPTIONS.map((opt) => (
-              <option key={opt} value={opt} className="text-white">
-                {opt}
-              </option>
-            ))}
-          </SelectField>
+          />
         </label>
 
         <label className="flex flex-col gap-1">
@@ -260,6 +274,7 @@ export function AiOpponentConfig({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -273,6 +288,9 @@ interface AiSeatPanelProps {
   cedhMode: boolean;
   candidates: AiDeckCandidate[];
   filteredDecks: AiDeckCandidate[];
+  /** When true (fixed-deck formats), the engine supplies this seat's deck — the
+   *  deck picker is hidden and only the difficulty selector is shown. */
+  hideDeckPicker: boolean;
   expanded: boolean;
   collapsible: boolean;
   onToggle: () => void;
@@ -286,6 +304,7 @@ function AiSeatPanel({
   cedhMode,
   candidates,
   filteredDecks,
+  hideDeckPicker,
   expanded,
   collapsible,
   onToggle,
@@ -320,50 +339,72 @@ function AiSeatPanel({
     ? t("aiOpponent.cedhToggle.badge")
     : t(`aiDifficulty.levels.${seat.difficulty}`);
 
+  const formatDeckLabel = (candidate: AiDeckCandidate): string => {
+    const suffix = [sourceLabel(candidate), candidate.archetype, candidate.coveragePct != null ? `${candidate.coveragePct}%` : null]
+      .filter(Boolean)
+      .join(" · ");
+    return suffix ? `${candidate.name} — ${suffix}` : candidate.name;
+  };
+
+  const randomDeckLabel = t("aiOpponent.deckRandomCount", { count: filteredDecks.length });
+  const deckMenuItems = useMemo(
+    () => [
+      { value: AI_DECK_RANDOM, label: randomDeckLabel },
+      ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
+    ],
+    [deckOptions, randomDeckLabel],
+  );
+  const selectedDeckLabel =
+    effectiveSelection === AI_DECK_RANDOM
+      ? randomDeckLabel
+      : (deckMenuItems.find((item) => item.value === effectiveSelection)?.label ?? randomDeckLabel);
+
+  const difficultyItems = useMemo(
+    () =>
+      AI_DIFFICULTIES.map((item) => ({
+        value: item.id,
+        label: t(`aiDifficulty.levels.${item.id}`),
+      })),
+    [t],
+  );
+  const selectedDifficultyLabel =
+    difficultyItems.find((item) => item.value === seat.difficulty)?.label ??
+    t(`aiDifficulty.levels.${seat.difficulty}`);
+
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
+      {!hideDeckPicker && (
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
-        <SelectField
-          wrapperClassName="w-full"
-          value={effectiveSelection}
-          onChange={(e) => onDeckChange(e.target.value as AiDeckSelection)}
-          className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
-        >
-          <option value={AI_DECK_RANDOM}>{t("aiOpponent.deckRandomCount", { count: filteredDecks.length })}</option>
-          {deckOptions.map((d) => {
-            const suffix = [sourceLabel(d), d.archetype, d.coveragePct != null ? `${d.coveragePct}%` : null]
-              .filter(Boolean)
-              .join(" · ");
-            return (
-              <option key={d.id} value={d.id}>
-                {d.name}
-                {suffix ? ` — ${suffix}` : ""}
-              </option>
-            );
-          })}
-        </SelectField>
+        <MenuSelect
+          ariaLabel={t("aiOpponent.deck")}
+          label={selectedDeckLabel}
+          selectedValue={effectiveSelection}
+          items={deckMenuItems}
+          onSelect={(value) => onDeckChange(value as AiDeckSelection)}
+          menuLayout={AI_MENU_LAYOUT}
+          fitContainer
+          wrapperClassName={AI_MENU_WRAPPER}
+          className={`${AI_MENU_CLASS} text-white`}
+        />
       </label>
+      )}
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>
         <div className="relative">
-          <SelectField
-            wrapperClassName="w-full"
-            value={seat.difficulty}
-            onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
+          <MenuSelect
+            ariaLabel={t("aiOpponent.difficulty")}
+            label={selectedDifficultyLabel}
+            selectedValue={seat.difficulty}
+            items={difficultyItems}
+            onSelect={(value) => onDifficultyChange(value as AIDifficulty)}
             disabled={cedhMode}
-            aria-disabled={cedhMode}
-            className={`w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white ${
-              cedhMode ? "cursor-not-allowed opacity-50" : ""
-            }`}
-          >
-            {AI_DIFFICULTIES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {t(`aiDifficulty.levels.${item.id}`)}
-              </option>
-            ))}
-          </SelectField>
+            menuLayout={AI_MENU_LAYOUT}
+            fitContainer
+            wrapperClassName={AI_MENU_WRAPPER}
+            className={`${AI_MENU_CLASS} text-white ${cedhMode ? "cursor-not-allowed opacity-50" : ""}`}
+          />
           {cedhMode && (
             <span
               aria-label="cEDH"
