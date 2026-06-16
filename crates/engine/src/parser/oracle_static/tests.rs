@@ -12741,6 +12741,30 @@ fn static_raw_cardname_is_colorless_is_not_contextless_self_cda() {
 }
 
 #[test]
+fn ghostfire_colorless_cda_via_oracle_text() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    let parsed = parse_oracle_text(
+        "Ghostfire is colorless.",
+        "Ghostfire",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("Ghostfire colorless CDA should parse via oracle text");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.characteristic_defining);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor { colors: vec![] }]
+    );
+}
+
+#[test]
 fn static_self_is_multicolor_cda() {
     let def = parse_static_line("~ is white and blue.").unwrap();
     assert_eq!(
