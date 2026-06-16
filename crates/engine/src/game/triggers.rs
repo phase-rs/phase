@@ -5300,6 +5300,27 @@ pub(crate) fn check_trigger_condition(
         } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| counter_condition_matches(obj, counters, *minimum, *maximum)),
+        // CR 301.5 + CR 303.4: "if this permanent is attached to a creature you control" —
+        // true when the trigger source is an Aura/Equipment attached to a creature
+        // controlled by the trigger's controller. Used by bestow triggers like
+        // Springheart Nantuko's landfall ability.
+        TriggerCondition::SourceAttachedToCreature => {
+            source_id.is_some_and(|id| {
+                state.objects.get(&id).is_some_and(|source| {
+                    // The source must be attached to something
+                    if let Some(crate::game::game_object::AttachTarget::Object(host_id)) = source.attached_to {
+                        // The host must be controlled by the trigger's controller
+                        // and must be a creature
+                        state.objects.get(&host_id).is_some_and(|host| {
+                            host.controller == controller
+                                && host.card_types.core_types.contains(&CoreType::Creature)
+                        })
+                    } else {
+                        false
+                    }
+                })
+            })
+        }
     }
 }
 

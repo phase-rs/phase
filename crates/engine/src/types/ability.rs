@@ -12923,6 +12923,11 @@ pub enum TriggerCondition {
     /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
     SourceIsTapped,
+    /// CR 301.5 + CR 303.4: "if this permanent is attached to a creature you control" —
+    /// checks whether the source Aura/Equipment is currently attached to a creature
+    /// controlled by the trigger source's controller. Used by bestow triggers like
+    /// Springheart Nantuko's landfall ability that only apply when attached.
+    SourceAttachedToCreature,
     /// CR 701.27g: "if this [permanent] is transformed" — checks the source's transformed status.
     /// A "transformed permanent" is a double-faced permanent on the battlefield with its
     /// back face up. Negation ("not transformed") is expressed via
