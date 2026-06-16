@@ -1784,18 +1784,21 @@ mod tests {
         );
     }
 
-    /// CR 903.9c: absorbed (non-survivor) commander component is also found by
-    /// the SBA when the merged pile leaves to hand.
+    /// CR 903.9c: absorbed (non-survivor) commander component is found by the SBA
+    /// after the merged pile leaves to hand.
     ///
-    /// Discriminating: verifies `is_commander` survives `put_component_into_zone`
-    /// so the SBA can find absorbed commander components — not just survivors.
+    /// Discriminating: the commander is the MERGING object, so it becomes an
+    /// absorbed component routed exclusively through `merge::put_component_into_zone`
+    /// (not `zones::move_to_zone`). If `put_component_into_zone` or
+    /// `apply_zone_exit_cleanup` dropped `is_commander`, the SBA would find nothing
+    /// and the assertion would fail. This is the novel path not covered by the
+    /// survivor-case tests above.
     ///
-    /// Setup: commander is the TARGET (becomes absorbed component when a
-    /// non-commander mutates ON TOP, because per CR 730.2c the TARGET keeps
-    /// its ObjectId as survivor). Actually — the TARGET is always the survivor.
-    /// Here we merge the non-commander ON TOP of the commander (commander = target
-    /// = survivor with is_commander). The rider becomes the absorbed component.
-    /// Either component orientation works: the SBA scans all objects.
+    /// Setup:
+    ///   host_id  = non-commander = TARGET  → survivor (keeps ObjectId, travels
+    ///              through normal `move_to_zone`, ends in hand)
+    ///   cmd_id   = commander     = MERGING → absorbed component (travels through
+    ///              `put_component_into_zone`, ends in hand with is_commander intact)
     #[test]
     fn cr903_9c_absorbed_commander_component_in_hand_found_by_sba() {
         use crate::game::sba::check_state_based_actions;
@@ -1804,29 +1807,39 @@ mod tests {
         let mut state = setup_commander_game();
         state.active_player = PlayerId(0);
 
-        // Commander is the TARGET (will be the survivor per CR 730.2c).
+        // Non-commander is the TARGET — it keeps its ObjectId as the survivor
+        // (CR 730.2c). It travels through move_to_zone on leave.
+        let host_id = make_creature(&mut state, PlayerId(0), "Trumpeting Gnarr", false);
+        // Commander is the MERGING object — it becomes an absorbed component
+        // routed through put_component_into_zone on leave.
         let cmd_id = make_creature(&mut state, PlayerId(0), "Surrak Dragonclaw", true);
-        // Non-commander mutates on top (becomes absorbed component).
-        let rider_id = make_creature(&mut state, PlayerId(0), "Trumpeting Gnarr", false);
 
-        // Merge rider on TOP of cmd — cmd_id stays as survivor (TARGET).
-        // The rider is now an absorbed component.
         let mut events = Vec::new();
         crate::game::merge::merge_object_onto(
             &mut state,
-            rider_id, // rider = merging object
-            cmd_id,   // cmd = target (keeps its ObjectId)
+            cmd_id,  // merging object → absorbed component
+            host_id, // target → survivor (keeps host_id as ObjectId)
             crate::game::merge::MergeSide::Top,
             &mut events,
         );
-        // After merge: survivor = cmd_id (is_commander = true, top = rider_id).
-        // The commander IS the survivor in this case; rider is absorbed.
-        // The survivor has is_commander = true and goes to hand.
+        assert!(
+            state.objects[&host_id].merged_components.contains(&cmd_id),
+            "commander (cmd_id) is an absorbed component of the merged pile"
+        );
 
-        // Bounce to hand — split runs, cmd_id (survivor, is_commander=true) → hand.
-        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
+        // Bounce to hand: host_id (survivor) → hand via move_to_zone;
+        // cmd_id (absorbed commander) → hand via put_component_into_zone.
+        crate::game::zones::move_to_zone(&mut state, host_id, Zone::Hand, &mut events);
 
-        // SBA must find the commander in hand.
+        // put_component_into_zone must preserve is_commander through
+        // apply_zone_exit_cleanup / snapshot_for_zone_change.
+        assert!(
+            state.objects[&cmd_id].is_commander,
+            "is_commander must survive put_component_into_zone"
+        );
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Hand);
+
+        // SBA must find the absorbed commander component in hand.
         check_state_based_actions(&mut state, &mut events);
 
         assert!(
@@ -1838,7 +1851,7 @@ mod tests {
                     ..
                 } if commander_id == cmd_id
             ),
-            "CR 903.9c: SBA must find commander component in hand even after a merged split; got {:?}",
+            "CR 903.9c: SBA must find the absorbed commander component in hand; got {:?}",
             state.waiting_for
         );
     }
