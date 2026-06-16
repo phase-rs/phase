@@ -1569,6 +1569,28 @@ fn scry_applier(
     }
 }
 
+// --- 4d. Explore (Twists and Turns) ---
+
+// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
+// effects can modify the explore action (e.g., add a scry prelude).
+fn explore_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Explore { .. })
+}
+
+fn explore_applier(
+    event: ProposedEvent,
+    _rid: ReplacementId,
+    _state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    // Twists and Turns pattern: the applier doesn't execute the scry prelude
+    // It just returns the modified event. The explore resolver will execute
+    // the scry prelude after the replacement pipeline returns.
+    // This follows the standard pattern (scry_applier, mill_applier, draw_applier)
+    // where appliers modify events, not execute effects directly.
+    ApplyResult::Modified(event)
+}
+
 // --- 4c. CoinFlip (Krark's Thumb) ---
 
 // CR 705.1 + CR 614.1a: A coin flip is about to happen. Krark's Thumb replaces
@@ -2660,6 +2682,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: scry_matcher,
             applier: scry_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::Explore,
+        ReplacementHandlerEntry {
+            matcher: explore_matcher,
+            applier: explore_applier,
         },
     );
     registry.insert(

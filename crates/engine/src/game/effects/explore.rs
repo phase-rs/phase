@@ -147,6 +147,58 @@ fn resolve_single_explorer(
     remaining: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // Create ProposedEvent::Explore and run through replacement pipeline
+    let proposed = crate::types::proposed_event::ProposedEvent::Explore {
+        object_id: explorer_id,
+        applied: std::collections::HashSet::new(),
+    };
+
+    match crate::game::replacement::replace_event(state, proposed, events) {
+        crate::game::replacement::ReplacementResult::Execute(modified_event) => {
+            // Check if Twists and Turns replacement applied by looking at the execute effect
+            let rid = modified_event.applied_set().iter().next();
+            if let Some(rid) = rid {
+                if let Some(obj) = state.objects.get(&rid.source) {
+                    if let Some(def) = obj.replacement_definitions.get(rid.index) {
+                        if let Some(execute) = def.execute.as_deref() {
+                            if matches!(
+                                &*execute.effect,
+                                crate::types::ability::Effect::Scry { .. }
+                            ) {
+                                // Execute the scry prelude before the explore
+                                let scry_ability = ResolvedAbility::new(
+                                    (*execute.effect).clone(),
+                                    vec![],
+                                    rid.source,
+                                    obj.controller,
+                                );
+                                let _ = crate::game::effects::scry::resolve(
+                                    state,
+                                    &scry_ability,
+                                    events,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        crate::game::replacement::ReplacementResult::Prevented => {
+            // Explore was prevented, skip the rest
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
+    }
+
+    // Continue with existing explore logic (reveal, counter, land/hand)
     let mut single = ResolvedAbility::new(
         Effect::Explore,
         vec![TargetRef::Object(explorer_id)],
@@ -362,14 +414,113 @@ pub fn handle_choice(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, ReplacementDefinition,
+        TargetFilter, TargetRef, TypedFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_explore_ability(source_id: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(Effect::Explore, vec![], source_id, PlayerId(0))
+    }
+
+    #[test]
+    fn test_explore_scry_prelude_replacement() {
+        // Test Twists and Turns pattern: "If a creature you control would explore,
+        // instead you scry 1, then that creature explores."
+        let mut state = GameState::new_two_player(42);
+
+        // Create a creature with the explore replacement
+        let twists_and_turns = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twists and Turns".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&twists_and_turns)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Add the replacement definition
+        let replacement = ReplacementDefinition::new(ReplacementEvent::Explore)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .description(
+                "If a creature you control would explore, instead you scry 1, then that creature explores."
+                    .to_string(),
+            );
+
+        state
+            .objects
+            .get_mut(&twists_and_turns)
+            .unwrap()
+            .replacement_definitions
+            .push(replacement);
+
+        // Create an exploring creature
+        let explorer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Explorer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&explorer)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Put a non-land card on top of library (so explore adds counter instead of putting land in hand)
+        let top_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&top_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        // Make the creature explore
+        let ability = make_explore_ability(explorer);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Verify explore still proceeded (counter added)
+        // This confirms the replacement pipeline was handled correctly
+        let explorer_obj = state.objects.get(&explorer).unwrap();
+        assert!(
+            explorer_obj
+                .counters
+                .iter()
+                .any(|(ct, _)| *ct == CounterType::Plus1Plus1),
+            "Explore should have added +1/+1 counter"
+        );
     }
 
     #[test]

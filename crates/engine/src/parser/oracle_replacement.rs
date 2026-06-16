@@ -287,6 +287,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if let Some(def) = parse_explore_scry_prelude_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "If you would draw a card, {effect}" ---
     if nom_primitives::scan_contains(&lower, "you would draw") {
         let effect_text = extract_replacement_effect(&normalized);
@@ -4551,6 +4555,46 @@ fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 
     if matches!(subject, MillReplacementSubject::Opponent) {
         def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    }
+
+    Some(def)
+}
+
+fn parse_explore_scry_prelude_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((subject,), rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if ").parse(input)?;
+        // Parse subject: "a creature you control" or "a creature"
+        let (input, _) = tag("a creature").parse(input)?;
+        let (input, has_control) = opt(tag(" you control")).parse(input)?;
+        let (input, _) =
+            tag(" would explore, instead you scry 1, then that creature explores").parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, (has_control.is_some(),)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // Create execute: scry 1 (main effect), explore is implicit (the event proceeds)
+    let scry_effect = Effect::Scry {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Explore)
+        .execute(AbilityDefinition::new(AbilityKind::Spell, scry_effect))
+        .description(original_text.to_string());
+
+    // Set valid_card to scope to creatures you control if present
+    if subject {
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+    } else {
+        def.valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
     }
 
     Some(def)
@@ -12373,6 +12417,26 @@ mod snapshot_tests {
     fn replacement_enters_with_counters() {
         let def = parse_replacement_line(
             "~ enters the battlefield with two +1/+1 counters on it.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_explore_scry_prelude_creature_you_control() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead you scry 1, then that creature explores.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_explore_scry_prelude_creature() {
+        let def = parse_replacement_line(
+            "If a creature would explore, instead you scry 1, then that creature explores.",
             "Test Card",
         )
         .unwrap();
