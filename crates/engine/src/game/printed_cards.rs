@@ -1241,6 +1241,16 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
             .face_index
             .values()
             .filter(|face| face.card_type.core_types.contains(&CoreType::Creature))
+            // CR 202.1b + CR 202.3b + CR 712.8a: `face_index` holds BOTH faces of
+            // every multi-face card, so a transform/flip/meld BACK face (which has
+            // no printed mana cost → `ManaCost::NoCost`, mana value 0) would key
+            // into the pool at MV 0. A back face is not a separately castable
+            // creature *card* (outside the battlefield a DFC has only its front
+            // face's characteristics), so it is never a valid Momir pick. Exclude
+            // costless faces by their data signal: only an ABSENT manaCost maps to
+            // `NoCost`, so modal-DFC creature backs (explicit cost → `Cost{..}`)
+            // and genuine `{0}` creatures (`Cost{generic:0}`) are preserved.
+            .filter(|face| !matches!(face.mana_cost, ManaCost::NoCost))
         {
             let mv = face.mana_cost.mana_value() as i32;
             pool.entry(mv).or_default().push(face.name.clone());
