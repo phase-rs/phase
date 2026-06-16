@@ -176,8 +176,7 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::SourceEnteredThisTurn
-        | AbilityCondition::SourceIsTapped
-        | AbilityCondition::SourceAttachedToCreature => true,
+        | AbilityCondition::SourceIsTapped => true,
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
             condition_refs_source_object(condition)
@@ -1457,25 +1456,6 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
     }))
 }
 
-/// CR 601.2f + CR 115.1: subject of a next-spell limiter — whose next spell is
-/// modified. "you cast" / "of the chosen type you cast" resolve to the
-/// controller; "they cast" / "that player casts" resolve to the player this
-/// ability targets. The two `Controller` arms come first so `ReduceNextSpellCost`
-/// and every existing "you cast" grant continue to parse under
-/// `PlayerScope::Controller`.
-fn parse_next_spell_subject(input: &str) -> OracleResult<'_, PlayerScope> {
-    alt((
-        value(PlayerScope::Controller, tag("you cast this turn ")),
-        value(
-            PlayerScope::Controller,
-            tag("of the chosen type you cast this turn "),
-        ),
-        value(PlayerScope::Target, tag("they cast this turn ")),
-        value(PlayerScope::Target, tag("that player casts this turn ")),
-    ))
-    .parse(input)
-}
-
 /// CR 601.2f: Parse "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
 ///
 /// Handles patterns like:
@@ -1484,7 +1464,6 @@ fn parse_next_spell_subject(input: &str) -> OracleResult<'_, PlayerScope> {
 /// - "the next sorcery spell you cast this turn can be cast as though it had flash"
 /// - "the next instant or sorcery spell you cast this turn has cascade"
 /// - "the next face-down creature spell you cast this turn costs {3} less to cast"
-/// - "the next spell they cast this turn has cascade" (granted to a targeted player)
 fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause> {
     // Must start with "the next "
     let rest = tag::<_, _, OracleError<'_>>("the next ")
@@ -1495,23 +1474,13 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     // Extract optional spell type filter before "spell you cast this turn"
     // Patterns: "spell you cast this turn", "creature spell you cast this turn",
     // "instant or sorcery spell you cast this turn", "noncreature spell you cast this turn",
-    // "face-down creature spell you cast this turn", and the third-person
-    // subject variants ("spell they cast this turn", "spell that player casts
-    // this turn") for grants to a targeted player.
-    //
-    // `filter_text` is the `take_until("spell")` capture — the spell-type
-    // filter slice ("creature ", "instant or sorcery ", "noncreature ", …)
-    // fed to parse_type_phrase below. Preserving it is REQUIRED: dropping it
-    // regresses filtered next-spell grants to no filter. `scope` is the parsed
-    // subject (you = Controller, they/that player = Target). `pair` keeps BOTH
-    // the `take_until` slice and the `parse_next_spell_subject` output — unlike
-    // `terminated`, which would discard the subject scope.
-    let (ability_text, (filter_text, scope)) = nom::sequence::pair(
+    // "face-down creature spell you cast this turn"
+    let (ability_text, filter_text) = nom::sequence::terminated(
         take_until::<_, _, OracleError<'_>>("spell"),
-        preceded(
-            tag::<_, _, OracleError<'_>>("spell "),
-            parse_next_spell_subject,
-        ),
+        alt((
+            tag::<_, _, OracleError<'_>>("spell you cast this turn "),
+            tag("spell of the chosen type you cast this turn "),
+        )),
     )
     .parse(rest)
     .ok()?;
@@ -1534,7 +1503,6 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::CantBeCountered,
-            player: scope,
             spell_filter,
         }));
     }
@@ -1546,7 +1514,6 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::CastAsThoughFlash,
-            player: scope,
             spell_filter,
         }));
     }
@@ -1558,7 +1525,6 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::WithoutPayingManaCost,
-            player: scope,
             spell_filter,
         }));
     }
@@ -1590,7 +1556,6 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
         if let Some(kw) = keyword {
             return Some(parsed_clause(Effect::GrantNextSpellAbility {
                 modifier: NextSpellModifier::HasKeyword { keyword: kw },
-                player: scope,
                 spell_filter,
             }));
         }
@@ -24849,87 +24814,6 @@ mod tests {
         );
     }
 
-    /// CR 701.9 + CR 603.4: "draw a card for each card you've discarded this
-    /// turn" must produce a dynamic Draw count referencing the controller's
-    /// per-turn discard tally, not a dropped `Fixed(1)`.
-    ///
-    /// Class: Misty Knight, Green Goblin (Revenant), Astonishing Spider-Man,
-    /// and other "for each card you've discarded this turn" draws.
-    #[test]
-    fn for_each_cards_discarded_this_turn_draw_count_replaced() {
-        let e = parse_effect("draw a card for each card you've discarded this turn");
-        match e {
-            Effect::Draw { count, .. } => assert_eq!(
-                count,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::CardsDiscardedThisTurn {
-                        player: PlayerScope::Controller,
-                    },
-                },
-                "draw count must scale with cards discarded this turn, not Fixed(1)"
-            ),
-            other => panic!("expected Draw, got {other:?}"),
-        }
-    }
-
-    /// The "you have discarded" surface variant must resolve identically.
-    #[test]
-    fn for_each_cards_discarded_this_turn_long_form_draw_count_replaced() {
-        let e = parse_effect("draw a card for each card you have discarded this turn");
-        match e {
-            Effect::Draw { count, .. } => assert_eq!(
-                count,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::CardsDiscardedThisTurn {
-                        player: PlayerScope::Controller,
-                    },
-                }
-            ),
-            other => panic!("expected Draw, got {other:?}"),
-        }
-    }
-
-    /// Discriminating runtime test: parse the real clause and resolve its Draw
-    /// count through the live quantity resolver against recorded discard state.
-    /// If the parser fix is reverted, the count is `Fixed(1)` and resolves to 1
-    /// regardless of discards, so the `resolved == 3` assertion flips and fails.
-    #[test]
-    fn for_each_cards_discarded_this_turn_resolves_dynamic_draw_count() {
-        use crate::game::quantity::resolve_quantity;
-        use crate::game::restrictions::record_discard;
-        use crate::game::zones::create_object;
-        use crate::types::game_state::GameState;
-        use crate::types::identifiers::CardId;
-        use crate::types::player::PlayerId;
-        use crate::types::zones::Zone;
-
-        let count = match parse_effect("draw a card for each card you've discarded this turn") {
-            Effect::Draw { count, .. } => count,
-            other => panic!("expected Draw, got {other:?}"),
-        };
-
-        let mut state = GameState::new_two_player(42);
-        let controller = PlayerId(0);
-        let source = create_object(
-            &mut state,
-            CardId(1),
-            controller,
-            "Misty Knight, Hero for Hire".to_string(),
-            Zone::Battlefield,
-        );
-
-        // Controller has discarded three cards this turn.
-        record_discard(&mut state, controller);
-        record_discard(&mut state, controller);
-        record_discard(&mut state, controller);
-
-        let resolved = resolve_quantity(&state, &count, controller, source);
-        assert_eq!(
-            resolved, 3,
-            "draw count must resolve to the controller's discard tally (3), not Fixed(1)"
-        );
-    }
-
     #[test]
     fn for_each_token_count_keeps_counter_history_this_turn_clause() {
         let clause = try_parse_for_each_effect(
@@ -44441,98 +44325,6 @@ mod tests {
             "Expected GrantNextSpellAbility(WithoutPayingManaCost), got {:?}",
             def.effect
         );
-    }
-
-    #[test]
-    fn parse_next_spell_you_cast_has_controller_scope() {
-        // CR 109.5: "you cast" subject → PlayerScope::Controller.
-        let def = parse_effect_chain(
-            "The next spell you cast this turn has cascade",
-            AbilityKind::Spell,
-        );
-        assert!(
-            matches!(
-                *def.effect,
-                Effect::GrantNextSpellAbility {
-                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
-                        keyword: Keyword::Cascade,
-                    },
-                    player: crate::types::ability::PlayerScope::Controller,
-                    ..
-                }
-            ),
-            "Expected GrantNextSpellAbility(Cascade, Controller), got {:?}",
-            def.effect
-        );
-    }
-
-    #[test]
-    fn parse_next_spell_they_cast_has_target_scope() {
-        // CR 115.1: "they cast" subject (Bigger on the Inside) →
-        // PlayerScope::Target (the targeted player whose mana clause precedes).
-        let def = parse_effect_chain(
-            "The next spell they cast this turn has cascade",
-            AbilityKind::Spell,
-        );
-        assert!(
-            matches!(
-                *def.effect,
-                Effect::GrantNextSpellAbility {
-                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
-                        keyword: Keyword::Cascade,
-                    },
-                    player: crate::types::ability::PlayerScope::Target,
-                    spell_filter: None,
-                }
-            ),
-            "Expected GrantNextSpellAbility(Cascade, Target), got {:?}",
-            def.effect
-        );
-    }
-
-    #[test]
-    fn parse_next_spell_that_player_casts_has_target_scope() {
-        // CR 115.1: "that player casts" subject → PlayerScope::Target.
-        let def = parse_effect_chain(
-            "The next spell that player casts this turn has cascade",
-            AbilityKind::Spell,
-        );
-        assert!(
-            matches!(
-                *def.effect,
-                Effect::GrantNextSpellAbility {
-                    player: crate::types::ability::PlayerScope::Target,
-                    ..
-                }
-            ),
-            "Expected GrantNextSpellAbility(Target), got {:?}",
-            def.effect
-        );
-    }
-
-    #[test]
-    fn parse_filtered_next_spell_they_cast_preserves_filter() {
-        // Regression guard: the type-filter slice ("creature ") must survive the
-        // subject-combinator rewrite for the third-person subject too — a
-        // filtered "they" grant must keep both Target scope AND the spell filter.
-        let def = parse_effect_chain(
-            "The next creature spell they cast this turn has cascade",
-            AbilityKind::Spell,
-        );
-        match &*def.effect {
-            Effect::GrantNextSpellAbility {
-                player,
-                spell_filter,
-                ..
-            } => {
-                assert_eq!(*player, crate::types::ability::PlayerScope::Target);
-                assert!(
-                    spell_filter.is_some(),
-                    "Expected a creature spell_filter, got None"
-                );
-            }
-            other => panic!("Expected GrantNextSpellAbility, got {other:?}"),
-        }
     }
 
     #[test]

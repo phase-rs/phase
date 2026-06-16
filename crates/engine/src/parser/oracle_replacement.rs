@@ -5037,9 +5037,6 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
         TokenReplacementShape::Double => {
             def = def.quantity_modification(QuantityModification::Double);
         }
-        TokenReplacementShape::Half => {
-            def = def.quantity_modification(QuantityModification::Half);
-        }
         TokenReplacementShape::PlusSpec { spec } => {
             def = def.additional_token_spec(*spec);
         }
@@ -5049,12 +5046,6 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
     if nom_primitives::scan_contains(lower, "under your control") {
         def = def.token_owner_scope(ControllerRef::You);
     }
-    // Halving Season class: "If an opponent would create …"
-    if nom_primitives::scan_contains(lower, "an opponent would create")
-        || nom_primitives::scan_contains(lower, "opponent would create")
-    {
-        def = def.token_owner_scope(ControllerRef::Opponent);
-    }
 
     Some(def)
 }
@@ -5062,8 +5053,6 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
 enum TokenReplacementShape {
     /// "twice that many tokens … are created instead" (Doubling Season).
     Double,
-    /// "half that many … tokens … instead, rounded down" (Halving Season).
-    Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
         spec: Box<crate::types::proposed_event::TokenSpec>,
@@ -5074,11 +5063,6 @@ enum TokenReplacementShape {
 /// `nom_on_lower` for case-preserving parsing and delegates token-spec
 /// extraction to the existing `parse_token_description` building block.
 fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
-    // "half that many" → Halving Season token-halving pattern.
-    if nom_primitives::scan_contains(lower, "half that many") {
-        return Some(TokenReplacementShape::Half);
-    }
-
     // "twice that many" → Doubling Season pattern.
     if nom_on_lower(lower, lower, |i| {
         let (i, _) = take_until::<_, _, OracleError<'_>>("twice that many").parse(i)?;

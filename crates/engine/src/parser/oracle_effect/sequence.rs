@@ -4775,14 +4775,6 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 ///
 /// Returns `TokenEntersWithCounters` so it shares the continuation absorption
 /// path with `try_parse_token_enters_with_counters` (declarative form).
-/// CR 122.6a + CR 301.5b: Returns true when the counter followup consumed the
-/// entire clause. A trailing `"and attach …"` conjunct (Fractal Harness) must
-/// not be absorbed here — the bare-and splitter needs to peel it into its own
-/// attach clause.
-fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
-    rest.trim().trim_start_matches(['.', ' ']).is_empty()
-}
-
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the verb. Both `put ` (imperative) and `puts ` (third-person,
@@ -4802,12 +4794,9 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // <quantity>". Delegates to the shared building block in `oracle_effect/
     // mod.rs`. The body consumes the full clause (including trailing period),
     // so on success we're done — emit the continuation directly.
-    if let Ok((remainder, (counter_type, count))) =
+    if let Ok((_, (counter_type, count))) =
         super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
     {
-        if !token_counter_followup_tail_is_clean(remainder) {
-            return None;
-        }
         return Some(ContinuationAst::TokenEntersWithCounters {
             counter_type,
             count,
@@ -4875,10 +4864,6 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         } else {
             None
         };
-
-    if quantity.is_none() && !token_counter_followup_tail_is_clean(rest) {
-        return None;
-    }
 
     let count = if let Some(qty) = quantity {
         qty
@@ -7407,17 +7392,6 @@ mod tests {
         } else {
             panic!("expected TokenEntersWithCounters");
         }
-    }
-
-    #[test]
-    fn put_counters_on_it_followup_rejects_trailing_attach_conjunct() {
-        assert!(
-            try_parse_put_counters_on_token_followup(
-                "put x +1/+1 counters on it and attach this equipment to it"
-            )
-            .is_none(),
-            "trailing attach conjunct must split as its own clause (Fractal Harness)"
-        );
     }
 
     #[test]

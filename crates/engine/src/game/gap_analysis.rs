@@ -51,7 +51,6 @@ const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
     "switch",
     "populate",
     "clash",
-    "planeswalk",
 ];
 
 /// Pre-dispatch verbs handled in `parse_effect_clause` before imperative dispatch.

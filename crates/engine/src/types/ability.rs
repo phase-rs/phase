@@ -8175,12 +8175,6 @@ pub enum Effect {
     /// Creates a one-shot modifier applied when the player casts their next qualifying spell.
     GrantNextSpellAbility {
         modifier: crate::types::game_state::NextSpellModifier,
-        /// CR 601.2f + CR 115.1: whose next spell receives the modifier.
-        /// `Controller` = "the next spell you cast"; `Target` = "the next
-        /// spell they cast / that player casts" (the player this ability
-        /// targets, e.g. the mana recipient on Bigger on the Inside).
-        #[serde(default = "default_player_scope_controller")]
-        player: PlayerScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
     },
@@ -9141,13 +9135,6 @@ fn default_quantity_one() -> QuantityExpr {
 
 fn default_duration_until_end_of_turn() -> Duration {
     Duration::UntilEndOfTurn
-}
-
-/// CR 109.5: backward-compatible serde default for `Effect::GrantNextSpellAbility`'s
-/// `player` field — pre-field data and "the next spell YOU cast" grants resolve to
-/// the controller.
-fn default_player_scope_controller() -> PlayerScope {
-    PlayerScope::Controller
 }
 
 fn default_comparator_ge() -> Comparator {
@@ -12406,14 +12393,6 @@ pub enum AbilityCondition {
     /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// For the untapped sense, wrap with `AbilityCondition::Not`.
     SourceIsTapped,
-    /// CR 301.5 + CR 303.4: "if this permanent is attached to a creature you control" —
-    /// checks whether the source Aura/Equipment is currently attached to a creature
-    /// controlled by the ability's controller. Used at the effect-resolution seam by
-    /// optional bestow-trigger branches like Springheart Nantuko's landfall pay
-    /// (the trigger itself fires regardless; only the optional payment / copy-token
-    /// sub-ability is gated on attachment so the fallback Insect token branch can
-    /// still resolve when the Aura is unattached).
-    SourceAttachedToCreature,
     /// CR 614.1a / CR 614.15: General "instead" self-replacement — wraps any
     /// `AbilityCondition` with replacement semantics. When the inner condition is
     /// met at resolution, the sub's
