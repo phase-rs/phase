@@ -59,6 +59,7 @@ pub fn resolve(
             state,
             player,
             object_id,
+            ability.source_id,
             profile.clone(),
             controller,
             events,
@@ -99,6 +100,10 @@ fn resolve_enters_under(
             TargetFilter::TriggeringPlayer
         }
         ControllerRef::ParentTargetController => TargetFilter::ParentTargetController,
+        // CR 108.3 + CR 110.2a: entry under the parent target object's owner's
+        // control resolves through the matching owner filter, mirroring the
+        // `ParentTargetController` arm above.
+        ControllerRef::ParentTargetOwner => TargetFilter::ParentTargetOwner,
         // Remaining references have no direct `TargetFilter` analogue at the
         // effect layer; they are not produced for manifest entry, so fall back
         // to the ability's controller (CR 110.2a default acting player).
