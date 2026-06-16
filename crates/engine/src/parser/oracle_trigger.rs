@@ -3155,6 +3155,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // CR 301.5 + CR 303.4 + CR 603.4: "if this permanent is attached to a creature you control" —
     // intervening-if for bestow triggers that only apply when the Aura is attached.
     // Used by Springheart Nantuko and similar bestow creatures.
+    // CR 603.4: source-referential intervening-if — recognizes the trigger source ("this
+    // permanent") being attached, needing the trigger context this inline parser holds;
+    // CLAUDE.md permits source-referential patterns ("if it's attaching") outside the combinator.
+    // allow-noncombinator: source-referential intervening-if; matches sibling escapes in this file.
     if let Some(pos) = tp.find("if this permanent is attached to a creature you control") {
         return (
             strip_condition_clause(
