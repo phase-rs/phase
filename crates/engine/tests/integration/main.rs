@@ -218,6 +218,7 @@ mod issue_3321_volcanic_spite_optional;
 mod issue_3322_airbend_owner_cast;
 mod issue_3323_nexus_of_fate_extra_turn;
 mod issue_3324_haunted_one;
+mod issue_3325_umbral_mantle;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;
