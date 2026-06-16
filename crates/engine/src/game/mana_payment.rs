@@ -363,6 +363,43 @@ pub fn classify_payment(cost: &ManaCost) -> PaymentClassification {
     PaymentClassification::Unambiguous
 }
 
+/// CR 107.4f + CR 118.3: True for shard requirements that carry the Phyrexian
+/// mana-vs-life choice — `{C/P}`, hybrid `{C/C/P}`, and the K'rrik-promoted
+/// `{2/C/P}`. The payment seams defer these until after strict requirements so
+/// each life-vs-mana decision sees the pool that actually remains.
+fn is_phyrexian_requirement(req: &ShardRequirement) -> bool {
+    matches!(
+        req,
+        ShardRequirement::Phyrexian(..)
+            | ShardRequirement::HybridPhyrexian(..)
+            | ShardRequirement::TwoGenericHybridPhyrexian(..)
+    )
+}
+
+/// CR 107.4f + CR 118.3: Order shard indices so every non-Phyrexian shard is
+/// resolved before any Phyrexian-shape shard, mirroring `can_pay_for_spell`'s
+/// deferral. Deciding a Phyrexian shard against the pool *after* strict
+/// requirements are met stops a contested colored source from being spent on
+/// the Phyrexian option and starving a strict shard — e.g. `{B/P}{B}` with one
+/// Swamp must spend the black on the strict `{B}` and pay life for `{B/P}`.
+/// Phyrexian indices keep their relative order so per-shard `ShardChoice`
+/// cursors and `PhyrexianShard` results stay aligned with the printed cost.
+fn phyrexian_deferred_order(
+    shards: &[ManaCostShard],
+    life_colors: crate::types::mana::LifePaymentColors,
+) -> Vec<usize> {
+    let is_phyrexian = |i: usize| {
+        is_phyrexian_requirement(&effective_shard_requirement(
+            shard_to_mana_type(shards[i]),
+            life_colors,
+        ))
+    };
+    (0..shards.len())
+        .filter(|&i| !is_phyrexian(i))
+        .chain((0..shards.len()).filter(|&i| is_phyrexian(i)))
+        .collect()
+}
+
 /// Check if the pool can pay the cost, respecting mana restrictions when `spell` is provided.
 ///
 /// CR 106.6: Some abilities that produce mana restrict how that mana can be spent.
@@ -784,12 +821,13 @@ pub fn pay_cost_with_demand_and_choices(
             let mut choice_cursor = 0usize;
             let mut preferred_hybrid_colors: Vec<(ManaType, ManaType, ManaType)> = Vec::new();
 
-            // CR 107.4a: Pay colored shards first (exact color match required).
-            for (idx, shard) in shards.iter().enumerate() {
-                // CR 107.4f: K'rrik promotion — dispatch the post-promotion
-                // shape so life-as-payment arms (Phyrexian/HybridPhyrexian/
-                // TwoGenericHybridPhyrexian) handle the ShardChoice uniformly.
-                match effective_shard_requirement(shard_to_mana_type(*shard), life_colors) {
+            // CR 107.4a + CR 107.4f + CR 118.3: Pay non-Phyrexian shards before
+            // Phyrexian-shape shards (see `phyrexian_deferred_order`) so each
+            // mana-vs-life decision sees the pool remaining after every strict
+            // requirement is met. K'rrik promotion is applied per shard so the
+            // life-as-payment arms handle the ShardChoice uniformly.
+            for idx in phyrexian_deferred_order(shards, life_colors) {
+                match effective_shard_requirement(shard_to_mana_type(shards[idx]), life_colors) {
                     ShardRequirement::Single(mt) => {
                         // CR 609.4b: When any_color, any mana can pay colored costs.
                         if any_color && mt != ManaType::Colorless {
@@ -1102,11 +1140,12 @@ pub fn compute_phyrexian_shards(
     // (or `LifeOnly`/unpayable would have failed `can_pay_for_spell` upstream).
     let mut life_budget = max_life_payments;
 
-    for (idx, shard) in shards.iter().enumerate() {
-        // CR 107.4f: K'rrik promotion — `{B}` becomes `{B/P}`, `{2/B}` becomes
-        // `{2/B/P}` for grant-bearing players. Dispatched arms below cover both
-        // intrinsic Phyrexian and the synthetic K'rrik fusion uniformly.
-        match effective_shard_requirement(shard_to_mana_type(*shard), life_colors) {
+    // CR 107.4f + CR 118.3: Resolve non-Phyrexian shards first (consuming their
+    // mana from `sim`), then the deferred Phyrexian shards — so each shard's
+    // `ShardOptions` reflects the pool after every strict requirement is met
+    // (see `phyrexian_deferred_order`). K'rrik promotion is applied per shard.
+    for idx in phyrexian_deferred_order(shards, life_colors) {
+        match effective_shard_requirement(shard_to_mana_type(shards[idx]), life_colors) {
             ShardRequirement::Single(mt) => {
                 if any_color && mt != ManaType::Colorless {
                     let _ = spend_any_for_required_colors(&mut sim, &[mt], spell);
@@ -2470,6 +2509,56 @@ mod tests {
         assert!(spent.is_empty());
         assert_eq!(life.len(), 1);
         assert_eq!(life[0].amount, 2);
+    }
+
+    #[test]
+    fn pay_cost_phyrexian_defers_to_same_color_strict_shard() {
+        // CR 107.4f + CR 118.3: {B/P}{B} with a single black source. The strict
+        // {B} must claim the lone black; the {B/P} is then paid with 2 life.
+        // Printed-order evaluation would spend the only black on {B/P} and then
+        // fail the strict {B} with InsufficientMana (regression for #3306 review).
+        let mut pool = pool_with(&[(ManaType::Black, 1)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlack, ManaCostShard::Black],
+            generic: 0,
+        };
+        let (spent, life) = pay_from_pool(&mut pool, &cost).unwrap();
+        assert_eq!(spent.len(), 1, "the lone black pays the strict {{B}}");
+        assert_eq!(spent[0].color, ManaType::Black);
+        assert_eq!(life.len(), 1, "the {{B/P}} is paid with 2 life");
+        assert_eq!(life[0].amount, 2);
+    }
+
+    #[test]
+    fn compute_phyrexian_shards_defers_to_strict_reports_life_only() {
+        // CR 107.4f + CR 601.2f: {B/P}{B} with one black source. Because the
+        // strict {B} consumes the lone black, the {B/P} shard's only legal option
+        // is life — the UI must not surface ManaOrLife (regression for #3306).
+        let pool = pool_with(&[(ManaType::Black, 1)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlack, ManaCostShard::Black],
+            generic: 0,
+        };
+        let shards = compute_phyrexian_shards(
+            &pool,
+            &cost,
+            None,
+            crate::types::mana::CostPermissionContext {
+                any_color: false,
+                max_life: 1,
+                life_colors: crate::types::mana::LifePaymentColors::EMPTY,
+            },
+        );
+        assert_eq!(shards.len(), 1, "one Phyrexian shard ({{B/P}})");
+        assert_eq!(
+            shards[0].shard_index, 0,
+            "shard_index stays the printed position"
+        );
+        assert_eq!(
+            shards[0].options,
+            crate::types::game_state::ShardOptions::LifeOnly,
+            "the lone black is reserved for the strict {{B}}, so {{B/P}} is life-only"
+        );
     }
 
     #[test]
