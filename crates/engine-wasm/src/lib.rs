@@ -1870,7 +1870,7 @@ pub fn playtest_start(
 /// `PlaytestSession` or an error if no session is active.
 #[wasm_bindgen]
 pub fn playtest_get_state() -> Result<JsValue, JsValue> {
-    with_playtest(|s| to_js(s))
+    with_playtest(to_js)
 }
 
 /// Keep the current opening hand and transition out of mulligan phase.
