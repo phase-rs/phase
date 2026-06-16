@@ -45,6 +45,17 @@ pub fn resolve(
             _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
         };
 
+    // CR 101.4 + CR 608.2c: "For each player, choose ... in that player's zone"
+    // iterates every player in APNAP order, parking one choice per player and
+    // accumulating each pick into the chain's tracked set. Routed here before
+    // the single-pool path so the per-player prompts never collapse into one
+    // candidate scan. Building block for Breach the Multiverse.
+    if matches!(zone_owner, ZoneOwner::EachPlayer) {
+        let players = crate::game::players::apnap_order(state);
+        // No pick has accumulated yet — the first one must start a fresh set.
+        return prompt_next_each_player(state, ability, players, false, events);
+    }
+
     let cards = resolve_candidate_cards(
         state,
         ability,
@@ -83,6 +94,161 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 101.4 + CR 608.2c: Park the next eligible player's `ChooseFromZoneChoice`
+/// for a `ChooseFromZone { zone_owner: EachPlayer }` iteration, stashing the
+/// players still to be prompted in `pending_per_player_zone_choice`. Players
+/// whose zone holds no matching candidate are skipped (CR 608.2c — there's
+/// nothing to choose). When no eligible player remains, the iteration is
+/// disposed (the parked `pending_continuation` then runs). Drives both the
+/// initial call from `resolve` and each resumed call from
+/// `drain_pending_per_player_zone_choice`.
+fn prompt_next_each_player(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    mut remaining_players: Vec<PlayerId>,
+    accumulated: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (count, zone, additional_zones, filter, chooser, up_to, constraint) = match &ability.effect
+    {
+        Effect::ChooseFromZone {
+            count,
+            zone,
+            additional_zones,
+            filter,
+            chooser,
+            up_to,
+            constraint,
+            ..
+        } => (
+            *count as usize,
+            *zone,
+            additional_zones.clone(),
+            filter.clone(),
+            *chooser,
+            *up_to,
+            constraint.clone(),
+        ),
+        _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
+    };
+
+    while let Some(owner) = remaining_players.first().copied() {
+        remaining_players.remove(0);
+
+        let cards = collect_player_zone_cards(
+            state,
+            ability,
+            owner,
+            zone,
+            &additional_zones,
+            filter.as_ref(),
+        );
+        if cards.is_empty() || count == 0 {
+            continue;
+        }
+
+        let clamped_count = count.min(cards.len());
+        // CR 101.4 + CR 608.2c: For "for each player, choose ...", the spell's controller is
+        // the chooser regardless of whose zone is scanned (Breach the
+        // Multiverse). `Chooser::Opponent` would route to an opponent; honor it.
+        let choosing_player = resolve_chooser(state, ability, chooser);
+
+        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+            player: choosing_player,
+            cards,
+            count: clamped_count,
+            up_to,
+            constraint,
+            source_id: ability.source_id,
+        };
+        state.pending_per_player_zone_choice =
+            Some(crate::types::game_state::PendingPerPlayerZoneChoice {
+                ability: Box::new(ability.clone()),
+                remaining_players,
+                accumulated,
+            });
+        return Ok(());
+    }
+
+    // CR 608.2c: No player had an eligible card — emit the resolution event so the
+    // parked continuation ("put those cards onto the battlefield") still runs.
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChooseFromZone,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
+/// CR 101.4 + CR 608.2c: Resume a per-player `ChooseFromZone { EachPlayer }`
+/// iteration after the current player's pick resolves. Accumulates the chosen
+/// cards into the resolution chain's tracked set (a fresh set on the first
+/// pick, extended on each subsequent pick) so a downstream "put those cards
+/// onto the battlefield" reads exactly the cards chosen across all players,
+/// then prompts the next eligible player. Mirrors
+/// `vote::drain_pending_vote_ballot_iteration`.
+pub(crate) fn drain_pending_per_player_zone_choice(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(pending) = state.pending_per_player_zone_choice.take() else {
+        return;
+    };
+
+    let crate::types::game_state::PendingPerPlayerZoneChoice {
+        ability,
+        remaining_players,
+        accumulated,
+    } = pending;
+
+    // CR 603.7 + CR 608.2c: The FIRST pick of this per-player iteration STARTS a
+    // fresh chosen-card set. It must NOT extend an earlier producer's tracked
+    // set — Breach the Multiverse mills first (publishing a "Milled" set), so
+    // extending here would reanimate the milled cards alongside the chosen ones
+    // ("those cards" = the chosen cards only, CR 608.2c). `publish_fresh_tracked_set`
+    // allocates a new set and rebinds `chain_tracked_set_id`, overwriting the
+    // milled binding. Every LATER pick extends that fresh set so all players'
+    // chosen cards unify under one "those cards" reference. The Cyberman / impulse
+    // "milled this way" path is unaffected — it never uses this per-player drain.
+    let accumulated = if chosen.is_empty() {
+        accumulated
+    } else if accumulated {
+        super::publish_tracked_set(state, chosen.to_vec());
+        true
+    } else {
+        super::publish_fresh_tracked_set(state, chosen.to_vec());
+        true
+    };
+
+    let _ = prompt_next_each_player(state, &ability, remaining_players, accumulated, events);
+}
+
+/// CR 101.4: Candidate cards in a SINGLE player's zone(s) for a per-player
+/// iteration, applying the effect's filter. Unlike `collect_direct_zone_cards`,
+/// the owner is supplied explicitly (the iterating player), so the tracked-set
+/// short-circuit in `resolve_candidate_cards` is bypassed — each player's
+/// graveyard is scanned independently.
+fn collect_player_zone_cards(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    owner: PlayerId,
+    zone: Zone,
+    additional_zones: &[Zone],
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let filter_ctx = FilterContext::from_ability(ability);
+    let mut zones = Vec::with_capacity(1 + additional_zones.len());
+    zones.push(zone);
+    zones.extend_from_slice(additional_zones);
+    zones
+        .into_iter()
+        .flat_map(|zone| object_ids_in_player_zone(state, owner, zone))
+        .filter(|id| {
+            filter.is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
+        })
+        .collect()
 }
 
 /// CR 608.2c + CR 608.2d + CR 603.7: Resolve the candidate card pool for a
@@ -197,6 +363,12 @@ fn resolve_zone_owner(
             .ok_or_else(|| EffectError::MissingParam("ChooseFromZone opponent".to_string())),
         // CR 701.38d: The scoped player (voter) supplies the zone.
         ZoneOwner::ScopedPlayer => Ok(ability.scoped_player.unwrap_or(ability.controller)),
+        // CR 101.4: `EachPlayer` resolves a *set* of zone owners, not one — it
+        // is handled by `prompt_next_each_player`, which scans each player's
+        // zone directly via `collect_direct_zone_cards` and never routes here.
+        ZoneOwner::EachPlayer => Err(EffectError::MissingParam(
+            "ChooseFromZone EachPlayer resolves per-player, not via single owner".to_string(),
+        )),
     }
 }
 

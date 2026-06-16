@@ -121,18 +121,29 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (win_effect, lose_effect) = match &ability.effect {
+    let (win_effect, lose_effect, flipper) = match &ability.effect {
         Effect::FlipCoin {
             win_effect,
             lose_effect,
-        } => (win_effect.as_deref(), lose_effect.as_deref()),
+            flipper,
+        } => (win_effect.as_deref(), lose_effect.as_deref(), flipper),
         _ => return Err(EffectError::MissingParam("FlipCoin".to_string())),
     };
+
+    // CR 705.2: "only the player who flips a coin wins or loses the flip." The
+    // `flipper` names that player ("that player flips a coin" → the triggering
+    // player, Mirrored Depths / Planar Chaos); the bare "flip a coin" defaults
+    // to the controller. The flipper drives the RNG, the recorded `CoinFlipped`,
+    // and the win/lose branch — the branch still runs in the SOURCE controller's
+    // context (CR 608.2c: the controller follows the spell/ability's
+    // instructions), so e.g. Mirrored Depths' controller is the one who counters
+    // the spell on a lost flip.
+    let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
 
     // CR 705.1 + CR 614.1a: route the flip through the replacement pipeline so
     // Krark's Thumb can double it.
     let prior_waiting_for = state.waiting_for.clone();
-    let won = match flip_through_replacement(state, ability.controller, events) {
+    let won = match flip_through_replacement(state, flipper, events) {
         CoinFlipOutcome::Resolved(won) => won,
         CoinFlipOutcome::Prevented => {
             // CR 614.6: the flip never happened — no branch, report resolved.
@@ -145,10 +156,12 @@ pub fn resolve(
         CoinFlipOutcome::Suspended => {
             // CR 614.1a + CR 705.1: doubled flip — stash the resolution context so
             // `resume_after_keep` can run the kept flip's branch. `EffectResolved`
-            // is deferred until the keep choice resolves.
+            // is deferred until the keep choice resolves. CR 705.2: the kept flip's
+            // `CoinFlipped` is recorded for the `flipper`, not the controller.
             state.pending_coin_flip = Some(PendingCoinFlip {
                 source_id: ability.source_id,
                 controller: ability.controller,
+                flipper,
                 targets: ability.targets.clone(),
                 win_effect: win_effect.map(|d| Box::new(d.clone())),
                 lose_effect: lose_effect.map(|d| Box::new(d.clone())),
@@ -198,14 +211,26 @@ pub fn resolve_flip_coins(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count_expr, win_effect, lose_effect) = match &ability.effect {
+    let (count_expr, win_effect, lose_effect, flipper) = match &ability.effect {
         Effect::FlipCoins {
             count,
             win_effect,
             lose_effect,
-        } => (count, win_effect.as_deref(), lose_effect.as_deref()),
+            flipper,
+        } => (
+            count,
+            win_effect.as_deref(),
+            lose_effect.as_deref(),
+            flipper,
+        ),
         _ => return Err(EffectError::MissingParam("FlipCoins".to_string())),
     };
+
+    // CR 705.2: the named player flips all `count` coins (see `resolve`). "each
+    // player flips a coin" is NOT this case — it rides the surrounding
+    // `player_scope` iteration, which rebinds `ability.controller` per player, so
+    // a `Controller` flipper there flips once per player (CR 101.4 APNAP).
+    let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
 
     // CR 107.1: resolve `count` in the ability's context; clamp at zero.
     let n =
@@ -216,7 +241,7 @@ pub fn resolve_flip_coins(
     // branch exactly as the single-flip resolver does.
     let prior_waiting_for = state.waiting_for.clone();
     for i in 0..n {
-        let won = match flip_through_replacement(state, ability.controller, events) {
+        let won = match flip_through_replacement(state, flipper, events) {
             CoinFlipOutcome::Resolved(won) => won,
             // CR 614.6: this flip was prevented entirely — skip its branch.
             CoinFlipOutcome::Prevented => continue,
@@ -226,6 +251,7 @@ pub fn resolve_flip_coins(
                 state.pending_coin_flip = Some(PendingCoinFlip {
                     source_id: ability.source_id,
                     controller: ability.controller,
+                    flipper,
                     targets: ability.targets.clone(),
                     win_effect: win_effect.map(|d| Box::new(d.clone())),
                     lose_effect: lose_effect.map(|d| Box::new(d.clone())),
@@ -329,6 +355,8 @@ fn flip_until_lose_loop(
                 state.pending_coin_flip = Some(PendingCoinFlip {
                     source_id,
                     controller,
+                    // CR 705: "flip a coin until you lose" is always the controller.
+                    flipper: controller,
                     targets: targets.to_vec(),
                     win_effect: Some(Box::new(win_effect.clone())),
                     lose_effect: None,
@@ -407,17 +435,19 @@ pub fn resume_after_keep(
     let PendingCoinFlip {
         source_id,
         controller,
+        flipper,
         targets,
         win_effect,
         lose_effect,
         kind,
     } = pending;
 
-    // CR 705.1 + CR 614.1a: the single surviving flip. The keep validation
-    // upstream guarantees exactly one kept result.
+    // CR 705.1 + CR 614.1a + CR 705.2: the single surviving flip is recorded for
+    // the flipper (the player who flipped), not necessarily the source's
+    // controller (Mirrored Depths / Planar Chaos, "that player flips a coin").
     let won = kept[0];
     events.push(GameEvent::CoinFlipped {
-        player_id: controller,
+        player_id: flipper,
         won,
     });
 
@@ -462,7 +492,8 @@ pub fn resume_after_keep(
             }
 
             for i in 0..remaining {
-                match flip_through_replacement(state, controller, events) {
+                // CR 705.2: the remaining `FlipCoins` flips belong to the flipper.
+                match flip_through_replacement(state, flipper, events) {
                     CoinFlipOutcome::Resolved(flip_won) => {
                         let branch = if flip_won {
                             win_effect.as_deref()
@@ -479,6 +510,7 @@ pub fn resume_after_keep(
                         state.pending_coin_flip = Some(PendingCoinFlip {
                             source_id,
                             controller,
+                            flipper,
                             targets: targets.clone(),
                             win_effect: win_effect.clone(),
                             lose_effect: lose_effect.clone(),
@@ -566,6 +598,7 @@ mod tests {
             Effect::FlipCoin {
                 win_effect: None,
                 lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -602,6 +635,7 @@ mod tests {
             Effect::FlipCoin {
                 win_effect: Some(win_effect),
                 lose_effect: Some(lose_effect),
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -681,6 +715,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 5 },
                 win_effect: None,
                 lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -704,6 +739,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 0 },
                 win_effect: None,
                 lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -739,6 +775,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 4 },
                 win_effect: Some(win_effect),
                 lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -885,6 +922,7 @@ mod tests {
             Effect::FlipCoin {
                 win_effect: Some(win_effect),
                 lose_effect: Some(lose_effect),
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
         );
         def.sub_ability = Some(Box::new(return_transformed));
@@ -1238,6 +1276,7 @@ mod tests {
         let Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         } = execute.effect.as_ref()
         else {
             panic!("expected FlipCoin execute, got {:?}", execute.effect);
@@ -1278,6 +1317,241 @@ mod tests {
             CopyRetargetPermission::MayChooseNewTargets,
             "win copy should allow new targets, got {:?}",
             win.effect
+        );
+    }
+
+    // --- PR #3349: subject flipper (Mirrored Depths / Planar Chaos) -----------
+    //
+    // CR 705.2: "only the player who flips a coin wins or loses the flip." When a
+    // NON-controller casts a spell into "Whenever a player casts a spell, that
+    // player flips a coin", the SUBJECT (the casting player) must flip, and the
+    // recorded `CoinFlipped` and the win/lose outcome belong to that player — not
+    // the enchantment/source controller. The parser binds this as
+    // `FlipCoin { flipper: TriggeringPlayer }` (see imperative.rs parser tests);
+    // these tests assert the runtime resolver honors it.
+
+    /// Build the Mirrored Depths flip ability: `FlipCoin { flipper:
+    /// TriggeringPlayer }` whose lose branch counters the cast spell. The flip
+    /// effect's controller is P0 (the enchantment owner); a SpellCast event names
+    /// the actual caster.
+    fn triggering_player_flip(lose_effect: Option<Box<AbilityDefinition>>) -> Effect {
+        Effect::FlipCoin {
+            win_effect: None,
+            lose_effect,
+            flipper: TargetFilter::TriggeringPlayer,
+        }
+    }
+
+    #[test]
+    fn opponent_casts_into_subject_flip_opponent_is_the_flipper() {
+        // CR 705.2: P1 (the opponent) casts the spell; P0 controls the flip
+        // source. The `CoinFlipped` must be recorded for P1, the flipper.
+        let mut state = GameState::new_two_player(0);
+        state.rng = ChaCha20Rng::seed_from_u64(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mirrored Depths".to_string(),
+            Zone::Battlefield,
+        );
+        // P1 is the casting (triggering) player.
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            controller: PlayerId(1),
+            object_id: ObjectId(999),
+            card_id: CardId(2),
+        });
+
+        let ability =
+            ResolvedAbility::new(triggering_player_flip(None), vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let flip = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CoinFlipped { player_id, won } => Some((*player_id, *won)),
+                _ => None,
+            })
+            .expect("a coin was flipped");
+        assert_eq!(
+            flip.0,
+            PlayerId(1),
+            "the OPPONENT (caster) flips, not the source controller P0"
+        );
+    }
+
+    #[test]
+    fn opponent_casts_into_subject_flip_lose_branch_resolves_for_the_flip() {
+        // CR 705.2: P1 casts; with a seed that loses the flip, the lose branch
+        // (here: the caster P1 loses 3 life) must fire — driven by P1's result.
+        // Seed 1 → first flip is a LOSS (mirrors `ral_loses_flip_takes_one_damage`).
+        let mut state = GameState::new_two_player(1);
+        state.rng = ChaCha20Rng::seed_from_u64(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Planar Chaos".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            controller: PlayerId(1),
+            object_id: ObjectId(999),
+            card_id: CardId(2),
+        });
+
+        // Lose branch: "that player loses 3 life" — bound to TriggeringPlayer so
+        // it drains the flipper, proving the loss is attributed to P1.
+        let lose = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: Some(TargetFilter::TriggeringPlayer),
+            },
+        ));
+        let p1_initial = state.players[1].life;
+        let p0_initial = state.players[0].life;
+
+        let ability = ResolvedAbility::new(
+            triggering_player_flip(Some(lose)),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The recorded flip is the opponent's and is a loss.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::CoinFlipped {
+                    player_id: PlayerId(1),
+                    won: false
+                }
+            )),
+            "expected P1 to lose the flip, events: {events:?}"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_initial - 3,
+            "the flipper (P1) takes the lose-branch loss"
+        );
+        assert_eq!(
+            state.players[0].life, p0_initial,
+            "the source controller (P0) is unaffected"
+        );
+    }
+
+    #[test]
+    fn each_player_flips_once_per_player_not_collapsed_to_one() {
+        // CR 101.4 + CR 705.2: "each player flips a coin" rides player_scope=All
+        // iteration; `flipper = Controller` resolves to each iterated player, so a
+        // 2-player game records exactly 2 flips, one per player — NOT a single
+        // controller flip.
+        let mut state = GameState::new_two_player(7);
+        state.rng = ChaCha20Rng::seed_from_u64(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Each-Player Flipper".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        );
+        def.player_scope = Some(crate::types::ability::PlayerFilter::All);
+
+        let ability = build_resolved_from_def(&def, source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let flippers: Vec<PlayerId> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::CoinFlipped { player_id, .. } => Some(*player_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            flippers.len(),
+            2,
+            "each of 2 players flips exactly once, got {flippers:?}"
+        );
+        assert!(
+            flippers.contains(&PlayerId(0)) && flippers.contains(&PlayerId(1)),
+            "both players must flip their own coin, got {flippers:?}"
+        );
+    }
+
+    #[test]
+    fn flip_coin_flipper_serde_back_compat_and_roundtrip() {
+        use crate::types::ability::Effect;
+
+        // CR 705.2: legacy serialized `FlipCoin` with no `flipper` field
+        // deserializes to the Controller default.
+        let legacy: Effect =
+            serde_json::from_str(r#"{"type":"FlipCoin","win_effect":null,"lose_effect":null}"#)
+                .expect("legacy FlipCoin without flipper must deserialize");
+        assert!(
+            matches!(
+                legacy,
+                Effect::FlipCoin {
+                    flipper: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "missing flipper must default to Controller, got {legacy:?}"
+        );
+
+        // The default flipper is skipped on serialize (back-compatible output).
+        let controller_flip = Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        let json = serde_json::to_string(&controller_flip).unwrap();
+        assert!(
+            !json.contains("flipper"),
+            "default Controller flipper must be omitted from JSON, got {json}"
+        );
+
+        // A non-default flipper round-trips.
+        let subject_flip = Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper: TargetFilter::TriggeringPlayer,
+        };
+        let json = serde_json::to_string(&subject_flip).unwrap();
+        assert!(
+            json.contains("flipper"),
+            "non-default flipper must serialize"
+        );
+        let back: Effect = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, subject_flip, "non-default flipper must round-trip");
+
+        // FlipCoins mirrors the same back-compat behavior.
+        let legacy_n: Effect = serde_json::from_str(
+            r#"{"type":"FlipCoins","count":{"type":"Fixed","value":3},"win_effect":null,"lose_effect":null}"#,
+        )
+        .expect("legacy FlipCoins without flipper must deserialize");
+        assert!(
+            matches!(
+                legacy_n,
+                Effect::FlipCoins {
+                    flipper: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "missing FlipCoins flipper must default to Controller, got {legacy_n:?}"
         );
     }
 }

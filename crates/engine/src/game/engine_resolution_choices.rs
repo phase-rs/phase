@@ -2054,6 +2054,25 @@ pub(super) fn handle_resolution_choice(
                 .map(|cont| cont.chain.controller)
                 .unwrap_or(player);
             set_priority(state, priority_player);
+            // CR 101.4 + CR 608.2c: A per-player `ChooseFromZone { EachPlayer }`
+            // iteration does NOT partition this player's pick into the
+            // continuation's target slots — each pick is accumulated into the
+            // chain's tracked set by `drain_pending_per_player_zone_choice`, and
+            // the continuation ("put those cards onto the battlefield") reads
+            // that tracked set. Hand the choice straight to the drain so it can
+            // accumulate and prompt the next player (Breach the Multiverse).
+            if state.pending_per_player_zone_choice.is_some() {
+                effects::choose_from_zone::drain_pending_per_player_zone_choice(
+                    state, &chosen, events,
+                );
+                // Only after every player has been prompted (the drain leaves no
+                // pending iteration and is no longer waiting on a choice) does
+                // the parked continuation run.
+                effects::drain_pending_continuation(state, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded

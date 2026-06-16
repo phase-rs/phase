@@ -769,6 +769,13 @@ fn resolve_event_scoped_ref(
                 &FilterContext::from_source(state, id),
             )
         }
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: _,
+                },
+        } => None,
         _ => None,
     }
 }
@@ -1876,6 +1883,13 @@ fn resolve_ref(
                     .current_trigger_event
                     .as_ref()
                     .and_then(crate::game::targeting::extract_source_from_event),
+                CastManaObjectScope::AbilityTarget => targets.iter().find_map(|target| {
+                    if let crate::types::ability::TargetRef::Object(id) = target {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                }),
             };
             cast_object
                 .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
