@@ -13,6 +13,7 @@ use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
+use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
@@ -81,6 +82,7 @@ pub enum PolicyId {
     HoldManaUpForInteraction,
     SweeperTiming,
     FreeOutletActivation,
+    FetchLandPatience,
     AristocratsKeepablesMulligan,
     AggroPressure,
     AggroKeepablesMulligan,
@@ -295,6 +297,7 @@ impl Default for PolicyRegistry {
             Box::new(HoldManaUpForInteractionPolicy),
             Box::new(SweeperTimingPolicy),
             Box::new(FreeOutletActivationPolicy),
+            Box::new(FetchLandPatiencePolicy),
             Box::new(AggroPressurePolicy),
             Box::new(TokensWidePolicy),
             Box::new(AnthemPriorityPolicy),

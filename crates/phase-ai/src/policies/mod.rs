@@ -19,6 +19,7 @@ mod effect_timing;
 mod equipment_priority;
 mod etb_value;
 mod evasion_removal_priority;
+mod fetch_land_patience;
 mod free_outlet_activation;
 pub(crate) mod hand_disruption;
 mod hold_mana_up;
