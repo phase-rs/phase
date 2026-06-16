@@ -197,6 +197,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -397,6 +398,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -620,6 +622,19 @@ fn parent_target_controller_player(
     })
 }
 
+fn parent_target_owner_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    ability.and_then(|a| {
+        crate::game::targeting::resolve_effect_player_ref(
+            state,
+            a,
+            &TargetFilter::ParentTargetOwner,
+        )
+    })
+}
+
 #[derive(Clone, Copy)]
 enum ControllerLookup {
     /// Normal filter matching: off-stack/off-battlefield objects may need
@@ -682,6 +697,7 @@ pub(crate) fn controller_ref_player(
             })
         }),
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
+        ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
@@ -818,6 +834,8 @@ fn stack_entry_controller_matches(
             parent_target_controller_player(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
         }
+        Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, ctx.ability)
+            .is_some_and(|pid| pid == entry_controller),
         Some(ControllerRef::DefendingPlayer) => {
             crate::game::combat::defending_player_for_attacker(state, ctx.source_id)
                 .is_some_and(|pid| pid == entry_controller)
@@ -1383,6 +1401,13 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::ParentTargetController => {
                         let target_player = parent_target_controller_player(state, ability);
+                        match target_player {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    ControllerRef::ParentTargetOwner => {
+                        let target_player = parent_target_owner_player(state, ability);
                         match target_player {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
@@ -2014,6 +2039,7 @@ pub fn spell_record_matches_filter(
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 613.1: "the chosen player" has no meaning for a
@@ -2194,6 +2220,8 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
             .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
+        // CR 702.33d: Kicker-paid state for "first kicked spell" cost reducers.
+        was_kicked: !spell_obj.kickers_paid.is_empty(),
         cast_variant: crate::types::game_state::CastingVariant::Normal,
     }
 }
@@ -2431,6 +2459,21 @@ fn spell_object_matches_property(
                 &source,
             )
         }
+        // CR 702.33d: Kicker-paid during live cost-modifier evaluation.
+        FilterProp::WasKicked => context.is_some_and(|ctx| {
+            let Some(spell_id) = ctx.spell_object_id else {
+                return false;
+            };
+            if let Some(pending) = ctx.state.pending_cast.as_ref() {
+                if pending.object_id == spell_id {
+                    return !pending.ability.context.kickers_paid.is_empty();
+                }
+            }
+            ctx.state
+                .objects
+                .get(&spell_id)
+                .is_some_and(|obj| !obj.kickers_paid.is_empty())
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -2518,6 +2561,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        FilterProp::WasKicked => record.was_kicked,
         FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
@@ -2957,6 +3001,14 @@ fn matches_filter_prop(
         FilterProp::HasXInActivationCost => {
             crate::game::casting_costs::pending_activation_cost_has_x(state, object_id)
         }
+        FilterProp::WasKicked => {
+            if let Some(pending) = state.pending_cast.as_ref() {
+                if pending.object_id == object_id {
+                    return !pending.ability.context.kickers_paid.is_empty();
+                }
+            }
+            !obj.kickers_paid.is_empty()
+        }
         // CR 605.1: Delegate to the single mana-ability classifier instead of
         // duplicating the definition at the filter layer.
         FilterProp::HasManaAbility => obj
@@ -3010,6 +3062,7 @@ fn matches_filter_prop(
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
+                    (Some(ControllerRef::ParentTargetOwner), Some(pid)) => perm.owner == pid,
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
@@ -3046,6 +3099,8 @@ fn matches_filter_prop(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
             }
+            ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
+                .is_some_and(|pid| pid == obj.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
@@ -3612,6 +3667,8 @@ fn zone_change_record_matches_property(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == record.owner)
             }
+            ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
+                .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
@@ -3787,6 +3844,7 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
@@ -3831,6 +3889,8 @@ fn attachment_controller_matches(
             parent_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
         }
+        Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, source.ability)
+            .is_some_and(|pid| pid == attachment_controller),
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -4410,6 +4470,7 @@ fn player_matches_target_filter_with(
             // established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: "the chosen player" has no meaning in this name-filter
             // context. Fail closed (mirrors `TargetPlayer`).
@@ -4903,6 +4964,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -4944,6 +5006,7 @@ mod tests {
             has_x_in_cost: true,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -5024,6 +5087,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -8368,6 +8432,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }
         };
 
@@ -8822,6 +8887,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

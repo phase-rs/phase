@@ -2387,6 +2387,9 @@ fn resolve_ref(
                                 crate::game::ability_utils::parent_target_controller(a, state)
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::ParentTargetOwner) => ability
+                            .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
@@ -2444,6 +2447,9 @@ fn damage_source_controller_matches(
             .and_then(|ability| {
                 crate::game::ability_utils::parent_target_controller(ability, state)
             })
+            .is_some_and(|player| actual == player),
+        ControllerRef::ParentTargetOwner => ability
+            .and_then(|ability| crate::game::ability_utils::parent_target_owner(ability, state))
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, ctx.source)
@@ -7999,6 +8005,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -8011,6 +8018,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );

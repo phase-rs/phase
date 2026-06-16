@@ -5,7 +5,9 @@ use engine::database::synthesis::synthesize_all;
 use engine::game::combat::can_block_pair;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
-use engine::types::ability::{ContinuousModification, DamageModification, Effect, TargetFilter};
+use engine::types::ability::{
+    ContinuousModification, ControllerRef, DamageModification, Effect, FilterProp, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -139,6 +141,45 @@ fn marchesa_dethrone_keyword_synthesizes_attack_trigger() {
         "Dethrone should add Attacks trigger with life-total condition; triggers: {:?}",
         face.triggers
     );
+}
+
+#[test]
+fn collective_inferno_static_damage_modification_parses() {
+    // Verify that Collective Inferno's "Double all damage that sources you control of the chosen type would deal"
+    // parses to a structured replacement definition with damage_modification
+    let oracle = "As this enchantment enters, choose a creature type.\nDouble all damage that sources you control of the chosen type would deal.";
+    let parsed = parse_card(oracle, "Collective Inferno", &[], &["Enchantment"]);
+
+    // Should have a replacement with Double damage modification
+    assert!(
+        parsed
+            .replacements
+            .iter()
+            .any(|r| r.damage_modification == Some(DamageModification::Double)),
+        "expected double-damage replacement for Collective Inferno, got {:?}",
+        parsed.replacements
+    );
+
+    // Verify the source filter includes IsChosenCreatureType
+    let double_repl = parsed
+        .replacements
+        .iter()
+        .find(|r| r.damage_modification == Some(DamageModification::Double))
+        .expect("expected double-damage replacement");
+
+    match &double_repl.damage_source_filter {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties.contains(&FilterProp::IsChosenCreatureType),
+                "expected IsChosenCreatureType property in source filter"
+            );
+        }
+        other => panic!(
+            "Expected Typed filter with IsChosenCreatureType, got {:?}",
+            other
+        ),
+    }
 }
 
 fn cast_zero_cost_bear_with_uncivil_unrest() -> (GameRunner, ObjectId) {

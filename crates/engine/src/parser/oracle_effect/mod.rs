@@ -3433,12 +3433,11 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
-    // Phase 2 PoC: peel structural slots off the head of the clause before
-    // body parsing. The recursive shell strips slot-bearing prefixes
-    // (currently just "you may " for the Optional slot) and accumulates them
+    // Phase 2: peel structural slots off the head of the clause before
+    // body parsing. The recursive shell strips slot-bearing prefixes/suffixes
+    // (optional, opponent-may, condition, duration, for-each, player-scope)
     // into a `ClauseContext`. The bare imperative remainder is parsed by the
-    // existing pipeline; the context is applied onto the result before
-    // return so no slot is silently dropped.
+    // existing pipeline; the context is applied onto the result before return.
     //
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
@@ -4170,6 +4169,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // CR 400.7 + CR 608.2c + CR 701.23a: Name-hate search/exile compounds
+    // ("search [player]'s graveyard, hand, and library ... and exile them")
+    // are a single structured instruction. Route them before broader clause
+    // shortcuts can reinterpret the trailing "exile them" as a generic
+    // ParentTarget zone move.
+    if let Some(owner) = imperative::try_parse_multi_zone_same_name_exile(&lower) {
+        return parsed_clause(imperative::lower_search_and_creation_ast(
+            SearchCreationImperativeAst::MultiZoneSameNameExile { owner },
+        ));
+    }
+
     if let Some(effect) = try_parse_triggered_damage_replacement(&lower) {
         return parsed_clause(effect);
     }
@@ -4561,9 +4571,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 601.2d: "distribute N [type] counters among [targets]" →
     // PutCounter with distribute: Some(Counters(type)).
-    if tag::<_, _, OracleError<'_>>("distribute ")
-        .parse(lower.as_str())
-        .is_ok()
+    if (scan_contains_phrase(&lower, "distribute ") || scan_contains_phrase(&lower, "distributes "))
         && scan_contains_phrase(&lower, "counter")
         && scan_contains_phrase(&lower, "among")
     {
@@ -10569,6 +10577,17 @@ fn replace_target_with_parent(effect: &mut Effect) {
     // them to another creature", where the attach destination is a fresh,
     // distinct choice, not the bounced creature).
     if let Some(TargetFilter::Typed(tf)) = effect.target_filter() {
+        // CR 201.2 + CR 608.2c: Same-name filters already encode their
+        // anaphoric reference via `SameNameAsParentTarget`; replacing the
+        // whole target with `ParentTarget` would discard the actual search/mass
+        // filter.
+        if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+        {
+            return;
+        }
         if tf
             .properties
             .iter()
@@ -10619,6 +10638,13 @@ fn replace_target_with_parent(effect: &mut Effect) {
         // three time counters on it") names the source via `~` (SelfRef); the
         // "on it" anaphor is a trailing counter modifier, not the moved object.
         // Leave SelfRef intact so the source still moves itself.
+        Effect::ChangeZoneAll {
+            target: TargetFilter::Typed(tf),
+            ..
+        } if tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)) => {}
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
             if !matches!(target, TargetFilter::SelfRef) =>
         {
@@ -17180,7 +17206,7 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text, None)
         } else {
             let reference_target = for_each_clause_target_controller_filter(&text);
-            let (repeat_for, text) = strip_for_each_prefix(&text);
+            let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
             let reference_target = repeat_for.as_ref().and(reference_target);
             (repeat_for, text, reference_target)
         };
@@ -17192,7 +17218,8 @@ pub(crate) fn parse_effect_chain_ir(
         };
         // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
-            let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
+            let (repeat_count, stripped_text) =
+                super::clause_shell::peel_repeat_count_suffix(&text_without_where_x);
             if repeat_count.is_some() {
                 (repeat_count, stripped_text)
             } else {
@@ -17207,7 +17234,7 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = strip_player_scope_subject(&text);
+        let (player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -19023,15 +19050,42 @@ pub(super) fn counter_unless_pay_modifier(cost: AbilityCost) -> UnlessPayModifie
     }
 }
 
-/// CR 118.12: Parse "unless its controller pays {X}" from counter/trigger text.
+/// CR 118.12 / CR 119.4 / CR 608.2c: Parse "unless its controller pays {X} /
+/// pays N life / sacrifices a [filter] / discards a card [or ...]" from
+/// counter/trigger text.
+///
 /// Returns `AbilityCost::Mana` for static costs ({3}, {1}{U}),
 /// `AbilityCost::ManaDynamic` for "pays {X}, where X is this creature's power",
-/// and `AbilityCost::PayEnergy` for "{E}{E}" patterns.
+/// `AbilityCost::PayEnergy` for "{E}{E}" patterns, and — for the **non-mana**
+/// forms — the corresponding `PayLife` / `Sacrifice` / `Discard` (or `OneOf`
+/// disjunction) cost. The non-mana shapes are delegated to the single
+/// non-mana unless-cost authority (`oracle_trigger::parse_unless_they_alt_cost_chain`)
+/// so counter spells and triggered abilities recognize the same cost grammar.
 pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
-    // Find "unless" followed by a subject and "pays {cost}"
+    // Find "unless" followed by a subject ("its controller", "that player", …).
     let after_unless = strip_after(lower, "unless ")?;
-    // Skip the subject ("its controller", "that player", "he or she", etc.)
-    let cost_str = strip_after(after_unless, "pays ")?;
+    // CR 117.3: the mana / energy / {X} forms require the "pays " verb. Try
+    // them first so existing behavior is preserved exactly for mana costs.
+    if let Some(cost_str) = strip_after(after_unless, "pays ") {
+        if let Some(cost) = parse_unless_mana_or_energy_payment(cost_str) {
+            return Some(cost);
+        }
+    }
+    // CR 118.12 / CR 119.4 / CR 608.2c: non-mana alternative costs — "pays N
+    // life", "sacrifices a [filter]", "discards a card", and `or`-disjunctions
+    // thereof. Normalize the counter subject to the "they" pronoun the shared
+    // authority anchors on, then delegate. The payer is fixed to the targeted
+    // spell's controller by `counter_unless_pay_modifier` at the call site, so
+    // rewriting the recognized subject does not affect resolution.
+    let normalized = normalize_counter_unless_subject(after_unless)?;
+    crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(&normalized)
+}
+
+/// CR 117.3 + CR 107.14: Parse the mana / energy / dynamic-{X} forms of an
+/// "unless … pays …" alternative cost. Operates on the text immediately after
+/// the "pays " verb. Returns `None` for non-mana shapes (life / sacrifice /
+/// discard), which the caller routes to the shared non-mana authority.
+fn parse_unless_mana_or_energy_payment(cost_str: &str) -> Option<AbilityCost> {
     // CR 107.14 + CR 202.3: dynamic energy unless-cost — checked before the
     // brace-run truncation below, which collapses "an amount of {e} …" to "an".
     if let Some(amount) = parse_dynamic_energy_unless_cost(cost_str) {
@@ -19078,6 +19132,29 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
         return None;
     }
     Some(AbilityCost::Mana { cost })
+}
+
+/// CR 118.12 / CR 119.4 / CR 608.2c: Normalize the subject of a counter
+/// spell's non-mana "unless" cost to the "they" pronoun recognized by the
+/// shared non-mana cost authority (`parse_unless_they_alt_cost_chain`).
+///
+/// Counter spells phrase the alternative-cost payer as "its controller" (the
+/// targeted spell's controller); the shared chain combinator anchors on
+/// "they" / "that player" / "that opponent". Rewriting the recognized subject
+/// prefix to "they " lets the single authority parse life / sacrifice /
+/// discard (and `or`-disjunctions) without duplicating the verb dispatch here.
+/// Returns `None` when no recognized subject is present.
+fn normalize_counter_unless_subject(after_unless: &str) -> Option<String> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("its controller "),
+        tag("their controller "),
+        tag("that player "),
+        tag("that opponent "),
+        tag("they "),
+    ))
+    .parse(after_unless)
+    .ok()?;
+    Some(format!("they {rest}"))
 }
 
 /// CR 118.12a: Tail of "deal N damage to them" unless-cost alternatives.
@@ -44933,6 +45010,80 @@ mod tests {
             "DestroyAll must exclude the targeted permanent itself, got {:?}",
             typed.properties
         );
+    }
+
+    fn chain_contains_multi_zone_same_name_exile(def: &AbilityDefinition) -> bool {
+        fn matches(effect: &Effect) -> bool {
+            let Effect::ChangeZoneAll { target, .. } = effect else {
+                return false;
+            };
+            let TargetFilter::Typed(typed) = target else {
+                return false;
+            };
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+                && typed.properties.iter().any(|p| {
+                    matches!(
+                        p,
+                        FilterProp::InAnyZone { zones }
+                            if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+                    )
+                })
+        }
+        if matches(def.effect.as_ref()) {
+            return true;
+        }
+        let mut cursor = def.sub_ability.as_deref();
+        while let Some(sub) = cursor {
+            if matches(sub.effect.as_ref()) {
+                return true;
+            }
+            cursor = sub.sub_ability.as_deref();
+        }
+        false
+    }
+
+    /// CR 201.2 + CR 400.7 + CR 701.23 + CR 701.24: Name-hate spells search GY,
+    /// hand, and library for all cards sharing the exiled/countered/chosen card's
+    /// name and exile them, then shuffle. Issue #3436 — the runtime infra already
+    /// existed (`MultiZoneSameNameExile`); these cards gap'd on parser routing.
+    #[test]
+    fn name_hate_spells_parse_multi_zone_same_name_exile_chain() {
+        for (label, text) in [
+            (
+                "Eradicate",
+                "Exile target nonblack creature. Search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them. Then that player shuffles.",
+            ),
+            (
+                "Quash",
+                "Counter target instant or sorcery spell. Search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them. Then that player shuffles.",
+            ),
+            (
+                "Counterbore",
+                "Counter target spell. Search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them. Then that player shuffles.",
+            ),
+            (
+                "Crumble to Dust",
+                "Exile target nonbasic land. Search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them. Then that player shuffles.",
+            ),
+            (
+                "Surgical Extraction",
+                "Choose target card in a graveyard. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+                "{label}: root effect must not be Unimplemented: {:?}",
+                def.effect
+            );
+            assert!(
+                chain_contains_multi_zone_same_name_exile(&def),
+                "{label}: expected ChangeZoneAll {{ InAnyZone[GY,Hand,Lib], SameNameAsParentTarget }} in chain: {def:#?}"
+            );
+        }
     }
 
     /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange

@@ -1778,6 +1778,12 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
         let result: OracleResult<'_, &str> =
             terminated(take_until(suffix), tag(suffix)).parse(lower);
         if let Ok(("", filter_phrase)) = result {
+            // CR 700.1: "card" is the zone-agnostic head noun for the discarded
+            // members ("nonland card discarded this way"). parse_type_phrase maps
+            // it to TypeFilter::Card (matches every card type), so "nonland card"
+            // yields [Card, Non(Land)] — counting nonland instants/sorceries too.
+            // It must NOT be narrowed to TypeFilter::Permanent: a nonland instant
+            // discarded by Seasoned Pyromancer is still counted (CR 701.9a).
             let (filter, remainder) =
                 crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
             if remainder.trim().is_empty() {
@@ -5868,6 +5874,45 @@ mod tests {
                 ),
                 other => panic!("expected Typed filter, got {other:?}"),
             },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + CR 701.9a: "nonland card discarded this way" (Seasoned
+    /// Pyromancer) must emit `FilteredTrackedSetSize` with a `[Card, NonLand]`
+    /// filter, not the plain `TrackedSetSize` fallback. The filter must include
+    /// `TypeFilter::Card` (every card type) and `Non(Land)`, and must NOT be
+    /// narrowed to `TypeFilter::Permanent` — a discarded nonland INSTANT or
+    /// SORCERY is still a nonland card and must be counted, so the token count
+    /// equals every nonland card discarded (CR 701.9a).
+    /// (Primary engine fix for issue #740 is in `ability_or_branch_references_tracked_set`.)
+    #[test]
+    fn nonland_card_discarded_this_way_uses_filtered_tracked_set_nonland() {
+        let qty = parse_for_each_clause("nonland card discarded this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+                assert_eq!(
+                    caused_by,
+                    Some(crate::types::ability::ThisWayCause::Discarded),
+                    "cause must be Discarded"
+                );
+                match *filter {
+                    TargetFilter::Typed(ref tf) => {
+                        assert!(
+                            tf.type_filters
+                                .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                            "filter must include NonLand; got {tf:?}"
+                        );
+                        // CR 701.9a: must NOT narrow to Permanent — a nonland
+                        // instant/sorcery discarded by Seasoned Pyromancer counts.
+                        assert!(
+                            !tf.type_filters.contains(&TypeFilter::Permanent),
+                            "filter must not exclude nonland instants/sorceries; got {tf:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
     }

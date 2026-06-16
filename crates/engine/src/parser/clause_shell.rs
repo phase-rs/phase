@@ -16,12 +16,17 @@
 //! ## Migrated slots
 //!
 //! - **Optional** (`you may [verb]` → `optional: true`)
+//! - **Opponent-may** (`each opponent may` / `any opponent may` / … →
+//!   `opponent_may_scope` + optional + implicit `player_scope`)
 //! - **Duration** (`... this turn` / `... until end of turn` /
 //!   `... until your next turn` / `... for as long as ~ remains tapped` etc.
 //!   → `Duration` variant)
+//! - **Leading condition** (`if [cond], [effect]` → `AbilityCondition`)
+//! - **Repeat-for** (`for each [qty], ` prefix and trailing `twice` / `N times`)
+//! - **Player-scope** (`each opponent` / `each player` subject prefixes)
 //!
-//! Every other slot continues to flow through its existing per-callsite
-//! handling until a follow-up commit migrates it here.
+//! Remaining slots (unless-pay, activation limits, `where X`) continue through
+//! the chunk loop until migrated here.
 //!
 //! As slots migrate, each becomes:
 //! 1. A new field on `ClauseContext`.
@@ -73,7 +78,9 @@ use super::oracle_effect::conditions::{
 use super::oracle_effect::strip_trailing_duration;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
-use crate::types::ability::{AbilityCondition, Duration};
+use crate::types::ability::{
+    AbilityCondition, Duration, OpponentMayScope, PlayerFilter, QuantityExpr,
+};
 
 /// Synthesized attributes accumulated by `peel_clause` as it strips
 /// structural slots off the head of a clause.
@@ -101,6 +108,16 @@ pub(crate) struct ClauseContext {
     /// pipeline (via the existing `strip_leading_general_conditional`
     /// building block).
     pub(crate) condition: Option<AbilityCondition>,
+    /// CR 608.2d: `any opponent may` / `any player may` first-accept-wins
+    /// scope. Set when `peel_clause` strips an opponent-may prefix.
+    pub(crate) opponent_may_scope: Option<OpponentMayScope>,
+    /// CR 608.2d: Implicit per-player iteration from an opponent-may prefix
+    /// (`each opponent may`, `target opponent may`, `defending player may`, …).
+    pub(crate) may_implicit_player_scope: Option<PlayerFilter>,
+    /// CR 609.3: `for each [qty], ` prefix or trailing `twice` / `N times`.
+    pub(crate) repeat_for: Option<QuantityExpr>,
+    /// CR 109.5: `each opponent` / `each player` subject-prefix iteration scope.
+    pub(crate) player_scope: Option<PlayerFilter>,
 }
 
 impl ClauseContext {
@@ -133,7 +150,13 @@ impl ClauseContext {
     /// True when no slot has been populated. Callers can short-circuit
     /// `apply_*` when nothing was peeled.
     pub(crate) fn is_empty(&self) -> bool {
-        !self.optional && self.duration.is_none() && self.condition.is_none()
+        !self.optional
+            && self.duration.is_none()
+            && self.condition.is_none()
+            && self.opponent_may_scope.is_none()
+            && self.may_implicit_player_scope.is_none()
+            && self.repeat_for.is_none()
+            && self.player_scope.is_none()
     }
 }
 
@@ -150,9 +173,16 @@ pub(crate) fn peel_clause(text: &str) -> (String, ClauseContext) {
 }
 
 fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
-    // Optional: "you may [bare imperative verb]" — leading prefix.
-    if !ctx.optional {
-        if let Some(rest) = strip_optional_prefix(&text) {
+    // Optional / opponent-may prefixes — leading slot family (CR 608.2d).
+    if !ctx.optional && ctx.opponent_may_scope.is_none() && ctx.may_implicit_player_scope.is_none()
+    {
+        if let Some((scope, player_scope, rest)) = try_peel_opponent_may_prefix(&text) {
+            ctx.optional = true;
+            ctx.opponent_may_scope = scope;
+            ctx.may_implicit_player_scope = player_scope;
+            return peel_inner(rest, ctx);
+        }
+        if let Some(rest) = peel_you_may_prefix(&text, YouMayBlocklist::PeelClause) {
             ctx.optional = true;
             return peel_inner(rest, ctx);
         }
@@ -185,6 +215,24 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
         }
     }
 
+    // Repeat-for: "for each [qty], " leading prefix (CR 107.1 / CR 609.3).
+    if ctx.repeat_for.is_none() {
+        let (qty, rest) = peel_for_each_prefix(&text);
+        if qty.is_some() {
+            ctx.repeat_for = qty;
+            return peel_inner(rest, ctx);
+        }
+    }
+
+    // Player-scope subject: "each opponent/player …" (CR 109.5).
+    if ctx.player_scope.is_none() {
+        let (scope, rest) = peel_player_scope_subject(&text);
+        if let Some(scope) = scope {
+            ctx.player_scope = Some(scope);
+            return peel_inner(rest, ctx);
+        }
+    }
+
     // CR 608.2c + CR 608.2d: Unrepresentable `If <X>, ` head fallback — strips
     // ONLY when the body begins with `"you may "` so the recursive call's
     // step-1 optional-prefix peel captures the may-choice. Runs after the
@@ -202,17 +250,105 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     (text, ctx)
 }
 
-/// CR 608.2d: Strip a leading bare "you may " when it precedes a fresh
-/// imperative. Returns the remainder text on a match, `None` when the
-/// "you may " phrase is part of a specialized construction handled by a
-/// dedicated body parser (see `is_specialized_you_may_phrase`).
-fn strip_optional_prefix(text: &str) -> Option<String> {
+/// Which specialized-phrase blocklist applies when peeling a leading `you may `.
+enum YouMayBlocklist {
+    /// `peel_clause` / `parse_effect_clause`: broad blocklist — specialized
+    /// cast/play/pay/reveal handlers keep the full surface form.
+    PeelClause,
+    /// Chunk-loop cascade: narrow blocklist — only retarget phrases block peel;
+    /// Beseech-style `you may cast the exiled card …` still peels optional.
+    ChunkLoop,
+}
+
+/// CR 107.1 + CR 609.3: Peel a leading `for each [qty], ` repeat prefix.
+/// Delegates to the existing `strip_for_each_prefix` building block.
+pub(crate) fn peel_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+    super::oracle_effect::lower::strip_for_each_prefix(text)
+}
+
+/// CR 608.2c: Peel a trailing `twice` / `N times` repeat suffix.
+pub(crate) fn peel_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
+    super::oracle_effect::lower::strip_repeat_count_suffix(text)
+}
+
+/// CR 109.5: Peel an `each player` / `each opponent` subject prefix.
+pub(crate) fn peel_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
+    super::oracle_effect::lower::strip_player_scope_subject(text)
+}
+
+/// CR 608.2d: Single authority for optional / opponent-may prefix peeling in
+/// the chunk-loop cascade. Delegates opponent-may arms and the narrow `you may`
+/// blocklist to `clause_shell` so the strip logic is not duplicated in
+/// `oracle_effect/lower.rs`.
+pub(crate) fn peel_optional_slots(
+    text: &str,
+) -> (bool, Option<OpponentMayScope>, Option<PlayerFilter>, String) {
+    if let Some((scope, player_scope, rest)) = try_peel_opponent_may_prefix(text) {
+        return (true, scope, player_scope, rest);
+    }
+    if let Some(rest) = peel_you_may_prefix(text, YouMayBlocklist::ChunkLoop) {
+        return (true, None, None, rest);
+    }
+    (false, None, None, text.to_string())
+}
+
+/// CR 608.2d: Opponent-may and group-bargain prefixes (`each opponent may`,
+/// `any opponent may`, `defending player may`, …). Shared by `peel_clause`
+/// and `peel_optional_slots`.
+fn try_peel_opponent_may_prefix(
+    text: &str,
+) -> Option<(Option<OpponentMayScope>, Option<PlayerFilter>, String)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        alt((
+            value(
+                (None, Some(PlayerFilter::Opponent)),
+                tag("each opponent may "),
+            ),
+            value(
+                (Some(OpponentMayScope::AnyOpponent), None),
+                tag("any opponent may "),
+            ),
+            value(
+                (Some(OpponentMayScope::AnyPlayer), None),
+                tag("any player may "),
+            ),
+            value(
+                (None, Some(PlayerFilter::TriggeringPlayer)),
+                tag("the first player may "),
+            ),
+            value(
+                (None, Some(PlayerFilter::Opponent)),
+                tag("target opponent may "),
+            ),
+            value(
+                (None, Some(PlayerFilter::DefendingPlayer)),
+                tag("defending player may "),
+            ),
+            value(
+                (None, Some(PlayerFilter::ParentObjectTargetController)),
+                tag("that creature's controller may "),
+            ),
+        ))
+        .parse(input)
+    })
+    .map(|(slots, rest)| (slots.0, slots.1, rest.to_string()))
+}
+
+/// CR 608.2d: Strip a leading bare `you may ` when it precedes a fresh
+/// imperative. Returns the remainder on a match, `None` when the phrase is
+/// part of a specialized construction handled by a dedicated body parser.
+fn peel_you_may_prefix(text: &str, blocklist: YouMayBlocklist) -> Option<String> {
     let lower = text.to_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |i| {
         value((), tag::<_, _, OracleError<'_>>("you may ")).parse(i)
     })?;
     let rest_lower = rest.to_lowercase();
-    if is_specialized_you_may_phrase(&rest_lower) {
+    let blocked = match blocklist {
+        YouMayBlocklist::PeelClause => is_specialized_you_may_phrase(&rest_lower),
+        YouMayBlocklist::ChunkLoop => is_specialized_you_may_retarget_phrase(&rest_lower),
+    };
+    if blocked {
         return None;
     }
     Some(rest.to_string())
@@ -624,5 +760,63 @@ mod tests {
         assert_eq!(peeled, "target creature gets +2/+2");
         assert!(ctx.condition().is_some());
         assert_eq!(ctx.duration(), Some(&Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn peel_each_opponent_may_strips_and_captures_scope() {
+        let (peeled, ctx) = peel_clause("each opponent may sacrifice a creature");
+        assert_eq!(peeled, "sacrifice a creature");
+        assert!(ctx.optional);
+        assert_eq!(ctx.may_implicit_player_scope, Some(PlayerFilter::Opponent));
+        assert!(ctx.opponent_may_scope.is_none());
+    }
+
+    #[test]
+    fn peel_any_opponent_may_strips_and_captures_first_accept_scope() {
+        let (peeled, ctx) = peel_clause("any opponent may pay {3}");
+        assert_eq!(peeled, "pay {3}");
+        assert!(ctx.optional);
+        assert_eq!(ctx.opponent_may_scope, Some(OpponentMayScope::AnyOpponent));
+    }
+
+    #[test]
+    fn peel_optional_slots_chunk_loop_beseech_cast_still_strips() {
+        let (is_optional, _, _, rest) =
+            peel_optional_slots("you may cast the exiled card without paying its mana cost");
+        assert!(is_optional);
+        assert_eq!(rest, "cast the exiled card without paying its mana cost");
+    }
+
+    #[test]
+    fn peel_player_scope_each_opponent() {
+        let (scope, rest) = peel_player_scope_subject("each opponent discards a card");
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
+        assert_eq!(rest, "discard a card");
+    }
+
+    #[test]
+    fn peel_player_scope_skips_per_grantee_play_permission() {
+        let text = "each player may play the card they exiled this way";
+        let (scope, rest) = peel_player_scope_subject(text);
+        assert_eq!(scope, None);
+        assert_eq!(rest, text);
+        let (peeled, ctx) = peel_clause(text);
+        assert!(ctx.player_scope.is_none());
+        assert_eq!(peeled, text);
+    }
+
+    #[test]
+    fn peel_for_each_prefix_strips_repeat_quantity() {
+        let (qty, rest) = peel_for_each_prefix("for each creature you control, draw a card");
+        assert!(qty.is_some());
+        assert_eq!(rest, "draw a card");
+    }
+
+    #[test]
+    fn peel_clause_combines_for_each_and_player_scope() {
+        let (peeled, ctx) = peel_clause("for each opponent, each opponent loses 1 life");
+        assert!(ctx.repeat_for.is_some());
+        assert_eq!(ctx.player_scope, Some(PlayerFilter::Opponent));
+        assert_eq!(peeled, "lose 1 life");
     }
 }

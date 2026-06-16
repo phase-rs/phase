@@ -1830,23 +1830,29 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
 ///     " with that name and exile them"
 /// ```
 ///
-/// Returns `Some(())` on match — the lowering step constructs the
+/// Returns `Some(owner)` on match — the lowering step constructs the
 /// `Effect::ChangeZoneAll` directly (multi-zone origin + filter + destination
 /// are fixed by the matched pattern). Returns `None` for any other shape so
 /// the regular library-search branch can run.
-fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
-    fn run(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+pub(super) fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<ControllerRef> {
+    fn run(input: &str) -> Result<(&str, ControllerRef), nom::Err<OracleError<'_>>> {
         // search <possessive> graveyard, hand, and library
         let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
-        let (input, _) = alt((
-            tag::<_, _, OracleError<'_>>("its owner's "),
-            tag("its controller's "),
-            tag("their "),
-            tag("that player's "),
-            tag("target player's "),
-            tag("target opponent's "),
-            tag("an opponent's "),
-            tag("your "),
+        let (input, owner) = alt((
+            value(
+                ControllerRef::ParentTargetOwner,
+                tag::<_, _, OracleError<'_>>("its owner's "),
+            ),
+            value(
+                ControllerRef::ParentTargetController,
+                tag("its controller's "),
+            ),
+            value(ControllerRef::TargetPlayer, tag("their ")),
+            value(ControllerRef::TargetPlayer, tag("that player's ")),
+            value(ControllerRef::TargetPlayer, tag("target player's ")),
+            value(ControllerRef::Opponent, tag("target opponent's ")),
+            value(ControllerRef::Opponent, tag("an opponent's ")),
+            value(ControllerRef::You, tag("your ")),
         ))
         .parse(input)?;
         let (input, _) = alt((
@@ -1896,9 +1902,9 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
             ),
         ))
         .parse(input)?;
-        Ok((input, ()))
+        Ok((input, owner))
     }
-    run(lower).ok().map(|_| ())
+    run(lower).ok().map(|(_, owner)| owner)
 }
 
 pub(super) fn parse_search_and_creation_ast(
@@ -1924,8 +1930,8 @@ pub(super) fn parse_search_and_creation_ast(
     // and library for [filter] and exile them" — multi-zone exile of every card
     // matching the filter. Recognized before the single-zone library search
     // because both patterns share the "search " prefix; multi-zone wins on match.
-    if try_parse_multi_zone_same_name_exile(lower).is_some() {
-        return Some(SearchCreationImperativeAst::MultiZoneSameNameExile);
+    if let Some(owner) = try_parse_multi_zone_same_name_exile(lower) {
+        return Some(SearchCreationImperativeAst::MultiZoneSameNameExile { owner });
     }
     if starts_with_possessive(lower, "search", "library")
         // CR 701.23a: God-Pharaoh's-Gift-class multi-zone tutors ("search your
@@ -2353,10 +2359,10 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         // target via `SameNameAsParentTarget`. The ChangeZoneAll resolver
         // reads multi-zone origins from the filter and per-object zone-of-
         // origin to track hand-origin exiles for the downstream draw count.
-        SearchCreationImperativeAst::MultiZoneSameNameExile => Effect::ChangeZoneAll {
+        SearchCreationImperativeAst::MultiZoneSameNameExile { owner } => Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Exile,
-            target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+            target: TargetFilter::Typed(TypedFilter::default().controller(owner).properties(vec![
                 crate::types::ability::FilterProp::InAnyZone {
                     zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
                 },
@@ -7697,6 +7703,23 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 601.2d + CR 615.7: "prevent N damage divided/distributed among [targets]"
+        // — intercepted here so `distribute` and `multi_target` propagate to
+        // `ParsedEffectClause`. The bare Effect returned by `lower_utility_imperative_ast`
+        // cannot carry these fields. Mirrors the ZoneCounter { unless_pay } intercept above.
+        ImperativeFamilyAst::Structured(ImperativeAst::Utility(
+            UtilityImperativeAst::Prevent { ref text },
+        )) => {
+            if let Some(clause) = super::lower::try_parse_prevent_distribute(text) {
+                return clause;
+            }
+            // Fallback: standard prevent with no distribution.
+            // lower_utility_imperative_ast is defined in THIS file (imperative.rs),
+            // called unqualified — NOT super::lower::lower_utility_imperative_ast.
+            parsed_clause(lower_utility_imperative_ast(
+                UtilityImperativeAst::Prevent { text: text.clone() },
+            ))
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -11940,23 +11963,51 @@ mod tests {
     #[test]
     fn parse_multi_zone_same_name_exile_pattern() {
         let positives = [
-            "search its owner's graveyard, hand, and library for any number of cards with that name and exile them",
-            "search target player's graveyard, hand, and library for any number of cards with that name and exile them",
-            "search target player's graveyard, hand, and library for all cards with that name and exile them",
-            "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
-            "search their graveyard, hand, and library for a card with that name and exile them",
+            (
+                "search its owner's graveyard, hand, and library for any number of cards with that name and exile them",
+                ControllerRef::ParentTargetOwner,
+            ),
+            (
+                "search target player's graveyard, hand, and library for any number of cards with that name and exile them",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "search target player's graveyard, hand, and library for all cards with that name and exile them",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+                ControllerRef::ParentTargetOwner,
+            ),
+            (
+                "search their graveyard, hand, and library for a card with that name and exile them",
+                ControllerRef::TargetPlayer,
+            ),
             // CR 201.2a: "its controller's" possessive + card-type name source —
             // Eradicate ("that creature"), Crumble to Dust ("that land"),
             // Counterbore ("that spell"), Deicide ("its controller's … that card").
-            "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
-            "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
-            "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
-            "search its controller's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+            (
+                "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                "search its controller's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+                ControllerRef::ParentTargetController,
+            ),
         ];
-        for text in positives {
-            assert!(
-                try_parse_multi_zone_same_name_exile(text).is_some(),
-                "expected match for: {text}"
+        for (text, owner) in positives {
+            assert_eq!(
+                try_parse_multi_zone_same_name_exile(text),
+                Some(owner.clone()),
+                "expected match with owner {owner:?} for: {text}"
             );
         }
 
@@ -12032,6 +12083,11 @@ mod tests {
                 let TargetFilter::Typed(tf) = target else {
                     panic!("Expected Typed target, got {target:?}");
                 };
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::ParentTargetOwner),
+                    "possessive owner must scope searched zones"
+                );
                 let zones_ok = tf.properties.iter().any(|p| {
                     matches!(p, FilterProp::InAnyZone { zones }
                         if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library])

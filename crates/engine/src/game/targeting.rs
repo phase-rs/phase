@@ -172,6 +172,7 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::ScopedPlayer) => false,
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::ParentTargetController) => false,
+                    Some(ControllerRef::ParentTargetOwner) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
                     // CR 613.1: a persisted chosen player isn't a target
                     // candidate here. Fail closed.
