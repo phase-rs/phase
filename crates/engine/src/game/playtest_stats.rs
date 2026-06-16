@@ -386,6 +386,7 @@ mod tests {
     use super::*;
     use crate::types::card::CardFace;
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::mana::ManaCost;
 
     fn land(name: &str) -> CardFace {
         CardFace {
@@ -405,7 +406,7 @@ mod tests {
                 core_types: vec![CoreType::Instant],
                 ..Default::default()
             },
-            mana_value: Some(cmc as f32),
+            mana_cost: ManaCost::generic(cmc),
             ..Default::default()
         }
     }

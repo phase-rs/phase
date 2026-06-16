@@ -602,6 +602,7 @@ pub struct AdvanceTurnResult {
 mod tests {
     use super::*;
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::mana::ManaCost;
 
     fn make_land(name: &str) -> CardFace {
         CardFace {
@@ -621,7 +622,7 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 ..Default::default()
             },
-            mana_value: Some(cmc as f32),
+            mana_cost: ManaCost::generic(cmc),
             ..Default::default()
         }
     }
