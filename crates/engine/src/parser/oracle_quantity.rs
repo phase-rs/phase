@@ -1778,8 +1778,25 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
         let result: OracleResult<'_, &str> =
             terminated(take_until(suffix), tag(suffix)).parse(lower);
         if let Ok(("", filter_phrase)) = result {
-            let (filter, remainder) =
-                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+            // "card"/"cards" is zone-agnostic Oracle phrasing for any permanent
+            // card (e.g. "nonland card discarded this way"). Normalize to
+            // "permanent"/"permanents" so parse_type_phrase can extract the full
+            // filter (e.g. NonLand + Permanent) rather than leaving "card" as an
+            // unrecognised remainder and falling back to the unfiltered TrackedSetSize.
+            let normalized;
+            let phrase = {
+                let t = filter_phrase.trim();
+                if let Some(prefix) = t.strip_suffix(" cards") {
+                    normalized = format!("{prefix} permanents");
+                    &normalized
+                } else if let Some(prefix) = t.strip_suffix(" card") {
+                    normalized = format!("{prefix} permanent");
+                    &normalized
+                } else {
+                    t
+                }
+            };
+            let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(phrase);
             if remainder.trim().is_empty() {
                 return Some((Some(filter), cause));
             }
@@ -5868,6 +5885,38 @@ mod tests {
                 ),
                 other => panic!("expected Typed filter, got {other:?}"),
             },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + CR 701.9a: "nonland card discarded this way" (Seasoned
+    /// Pyromancer) must emit `FilteredTrackedSetSize` with a NonLand filter,
+    /// not the plain `TrackedSetSize` fallback. Without the "card" → "permanent"
+    /// normalisation in `parse_destroyed_or_sacrificed_this_way_filter`, the
+    /// "card" tail is left as an unrecognised remainder and the filter is dropped,
+    /// so discarding 1 land + 1 nonland would create 2 tokens instead of 1.
+    /// (Primary engine fix for issue #740 is in `ability_or_branch_references_tracked_set`.)
+    #[test]
+    fn nonland_card_discarded_this_way_uses_filtered_tracked_set_nonland() {
+        let qty = parse_for_each_clause("nonland card discarded this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+                assert_eq!(
+                    caused_by,
+                    Some(crate::types::ability::ThisWayCause::Discarded),
+                    "cause must be Discarded"
+                );
+                match *filter {
+                    TargetFilter::Typed(ref tf) => {
+                        assert!(
+                            tf.type_filters
+                                .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                            "filter must include NonLand; got {tf:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
     }

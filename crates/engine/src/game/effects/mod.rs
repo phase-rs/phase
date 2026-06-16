@@ -2565,7 +2565,17 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || effect_references_tracked_set(&ability.effect);
+    ) || effect_references_tracked_set(&ability.effect)
+        // CR 608.2c + CR 609.3: `repeat_for` is a loop-count quantity on the
+        // ResolvedAbility, not inside Effect — e.g. "for each nonland card
+        // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
+        // Without this check, the forced-discard path (no WaitingFor pause)
+        // never publishes the tracked set, so the downstream token loop sees
+        // size 0 and creates no tokens (Seasoned Pyromancer bug #740).
+        || ability
+            .repeat_for
+            .as_ref()
+            .is_some_and(quantity_expr_references_tracked_set);
 
     consumes
         || ability
