@@ -4564,23 +4564,29 @@ fn parse_explore_scry_prelude_replacement(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let ((subject,), rest) = nom_on_lower(lower, lower, |input| {
+    let ((subject, scry_value), rest) = nom_on_lower(lower, lower, |input| {
         let (input, _) = tag("if ").parse(input)?;
         // Parse subject: "a creature you control" or "a creature"
         let (input, _) = tag("a creature").parse(input)?;
         let (input, has_control) = opt(tag(" you control")).parse(input)?;
-        let (input, _) =
-            tag(" would explore, instead you scry 1, then that creature explores").parse(input)?;
+        let (input, _) = tag(" would explore, instead you scry ").parse(input)?;
+        let (input, count_str) = nom::character::complete::digit1(input)?;
+        let (input, _) = tag(", then that creature explores").parse(input)?;
         let (input, _) = opt(char('.')).parse(input)?;
-        Ok((input, (has_control.is_some(),)))
+        let count = count_str.parse::<u32>().ok().ok_or_else(|| {
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
+        })?;
+        Ok((input, (has_control.is_some(), count)))
     })?;
     if !rest.trim().is_empty() {
         return None;
     }
 
-    // Create execute: scry 1 (main effect), explore is implicit (the event proceeds)
+    // Create execute: scry N (main effect), explore is implicit (the event proceeds)
     let scry_effect = Effect::Scry {
-        count: QuantityExpr::Fixed { value: 1 },
+        count: QuantityExpr::Fixed {
+            value: scry_value as i32,
+        },
         target: TargetFilter::Controller,
     };
 
@@ -12437,6 +12443,16 @@ mod snapshot_tests {
     fn replacement_explore_scry_prelude_creature() {
         let def = parse_replacement_line(
             "If a creature would explore, instead you scry 1, then that creature explores.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_explore_scry_prelude_creature_scry_2() {
+        let def = parse_replacement_line(
+            "If a creature would explore, instead you scry 2, then that creature explores.",
             "Test Card",
         )
         .unwrap();

@@ -154,35 +154,7 @@ fn resolve_single_explorer(
     };
 
     match crate::game::replacement::replace_event(state, proposed, events) {
-        crate::game::replacement::ReplacementResult::Execute(modified_event) => {
-            // Check if Twists and Turns replacement applied by looking at the execute effect
-            let rid = modified_event.applied_set().iter().next();
-            if let Some(rid) = rid {
-                if let Some(obj) = state.objects.get(&rid.source) {
-                    if let Some(def) = obj.replacement_definitions.get(rid.index) {
-                        if let Some(execute) = def.execute.as_deref() {
-                            if matches!(
-                                &*execute.effect,
-                                crate::types::ability::Effect::Scry { .. }
-                            ) {
-                                // Execute the scry prelude before the explore
-                                let scry_ability = ResolvedAbility::new(
-                                    (*execute.effect).clone(),
-                                    vec![],
-                                    rid.source,
-                                    obj.controller,
-                                );
-                                let _ = crate::game::effects::scry::resolve(
-                                    state,
-                                    &scry_ability,
-                                    events,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::game::replacement::ReplacementResult::Execute(_) => {}
         crate::game::replacement::ReplacementResult::Prevented => {
             // Explore was prevented, skip the rest
             events.push(GameEvent::EffectResolved {

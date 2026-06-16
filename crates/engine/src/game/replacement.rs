@@ -1579,15 +1579,26 @@ fn explore_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState)
 
 fn explore_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    // Twists and Turns pattern: the applier doesn't execute the scry prelude
-    // It just returns the modified event. The explore resolver will execute
-    // the scry prelude after the replacement pipeline returns.
-    // This follows the standard pattern (scry_applier, mill_applier, draw_applier)
-    // where appliers modify events, not execute effects directly.
+    // CR 701.37a + CR 614.1a: Execute the replacement prelude (e.g., scry) before the explore proceeds
+    if let Some(obj) = state.objects.get(&rid.source) {
+        if let Some(def) = obj.replacement_definitions.get(rid.index) {
+            if let Some(execute) = def.execute.as_deref() {
+                if matches!(&*execute.effect, crate::types::ability::Effect::Scry { .. }) {
+                    let scry_ability = ResolvedAbility::new(
+                        (*execute.effect).clone(),
+                        vec![],
+                        rid.source,
+                        obj.controller,
+                    );
+                    let _ = crate::game::effects::scry::resolve(state, &scry_ability, events);
+                }
+            }
+        }
+    }
     ApplyResult::Modified(event)
 }
 
