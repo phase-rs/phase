@@ -1109,6 +1109,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 702.16k: Player-subject protection ("You have protection from <X>")
+    // must be claimed before the permanent-subject continuous path, which would
+    // otherwise grant the protection keyword to permanents you control instead
+    // of to you (the player). Distinguishes the player subject from the
+    // permanent subject — the permanent path is left untouched.
+    if let Some(def) = parse_player_protection_static(&text, &lower) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_subject_continuous_static(&text) {
         return Some(def);
     }

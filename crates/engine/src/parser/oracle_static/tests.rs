@@ -75,6 +75,83 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
+/// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
+/// each of your opponents." (Absolute Virtue) must emit a SINGLE
+/// `PlayerProtection(FromPlayer(Opponent))` def affecting the controller — NOT a
+/// permanent-targeting `Continuous`/`AddKeyword` def (which would grant nothing
+/// to the player).
+#[test]
+fn player_subject_protection_each_opponent_emits_player_protection() {
+    use crate::types::keywords::ProtectionTarget;
+
+    let def = parse_static_line("You have protection from each of your opponents.")
+        .expect("player-protection static def");
+    assert_eq!(
+        def.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::FromPlayer(ControllerRef::Opponent)),
+        "player subject must emit PlayerProtection(FromPlayer(Opponent)), got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        )),
+        "player-protection must affect the controller"
+    );
+}
+
+/// CR 702.16: the player-subject protection class is quality-general — the SAME
+/// `parse_protection_target` classifier handles color, everything, etc. for the
+/// player subject, not just the one card.
+#[test]
+fn player_subject_protection_handles_color_and_everything() {
+    use crate::types::keywords::ProtectionTarget;
+    use crate::types::mana::ManaColor;
+
+    let red = parse_static_line("You have protection from red.").expect("color def");
+    assert_eq!(
+        red.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::Color(ManaColor::Red))
+    );
+
+    let everything =
+        parse_static_line("You have protection from everything.").expect("everything def");
+    assert_eq!(
+        everything.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::Everything)
+    );
+}
+
+/// CR 702.16a: Regression — the permanent-SUBJECT path ("Creatures you control
+/// have protection from <X>") must NOT be claimed by the player-subject parser.
+/// It still emits a `Continuous`/`AddKeyword(Protection)` on permanents.
+#[test]
+fn permanent_subject_protection_still_continuous() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let defs = parse_static_line_multi("Creatures you control have protection from red.");
+    let cont = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("permanent path must remain a Continuous def, not PlayerProtection");
+    assert!(
+        defs.iter()
+            .all(|d| !matches!(d.mode, StaticMode::PlayerProtection(_))),
+        "permanent subject must NOT emit PlayerProtection, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        cont.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            }),
+        "permanent path must grant Protection(Color(Red)) on permanents, got {:?}",
+        cont.modifications
+    );
+}
+
 /// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
 /// block an additional creature each combat." must decompose into BOTH the
 /// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
