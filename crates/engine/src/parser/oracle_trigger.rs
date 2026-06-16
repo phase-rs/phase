@@ -2965,6 +2965,24 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return result;
     }
 
+    // CR 702.188a + CR 603.4: "if <pronoun> was cast using web-slinging" —
+    // intervening-if gating an ETB trigger on the alternative cast cost
+    // (Spiders-Man, Heroic Horde). Mirrors the replacement-side
+    // `ReplacementCondition::CastVariantPaid { WebSlinging }` used by Scarlet
+    // Spider, reading the same recorded `GameObject.cast_variant_paid`.
+    // MUST precede the zoneless "if it was cast" arm below: "if it was cast"
+    // is a prefix of "if it was cast using web-slinging" and would shadow it.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_cast_using_variant_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
+
     // CR 603.4 + CR 601.2: "if it was cast" — the entering permanent must have
     // been cast (not put onto the battlefield by another effect). Wedding
     // Ring's ETB token-copy is gated this way so the created copy *token* —
@@ -4069,6 +4087,44 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
 /// CR 702.49 / CR 702.117a / CR 702.137a: Extract alternative-cost "cost was
 /// paid" intervening-if conditions (ninjutsu/sneak/surge/spectacle).
 /// Guard: "instead" after the condition means conditional override, not intervening-if.
+/// CR 702.188a + CR 603.4: Parse an intervening-if of the form
+/// "if <pronoun> was cast using <variant>" and emit the matching
+/// `TriggerCondition::CastVariantPaidPersistent`.
+///
+/// Built for the class along two orthogonal axes (CLAUDE.md "compose nom
+/// combinators, don't enumerate permutations"):
+///   * pronoun axis — the entering subject is referenced by any singular or
+///     plural pronoun (Spiders-Man's reflexive token batch uses "they were";
+///     single-permanent cards use "it was"). A single `alt` over the
+///     pronoun + linking verb consumes this.
+///   * variant axis — the named alternative cast cost. Web-slinging is the
+///     only cast cost spelled "cast using <name>" in current Oracle text
+///     (mirrors the replacement-side coverage in `oracle_replacement.rs`);
+///     adding a future variant is a one-line `alt` arm here.
+///
+/// Emits `CastVariantPaidPersistent` (turn-agnostic) so the trigger agrees
+/// with the replacement path, which reads `GameObject.cast_variant_paid`
+/// without a turn bound.
+fn parse_cast_using_variant_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (input, _) = tag("if ").parse(input)?;
+    // Subject pronoun + linking verb. "they were" / "it was" / "this was" /
+    // "he was" / "she was" all reference the entering object's cast provenance.
+    let (input, _) = alt((
+        tag("they were cast using "),
+        tag("it was cast using "),
+        tag("this was cast using "),
+        tag("he was cast using "),
+        tag("she was cast using "),
+    ))
+    .parse(input)?;
+    // CR 702.188a: web-slinging is the sole "cast using" alternative cost.
+    let (input, variant) = value(CastVariantPaid::WebSlinging, tag("web-slinging")).parse(input)?;
+    Ok((
+        input,
+        TriggerCondition::CastVariantPaidPersistent { variant },
+    ))
+}
+
 fn try_extract_cast_variant_paid_condition(
     tp: &TextPair<'_>,
     lower: &str,
@@ -26408,6 +26464,74 @@ mod tests {
         );
     }
 
+    /// CR 702.188a + CR 603.4 (issue: Spiders-Man, Heroic Horde): the ETB
+    /// intervening-if "if they were cast using web-slinging" must gate the
+    /// life-gain + token effects. Before the fix `extract_if_condition` had no
+    /// arm for "cast using <variant>", so the clause was dropped and the
+    /// trigger fired unconditionally. Drives the full lowering pipeline
+    /// (`parse_trigger_line` → `lower_trigger_ir`) and asserts the composed
+    /// `def.condition` carries the web-slinging gate — this assertion flips to
+    /// `None` if the parser arm is reverted.
+    #[test]
+    fn extract_cast_using_web_slinging_plural_pronoun() {
+        let (cleaned, cond) = extract_if_condition(
+            "if they were cast using web-slinging, you gain 3 life and create two 2/1 green Spider creature tokens with reach",
+        );
+        assert_eq!(
+            cleaned,
+            "you gain 3 life and create two 2/1 green Spider creature tokens with reach"
+        );
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::CastVariantPaidPersistent {
+                variant: CastVariantPaid::WebSlinging,
+            }
+        );
+    }
+
+    /// Singular-pronoun variant of the same class — "if it was cast using
+    /// web-slinging" — covers single-permanent web-slinging cards.
+    #[test]
+    fn extract_cast_using_web_slinging_singular_pronoun() {
+        let (_cleaned, cond) =
+            extract_if_condition("if it was cast using web-slinging, draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::CastVariantPaidPersistent {
+                variant: CastVariantPaid::WebSlinging,
+            }
+        );
+    }
+
+    /// End-to-end: the full Spiders-Man ETB trigger lowers with the
+    /// web-slinging intervening-if as its `def.condition` (NOT `None`).
+    /// This is the discriminating assertion: revert the parser arm and
+    /// `def.condition` becomes `None`, so the gated effects would fire
+    /// unconditionally.
+    #[test]
+    fn spiders_man_etb_carries_web_slinging_condition() {
+        let def = parse_trigger_line(
+            "When Spiders-Man enters, if they were cast using web-slinging, you gain 3 life and create two 2/1 green Spider creature tokens with reach.",
+            "Spiders-Man, Heroic Horde",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::CastVariantPaidPersistent {
+                variant: CastVariantPaid::WebSlinging,
+            }),
+            "Spiders-Man ETB must be gated on web-slinging, not fire unconditionally"
+        );
+    }
+
+    /// Control: an ETB trigger with no cast-variant clause must remain
+    /// unconditional (`def.condition == None`) — guards against the new arm
+    /// over-matching.
+    #[test]
+    fn plain_etb_has_no_cast_variant_condition() {
+        let def = parse_trigger_line("When Test Card enters, draw a card.", "Test Card");
+        assert_eq!(def.condition, None);
+    }
+
     #[test]
     fn extract_if_it_wasnt_blocking_as_zone_change_lookback() {
         let (cleaned, cond) = extract_if_condition("if it wasn't blocking, draw a card");
@@ -29399,6 +29523,80 @@ mod tests {
             replacement.expiry,
             Some(crate::types::ability::RestrictionExpiry::EndOfTurn),
             "the boost lasts until end of turn"
+        );
+    }
+
+    /// CR 108.3 + CR 109.4 + CR 603.4: Agent of Treachery's end-step draw is
+    /// gated by an intervening-if — "if you control three or more permanents you
+    /// don't own". The bare "you don't own" negated-ownership suffix must be
+    /// consumed by the type-phrase parser so the count condition reaches a word
+    /// boundary and the intervening-if is hoisted onto the trigger. Before the
+    /// fix the suffix was unconsumed, the condition was discarded
+    /// (`condition: None`), and Agent drew three cards unconditionally every end
+    /// step (#3304).
+    #[test]
+    fn agent_of_treachery_end_step_draw_is_gated_by_not_owned_count() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, gain control of target permanent.\n\
+             At the beginning of your end step, if you control three or more \
+             permanents you don't own, draw three cards.",
+            "Agent of Treachery",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "no parse warnings expected, got {:?}",
+            parsed.parse_warnings
+        );
+
+        let end_step = parsed
+            .triggers
+            .iter()
+            .find(|t| t.phase == Some(Phase::End))
+            .expect("an end-step (Phase::End) trigger must be parsed");
+
+        // The intervening-if must survive as a QuantityComparison, NOT be dropped.
+        let Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }) = end_step.condition.clone()
+        else {
+            panic!(
+                "end-step trigger must carry ObjectCount >= 3 intervening-if, got {:?}",
+                end_step.condition
+            );
+        };
+
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("count filter must be Typed, got {filter:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "the counted permanents are ones YOU control (CR 109.4)"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            }),
+            "the counted permanents are ones you DON'T own — Owned{{Opponent}} \
+             (runtime: owner != controller); got {:?}",
+            tf.properties
+        );
+
+        // The execute body still draws three cards.
+        let exec = end_step.execute.as_deref().expect("end-step execute body");
+        assert!(
+            matches!(exec.effect.as_ref(), Effect::Draw { .. }),
+            "end-step trigger draws cards, got {:?}",
+            exec.effect
         );
     }
 }

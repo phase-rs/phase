@@ -30,7 +30,9 @@
 //!   → [`ContinuousModification::SetPower`] + [`ContinuousModification::SetToughness`]
 //!   plus an `AddType` / `AddSubtype` per word in the type list (CR 707.9b
 //!   + CR 613.1d).
-//! - `it's a(n) {core_type} in addition to its other types`
+//! - `it's a(n) {core_type} in addition to its other types` (and the
+//!   elided-subject form `is a(n) {core_type} in addition to its other types`
+//!   for non-leading bodies in a comma-anded list)
 //!   → [`ContinuousModification::AddType`] (when the type word is a core type)
 //!   or [`ContinuousModification::AddSubtype`] (otherwise).
 //! - `it has {keyword[, keyword, ...]}`
@@ -157,6 +159,8 @@ pub(crate) fn parse_except_clause<'a>(
 ///     (when ctx provides the trigger or activated-ability index)
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
 ///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
+///   - `is a(n) {core_type|subtype} in addition to its other types`
+///     (elided-subject form for non-leading bodies)            → AddType/AddSubtype
 ///   - `it has "<triggered/activated/static ability>"`         → GrantTrigger/GrantAbility/etc.
 ///   - `it has {keyword[, keyword, ...]}`                      → AddKeyword per kw
 pub(crate) fn parse_except_body<'a>(
@@ -582,15 +586,32 @@ fn parse_has_this_ability<'a>(
     ))
 }
 
-/// "it's a(n) {type_word} in addition to its other types"
+/// CR 707.9b + CR 205.1b: "it's a(n) {type_word} in addition to its other
+/// types", plus the elided-subject form "is a(n) {type_word} in addition to
+/// its other types" used for non-leading bodies in a comma-anded copy-except
+/// list (the pronoun "it" is dropped and "'s" decontracts to "is").
 /// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
-/// or anything else → treated as a subtype and canonicalized.
+/// or anything else → treated as a subtype and canonicalized → `AddSubtype`.
 fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it\u{2019}s an "),
         tag("it\u{2019}s a "),
+        // CR 707.9b + CR 205.1b: elided-subject form. In a comma-anded copy-except
+        // list ("it isn't legendary, is an artifact in addition to its other
+        // types, and has myriad") the subject pronoun "it" is dropped and "'s"
+        // decontracts to "is" for non-leading bodies. Auton Soldier (core type
+        // Artifact, BecomeCopy path) and The Apprentice's Folly (subtype Reflection,
+        // CopyTokenOf path) are the canonical cases. Reached only after
+        // `parse_its_a_type_loses_others` (parse_except_body) declines, so the
+        // "and loses all other card types" replacement form is never mis-routed
+        // here for the leading-subject "it's" contraction.
+        // NOTE: the loses-others arm matches only the "it's"-contraction; a future
+        // card using the elided form WITH "and loses all other card types" would
+        // incorrectly land here as an AddType — no such card exists today.
+        tag("is an "),
+        tag("is a "),
     ))
     .parse(input)
     .ok()?;
@@ -1399,6 +1420,81 @@ mod tests {
             vec![ContinuousModification::AddType {
                 core_type: CoreType::Artifact,
             }]
+        );
+    }
+
+    /// CR 707.9b + CR 205.1b: elided-subject "is an artifact in addition to its
+    /// other types" (Auton Soldier class). In a comma-anded copy-except list the
+    /// subject pronoun "it" is dropped and "'s" decontracts to "is", so the body
+    /// reads "is an …". The arm must restore `AddType(Artifact)` without
+    /// disturbing the surrounding `isn't legendary` / `has myriad` bodies.
+    /// Auton Soldier's replacement (BecomeCopy) clause is NOT truncated, so the
+    /// trailing `has myriad` is present and must survive.
+    #[test]
+    fn elided_subject_is_an_core_type_in_addition_emits_add_type() {
+        let (_, mods) = parse_except_clause(
+            ", except it isn't legendary, is an artifact in addition to its other types, and has myriad",
+            "Auton Soldier",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Artifact
+                }
+            )),
+            "missing AddType(Artifact) from elided 'is an artifact'; got {mods:?}"
+        );
+        // The elided arm must not disturb the surrounding bodies: the leading
+        // `isn't legendary` and the trailing `has myriad` both still parse.
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Myriad
+            }
+        )));
+    }
+
+    /// CR 707.9b + CR 205.1b: elided-subject "is a Reflection in addition to its
+    /// other types" (The Apprentice's Folly class — the restored modification is
+    /// `AddSubtype`). NOTE: on the shipped card the saga sentence-splitter
+    /// truncates the chapter at ", and ", diverting "has haste" into a separate
+    /// SequentialSibling Unimplemented sub-ability BEFORE the token effect runs.
+    /// So the real text the token-copy except parser receives ends at "...its
+    /// other types" — there is no trailing "and has haste" here. This test uses
+    /// exactly that truncated form. (The dropped-Haste sentence-split is a
+    /// separate latent saga bug, out of scope for this type fix.)
+    #[test]
+    fn elided_subject_is_a_subtype_in_addition_emits_add_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it isn't legendary, is a Reflection in addition to its other types",
+            "The Apprentice's Folly",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Reflection"
+            )),
+            "missing AddSubtype(Reflection) from elided 'is a Reflection'; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "leading 'isn't legendary' must still parse; got {mods:?}"
         );
     }
 

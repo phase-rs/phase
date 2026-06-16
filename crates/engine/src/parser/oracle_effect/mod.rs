@@ -24823,6 +24823,87 @@ mod tests {
         );
     }
 
+    /// CR 701.9 + CR 603.4: "draw a card for each card you've discarded this
+    /// turn" must produce a dynamic Draw count referencing the controller's
+    /// per-turn discard tally, not a dropped `Fixed(1)`.
+    ///
+    /// Class: Misty Knight, Green Goblin (Revenant), Astonishing Spider-Man,
+    /// and other "for each card you've discarded this turn" draws.
+    #[test]
+    fn for_each_cards_discarded_this_turn_draw_count_replaced() {
+        let e = parse_effect("draw a card for each card you've discarded this turn");
+        match e {
+            Effect::Draw { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                "draw count must scale with cards discarded this turn, not Fixed(1)"
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+    }
+
+    /// The "you have discarded" surface variant must resolve identically.
+    #[test]
+    fn for_each_cards_discarded_this_turn_long_form_draw_count_replaced() {
+        let e = parse_effect("draw a card for each card you have discarded this turn");
+        match e {
+            Effect::Draw { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                }
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+    }
+
+    /// Discriminating runtime test: parse the real clause and resolve its Draw
+    /// count through the live quantity resolver against recorded discard state.
+    /// If the parser fix is reverted, the count is `Fixed(1)` and resolves to 1
+    /// regardless of discards, so the `resolved == 3` assertion flips and fails.
+    #[test]
+    fn for_each_cards_discarded_this_turn_resolves_dynamic_draw_count() {
+        use crate::game::quantity::resolve_quantity;
+        use crate::game::restrictions::record_discard;
+        use crate::game::zones::create_object;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        let count = match parse_effect("draw a card for each card you've discarded this turn") {
+            Effect::Draw { count, .. } => count,
+            other => panic!("expected Draw, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Misty Knight, Hero for Hire".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller has discarded three cards this turn.
+        record_discard(&mut state, controller);
+        record_discard(&mut state, controller);
+        record_discard(&mut state, controller);
+
+        let resolved = resolve_quantity(&state, &count, controller, source);
+        assert_eq!(
+            resolved, 3,
+            "draw count must resolve to the controller's discard tally (3), not Fixed(1)"
+        );
+    }
+
     #[test]
     fn for_each_token_count_keeps_counter_history_this_turn_clause() {
         let clause = try_parse_for_each_effect(

@@ -4988,7 +4988,10 @@ pub(crate) fn check_trigger_condition(
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
-            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            let ctx = FilterContext::from_source_with_controller(
+                source_id.unwrap_or(ObjectId(0)),
+                controller,
+            );
             let count = state
                 .battlefield
                 .iter()
@@ -6378,6 +6381,37 @@ pub mod tests {
             None,
             None,
         ));
+    }
+
+    #[test]
+    fn control_count_condition_uses_trigger_controller_not_source_controller() {
+        // CR 603.4: Agent of Treachery — "if you control three or more permanents
+        // you don't own". The `ControlCount` filter must resolve the controller-
+        // relative scope ("you") against the TRIGGER controller, not the source
+        // object's controller. Here the source is controlled by P1 while the
+        // trigger fires for P0, who controls two creatures: with the source-
+        // derived context the "creatures you control" filter counted P1's
+        // creatures (1 — the source) and the condition failed; with the explicit
+        // trigger controller it correctly counts P0's two creatures.
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(1), "Source", 2, 2);
+        make_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        make_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+
+        let condition = TriggerCondition::ControlCount {
+            minimum: 2,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), None),
+            "ControlCount must count the trigger controller's permanents, not the source controller's"
+        );
+        // The same board fails for P1 (controls only the source creature).
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(1), Some(source), None),
+            "P1 controls only one matching creature, so minimum 2 is not met"
+        );
     }
 
     fn make_soulbond_creature(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {

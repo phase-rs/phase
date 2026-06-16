@@ -1379,6 +1379,38 @@ mod tests {
         );
     }
 
+    /// CR 707.9b + CR 205.1b: The Apprentice's Folly — elided-subject "is a
+    /// Reflection in addition to its other types" in a comma-anded token-copy
+    /// except clause must restore `AddSubtype(Reflection)` to
+    /// `CopyTokenOf.additional_modifications`. Uses the TRUNCATED text the saga
+    /// sentence-splitter produces (no "and has haste" — that is diverted upstream
+    /// into a separate Unimplemented sibling, a separate out-of-scope saga bug).
+    /// We assert nothing about `extra_keywords`: on this card path there is no
+    /// surviving keyword in the clause.
+    #[test]
+    fn elided_subtype_token_copy_routes_subtype_to_additional_modifications() {
+        let effect = try_parse_token(
+            "create a token that's a copy of that permanent, except it isn't legendary, is a reflection in addition to its other types",
+            "Create a token that's a copy of that permanent, except it isn't legendary, is a Reflection in addition to its other types",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Reflection"
+            )),
+            "AddSubtype(Reflection) must reach CopyTokenOf.additional_modifications; got {additional_modifications:?}"
+        );
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones: "create a token that's a copy of
     /// that card, except it's an enchantment and loses all other card types."
     /// CR 205.1a + CR 707.9d: the "loses all other card types" suffix is the
