@@ -9012,12 +9012,12 @@ pub enum Effect {
         target: TargetFilter,
         amount: QuantityExpr,
     },
-    /// CR 701.12a: Exchange a player's life total with the source permanent's
+    /// CR 701.12g: Exchange a player's life total with the source permanent's
     /// power or toughness. The player's life total becomes the stat's current
     /// value (CR 119.5 gain/lose-to-reach), and the source gains an indefinite
     /// layer-7b continuous effect setting that stat to the player's previous
-    /// life total (CR 613.4b). All-or-nothing per CR 701.12a: if the life change
-    /// is forbidden (CR 119.7/119.8 can't-gain/can't-lose), no part occurs.
+    /// life total (CR 613.4b). All-or-nothing per CR 701.12a + CR 119.7/119.8:
+    /// if the life change is forbidden (can't-gain/can't-lose), no part occurs.
     /// `player` selects the player (Controller for "your", Opponent for "target
     /// opponent"); `stat` selects which of the source's stats is exchanged.
     /// Tree of Redemption (your life ↔ toughness), Tree of Perdition (target

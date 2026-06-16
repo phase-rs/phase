@@ -444,7 +444,7 @@ pub(crate) enum ImperativeFamilyAst {
         target_a: TargetFilter,
         target_b: TargetFilter,
     },
-    /// CR 701.12a: Exchange a player's life total with the source's power or
+    /// CR 701.12g: Exchange a player's life total with the source's power or
     /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
     /// player whose life is exchanged (`Controller` for "your", an opponent
     /// filter for "target opponent's"); `stat` selects which source stat.

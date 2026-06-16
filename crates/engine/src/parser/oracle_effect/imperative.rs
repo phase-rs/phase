@@ -6743,7 +6743,7 @@ pub(super) fn parse_imperative_family_ast(
         // Both shapes lower to ExchangeControl { target_a, target_b }; in the
         // quantified case both filters are identical.
         "exchange" => {
-            // CR 701.12a: "exchange <player>'s life total with ~'s power/toughness"
+            // CR 701.12g: "exchange <player>'s life total with ~'s power/toughness"
             // (Tree of Perdition, Tree of Redemption, Evra) — checked before
             // "exchange control of" since the two shapes share only the verb.
             if let Some((player, stat)) = try_parse_exchange_life_with_stat(lower) {
@@ -6959,7 +6959,7 @@ pub(super) fn parse_imperative_family_ast(
     }
 }
 
-/// CR 701.12a: Parse "exchange <player>'s life total with ~'s power/toughness"
+/// CR 701.12g: Parse "exchange <player>'s life total with ~'s power/toughness"
 /// (Tree of Perdition, Tree of Redemption, Evra, Halcyon Witness) into the
 /// exchanged player filter and the source stat. Returns `None` for any other
 /// "exchange" shape so the caller falls through to "exchange control of".

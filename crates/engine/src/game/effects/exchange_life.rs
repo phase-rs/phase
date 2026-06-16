@@ -170,7 +170,7 @@ fn resolve_life_with_stat(
         })
         .unwrap_or(ability.controller);
 
-    // CR 701.12a: capture both previous values before any mutation.
+    // CR 701.12g: capture both previous values before any mutation.
     let Some(source) = state.objects.get(&ability.source_id) else {
         // Source left the battlefield before resolution — the stat side can't
         // be completed, so per CR 701.12a nothing happens.
@@ -298,7 +298,7 @@ mod tests {
         id
     }
 
-    /// CR 701.12a + CR 119.5 + CR 613.4b: Tree of Perdition exchanges the
+    /// CR 701.12g + CR 119.5 + CR 613.4b: Tree of Perdition exchanges the
     /// opponent's life total with the source's toughness. The opponent's life
     /// becomes the toughness; the toughness is set (layer 7b) to the opponent's
     /// previous life.
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(state.objects.get(&source).unwrap().toughness, Some(25));
     }
 
-    /// CR 701.12a: "your life total" form exchanges the controller's life with
+    /// CR 701.12g: "your life total" form exchanges the controller's life with
     /// the source's toughness, with no player target supplied.
     #[test]
     fn exchange_uses_controller_when_no_target() {
@@ -399,7 +399,7 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // CR 701.12a: life unchanged (would have risen 5 → 13) ...
+        // CR 701.12g + CR 701.12a: life unchanged (would have risen 5 → 13) ...
         assert_eq!(state.players[0].life, 5);
         // ... and the toughness was not set.
         assert!(!state.transient_continuous_effects.iter().any(|e| {
