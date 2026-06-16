@@ -13350,6 +13350,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantNextSpellAbility {
                 modifier: NextSpellModifier::WithoutPayingManaCost,
+                player: PlayerScope::Controller,
                 spell_filter: None,
             },
             vec![],
@@ -13393,6 +13394,83 @@ mod tests {
         }
         assert_eq!(state.stack.len(), 1);
         assert!(state.pending_next_spell_modifiers.is_empty());
+    }
+
+    /// CR 115.1: a `player: Target` grant (Bigger on the Inside) pushes the
+    /// pending modifier keyed to the TARGETED player, not the controller — so
+    /// "the next spell THEY cast" gains the keyword for the mana recipient.
+    #[test]
+    fn grant_next_spell_target_scope_keys_targeted_player() {
+        use crate::types::ability::ResolvedAbility;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(79),
+            PlayerId(0),
+            "Bigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        // Controller is player 0; the ability targets player 1.
+        let ability = ResolvedAbility::new(
+            Effect::GrantNextSpellAbility {
+                modifier: NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Cascade,
+                },
+                player: PlayerScope::Target,
+                spell_filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.pending_next_spell_modifiers.len(), 1);
+        assert_eq!(
+            state.pending_next_spell_modifiers[0].player,
+            PlayerId(1),
+            "Target-scope grant must key the targeted player, not the controller"
+        );
+    }
+
+    /// CR 109.5: a `player: Controller` grant keys the controller even when the
+    /// ability also has a player target (e.g. a "you cast" grant chained after
+    /// a targeted clause).
+    #[test]
+    fn grant_next_spell_controller_scope_keys_controller() {
+        use crate::types::ability::ResolvedAbility;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Controller Grant Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantNextSpellAbility {
+                modifier: NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Cascade,
+                },
+                player: PlayerScope::Controller,
+                spell_filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.pending_next_spell_modifiers.len(), 1);
+        assert_eq!(
+            state.pending_next_spell_modifiers[0].player,
+            PlayerId(0),
+            "Controller-scope grant must key the controller even with a player target"
+        );
     }
 
     #[test]

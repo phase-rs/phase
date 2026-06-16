@@ -6536,6 +6536,26 @@ pub(super) fn parse_imperative_family_ast(
         .parse(lower)
         .ok()
         .map(|(_, ast)| ast),
+        // CR 701.31c: "planeswalk" — an ability instructs a player to
+        // planeswalk (TARDIS, Start the TARDIS, TARDIS Bay). Rules-correct
+        // no-op outside a Planechase game (CR 701.31a); handled by
+        // effects::planeswalk via game::planechase. The "you may " / "then "
+        // prefix and the `optional` flag are already stripped upstream, so the
+        // family parser sees only the bare verb body for both the optional
+        // (TARDIS, Start the TARDIS) and mandatory (TARDIS Bay) forms. The
+        // anchored all-consuming guard prevents matching a longer clause.
+        "planeswalk" | "planeswalks" => all_consuming(terminated(
+            // Longer alternative first so "planeswalks" matches the full token
+            // before the "planeswalk" prefix can short-circuit the `alt`.
+            alt((
+                tag::<_, _, OracleError<'_>>("planeswalks"),
+                tag("planeswalk"),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(lower.trim())
+        .ok()
+        .map(|_| ImperativeFamilyAst::Planeswalk),
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
@@ -7790,6 +7810,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        // CR 701.31c: An ability instructs a player to planeswalk.
+        ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
@@ -13086,6 +13108,67 @@ mod tests {
         assert_eq!(
             replace_fixed_quantity(dynamic_base.clone(), for_each),
             dynamic_base,
+        );
+    }
+
+    /// CR 701.31c: the bare "planeswalk" verb dispatches to the
+    /// `Planeswalk` imperative-family leaf (the "you may " / "then " prefix and
+    /// the optional flag are stripped upstream, so the family parser only ever
+    /// sees the bare verb body).
+    #[test]
+    fn planeswalk_verb_dispatches_to_planeswalk_leaf() {
+        // The family parser sees the bare verb body (subject + optional-prefix +
+        // trailing-period normalization happen upstream — see the end-to-end
+        // `parse_effect_chain` tests below for the "you may planeswalk." /
+        // "then planeswalk." forms). Both singular and plural verb tokens map to
+        // the same leaf.
+        for input in ["planeswalk", "planeswalks"] {
+            let ast = parse_imperative_family_ast(input, input, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("'{input}' should parse to a Planeswalk leaf"));
+            assert!(
+                matches!(ast, ImperativeFamilyAst::Planeswalk),
+                "expected Planeswalk leaf for '{input}', got {ast:?}"
+            );
+        }
+    }
+
+    /// CR 701.31c: "you may planeswalk" → optional `Effect::Planeswalk`
+    /// (TARDIS, Start the TARDIS rider). The optional shell is produced by the
+    /// upstream optional-prefix strip.
+    #[test]
+    fn effect_you_may_planeswalk_is_optional_planeswalk() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "You may planeswalk.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Planeswalk),
+            "expected Effect::Planeswalk, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.optional,
+            "expected optional: true for 'you may planeswalk'"
+        );
+    }
+
+    /// CR 701.31c: "Then planeswalk." → mandatory `Effect::Planeswalk`
+    /// (TARDIS Bay). The mandatory form must parse to the same effect with
+    /// `optional: false`.
+    #[test]
+    fn effect_then_planeswalk_is_mandatory_planeswalk() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Then planeswalk.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Planeswalk),
+            "expected Effect::Planeswalk, got {:?}",
+            def.effect
+        );
+        assert!(
+            !def.optional,
+            "expected optional: false for 'then planeswalk'"
         );
     }
 }

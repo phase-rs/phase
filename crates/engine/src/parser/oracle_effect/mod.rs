@@ -1456,6 +1456,25 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
     }))
 }
 
+/// CR 601.2f + CR 115.1: subject of a next-spell limiter — whose next spell is
+/// modified. "you cast" / "of the chosen type you cast" resolve to the
+/// controller; "they cast" / "that player casts" resolve to the player this
+/// ability targets. The two `Controller` arms come first so `ReduceNextSpellCost`
+/// and every existing "you cast" grant continue to parse under
+/// `PlayerScope::Controller`.
+fn parse_next_spell_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+    alt((
+        value(PlayerScope::Controller, tag("you cast this turn ")),
+        value(
+            PlayerScope::Controller,
+            tag("of the chosen type you cast this turn "),
+        ),
+        value(PlayerScope::Target, tag("they cast this turn ")),
+        value(PlayerScope::Target, tag("that player casts this turn ")),
+    ))
+    .parse(input)
+}
+
 /// CR 601.2f: Parse "the next [type] spell you cast this turn [has keyword/can't be countered/etc.]"
 ///
 /// Handles patterns like:
@@ -1464,6 +1483,7 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
 /// - "the next sorcery spell you cast this turn can be cast as though it had flash"
 /// - "the next instant or sorcery spell you cast this turn has cascade"
 /// - "the next face-down creature spell you cast this turn costs {3} less to cast"
+/// - "the next spell they cast this turn has cascade" (granted to a targeted player)
 fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause> {
     // Must start with "the next "
     let rest = tag::<_, _, OracleError<'_>>("the next ")
@@ -1474,13 +1494,23 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     // Extract optional spell type filter before "spell you cast this turn"
     // Patterns: "spell you cast this turn", "creature spell you cast this turn",
     // "instant or sorcery spell you cast this turn", "noncreature spell you cast this turn",
-    // "face-down creature spell you cast this turn"
-    let (ability_text, filter_text) = nom::sequence::terminated(
+    // "face-down creature spell you cast this turn", and the third-person
+    // subject variants ("spell they cast this turn", "spell that player casts
+    // this turn") for grants to a targeted player.
+    //
+    // `filter_text` is the `take_until("spell")` capture — the spell-type
+    // filter slice ("creature ", "instant or sorcery ", "noncreature ", …)
+    // fed to parse_type_phrase below. Preserving it is REQUIRED: dropping it
+    // regresses filtered next-spell grants to no filter. `scope` is the parsed
+    // subject (you = Controller, they/that player = Target). `pair` keeps BOTH
+    // the `take_until` slice and the `parse_next_spell_subject` output — unlike
+    // `terminated`, which would discard the subject scope.
+    let (ability_text, (filter_text, scope)) = nom::sequence::pair(
         take_until::<_, _, OracleError<'_>>("spell"),
-        alt((
-            tag::<_, _, OracleError<'_>>("spell you cast this turn "),
-            tag("spell of the chosen type you cast this turn "),
-        )),
+        preceded(
+            tag::<_, _, OracleError<'_>>("spell "),
+            parse_next_spell_subject,
+        ),
     )
     .parse(rest)
     .ok()?;
@@ -1503,6 +1533,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::CantBeCountered,
+            player: scope,
             spell_filter,
         }));
     }
@@ -1514,6 +1545,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::CastAsThoughFlash,
+            player: scope,
             spell_filter,
         }));
     }
@@ -1525,6 +1557,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     {
         return Some(parsed_clause(Effect::GrantNextSpellAbility {
             modifier: NextSpellModifier::WithoutPayingManaCost,
+            player: scope,
             spell_filter,
         }));
     }
@@ -1556,6 +1589,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
         if let Some(kw) = keyword {
             return Some(parsed_clause(Effect::GrantNextSpellAbility {
                 modifier: NextSpellModifier::HasKeyword { keyword: kw },
+                player: scope,
                 spell_filter,
             }));
         }
@@ -44324,6 +44358,98 @@ mod tests {
             "Expected GrantNextSpellAbility(WithoutPayingManaCost), got {:?}",
             def.effect
         );
+    }
+
+    #[test]
+    fn parse_next_spell_you_cast_has_controller_scope() {
+        // CR 109.5: "you cast" subject → PlayerScope::Controller.
+        let def = parse_effect_chain(
+            "The next spell you cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Cascade,
+                    },
+                    player: crate::types::ability::PlayerScope::Controller,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(Cascade, Controller), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_they_cast_has_target_scope() {
+        // CR 115.1: "they cast" subject (Bigger on the Inside) →
+        // PlayerScope::Target (the targeted player whose mana clause precedes).
+        let def = parse_effect_chain(
+            "The next spell they cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                        keyword: Keyword::Cascade,
+                    },
+                    player: crate::types::ability::PlayerScope::Target,
+                    spell_filter: None,
+                }
+            ),
+            "Expected GrantNextSpellAbility(Cascade, Target), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_that_player_casts_has_target_scope() {
+        // CR 115.1: "that player casts" subject → PlayerScope::Target.
+        let def = parse_effect_chain(
+            "The next spell that player casts this turn has cascade",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    player: crate::types::ability::PlayerScope::Target,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(Target), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_filtered_next_spell_they_cast_preserves_filter() {
+        // Regression guard: the type-filter slice ("creature ") must survive the
+        // subject-combinator rewrite for the third-person subject too — a
+        // filtered "they" grant must keep both Target scope AND the spell filter.
+        let def = parse_effect_chain(
+            "The next creature spell they cast this turn has cascade",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GrantNextSpellAbility {
+                player,
+                spell_filter,
+                ..
+            } => {
+                assert_eq!(*player, crate::types::ability::PlayerScope::Target);
+                assert!(
+                    spell_filter.is_some(),
+                    "Expected a creature spell_filter, got None"
+                );
+            }
+            other => panic!("Expected GrantNextSpellAbility, got {other:?}"),
+        }
     }
 
     #[test]

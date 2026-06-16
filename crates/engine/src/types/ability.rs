@@ -8160,6 +8160,12 @@ pub enum Effect {
     /// Creates a one-shot modifier applied when the player casts their next qualifying spell.
     GrantNextSpellAbility {
         modifier: crate::types::game_state::NextSpellModifier,
+        /// CR 601.2f + CR 115.1: whose next spell receives the modifier.
+        /// `Controller` = "the next spell you cast"; `Target` = "the next
+        /// spell they cast / that player casts" (the player this ability
+        /// targets, e.g. the mana recipient on Bigger on the Inside).
+        #[serde(default = "default_player_scope_controller")]
+        player: PlayerScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
     },
@@ -9078,6 +9084,13 @@ fn default_quantity_one() -> QuantityExpr {
 
 fn default_duration_until_end_of_turn() -> Duration {
     Duration::UntilEndOfTurn
+}
+
+/// CR 109.5: backward-compatible serde default for `Effect::GrantNextSpellAbility`'s
+/// `player` field — pre-field data and "the next spell YOU cast" grants resolve to
+/// the controller.
+fn default_player_scope_controller() -> PlayerScope {
+    PlayerScope::Controller
 }
 
 fn default_comparator_ge() -> Comparator {

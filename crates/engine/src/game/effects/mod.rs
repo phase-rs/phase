@@ -6678,21 +6678,39 @@ fn resolve_grant_next_spell_ability(
     ability: &crate::types::ability::ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), crate::types::ability::EffectError> {
-    let (modifier, spell_filter) = match &ability.effect {
+    let (modifier, player_scope, spell_filter) = match &ability.effect {
         Effect::GrantNextSpellAbility {
             modifier,
+            player,
             spell_filter,
-        } => (modifier.clone(), spell_filter.clone()),
+        } => (modifier.clone(), player.clone(), spell_filter.clone()),
         _ => {
             return Err(crate::types::ability::EffectError::MissingParam(
                 "GrantNextSpellAbility".to_string(),
             ))
         }
     };
+    // CR 115.1: "they cast / that player casts" (PlayerScope::Target) = the
+    // player this ability targets — the mana-clause recipient on Bigger on the
+    // Inside, inherited onto this SequentialSibling via chain target
+    // propagation. CR 109.5: every other scope = the effect's controller
+    // ("the next spell you cast"). Exhaustive over PlayerScope (no `_`), so any
+    // future variant forces a maintainer to re-confirm its next-spell semantics.
+    let player = match player_scope {
+        PlayerScope::Target => ability.target_player(),
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer => ability.controller,
+    };
     state
         .pending_next_spell_modifiers
         .push(crate::types::game_state::PendingNextSpellModifier {
-            player: ability.controller,
+            player,
             modifier,
             spell_filter,
         });
