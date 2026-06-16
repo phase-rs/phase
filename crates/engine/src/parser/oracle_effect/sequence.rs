@@ -563,7 +563,17 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     current.push(ch);
                 }
             }
-            '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
+            // A sentence-ending period closes the clause (text-structure rule;
+            // no governing CR). Real quoted ability text in Oracle text always
+            // uses DOUBLE quotes, so a dangling single-quote here can only have
+            // been opened by a possessive/contraction apostrophe (e.g. "~'s
+            // power gains skulk until end of turn. Goad it." — The Master,
+            // Mesmerist). Such a "quote" must not swallow a sentence boundary:
+            // split here and reset the phantom single-quote state.
+            // `in_double_quote` (a genuine quoted ability) still suppresses the
+            // split.
+            '.' if paren_depth == 0 && !in_double_quote => {
+                in_single_quote = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;

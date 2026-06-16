@@ -1518,6 +1518,71 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     Some(def)
 }
 
+/// CR 122.2 + CR 113.6b: Parse the counter-persistence static — "Counters
+/// remain on ~ as it moves to any zone other than [zone list]." Overrides the
+/// default CR 122.2 rule that counters cease to exist on a zone change, except
+/// for moves into the excluded destination zones.
+///
+/// Class members (verbatim): Me, the Immortal and Skullbriar, the Walking
+/// Grave, both "... other than a player's hand or library" →
+/// `excluded_zones = [Hand, Library]`. The zone-list tail is parsed by a
+/// combinator (`alt`) so additional "other than [zones]" exclusion sets slot
+/// in without a new variant.
+///
+/// Anchors on the self-reference glyph `~` (the card name is normalized to `~`
+/// upstream), so the parser is name-agnostic and covers the whole class.
+pub(crate) fn try_parse_counters_persist_across_zones(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // "counters remain on ~ as it moves to any zone other than " <zone-list>
+    let rest = nom_tag_lower(
+        lower,
+        lower,
+        "counters remain on ~ as it moves to any zone other than ",
+    )?;
+    // allow-noncombinator: trailing-period/whitespace cleanup on the tokenized
+    // tail before the zone-list combinator runs (matches the file-wide idiom at
+    // lines 84/264/304/360); the actual parsing dispatch is the `alt` below.
+    let rest = rest.trim_end_matches('.').trim();
+    // Zone-list combinator: the only shipping exclusion set is "a player's hand
+    // or library". Expressed as an `alt` so future exclusion phrasings are
+    // added as sibling arms rather than string-equality checks.
+    let excluded_zones = parse_excluded_zone_list(rest)?;
+    Some(
+        StaticDefinition::new(StaticMode::CountersPersistAcrossZones { excluded_zones })
+            // CR 122.2: the persistence applies to this object's own counters.
+            .affected(TargetFilter::SelfRef)
+            // CR 113.6b: per Me's ruling the ability is read from the zone the
+            // object is moving FROM; it must function in every zone the object
+            // can carry counters out of, so it is active in all zones.
+            .active_zones(vec![
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Command,
+                Zone::Stack,
+            ])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 122.2: Parse the "any zone other than [zones]" exclusion list into the
+/// typed destination-zone set whose moves still clear counters. Combinator-only
+/// (no `contains` dispatch); add sibling `alt` arms for new exclusion phrasings.
+fn parse_excluded_zone_list(rest: &str) -> Option<Vec<Zone>> {
+    let res: nom::IResult<&str, Vec<Zone>, OracleError<'_>> = value(
+        vec![Zone::Hand, Zone::Library],
+        alt((
+            tag::<_, _, OracleError<'_>>("a player's hand or library"),
+            tag::<_, _, OracleError<'_>>("a player's library or hand"),
+        )),
+    )
+    .parse(rest);
+    res.ok()
+        .and_then(|(remainder, zones)| remainder.trim().is_empty().then_some(zones))
+}
+
 /// CR 601.2a + CR 113.6b + CR 118.9: Parse the Maralen-class exile cast
 /// permission line: "Once each turn, you may cast [filter] from among cards
 /// exiled with ~ this turn [without paying its mana cost]." Mirrors

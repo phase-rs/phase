@@ -19962,6 +19962,61 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    /// CR 701.15a: A self-referential possessive (`~'s power`) inside a target
+    /// filter must not put the clause splitter into quote mode and thereby
+    /// swallow a later sentence boundary (a text-structure concern with no
+    /// governing CR). The grant-keyword clause must terminate at
+    /// the period so the trailing imperative ("Goad it.") re-dispatches as a chained
+    /// sibling targeting the same creature (`ParentTarget`). This is the
+    /// building-block fix for the whole "[filter referencing ~'s P/T] gains
+    /// [keyword] until end of turn. [imperative on it]" class (The Master,
+    /// Mesmerist is the type specimen).
+    #[test]
+    fn grant_keyword_then_imperative_with_self_possessive_filter_chains() {
+        let def = parse_effect_chain(
+            "Target creature an opponent controls with power less than or equal to ~'s power gains skulk until end of turn. Goad it.",
+            AbilityKind::Activated,
+        );
+        // Head clause: grant skulk until end of turn to the filtered target.
+        assert!(
+            matches!(*def.effect, Effect::GenericEffect { .. }),
+            "expected grant-keyword GenericEffect head, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        // Chained sibling: goad that same creature via ParentTarget anaphora.
+        let sub = def.sub_ability.expect("expected chained Goad sub-ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Goad {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "expected Goad{{ParentTarget}}, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Building-block guard: a possessive/contraction apostrophe (`~'s`) opens a
+    /// phantom single-quote in the clause splitter, but a sentence-ending period
+    /// must still split — Oracle quoted-ability text always uses double quotes,
+    /// so a dangling single-quote can never legitimately span a sentence.
+    #[test]
+    fn self_ref_possessive_does_not_swallow_sentence_boundary_in_clause_splitter() {
+        let chunks =
+            sequence::split_clause_sequence("~'s power gains skulk until end of turn. Goad it");
+        let texts: Vec<_> = chunks.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "~'s power gains skulk until end of turn".to_string(),
+                "Goad it".to_string(),
+            ],
+            "self-ref possessive must not suppress the sentence boundary"
+        );
+    }
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,

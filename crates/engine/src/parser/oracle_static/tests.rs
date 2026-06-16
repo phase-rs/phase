@@ -7140,6 +7140,46 @@ fn graveyard_cast_permission_exile_rider() {
     ));
 }
 
+/// CR 122.2 + CR 113.6b: The counter-persistence static — "Counters remain on
+/// ~ as it moves to any zone other than a player's hand or library." — must
+/// parse to `CountersPersistAcrossZones { excluded_zones: [Hand, Library] }`
+/// for the whole class (Me, the Immortal and Skullbriar, the Walking Grave
+/// share the verbatim phrase). Tested on the normalized `~` form the dispatch
+/// chain sees, so the assertion is name-agnostic.
+#[test]
+fn counters_persist_across_zones_me_and_skullbriar() {
+    let def = parse_static_line(
+        "Counters remain on ~ as it moves to any zone other than a player's hand or library.",
+    )
+    .expect("should parse the counter-persistence static");
+    match &def.mode {
+        StaticMode::CountersPersistAcrossZones { excluded_zones } => {
+            assert_eq!(excluded_zones, &vec![Zone::Hand, Zone::Library]);
+        }
+        other => panic!("expected CountersPersistAcrossZones, got {other:?}"),
+    }
+    // CR 122.2: the persistence applies to the source's own counters.
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    // CR 113.6b: must function in the zones the object can leave with counters.
+    assert!(def.active_zones.contains(&Zone::Battlefield));
+    assert!(def.active_zones.contains(&Zone::Graveyard));
+}
+
+/// Word-order variant ("library or hand") parses to the same excluded set —
+/// verifies the combinator covers the axis, not a single literal.
+#[test]
+fn counters_persist_across_zones_word_order_variant() {
+    let def = parse_static_line(
+        "Counters remain on ~ as it moves to any zone other than a player's library or hand.",
+    )
+    .expect("should parse the swapped-order phrase");
+    assert!(matches!(
+        &def.mode,
+        StaticMode::CountersPersistAcrossZones { excluded_zones }
+            if excluded_zones == &vec![Zone::Hand, Zone::Library]
+    ));
+}
+
 #[test]
 fn graveyard_cast_permission_gisa_geralf() {
     let text =

@@ -433,6 +433,13 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 122.2 + CR 113.6b: "Counters remain on ~ as it moves to any zone other
+    // than [zone list]." Counter-persistence override (Me, the Immortal;
+    // Skullbriar, the Walking Grave).
+    if let Some(result) = try_parse_counters_persist_across_zones(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 601.2a + CR 113.6b + CR 118.9: "Once each turn, you may cast [filter]
     // from among cards exiled with ~ this turn [without paying its mana cost]."
     // Maralen, Fae Ascendant is the type specimen; the handler accepts the

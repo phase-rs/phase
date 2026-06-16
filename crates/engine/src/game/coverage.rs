@@ -73,6 +73,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // gates the per-card `CastingPermission::PlayFromExile` on a live
             // source. Not registry-keyed (mirrors the cast-permission cluster).
             | StaticMode::LinkedCollectionCounterPlayPermission
+            // CR 122.2 + CR 113.6b: CountersPersistAcrossZones carries the
+            // excluded-zone list. Runtime enforcement is the from-zone counter
+            // guard zones.rs::counters_persist_on_move (called from
+            // apply_zone_exit_cleanup) (Me, the Immortal; Skullbriar).
+            | StaticMode::CountersPersistAcrossZones { .. }
             | StaticMode::CastWithKeyword { .. }
             // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
