@@ -278,6 +278,33 @@ fn pay_ability_cost_inner(
                 caused_by: None,
             });
         }
+        // CR 107.6: The untap symbol in a cost means "Untap this permanent. A
+        // permanent that's already untapped can't be untapped again to pay the
+        // cost." Mirrors the `AbilityCost::Tap` arm above: paying is illegal when
+        // the source is in the wrong tap state, so the activation fails rather
+        // than silently no-op'ing (which would let Umbral Mantle-style {Q} pumps
+        // fire on an untapped creature, against the rules).
+        AbilityCost::Untap => {
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if obj.zone != Zone::Battlefield {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay untap cost: source is not on the battlefield".to_string(),
+                ));
+            }
+            if !obj.tapped {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay untap cost: permanent is already untapped".to_string(),
+                ));
+            }
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.tapped = false;
+            events.push(GameEvent::PermanentUntapped {
+                object_id: source_id,
+            });
+        }
         AbilityCost::Mana { cost } => match scope {
             // CR 601.2g: Activation pays through the mana-ability window. CR
             // 106.6: restriction enforcement routes through `allows_activation`
@@ -783,8 +810,7 @@ fn pay_ability_cost_inner(
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
-        AbilityCost::Untap
-        | AbilityCost::Exile { .. }
+        AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -1353,6 +1379,37 @@ mod tests {
                 "can_pay==true but pay_cost returned Failed for {cost:?}"
             );
         }
+    }
+
+    #[test]
+    fn untap_cost_untaps_tapped_source_and_rejects_when_already_untapped() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Untap Source", 2, 2).id();
+        scenario.state.objects.get_mut(&src).unwrap().tapped = true;
+
+        let cost = AbilityCost::Untap;
+        let excluded = ability_mana_payment_excluded_sources(&cost, src);
+        let scope = PaymentScope::Activation {
+            excluded_sources: &excluded,
+        };
+        let mut events = Vec::new();
+        let outcome =
+            pay_ability_cost_inner(&mut scenario.state, P0, src, &cost, &mut events, &scope)
+                .unwrap();
+        assert!(matches!(outcome, PaymentOutcome::Paid));
+        assert!(!scenario.state.objects.get(&src).unwrap().tapped);
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == src)
+        ));
+
+        // CR 107.6: a permanent that's already untapped can't be untapped again
+        // to pay the cost — the second payment must FAIL, not silently no-op.
+        let result =
+            pay_ability_cost_inner(&mut scenario.state, P0, src, &cost, &mut events, &scope);
+        assert!(
+            result.is_err(),
+            "paying {{Q}} on an already-untapped permanent must be rejected (CR 107.6)"
+        );
     }
 
     #[test]

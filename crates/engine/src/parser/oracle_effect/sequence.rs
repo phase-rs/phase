@@ -625,7 +625,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // is a single compound search-and-exile action — keep it together so
                         // the imperative dispatcher can recognize the multi-zone pattern.
                         // Accepts "search ..." and "then search ..." prefixes, and either
-                        // "with that name" or "with the same name as that card" suffixes.
+                        // "with that name" or "with the same name as that {card,creature,…}"
+                        // suffixes (Eradicate / Counterbore / Surgical Extraction class).
                         let has_search_prefix =
                             nom_primitives::scan_contains(&before_lower, "search ");
                         let search_with_that_name = has_search_prefix
@@ -865,9 +866,24 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with that name"),
-        tag("with the chosen name"),
-        tag("with the same name as that card"),
+        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        value((), tag("with the chosen name")),
+        value(
+            (),
+            (
+                tag("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
+        ),
     ))
     .parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
@@ -1618,7 +1634,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             ),
         ),
         value((), starts_they_continuous_clause_lower),
-        // Singular anaphoric subjects: "that {creature,permanent,token}" +
+        // Singular anaphoric subjects: "that {creature,land,permanent,token}" +
         // singular-conjugation continuous verb (gains/gets/has/loses).
         // Single-token grants ("create one X token, that token gains haste")
         // are rarer than the plural form but real, so all three subject
@@ -1628,6 +1644,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             (
                 alt((
                     tag("that creature "),
+                    tag("that land "),
                     tag("that permanent "),
                     tag("that token "),
                 )),
@@ -2974,6 +2991,14 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 return None;
             }
             let full_lower = full_text.to_ascii_lowercase();
+            // CR 400.7 + CR 701.23 + CR 701.24: Name-hate compounds ("search … graveyard,
+            // hand, and library … with the same name as that {creature,spell,…} and exile
+            // them") lower to `ChangeZoneAll { SameNameAsParentTarget }`, not SearchLibrary
+            // + SearchDestination. Suppress the generic put/exile step when the full
+            // sentence matches the multi-zone same-name exile recognizer.
+            if super::imperative::try_parse_multi_zone_same_name_exile(&full_lower).is_some() {
+                return None;
+            }
             // CR 608.2c: Conditional result destinations ("put it onto the
             // battlefield tapped if it's a land card. Otherwise, put it into
             // your hand" — Archdruid's Charm) are represented by the parsed
@@ -4749,6 +4774,14 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 ///
 /// Returns `TokenEntersWithCounters` so it shares the continuation absorption
 /// path with `try_parse_token_enters_with_counters` (declarative form).
+/// CR 122.6a + CR 301.5b: Returns true when the counter followup consumed the
+/// entire clause. A trailing `"and attach …"` conjunct (Fractal Harness) must
+/// not be absorbed here — the bare-and splitter needs to peel it into its own
+/// attach clause.
+fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
+    rest.trim().trim_start_matches(['.', ' ']).is_empty()
+}
+
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the verb. Both `put ` (imperative) and `puts ` (third-person,
@@ -4768,9 +4801,12 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // <quantity>". Delegates to the shared building block in `oracle_effect/
     // mod.rs`. The body consumes the full clause (including trailing period),
     // so on success we're done — emit the continuation directly.
-    if let Ok((_, (counter_type, count))) =
+    if let Ok((remainder, (counter_type, count))) =
         super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
     {
+        if !token_counter_followup_tail_is_clean(remainder) {
+            return None;
+        }
         return Some(ContinuationAst::TokenEntersWithCounters {
             counter_type,
             count,
@@ -4838,6 +4874,10 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         } else {
             None
         };
+
+    if quantity.is_none() && !token_counter_followup_tail_is_clean(rest) {
+        return None;
+    }
 
     let count = if let Some(qty) = quantity {
         qty
@@ -5031,6 +5071,32 @@ mod tests {
         // standalone ChangeZone.
         let chunks = clause_texts(
             "search target opponent's graveyard, hand, and library for any number of cards with the chosen name and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_creature_search_exile_compound() {
+        // CR 201.2 + CR 701.23a + CR 701.18a: Eradicate-class "same name as that
+        // creature" must stay one compound so `MultiZoneSameNameExile` wins.
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_spell_search_exile_compound() {
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_land_search_exile_compound() {
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
@@ -7205,6 +7271,17 @@ mod tests {
     }
 
     #[test]
+    fn put_counters_on_it_followup_rejects_trailing_attach_conjunct() {
+        assert!(
+            try_parse_put_counters_on_token_followup(
+                "put x +1/+1 counters on it and attach this equipment to it"
+            )
+            .is_none(),
+            "trailing attach conjunct must split as its own clause (Fractal Harness)"
+        );
+    }
+
+    #[test]
     fn put_counters_on_it_followup_where_x_is() {
         // Fractal Anomaly: "... put X +1/+1 counters on it, where X is the
         // number of cards you've drawn this turn"
@@ -7372,6 +7449,9 @@ mod tests {
         assert!(starts_bare_and_clause("that creature loses flying"));
         assert!(starts_bare_and_clause(
             "that permanent gains indestructible"
+        ));
+        assert!(starts_bare_and_clause(
+            "that land gains indestructible until end of turn"
         ));
         // Token anaphors — "create N tokens. Those tokens gain haste."
         assert!(starts_bare_and_clause("those tokens gain haste"));

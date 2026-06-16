@@ -9121,6 +9121,71 @@ mod tests {
         );
     }
 
+    /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry — the passive-voice
+    /// "When that mana is spent to cast a creature spell that shares a creature
+    /// type with your commander, scry 1" clause folds into the
+    /// commander-color-identity mana ability's `grants` as a `TriggerOnSpend`
+    /// with the relational `SharesCreatureTypeWithCommander` restriction. The
+    /// whole card parses with no `Effect::Unimplemented` anywhere.
+    #[test]
+    fn path_of_ancestry_full_parse_no_unimplemented() {
+        use crate::types::ability::ManaProduction;
+        use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+        let r = parse(
+            "This land enters tapped.\n{T}: Add one mana of any color in your commander's color identity. When that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
+            "Path of Ancestry",
+            &[],
+            &["Land"],
+            &["Path of Ancestry"],
+        );
+        assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+        let Effect::Mana {
+            produced, grants, ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+        };
+        assert!(
+            matches!(
+                produced,
+                ManaProduction::AnyInCommandersColorIdentity { .. }
+            ),
+            "expected commander-color-identity mana, got {produced:?}"
+        );
+        // CR 605.1a: the delayed-trigger rider doesn't disqualify the mana ability.
+        assert!(
+            crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+            "must stay a mana ability"
+        );
+        assert_eq!(grants.len(), 1, "grants: {grants:?}");
+        let ManaSpellGrant::TriggerOnSpend {
+            restriction,
+            ability,
+        } = &grants[0]
+        else {
+            panic!("expected TriggerOnSpend, got {:?}", grants[0]);
+        };
+        assert_eq!(
+            *restriction,
+            Some(ManaRestriction::SharesCreatureTypeWithCommander)
+        );
+        assert!(matches!(*ability.effect, Effect::Scry { .. }));
+        assert!(
+            r.abilities[0].sub_ability.is_none(),
+            "the spend-trigger clause must be folded out of the chain"
+        );
+        // No Unimplemented anywhere in the ability tree.
+        assert!(
+            !matches!(*r.abilities[0].effect, Effect::Unimplemented { .. }),
+            "ability effect must not be Unimplemented"
+        );
+        // The "enters tapped" replacement is preserved.
+        assert!(
+            !r.replacements.is_empty(),
+            "enters-tapped replacement must be present"
+        );
+    }
+
     /// CR 106.6 + CR 603.3: a spell-referencing reflexive effect (Jade Orb of
     /// Dragonkind — "it enters with an additional +1/+1 counter on it") is NOT
     /// folded into a grant in the first pass — it stays a loud gap rather than

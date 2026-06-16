@@ -148,6 +148,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // scans active statics whose `affected` filter matches the entering
             // object. Parameterized — no registry entry; coverage support here.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 502.3: MaxUntapPerType carries the permanent-type filter + cap
+            // (Smoke / Damping Field / Winter Orb). Runtime: the active player
+            // determines the bounded untap subset via
+            // turns.rs::max_untap_subset_prompt (→ WaitingFor::ChooseUntapSubset),
+            // with turns.rs::execute_untap_with_choices keeping a cap clamp as a
+            // safety net. Parameterized — no registry entry; coverage support here.
+            | StaticMode::MaxUntapPerType { .. }
     )
 }
 
@@ -628,6 +635,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::ScopedPlayer => "that player's",
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
+                    ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
@@ -722,6 +730,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
@@ -736,6 +745,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
+                ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
                 ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
@@ -804,6 +814,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
+        ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
@@ -1132,6 +1143,22 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             CardTypeSetSource::Objects { filter } => {
                 format!("card types among {}", fmt_target(filter))
             }
+            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+                Some(cause) => {
+                    use crate::types::ability::ThisWayCause;
+                    let verb = match cause {
+                        ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Exiled => "exiled",
+                        ThisWayCause::Milled => "milled",
+                        ThisWayCause::Destroyed => "destroyed",
+                        ThisWayCause::Sacrificed => "sacrificed",
+                        ThisWayCause::Returned => "returned",
+                        ThisWayCause::Bounced => "bounced",
+                    };
+                    format!("card types among cards {verb} this way")
+                }
+                None => "card types among tracked cards".into(),
+            },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ZoneCardCount {
@@ -5535,6 +5562,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
         // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
         AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        // CR 301.5 + CR 303.4: Source attached-to-creature check — resolved by
+        // `evaluate_condition` against the source's `attached_to` host.
+        AbilityCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -5769,6 +5799,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
+        StaticCondition::RecipientAttackingOwnerTarget { .. } => {
+            ("RecipientAttackingOwnerTarget", Handled)
+        }
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
@@ -7075,6 +7108,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 502.3: Smoke / Damping Field / Winter Orb max-untap cap. Anchor
+            // on the verb phrase; the type filter half is the reused TargetFilter
+            // and is validated by parser tests.
+            StaticMode::MaxUntapPerType { .. } => effective_lower.contains("can't untap more than"),
             // CR 301.5 + CR 303.4: positive "can be attached only to {filter}"
             // restriction. Anchor on the verb phrase; the filter half is the
             // reused TargetFilter and is validated by parser tests.
@@ -10652,6 +10689,10 @@ mod tests {
                 "ZoneChangedThisWay",
             ),
             (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+            (
+                AbilityCondition::SourceAttachedToCreature,
+                "SourceAttachedToCreature",
+            ),
         ];
 
         for (condition, expected_name) in conditions {

@@ -214,6 +214,72 @@ fn push_identity_color(identity: &mut Vec<ManaColor>, color: ManaColor) {
     }
 }
 
+/// CR 205.3m + CR 903.3: The set of creature subtypes ("creature types") across
+/// `player`'s commander(s).
+///
+/// CR 205.3m: creature types are the subtypes shared by creatures and kindreds,
+/// so only commanders that are creatures contribute. Reads
+/// `deck_pools.current_commander` first (pre-game registration), falling back to
+/// live `is_commander && owner == player` objects — the same precedence as
+/// [`commander_color_identity`]. Partner commanders merge their type sets.
+/// Subtypes are deduplicated case-insensitively, preserving first-seen casing.
+///
+/// Returns an empty vector when the player has no commander (CR 903.3: a card
+/// must be designated a commander for this reference to resolve). Callers that
+/// gate a spend on "shares a creature type with your commander" treat an empty
+/// set as "no type shared" — the spend simply doesn't qualify.
+//
+// TODO(strict): CR 702.73a — a Changeling commander is every creature type and
+// should match any creature subtype. Mirrors the color-identity helper's scope:
+// printed/effective subtypes only, no CDA expansion, until that is generalized.
+pub fn commander_creature_types(state: &GameState, player: PlayerId) -> Vec<String> {
+    let mut types: Vec<String> = Vec::new();
+
+    if let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) {
+        for entry in pool.current_commander.iter() {
+            if entry
+                .card
+                .card_type
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            {
+                for subtype in &entry.card.card_type.subtypes {
+                    push_creature_type(&mut types, subtype);
+                }
+            }
+        }
+        if !types.is_empty() {
+            return types;
+        }
+    }
+
+    for obj in state
+        .objects
+        .values()
+        .filter(|obj| obj.is_commander && obj.owner == player)
+    {
+        if obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+        {
+            for subtype in &obj.card_types.subtypes {
+                push_creature_type(&mut types, subtype);
+            }
+        }
+    }
+    types
+}
+
+fn push_creature_type(types: &mut Vec<String>, subtype: &str) {
+    if !types
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(subtype))
+    {
+        types.push(subtype.to_string());
+    }
+}
+
 /// CR 903.4: Each card must be within the commander's color identity.
 ///
 /// Color identity includes colors from mana cost symbols (CR 903.4) plus the card's
@@ -678,6 +744,61 @@ mod tests {
         assert_eq!(identity.len(), 2);
         assert!(identity.contains(&ManaColor::White));
         assert!(identity.contains(&ManaColor::Black));
+    }
+
+    #[test]
+    fn commander_creature_types_empty_without_commander() {
+        // CR 903.3: No commander designated → empty creature-type set.
+        let state = setup_commander_game();
+        assert!(commander_creature_types(&state, PlayerId(0)).is_empty());
+    }
+
+    #[test]
+    fn commander_creature_types_returns_live_commander_subtypes() {
+        // CR 205.3m: a creature commander contributes its subtypes as creature types.
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Elf Lord",
+            vec![ManaColor::Green],
+        );
+        state.objects.get_mut(&cmd_id).unwrap().card_types.subtypes =
+            vec!["Elf".to_string(), "Warrior".to_string()];
+
+        let types = commander_creature_types(&state, PlayerId(0));
+        assert_eq!(types.len(), 2);
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Elf")));
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Warrior")));
+    }
+
+    #[test]
+    fn commander_creature_types_merges_partner_commanders() {
+        // CR 205.3m + CR 903.3: partner commanders union their creature-type sets.
+        let mut state = setup_commander_game();
+        let a = create_commander_in_command_zone(&mut state, PlayerId(0), "Partner A", vec![]);
+        state.objects.get_mut(&a).unwrap().card_types.subtypes = vec!["Elf".to_string()];
+        let b = create_commander_in_command_zone(&mut state, PlayerId(0), "Partner B", vec![]);
+        state.objects.get_mut(&b).unwrap().card_types.subtypes = vec!["Goblin".to_string()];
+
+        let types = commander_creature_types(&state, PlayerId(0));
+        assert_eq!(types.len(), 2);
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Elf")));
+        assert!(types.iter().any(|t| t.eq_ignore_ascii_case("Goblin")));
+    }
+
+    #[test]
+    fn commander_creature_types_ignores_noncreature_commander() {
+        // CR 205.3m: creature types only belong to creatures. A Vehicle commander
+        // (permitted by CR 903.3) that is not a creature contributes no creature
+        // types.
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Vehicle", vec![]);
+        let obj = state.objects.get_mut(&cmd_id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Artifact];
+        obj.card_types.subtypes = vec!["Vehicle".to_string()];
+
+        assert!(commander_creature_types(&state, PlayerId(0)).is_empty());
     }
 
     #[test]

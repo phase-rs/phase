@@ -489,6 +489,10 @@ pub(crate) enum ImperativeFamilyAst {
     VentureIntoUndercity,
     /// CR 725: "take the initiative"
     TakeTheInitiative,
+    /// CR 701.31c: An ability instructs a player to planeswalk (TARDIS, Start
+    /// the TARDIS, TARDIS Bay). Resolves to a no-op outside a Planechase game
+    /// (CR 701.31a).
+    Planeswalk,
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -941,9 +945,10 @@ pub(crate) enum SearchCreationImperativeAst {
     /// and library for any number of cards with that name and exile them."
     /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
     /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
-    /// scoped to the owner of the parent target's exiled card. Used by
-    /// Deadly Cover-Up.
-    MultiZoneSameNameExile,
+    /// scoped to the player named by the possessive zone phrase.
+    MultiZoneSameNameExile {
+        owner: ControllerRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

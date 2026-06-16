@@ -978,8 +978,9 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // "those creatures" / "those lands" — anaphoric reference to previous targets.
-    // Maps to ParentTarget so the restriction applies to the same objects.
+    // "those creatures" / "those lands" — anaphoric reference to previous
+    // targets. Maps to ParentTarget so the restriction applies to the same
+    // objects.
     if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
         return subject_filter_application(TargetFilter::ParentTarget, false);
     }
@@ -1492,18 +1493,27 @@ fn subject_application_for_cant_be_regenerated(subject: &str) -> Option<SubjectA
     if !matched {
         return None;
     }
+    Some(cant_be_regenerated_tracked_set_application())
+}
+
+/// CR 608.2c + CR 701.19c: The `SubjectApplication` for a regen rider that binds
+/// to the preceding damage clause's published set via the `TrackedSetId(0)`
+/// sentinel. `target: Some(TrackedSet)` trips `next_sub_needs_tracked_set` on the
+/// parent damage clause so it publishes the struck-object ids; the rider does not
+/// inherit the parent's chosen targets. Shared by the unconditional anaphor form
+/// and the conditional ("if it's a creature, it") damage-form so both bind the
+/// CantBeRegenerated static to exactly the same set.
+pub(super) fn cant_be_regenerated_tracked_set_application() -> SubjectApplication {
     let tracked = TargetFilter::TrackedSet {
         id: crate::types::identifiers::TrackedSetId(0),
     };
-    Some(SubjectApplication {
+    SubjectApplication {
         affected: tracked.clone(),
-        // The static binds to the damaged-object tracked set via `target`/`affected`
-        // above; the rider does not inherit the parent's chosen targets.
         target: Some(tracked),
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
-    })
+    }
 }
 
 /// CR 608.2c + CR 701.19c: Build the separate-sentence regen rider attached to a
@@ -1525,20 +1535,36 @@ pub(super) fn try_parse_cant_be_regenerated_damage_rider(
         nom_primitives::scan_preceded(&lower, parse_cant_be_regenerated_predicate)?;
     let subject = text[..before_lower.len()].trim();
     let application = subject_application_for_cant_be_regenerated(subject)?;
-    let affected = static_affected_for_application(&application);
+    Some(build_cant_be_regenerated_rider(kind, &application))
+}
+
+/// CR 701.19c + CR 614.8: Build the `CantBeRegenerated` rider `AbilityDefinition`
+/// shared by the unconditional damage-anaphor form ("a creature dealt damage this
+/// way can't be regenerated") and the conditional damage-form (Disintegrate /
+/// Carbonize, gated on "if it's a creature, it"). The rider is a
+/// `GenericEffect{CantBeRegenerated}` whose `target`/`affected` bind to the
+/// preceding damage clause's published set via `SubjectApplication`
+/// (`static_affected_for_application` maps `target.is_some()` → `ParentTarget`,
+/// the runtime-bound back-reference the GenericEffect resolver reads against the
+/// chain's tracked set). Factored out so both call sites construct the identical
+/// def; the conditional caller additionally stamps `def.condition` to gate it.
+pub(super) fn build_cant_be_regenerated_rider(
+    kind: AbilityKind,
+    application: &SubjectApplication,
+) -> AbilityDefinition {
+    let affected = static_affected_for_application(application);
     let mode = StaticMode::CantBeRegenerated;
-    let def = AbilityDefinition::new(
+    AbilityDefinition::new(
         kind,
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(mode.clone())
                 .affected(affected)
                 .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
             duration: Some(Duration::UntilEndOfTurn),
-            target: application.target,
+            target: application.target.clone(),
         },
     )
-    .duration(Duration::UntilEndOfTurn);
-    Some(def)
+    .duration(Duration::UntilEndOfTurn)
 }
 
 /// CR 602.5 + CR 603.2a + CR 608.2c: Resolve the subject of an EFFECT-form
@@ -3096,7 +3122,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     None
 }
 
-fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'_, ()> {
+pub(super) fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'_, ()> {
     all_consuming(value(
         (),
         (

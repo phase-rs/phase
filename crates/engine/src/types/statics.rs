@@ -1367,6 +1367,30 @@ pub enum StaticMode {
     /// player's normal untap, scanning the battlefield for this variant on
     /// permanents whose controller != active_player.
     UntapsDuringEachOtherPlayersUntapStep,
+    /// CR 502.3: "Players can't untap more than `max` `filter` during their
+    /// untap steps." A continuous restriction on the untap turn-based action:
+    /// while any source with this static is on the battlefield, the active
+    /// player may untap at most `max` permanents matching `filter` during their
+    /// untap step. CR 502.3 makes the untap a player-determined choice ("the
+    /// active player determines which permanents they control will untap"), so
+    /// when more than `max` matching permanents are tapped the active player
+    /// chooses which `max` untap; the rest stay tapped.
+    ///
+    /// Built for the class — `filter` carries the permanent type (creature,
+    /// artifact, nonbasic land, …) and `max` the cap, covering Smoke /
+    /// Stoic Angel (creature), Damping Field / Imi Statue (artifact), and the
+    /// Winter Orb / nonbasic-land family in one variant. The restriction is a
+    /// global rule modification keyed on the active player, not on the source's
+    /// controller — Smoke restricts every player — so the affected-permanent
+    /// scope rides inline on `filter` rather than `StaticDefinition::affected`
+    /// (mirroring `BlockRestriction` / `CantBeBlockedBy`). Runtime enforcement
+    /// is in `turns::execute_untap_with_choices`, which clamps each matching
+    /// group to `max`, and `turns::untap_choice_candidates`, which surfaces the
+    /// over-cap members for the CR 502.3 player determination.
+    MaxUntapPerType {
+        filter: TargetFilter,
+        max: u32,
+    },
     /// CR 614.1c + CR 122.1: Continuous "enters with an additional counter"
     /// replacement static. A permanent matching `StaticDefinition::affected`
     /// (e.g. "Other creatures you control", "Legendary creatures you control",
@@ -1428,6 +1452,13 @@ impl Hash for StaticMode {
             StaticMode::MustAttackPlayer { player } => player.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
+            // CR 502.3: filter is a non-Hash TargetFilter; hash the enum
+            // discriminant alongside the cap so creature/artifact/land caps
+            // with the same max don't collide.
+            StaticMode::MaxUntapPerType { filter, max } => {
+                std::mem::discriminant(filter).hash(state);
+                max.hash(state);
+            }
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
             StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
@@ -1616,6 +1647,7 @@ impl StaticMode {
             | StaticMode::CanBlockShadow
             | StaticMode::AssignNoCombatDamage
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::MaxUntapPerType { .. }
             | StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::Other(_) => None,
@@ -1902,6 +1934,11 @@ impl fmt::Display for StaticMode {
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
+            }
+            // CR 502.3: Debug format, one-way (mirrors BlockRestriction). The
+            // `filter` carries a TargetFilter, so no from_str reconstruction.
+            StaticMode::MaxUntapPerType { filter, max } => {
+                write!(f, "MaxUntapPerType({max},{filter:?})")
             }
             // CR 614.1c + CR 122.1: "enters with an additional [counter] counter"
             // — Display carries both the counter type and the fixed count.

@@ -1655,13 +1655,22 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
         Some(TargetFilter::Typed(
             TypedFilter::card().properties(vec![FilterProp::Historic]),
         ))
+    } else if all_consuming(tag::<_, _, OracleError<'_>>("kicked"))
+        .parse(pre_type)
+        .is_ok()
+    {
+        // CR 702.33d: bare "kicked spell" — kicker-paid qualifier for Vine Gecko
+        // class cost reducers.
+        Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::WasKicked]),
+        ))
     } else {
         let (filter, remainder) = parse_type_phrase(pre_type);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             Some(filter)
         } else {
-            // Unrecognized pre-spell qualifier (e.g. "kicked") — decline rather
-            // than emit a cost reduction that ignores the printed restriction.
+            // Unrecognized pre-spell qualifier — decline rather than emit a cost
+            // reduction that ignores the printed restriction.
             return FirstQualifiedSpell::UnsupportedQualifier;
         }
     };

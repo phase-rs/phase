@@ -757,6 +757,58 @@ pub(crate) fn transient_grants_static_mode_to_player(
     false
 }
 
+/// CR 611.1 + CR 611.3: Object-scoped counterpart to
+/// [`transient_grants_static_mode_to_player`]. Scan
+/// `state.transient_continuous_effects` for an effect that grants
+/// `AddStaticMode { mode }` and whose typed/filter `affected` matches
+/// `object_id` (e.g. a spell granting "creatures your opponents control don't
+/// untap during their controllers' next untap steps"). Honors the same
+/// `ForAsLongAs` duration and explicit `condition` gates as the player sibling.
+///
+/// `SpecificObject { id }` affecteds are intentionally NOT matched here: those
+/// are an exact-id lookup that callers already cover directly. This query exists
+/// to cover the filter-scoped class (`Typed` / `AnyOf` / `SelfRef` resolved
+/// against the source, etc.) that an exact-id scan misses. Mirrors the
+/// `matches_target_filter` source-context resolution used by
+/// `triggered_cause_sacrifice_or_exile_muzzled`.
+pub(crate) fn transient_grants_static_mode_to_object(
+    state: &GameState,
+    object_id: ObjectId,
+    mode: &StaticMode,
+) -> bool {
+    for tce in &state.transient_continuous_effects {
+        // Exact-id and player-scoped affecteds are handled by the dedicated
+        // SpecificObject / SpecificPlayer paths; this query owns the rest.
+        if matches!(
+            tce.affected,
+            TargetFilter::SpecificObject { .. } | TargetFilter::SpecificPlayer { .. }
+        ) {
+            continue;
+        }
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        let grants_mode = tce.modifications.iter().any(|m| {
+            matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
+        });
+        if !grants_mode {
+            continue;
+        }
+        let ctx = FilterContext::from_source(state, tce.source_id);
+        if matches_target_filter(state, object_id, &tce.affected, &ctx) {
+            return true;
+        }
+    }
+    false
+}
+
 /// CR 609.4b: Check if a player has the "spend mana as any color" static active.
 /// Scans battlefield and command zone for `StaticMode::SpendManaAsAnyColor`
 /// whose affected filter matches the given player.
@@ -1011,6 +1063,7 @@ pub fn player_protection_from(
     source: Option<ObjectId>,
 ) -> bool {
     use crate::game::keywords::source_matches_card_type;
+    use crate::types::ability::ControllerRef;
     use crate::types::keywords::ProtectionTarget;
 
     // CR 702.16j: protection from everything covers every source.
@@ -1048,8 +1101,33 @@ pub fn player_protection_from(
                     .and_then(|ct| ct.protection_quality_str())
                     .is_some_and(|quality| source_matches_card_type(src, quality))
             }),
-            // Inert — the parser never emits other arms for `PlayerProtection`.
-            _ => false,
+            // CR 702.16k: "Protection from [a player]" at the player level — the
+            // protected player has protection from each object the specified
+            // player(s) control. "Each of your opponents" (CR 702.16i) → the
+            // `Opponent` scope: any source NOT controlled by the protected
+            // player is an opponent's object in 1v1 and free-for-all. Mirrors the
+            // object-level arm in `game/keywords.rs::source_matches_protection_target`.
+            ProtectionTarget::FromPlayer(scope) => {
+                state
+                    .objects
+                    .get(&source_id)
+                    .is_some_and(|src| match scope {
+                        ControllerRef::Opponent => src.controller != player_id,
+                        ControllerRef::You => src.controller == player_id,
+                        // Target/chosen player refs have no static context here —
+                        // fail closed (the parser never emits them for protection).
+                        _ => false,
+                    })
+            }
+            // Truly inert at the player level — no card grants these qualities to
+            // a player; object-level grants of these qualities flow through the
+            // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
+            ProtectionTarget::ChosenColor
+            | ProtectionTarget::Color(_)
+            | ProtectionTarget::Multicolored
+            | ProtectionTarget::Quality(_)
+            | ProtectionTarget::CardType(_)
+            | ProtectionTarget::Filter(_) => false,
         };
         if protects {
             return true;
@@ -1294,6 +1372,7 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
+                        crate::types::ability::ControllerRef::ParentTargetOwner => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
                         // CR 613.1: chosen-player scope has no static context here.
                         crate::types::ability::ControllerRef::SourceChosenPlayer => false,
@@ -2199,6 +2278,66 @@ mod tests {
         // Remove the transient — mirrors the cleanup path in layers.rs.
         state.transient_continuous_effects.clear();
         assert!(!player_has_protection_from_everything(&state, PlayerId(0)));
+    }
+
+    /// CR 702.16k + CR 702.16i: A `PlayerProtection(FromPlayer(Opponent))` static
+    /// (Absolute Virtue's "You have protection from each of your opponents.")
+    /// makes its controller protected from every opponent-controlled source and
+    /// NOT from its own sources. Exercises the runtime `FromPlayer` arm — the
+    /// building block, not the card name.
+    #[test]
+    fn player_protection_from_opponent_grants_against_opponent_sources() {
+        let mut state = setup();
+
+        // The granting permanent, controlled by PlayerId(0), carries the static.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Absolute Virtue".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::PlayerProtection(
+                    crate::types::keywords::ProtectionTarget::FromPlayer(ControllerRef::Opponent),
+                ))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent's Bolt Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "My Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_protection_from(&state, PlayerId(0), Some(opponent_source)),
+            "controller must have protection from an opponent-controlled source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(0), Some(own_source)),
+            "controller must NOT have protection from its own source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(1), Some(own_source)),
+            "the opponent gains no protection — affected is the controller only"
+        );
     }
 
     #[test]

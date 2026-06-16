@@ -105,6 +105,21 @@ fn collect_controller_controlled_as_cast_filters_from_condition(
     }
 }
 
+fn recompute_pending_cast_cost_after_additional_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) {
+    let object_id = pending.object_id;
+    let prior_pending = state.pending_cast.take();
+    state.pending_cast = Some(Box::new(pending.clone()));
+    let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
+    state.pending_cast = prior_pending;
+    if let Some(cost) = recomputed {
+        pending.cost = cost;
+    }
+}
+
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
 /// For `Optional`: `pay=true` pays the cost and sets `additional_cost_paid`, `pay=false` skips.
@@ -282,14 +297,7 @@ pub(crate) fn handle_decide_additional_cost(
     // flag via `state.pending_cast`, so publish `updated_pending` there for the
     // duration of the recompute, then restore the prior value.
     if optional_cost_paid {
-        let object_id = updated_pending.object_id;
-        let prior_pending = state.pending_cast.take();
-        state.pending_cast = Some(Box::new(updated_pending.clone()));
-        let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
-        state.pending_cast = prior_pending;
-        if let Some(cost) = recomputed {
-            updated_pending.cost = cost;
-        }
+        recompute_pending_cast_cost_after_additional_cost(state, player, &mut updated_pending);
     }
 
     if let Some(cost) = cost_to_pay {
@@ -467,6 +475,10 @@ fn handle_decide_kicker_cost(
 
     pending.ability.context.additional_cost_paid = true;
     pending.ability.context.kickers_paid.push(variant);
+    // CR 601.2b + CR 601.2f + CR 702.33d: Kicker is declared before total cost is
+    // locked in. Recompute now so "kicked spell" cost reducers see the paid kicker
+    // through `state.pending_cast` before mana payment.
+    recompute_pending_cast_cost_after_additional_cost(state, player, &mut pending);
     if pending.deferred_modal_choice.is_some() || pending.deferred_target_selection {
         pending.declared_kickers_to_pay.push(variant);
         return finish_pending_cost_or_cast(state, player, pending, events);
@@ -6172,27 +6184,48 @@ fn auto_tap_mana_sources_inner(
 
     // Build the typed shard-requirements list first — used by both the
     // combination pre-pass and the main MCV/LCV loop.
+    //
+    // CR 107.4f: Phyrexian shards can be paid with 2 life, so they should
+    // not block using flexible mana sources (dual lands) for strict colored
+    // requirements. We track Phyrexian shards separately and prioritize
+    // them after strict colored shards (MCV will sort them as least constrained).
     let mut deferred_generic: usize = 0;
-    let mut needs: Vec<(Vec<ManaType>, bool, bool)> = Vec::new();
+    let mut needs: Vec<(Vec<ManaType>, bool, bool, bool)> = Vec::new();
     for shard in shards {
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
-            ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
+            ShardRequirement::Single(color) => {
                 let acceptable = if any_color { Vec::new() } else { vec![color] };
-                needs.push((acceptable, false, false));
+                needs.push((acceptable, false, false, false));
             }
-            ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
+            ShardRequirement::Phyrexian(color) => {
+                // CR 107.4f: Mark as phyrexian (4th field = true) so MCV deprioritizes it
+                // compared to strict Single color requirements. Phyrexian can be paid with
+                // life, so we should consume other mana sources for strict requirements first.
+                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                needs.push((acceptable, false, false, true));
+            }
+            ShardRequirement::Hybrid(a, b) => {
                 let acceptable = if any_color { Vec::new() } else { vec![a, b] };
-                needs.push((acceptable, false, false));
+                needs.push((acceptable, false, false, false));
             }
-            ShardRequirement::TwoGenericHybrid(color)
+            ShardRequirement::HybridPhyrexian(a, b) => {
+                // CR 107.4f: Hybrid Phyrexian also allows life payment, so deprioritize.
+                let acceptable = if any_color { Vec::new() } else { vec![a, b] };
+                needs.push((acceptable, false, false, true));
+            }
+            ShardRequirement::TwoGenericHybrid(color) => {
+                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                needs.push((acceptable, true, false, false));
+            }
             // CR 107.4f: K'rrik promotion never reaches the auto-tap
             // planner (`shard_to_mana_type` never emits this variant),
             // but the arm is required for exhaustiveness. Same
-            // tap-planning shape as the unpromoted `TwoGenericHybrid`.
-            | ShardRequirement::TwoGenericHybridPhyrexian(color) => {
+            // tap-planning shape as the unpromoted `TwoGenericHybrid` but
+            // with potential life payment, so deprioritize.
+            ShardRequirement::TwoGenericHybridPhyrexian(color) => {
                 let acceptable = if any_color { Vec::new() } else { vec![color] };
-                needs.push((acceptable, true, false));
+                needs.push((acceptable, true, false, true));
             }
             ShardRequirement::ColorlessHybrid(color) => {
                 let acceptable = if any_color {
@@ -6200,10 +6233,10 @@ fn auto_tap_mana_sources_inner(
                 } else {
                     vec![ManaType::Colorless, color]
                 };
-                needs.push((acceptable, false, false));
+                needs.push((acceptable, false, false, false));
             }
             ShardRequirement::TwoOrMoreColorSource => {
-                needs.push((Vec::new(), false, true));
+                needs.push((Vec::new(), false, true, false));
             }
             ShardRequirement::Snow | ShardRequirement::X => {
                 deferred_generic += 1;
@@ -6234,11 +6267,15 @@ fn auto_tap_mana_sources_inner(
     // a color only the flexible source can produce.
     //
     // MCV: process the most constrained shard first (fewest available sources).
+    // Phyrexian shards are deprioritized since they can be paid with life.
     // LCV: for each shard, prefer the least flexible source (fewest color options).
     for _ in 0..needs.len() {
         let mut best_idx = None;
         let mut min_sources = usize::MAX;
-        for (i, (acceptable, _, requires_two_or_more_color_source)) in needs.iter().enumerate() {
+        let mut best_priority = 1u8; // 0 = strict color (prioritized), 1 = phyrexian (deprioritized)
+        for (i, (acceptable, _, requires_two_or_more_color_source, is_phyrexian)) in
+            needs.iter().enumerate()
+        {
             if assigned[i] {
                 continue;
             }
@@ -6249,23 +6286,28 @@ fn auto_tap_mana_sources_inner(
                 *requires_two_or_more_color_source,
                 effective_ctx,
             );
-            if count < min_sources {
+            let priority = if *is_phyrexian { 1u8 } else { 0u8 };
+            // CR 107.4f: Prioritize strict colored shards (priority 0) over Phyrexian
+            // shards (priority 1). Within the same priority tier, use MCV (fewest sources).
+            if priority < best_priority || (priority == best_priority && count < min_sources) {
                 min_sources = count;
+                best_priority = priority;
                 best_idx = Some(i);
             }
         }
         let Some(idx) = best_idx else { break };
-        let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source) = needs[idx];
+        let (ref acceptable, two_generic_fallback, requires_two_or_more_color_source, _) =
+            &needs[idx];
         if let Some(option) = find_least_flexible_source(
             &available,
             &used_sources,
             acceptable,
-            requires_two_or_more_color_source,
+            *requires_two_or_more_color_source,
             effective_ctx,
         ) {
             used_sources.insert(option.object_id);
             to_tap.push(option);
-        } else if two_generic_fallback {
+        } else if *two_generic_fallback {
             deferred_generic += 2;
         }
         assigned[idx] = true;
@@ -6469,7 +6511,7 @@ fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
 /// `used_sources`, blocking further rows of every combination variant.
 fn assign_combination_sources(
     available: &[ManaSourceOption],
-    needs: &[(Vec<ManaType>, bool, bool)],
+    needs: &[(Vec<ManaType>, bool, bool, bool)],
     assigned: &mut [bool],
     used_sources: &mut HashSet<ObjectId>,
     to_tap: &mut Vec<ManaSourceOption>,
@@ -6544,13 +6586,13 @@ fn assign_combination_sources(
 /// first-fit is sufficient for the filter-land class).
 fn score_combination(
     combo: &[ManaType],
-    needs: &[(Vec<ManaType>, bool, bool)],
+    needs: &[(Vec<ManaType>, bool, bool, bool)],
     assigned: &[bool],
 ) -> (usize, Vec<usize>) {
     let mut locally_consumed: Vec<bool> = assigned.to_vec();
     let mut covered = Vec::new();
     for mana in combo {
-        for (i, (acceptable, _, requires_two_or_more_color_source)) in needs.iter().enumerate() {
+        for (i, (acceptable, _, requires_two_or_more_color_source, _)) in needs.iter().enumerate() {
             if locally_consumed[i] {
                 continue;
             }

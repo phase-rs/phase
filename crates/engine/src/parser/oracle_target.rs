@@ -4175,6 +4175,27 @@ fn parse_ownership_or_controller_suffix(
         });
         return own_ctrl_offset + "you own".len();
     }
+    // CR 108.3 + CR 109.4: bare "you don't own"/"you do not own" — negated
+    // ownership with no "but" lead (distinct from the "but don't own" block in
+    // `parse_type_phrase`, which requires a controller already set). Placed after
+    // the affirmative "you own"/"you own and control" arms ("you own" is not a
+    // prefix of "you don't own", so no shadowing) and before the anaphoric
+    // subject×action block. `Owned { Opponent }` is runtime-evaluated as
+    // owner != controller (filter.rs), i.e. "you don't own it". Does NOT set
+    // *controller — ownership is independent of control; for "you control N
+    // permanents you don't own" the controller is supplied upstream by
+    // `inject_controller_you`. (Agent of Treachery #3304.)
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("you don't own"),
+        tag::<_, _, OracleError<'_>>("you do not own"),
+    ))
+    .parse(own_ctrl)
+    {
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        });
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
+    }
     // CR 108.3: "an opponent owns" — the card belongs to an opponent, used by Eldrazi Processors.
     for phrase in ["an opponent owns", "opponents own"] {
         if tag::<_, _, OracleError<'_>>(phrase).parse(own_ctrl).is_ok() {
@@ -11927,6 +11948,65 @@ mod tests {
             }
             other => panic!("expected And filter, got {other:?}"),
         }
+    }
+
+    /// CR 108.3 + CR 109.4: bare "permanents you don't own" — the new
+    /// negated-ownership suffix in `parse_ownership_or_controller_suffix`. With
+    /// no controller and no "but" lead it pushes `Owned { Opponent }` directly
+    /// onto a single `Typed` filter (runtime: owner != controller, i.e. "you
+    /// don't own it"). Distinct from the "but don't own" `And[Typed, Not(..)]`
+    /// shape below, which is left UNCHANGED — proving the bare arm is additive.
+    /// (Agent of Treachery #3304.)
+    #[test]
+    fn parse_type_phrase_permanents_you_dont_own_pushes_owned_opponent() {
+        for text in ["permanents you don't own", "permanents you do not own"] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert_eq!(rest, "", "fully consumed for {text:?}");
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected single Typed filter for {text:?}, got {filter:?}");
+            };
+            assert!(
+                tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent
+                }),
+                "{text:?} must push Owned{{Opponent}}, got {:?}",
+                tf.properties
+            );
+            // Ownership is independent of control: the bare suffix must NOT pin
+            // a controller (CR 109.4).
+            assert_eq!(
+                tf.controller, None,
+                "bare ownership suffix must not set controller for {text:?}"
+            );
+        }
+    }
+
+    /// No-regression guard: the "but don't own" path (controller already set)
+    /// still yields the `And[Typed(You), Not(Owned{You})]` shape, UNCHANGED by
+    /// the additive bare "you don't own" arm. (CR 108.3 + CR 109.4.)
+    #[test]
+    fn parse_type_phrase_but_dont_own_shape_unchanged_by_bare_arm() {
+        let (filter, rest) = parse_type_phrase("creature you control but don't own");
+        assert_eq!(rest, "");
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected And filter, got {filter:?}");
+        };
+        assert!(matches!(
+            filters.first(),
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == &vec![TypeFilter::Creature]
+        ));
+        assert!(matches!(
+            filters.get(1),
+            Some(TargetFilter::Not { filter }) if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if properties == &vec![FilterProp::Owned { controller: ControllerRef::You }]
+            )
+        ));
     }
 
     /// CR 205.3 + CR 205.4b: "target attacking Vampire that isn't a Demon" — the

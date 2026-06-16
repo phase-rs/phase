@@ -116,6 +116,13 @@ pub struct FormatConfig {
     /// Historic Brawl. The frontend consumes this directly — it must never
     /// re-list commander-style formats client-side.
     pub uses_commander: bool,
+    /// Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`):
+    /// true when the format's deck is fixed and supplied automatically by the
+    /// engine, so the player builds/selects nothing. True only for Momir's
+    /// Madness. The frontend consumes this directly to bypass deck-selection
+    /// gates — it must never re-list fixed-deck formats client-side.
+    #[serde(default)]
+    pub supplies_fixed_deck: bool,
     /// Capability flag: when true, the server (and other transport gates)
     /// permit `GameAction::Debug(_)` from any player in this session. Off by
     /// default. Orthogonal to format — a sandbox Commander game plays
@@ -220,6 +227,17 @@ impl GameFormat {
                 | GameFormat::Brawl
                 | GameFormat::HistoricBrawl,
         )
+    }
+
+    /// Whether this format's deck is fixed by the format rules and supplied
+    /// automatically by the engine — the player never builds or selects one.
+    /// True only for Momir's Madness, whose deck is the fixed 60-card snow-basic
+    /// list (`deck_loading::momir_fixed_deck_names`); `load_and_hydrate_decks`
+    /// synthesizes it for every seat. The frontend consumes the derived
+    /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
+    /// and must never re-list fixed-deck formats client-side.
+    pub fn supplies_fixed_deck(self) -> bool {
+        matches!(self, GameFormat::Momir)
     }
 
     /// Display label for validation error messages (e.g., "Not Pioneer legal").
@@ -425,6 +443,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -442,6 +461,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: true,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -531,6 +551,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -552,6 +573,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -586,6 +608,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: true,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -611,6 +634,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -630,6 +654,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -652,6 +677,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             uses_commander: false,
+            supplies_fixed_deck: true,
             allow_debug_actions: false,
         }
     }
@@ -669,6 +695,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: true,
             uses_commander: false,
+            supplies_fixed_deck: false,
             allow_debug_actions: false,
         }
     }
@@ -1000,11 +1027,21 @@ mod tests {
                 "{:?}: commander_damage_threshold presence must match uses_commander",
                 meta.format
             );
+            // The derived `supplies_fixed_deck` field must agree with the
+            // predicate for every variant (engine is the single authority for
+            // which formats auto-supply their deck).
+            assert_eq!(
+                meta.default_config.supplies_fixed_deck,
+                meta.format.supplies_fixed_deck(),
+                "{:?}: registry default disagrees with supplies_fixed_deck predicate",
+                meta.format
+            );
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
             let config = FormatConfig::for_format(format);
             assert_eq!(config.uses_commander, format.uses_commander());
+            assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
         }
     }
 

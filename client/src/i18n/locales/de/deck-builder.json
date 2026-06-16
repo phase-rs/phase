@@ -5,6 +5,8 @@
     "reset": "Zurücksetzen",
     "textPlaceholder": "Karten suchen...",
     "allTypes": "Alle Typen",
+    "cardType": "Kartentyp",
+    "browseFormatFilter": "Legal im Format",
     "cmcMax": "CMC max:",
     "sets": "Sets",
     "addSetPlaceholder": "Set-Code hinzufügen...",

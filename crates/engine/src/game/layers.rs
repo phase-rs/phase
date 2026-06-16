@@ -5,9 +5,9 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
-    eval_source_has_dealt_damage, eval_source_in_zone, eval_source_is_attacking,
-    eval_source_is_tapped_on_battlefield,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_recipient_attacking_owner_target,
+    eval_source_entered_this_turn, eval_source_has_dealt_damage, eval_source_in_zone,
+    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -547,6 +547,14 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
+        // CR 509.1b + CR 506.2: the attacking creature (recipient) is the subject
+        // of the owner-attack check, so this MUST route through the recipient-eval
+        // path. The `Not` wrapper above already recurses, so the positive inner
+        // condition is what must report `true`. This match carries a `_ => false`
+        // wildcard, so the compiler will NOT flag an omission here — it is
+        // functionally required: without it `recipient_id` arrives `None`, the
+        // evaluator returns `false`, and the `Not` inverts it to "always blockable".
+        StaticCondition::RecipientAttackingOwnerTarget { .. } => true,
         // CR 110.5b + CR 611.2b: a target/recipient-scoped tap condition must
         // route through the recipient-eval path so the captured `duration_subject`
         // (the copy target) binds — relying on the `_ => false` default would
@@ -628,6 +636,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
+        // CR 509.1b: combat-status gate on the recipient's attack target — per-object
+        // combat state, never board-population-dependent (like `SourceIsAttacking`).
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
@@ -749,6 +760,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
+        // CR 509.1b: an entering object cannot perturb a per-object combat-status
+        // gate on the recipient's attack target — `false` like `SourceIsAttacking`.
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch
@@ -929,6 +943,13 @@ fn evaluate_condition_with_context(
                     &FilterContext::from_source_with_recipient(state, source_id, id),
                 )
             })
+            .unwrap_or(false),
+        // CR 509.1b + CR 506.2 + CR 108.3: the recipient (the attacking creature
+        // this static gates) is attacking its owner / a permanent its owner
+        // controls. Owner-relative (CR 108.3); no recipient → false (mirrors the
+        // RecipientMatchesFilter defensive default).
+        StaticCondition::RecipientAttackingOwnerTarget { target } => recipient_id
+            .map(|id| eval_recipient_attacking_owner_target(state, id, target))
             .unwrap_or(false),
         // CR 716.2a + CR 716.3: Level abilities are active at or above the specified
         // level. No battlefield zone guard here — the functioning-abilities machinery
@@ -8564,6 +8585,161 @@ mod tests {
             &StaticCondition::SourceIsAttacking,
             PlayerId(0),
             bystander,
+        ));
+    }
+
+    // -- RecipientAttackingOwnerTarget evaluator tests (CR 509.1b / CR 506.2 / CR 108.3) --
+
+    #[test]
+    fn recipient_attacking_owner_target_owner_player_matches_owner() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        // Owned by B(1), controlled by A(0).
+        let attacker = make_creature(&mut state, "Donated", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::Owner,
+        };
+
+        // Attacking its owner (B) → positive condition true.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+
+        // Attacking a non-owner player (A) → false.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
+            ..Default::default()
+        });
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_or_planeswalker_matches_owner_controlled_pw() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Donated", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let owner_pw = make_creature(&mut state, "Owner Walker", 0, 4, PlayerId(1));
+        let controller_pw = make_creature(&mut state, "Controller Walker", 0, 4, PlayerId(0));
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::OwnerOrPlaneswalker,
+        };
+
+        // Planeswalker the OWNER (B) controls → true.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(owner_pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        assert!(evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+
+        // Planeswalker the CONTROLLER (A, not owner) controls → false (CR 108.3).
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(controller_pw),
+                PlayerId(0),
+            )],
+            ..Default::default()
+        });
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_false_when_not_attacking() {
+        use crate::game::combat::CombatState;
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Idle", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::OwnerOrPlaneswalker,
+        };
+
+        // Combat exists but the creature is not an attacker → false.
+        state.combat = Some(CombatState::default());
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_false_when_no_combat() {
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Idle", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::Owner,
+        };
+        assert!(state.combat.is_none());
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
+            attacker,
+        ));
+    }
+
+    #[test]
+    fn recipient_attacking_owner_target_false_when_no_recipient() {
+        // CR 509.1b: routing through the source-binding path (recipient_id == None)
+        // must yield false — guards the `condition_uses_recipient_context` arm.
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::types::triggers::AttackTargetFilter;
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Donated", 4, 4, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().controller = PlayerId(0);
+        let condition = StaticCondition::RecipientAttackingOwnerTarget {
+            target: AttackTargetFilter::Owner,
+        };
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        // No recipient supplied → defensive false, even though attacking owner.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &condition,
+            PlayerId(0),
+            attacker,
         ));
     }
 

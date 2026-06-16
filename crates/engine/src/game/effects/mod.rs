@@ -2,17 +2,19 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_initiative, eval_is_monarch, eval_source_entered_this_turn,
+    eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
-    FilterProp, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
+    EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -1654,6 +1656,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::ZoneChangedThisWay { .. }
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
             | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
             | AbilityCondition::ConditionInstead { .. }
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
@@ -2564,7 +2567,17 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || effect_references_tracked_set(&ability.effect);
+    ) || effect_references_tracked_set(&ability.effect)
+        // CR 608.2c + CR 609.3: `repeat_for` is a loop-count quantity on the
+        // ResolvedAbility, not inside Effect — e.g. "for each nonland card
+        // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
+        // Without this check, the forced-discard path (no WaitingFor pause)
+        // never publishes the tracked set, so the downstream token loop sees
+        // size 0 and creates no tokens (Seasoned Pyromancer bug #740).
+        || ability
+            .repeat_for
+            .as_ref()
+            .is_some_and(quantity_expr_references_tracked_set);
 
     consumes
         || ability
@@ -2684,7 +2697,11 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => {
             matches!(
                 qty,
-                QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+                QuantityRef::TrackedSetSize
+                    | QuantityRef::FilteredTrackedSetSize { .. }
+                    | QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::TrackedSet { .. }
+                    }
             )
         }
         QuantityExpr::Offset { inner, .. }
@@ -6308,6 +6325,17 @@ pub(crate) fn evaluate_condition(
         // For the untapped sense, wrap with `Not`. No battlefield zone guard
         // (ability conditions; zone constrained by functioning-abilities path).
         AbilityCondition::SourceIsTapped => eval_source_is_tapped(state, ability.source_id),
+        // CR 301.5 + CR 303.4: "if this permanent is attached to a creature you
+        // control" — check the source Aura/Equipment's host. False when the
+        // source is unattached or its host isn't a creature controlled by the
+        // ability's controller. Lets bestow triggers like Springheart Nantuko
+        // skip their optional payment branch silently while still resolving
+        // the fallback sub-ability.
+        AbilityCondition::SourceAttachedToCreature => eval_source_attached_to_controlled_creature(
+            state,
+            ability.source_id,
+            ability.controller,
+        ),
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
@@ -6663,21 +6691,39 @@ fn resolve_grant_next_spell_ability(
     ability: &crate::types::ability::ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), crate::types::ability::EffectError> {
-    let (modifier, spell_filter) = match &ability.effect {
+    let (modifier, player_scope, spell_filter) = match &ability.effect {
         Effect::GrantNextSpellAbility {
             modifier,
+            player,
             spell_filter,
-        } => (modifier.clone(), spell_filter.clone()),
+        } => (modifier.clone(), player.clone(), spell_filter.clone()),
         _ => {
             return Err(crate::types::ability::EffectError::MissingParam(
                 "GrantNextSpellAbility".to_string(),
             ))
         }
     };
+    // CR 115.1: "they cast / that player casts" (PlayerScope::Target) = the
+    // player this ability targets — the mana-clause recipient on Bigger on the
+    // Inside, inherited onto this SequentialSibling via chain target
+    // propagation. CR 109.5: every other scope = the effect's controller
+    // ("the next spell you cast"). Exhaustive over PlayerScope (no `_`), so any
+    // future variant forces a maintainer to re-confirm its next-spell semantics.
+    let player = match player_scope {
+        PlayerScope::Target => ability.target_player(),
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer => ability.controller,
+    };
     state
         .pending_next_spell_modifiers
         .push(crate::types::game_state::PendingNextSpellModifier {
-            player: ability.controller,
+            player,
             modifier,
             spell_filter,
         });
@@ -7154,6 +7200,30 @@ mod tests {
         );
         ability.optional = true;
         ability
+    }
+
+    #[test]
+    fn repeat_for_tracked_set_marks_ability_as_referencing_tracked_set() {
+        // Issue #740 (Seasoned Pyromancer): "for each nonland card discarded this
+        // way, create a token" carries its loop count as `repeat_for: TrackedSetSize`
+        // on the ResolvedAbility, NOT inside Effect. The publish predicate must
+        // detect it so the forced-discard path (no WaitingFor pause) still publishes
+        // the tracked set; without this check the token loop sees size 0.
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        // Control: a plain GainLife with no `repeat_for` references no tracked set.
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+        // With a tracked-set loop count, the predicate must return true.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
     }
 
     #[test]

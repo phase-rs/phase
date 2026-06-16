@@ -157,7 +157,9 @@
     "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
     "errorGeneric": "Nie udało się zaimportować talii.",
     "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
-    "chooseFile": "Wybierz plik"
+    "chooseFile": "Wybierz plik",
+    "importedSuccessTitle": "Talia zaimportowana",
+    "importedSuccessDescription": "„{{name}}” została dodana do twoich talii."
   },
   "precon": {
     "savePrompt": "Zapisz gotową talię jako:",

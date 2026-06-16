@@ -1830,23 +1830,29 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
 ///     " with that name and exile them"
 /// ```
 ///
-/// Returns `Some(())` on match — the lowering step constructs the
+/// Returns `Some(owner)` on match — the lowering step constructs the
 /// `Effect::ChangeZoneAll` directly (multi-zone origin + filter + destination
 /// are fixed by the matched pattern). Returns `None` for any other shape so
 /// the regular library-search branch can run.
-fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
-    fn run(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+pub(super) fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<ControllerRef> {
+    fn run(input: &str) -> Result<(&str, ControllerRef), nom::Err<OracleError<'_>>> {
         // search <possessive> graveyard, hand, and library
         let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
-        let (input, _) = alt((
-            tag::<_, _, OracleError<'_>>("its owner's "),
-            tag("its controller's "),
-            tag("their "),
-            tag("that player's "),
-            tag("target player's "),
-            tag("target opponent's "),
-            tag("an opponent's "),
-            tag("your "),
+        let (input, owner) = alt((
+            value(
+                ControllerRef::ParentTargetOwner,
+                tag::<_, _, OracleError<'_>>("its owner's "),
+            ),
+            value(
+                ControllerRef::ParentTargetController,
+                tag("its controller's "),
+            ),
+            value(ControllerRef::TargetPlayer, tag("their ")),
+            value(ControllerRef::TargetPlayer, tag("that player's ")),
+            value(ControllerRef::TargetPlayer, tag("target player's ")),
+            value(ControllerRef::Opponent, tag("target opponent's ")),
+            value(ControllerRef::Opponent, tag("an opponent's ")),
+            value(ControllerRef::You, tag("your ")),
         ))
         .parse(input)?;
         let (input, _) = alt((
@@ -1896,9 +1902,9 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
             ),
         ))
         .parse(input)?;
-        Ok((input, ()))
+        Ok((input, owner))
     }
-    run(lower).ok().map(|_| ())
+    run(lower).ok().map(|(_, owner)| owner)
 }
 
 pub(super) fn parse_search_and_creation_ast(
@@ -1924,8 +1930,8 @@ pub(super) fn parse_search_and_creation_ast(
     // and library for [filter] and exile them" — multi-zone exile of every card
     // matching the filter. Recognized before the single-zone library search
     // because both patterns share the "search " prefix; multi-zone wins on match.
-    if try_parse_multi_zone_same_name_exile(lower).is_some() {
-        return Some(SearchCreationImperativeAst::MultiZoneSameNameExile);
+    if let Some(owner) = try_parse_multi_zone_same_name_exile(lower) {
+        return Some(SearchCreationImperativeAst::MultiZoneSameNameExile { owner });
     }
     if starts_with_possessive(lower, "search", "library")
         // CR 701.23a: God-Pharaoh's-Gift-class multi-zone tutors ("search your
@@ -2353,10 +2359,10 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         // target via `SameNameAsParentTarget`. The ChangeZoneAll resolver
         // reads multi-zone origins from the filter and per-object zone-of-
         // origin to track hand-origin exiles for the downstream draw count.
-        SearchCreationImperativeAst::MultiZoneSameNameExile => Effect::ChangeZoneAll {
+        SearchCreationImperativeAst::MultiZoneSameNameExile { owner } => Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Exile,
-            target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+            target: TargetFilter::Typed(TypedFilter::default().controller(owner).properties(vec![
                 crate::types::ability::FilterProp::InAnyZone {
                     zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
                 },
@@ -5656,6 +5662,18 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
         });
     }
 
+    // CR 118.8: "pay half your life[, rounded up]" — delegate the life-fraction
+    // phrase to the shared quantity expression parser (`DivideRounded` over the
+    // controller's `LifeTotal`), so the rounding mode and life-total wording
+    // recognized everywhere else compose here too. Gated on a "half " prefix so
+    // only fraction phrases reach the (non-dispatch) all-consuming delegation.
+    if tag::<_, _, OracleError<'_>>("half ").parse(rest).is_ok() {
+        let qty_text = rest.trim_end().trim_end_matches('.').trim_end();
+        if let Ok(("", expr)) = crate::parser::oracle_nom::quantity::parse_quantity(qty_text) {
+            return Some(expr);
+        }
+    }
+
     // CR 118.8: "pay N life" — literal amount via `parse_number` (digit words
     // or numerals, never "X" — handled above). Same word-boundary guard so
     // hypothetical phrases like "3 lifelink" cannot false-match.
@@ -6530,6 +6548,26 @@ pub(super) fn parse_imperative_family_ast(
         .parse(lower)
         .ok()
         .map(|(_, ast)| ast),
+        // CR 701.31c: "planeswalk" — an ability instructs a player to
+        // planeswalk (TARDIS, Start the TARDIS, TARDIS Bay). Rules-correct
+        // no-op outside a Planechase game (CR 701.31a); handled by
+        // effects::planeswalk via game::planechase. The "you may " / "then "
+        // prefix and the `optional` flag are already stripped upstream, so the
+        // family parser sees only the bare verb body for both the optional
+        // (TARDIS, Start the TARDIS) and mandatory (TARDIS Bay) forms. The
+        // anchored all-consuming guard prevents matching a longer clause.
+        "planeswalk" | "planeswalks" => all_consuming(terminated(
+            // Longer alternative first so "planeswalks" matches the full token
+            // before the "planeswalk" prefix can short-circuit the `alt`.
+            alt((
+                tag::<_, _, OracleError<'_>>("planeswalks"),
+                tag("planeswalk"),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(lower.trim())
+        .ok()
+        .map(|_| ImperativeFamilyAst::Planeswalk),
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
@@ -7697,6 +7735,23 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 601.2d + CR 615.7: "prevent N damage divided/distributed among [targets]"
+        // — intercepted here so `distribute` and `multi_target` propagate to
+        // `ParsedEffectClause`. The bare Effect returned by `lower_utility_imperative_ast`
+        // cannot carry these fields. Mirrors the ZoneCounter { unless_pay } intercept above.
+        ImperativeFamilyAst::Structured(ImperativeAst::Utility(
+            UtilityImperativeAst::Prevent { ref text },
+        )) => {
+            if let Some(clause) = super::lower::try_parse_prevent_distribute(text) {
+                return clause;
+            }
+            // Fallback: standard prevent with no distribution.
+            // lower_utility_imperative_ast is defined in THIS file (imperative.rs),
+            // called unqualified — NOT super::lower::lower_utility_imperative_ast.
+            parsed_clause(lower_utility_imperative_ast(
+                UtilityImperativeAst::Prevent { text: text.clone() },
+            ))
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -7767,6 +7822,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        // CR 701.31c: An ability instructs a player to planeswalk.
+        ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
@@ -8588,6 +8645,104 @@ mod tests {
         assert!(
             has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
             "the spell leg must be pinned to the stack zone"
+        );
+    }
+
+    /// Spider-Sense — "Counter target instant spell, sorcery spell, or
+    /// triggered ability." must parse to the full three-way disjunction, not
+    /// the buggy bare `Typed { [Instant] }` that dropped the sorcery and
+    /// triggered-ability legs. CR 701.6a + CR 115.1: every listed leg of the
+    /// legal target set must be reproduced.
+    #[test]
+    fn parse_counter_spider_sense_spell_first_disjunction() {
+        let text = "Counter target instant spell, sorcery spell, or triggered ability.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Spider-Sense counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // Regression guard for the exact bug: it must NOT be the bare
+        // instant-only `Typed` filter.
+        assert!(
+            !matches!(&target, TargetFilter::Typed(_)),
+            "Spider-Sense must not parse to a bare Typed filter (the instant-only bug): {target:?}"
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ instant, sorcery, ability }}, got {target:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
+            "missing the triggered-ability disjunct: {target:?}"
+        );
+        let instant_leg = filters
+            .iter()
+            .filter_map(typed_leg)
+            .find(|tf| has_type(tf, TypeFilter::Instant))
+            .expect("missing the instant-spell disjunct");
+        assert!(
+            has_prop(instant_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the instant leg must be pinned to the stack zone: {instant_leg:?}"
+        );
+        let sorcery_leg = filters
+            .iter()
+            .filter_map(typed_leg)
+            .find(|tf| has_type(tf, TypeFilter::Sorcery))
+            .expect("missing the sorcery-spell disjunct (the dropped leg)");
+        assert!(
+            has_prop(sorcery_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the sorcery leg must be pinned to the stack zone: {sorcery_leg:?}"
+        );
+    }
+
+    /// Disallow / Voidslime / Overcharged Amalgam / Ertai Resurrected —
+    /// "Counter target spell, activated ability, or triggered ability." must
+    /// parse to `Or { spell, ability }`, not the buggy bare `StackSpell` that
+    /// dropped BOTH ability legs (the highest-printing member of the class).
+    /// CR 701.6a + CR 113.3b/113.3c.
+    #[test]
+    fn parse_counter_disallow_three_way_disjunction() {
+        let text = "Counter target spell, activated ability, or triggered ability.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Disallow counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // Regression guard for the exact bug: it must NOT be the bare
+        // StackSpell that silently dropped both ability legs.
+        assert!(
+            !matches!(&target, TargetFilter::StackSpell),
+            "Disallow must not parse to bare StackSpell (the dropped-abilities bug): {target:?}"
+        );
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ spell, ability }}, got {target:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
+            "missing the activated/triggered ability disjunct: {target:?}"
+        );
+        let spell_leg = filters
+            .iter()
+            .find_map(typed_leg)
+            .expect("missing the bare-spell disjunct");
+        assert!(
+            has_type(spell_leg, TypeFilter::Card),
+            "the bare-spell leg must carry TypeFilter::Card: {spell_leg:?}"
+        );
+        assert!(
+            has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the bare-spell leg must be pinned to the stack zone: {spell_leg:?}"
         );
     }
 
@@ -10642,6 +10797,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_pay_half_your_life_rounded_up() {
+        // CR 118.8: delegate the life-fraction phrase to the shared quantity
+        // parser (DivideRounded over the controller's life total).
+        let text = "pay half your life, rounded up";
+        let lower = text.to_lowercase();
+        let Some(CostResourceImperativeAst::Pay {
+            cost: AbilityCost::PayLife { amount },
+        }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("expected PayLife cost for {text:?}");
+        };
+        assert!(
+            matches!(
+                amount,
+                QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                    ..
+                }
+            ),
+            "expected half-life DivideRounded, got {amount:?}"
+        );
+    }
+
+    #[test]
+    fn parse_pay_does_not_false_match_lifelink_or_lifeless() {
+        // Word-boundary guard: "any amount of life" must be a complete token.
+        for text in ["pay any amount of lifelink", "pay any amount of lifeforce"] {
+            let lower = text.to_lowercase();
+            let res = parse_cost_resource_ast(text, &lower, &mut ParseContext::default());
+            assert!(
+                !matches!(
+                    res,
+                    Some(CostResourceImperativeAst::Pay {
+                        cost: AbilityCost::PayLife { .. }
+                    })
+                ),
+                "{text:?} must not parse as a life payment"
+            );
+        }
+    }
+
+    #[test]
     fn parse_additional_phase_with_main_phase() {
         let text = "there is an additional combat phase followed by an additional main phase";
         let lower = text.to_lowercase();
@@ -11945,23 +12143,51 @@ mod tests {
     #[test]
     fn parse_multi_zone_same_name_exile_pattern() {
         let positives = [
-            "search its owner's graveyard, hand, and library for any number of cards with that name and exile them",
-            "search target player's graveyard, hand, and library for any number of cards with that name and exile them",
-            "search target player's graveyard, hand, and library for all cards with that name and exile them",
-            "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
-            "search their graveyard, hand, and library for a card with that name and exile them",
+            (
+                "search its owner's graveyard, hand, and library for any number of cards with that name and exile them",
+                ControllerRef::ParentTargetOwner,
+            ),
+            (
+                "search target player's graveyard, hand, and library for any number of cards with that name and exile them",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "search target player's graveyard, hand, and library for all cards with that name and exile them",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+                ControllerRef::ParentTargetOwner,
+            ),
+            (
+                "search their graveyard, hand, and library for a card with that name and exile them",
+                ControllerRef::TargetPlayer,
+            ),
             // CR 201.2a: "its controller's" possessive + card-type name source —
             // Eradicate ("that creature"), Crumble to Dust ("that land"),
             // Counterbore ("that spell"), Deicide ("its controller's … that card").
-            "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
-            "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
-            "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
-            "search its controller's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+            (
+                "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                "search its controller's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+                ControllerRef::ParentTargetController,
+            ),
         ];
-        for text in positives {
-            assert!(
-                try_parse_multi_zone_same_name_exile(text).is_some(),
-                "expected match for: {text}"
+        for (text, owner) in positives {
+            assert_eq!(
+                try_parse_multi_zone_same_name_exile(text),
+                Some(owner.clone()),
+                "expected match with owner {owner:?} for: {text}"
             );
         }
 
@@ -12037,6 +12263,11 @@ mod tests {
                 let TargetFilter::Typed(tf) = target else {
                     panic!("Expected Typed target, got {target:?}");
                 };
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::ParentTargetOwner),
+                    "possessive owner must scope searched zones"
+                );
                 let zones_ok = tf.properties.iter().any(|p| {
                     matches!(p, FilterProp::InAnyZone { zones }
                         if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library])
@@ -13178,5 +13409,66 @@ mod tests {
                 ability.effect
             );
         }
+    }
+
+    /// CR 701.31c: the bare "planeswalk" verb dispatches to the
+    /// `Planeswalk` imperative-family leaf (the "you may " / "then " prefix and
+    /// the optional flag are stripped upstream, so the family parser only ever
+    /// sees the bare verb body).
+    #[test]
+    fn planeswalk_verb_dispatches_to_planeswalk_leaf() {
+        // The family parser sees the bare verb body (subject + optional-prefix +
+        // trailing-period normalization happen upstream — see the end-to-end
+        // `parse_effect_chain` tests below for the "you may planeswalk." /
+        // "then planeswalk." forms). Both singular and plural verb tokens map to
+        // the same leaf.
+        for input in ["planeswalk", "planeswalks"] {
+            let ast = parse_imperative_family_ast(input, input, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("'{input}' should parse to a Planeswalk leaf"));
+            assert!(
+                matches!(ast, ImperativeFamilyAst::Planeswalk),
+                "expected Planeswalk leaf for '{input}', got {ast:?}"
+            );
+        }
+    }
+
+    /// CR 701.31c: "you may planeswalk" → optional `Effect::Planeswalk`
+    /// (TARDIS, Start the TARDIS rider). The optional shell is produced by the
+    /// upstream optional-prefix strip.
+    #[test]
+    fn effect_you_may_planeswalk_is_optional_planeswalk() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "You may planeswalk.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Planeswalk),
+            "expected Effect::Planeswalk, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.optional,
+            "expected optional: true for 'you may planeswalk'"
+        );
+    }
+
+    /// CR 701.31c: "Then planeswalk." → mandatory `Effect::Planeswalk`
+    /// (TARDIS Bay). The mandatory form must parse to the same effect with
+    /// `optional: false`.
+    #[test]
+    fn effect_then_planeswalk_is_mandatory_planeswalk() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Then planeswalk.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::Planeswalk),
+            "expected Effect::Planeswalk, got {:?}",
+            def.effect
+        );
+        assert!(
+            !def.optional,
+            "expected optional: false for 'then planeswalk'"
+        );
     }
 }

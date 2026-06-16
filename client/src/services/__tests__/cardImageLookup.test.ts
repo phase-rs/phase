@@ -89,6 +89,46 @@ describe("cardImageLookup", () => {
     });
   });
 
+  it("resolves an emblem's art from emblem_source name when it has no printed_ref", () => {
+    // CR 114.5: the Momir emblem carries no printed_ref of its own; its art is
+    // resolved from the display-only emblem_source (the card it represents) so
+    // its activated ability on the stack shows Momir Vig instead of a blank.
+    expect(
+      cardImageLookup({
+        name: "Emblem",
+        transformed: false,
+        back_face: null,
+        is_emblem: true,
+        emblem_source: { name: "Momir Vig, Simic Visionary" },
+      }),
+    ).toEqual({
+      name: "Momir Vig, Simic Visionary",
+      oracleId: undefined,
+      faceName: undefined,
+      faceIndex: 0,
+    });
+  });
+
+  it("prefers emblem_source.printed_ref oracle_id when present", () => {
+    expect(
+      cardImageLookup({
+        name: "Emblem",
+        transformed: false,
+        back_face: null,
+        is_emblem: true,
+        emblem_source: {
+          name: "Jace, the Mind Sculptor",
+          printed_ref: { oracle_id: "jace-oracle", face_name: "Jace, the Mind Sculptor" },
+        },
+      }),
+    ).toEqual({
+      name: "Jace, the Mind Sculptor",
+      oracleId: "jace-oracle",
+      faceName: "Jace, the Mind Sculptor",
+      faceIndex: 0,
+    });
+  });
+
   it("uses obj.printed_ref directly when transformed (engine tracks current face)", () => {
     // After transform, the engine overwrites obj.printed_ref to point at the
     // back face (printed_cards.rs:190). The Scryfall service resolves the

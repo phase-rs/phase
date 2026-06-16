@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -39,7 +39,7 @@ import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
@@ -122,6 +122,9 @@ const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   },
 ];
 
+const SETTINGS_MENU_CLASS =
+  "min-h-[44px] rounded-[14px] py-2 text-base sm:min-h-0 sm:text-sm";
+
 export function PreferencesModal({
   onClose,
   initialTab = "gameplay",
@@ -201,6 +204,42 @@ export function PreferencesModal({
   const [themeImportStatus, setThemeImportStatus] = useState<"idle" | "loading" | "error">("idle");
   const [themeImportError, setThemeImportError] = useState("");
 
+  const boardBackgroundMenuGroups = useMemo(
+    () =>
+      BOARD_BACKGROUND_GROUPS.map((group) => ({
+        label: t(group.labelKey),
+        items: group.options.map((bg) => ({
+          value: bg.value,
+          label: bg.labelKey ? t(bg.labelKey) : (bg.label ?? bg.value),
+        })),
+      })),
+    [t],
+  );
+  const selectedBoardBackgroundLabel = useMemo(() => {
+    for (const group of boardBackgroundMenuGroups) {
+      const match = group.items.find((item) => item.value === boardBackground);
+      if (match) return match.label;
+    }
+    return boardBackground;
+  }, [boardBackground, boardBackgroundMenuGroups]);
+  const audioThemeItems = useMemo(
+    () => [
+      ...Object.values(BUILT_IN_THEMES).map((theme) => ({
+        value: theme.id,
+        label: theme.name,
+      })),
+      ...customThemeUrls.map((theme) => ({
+        value: theme.id,
+        label: theme.id,
+      })),
+    ],
+    [customThemeUrls],
+  );
+  const selectedAudioThemeLabel = useMemo(
+    () => audioThemeItems.find((item) => item.value === audioThemeId)?.label ?? audioThemeId,
+    [audioThemeId, audioThemeItems],
+  );
+
   const handleThemeChange = useCallback(async (id: string) => {
     setAudioThemeId(id);
     try {
@@ -252,26 +291,31 @@ export function PreferencesModal({
       subtitle={t("modal.subtitle")}
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
-      bodyClassName="overflow-y-auto p-4 sm:p-6"
+      bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden pl-4 pt-4 pr-1.5 pb-8 sm:pl-6 sm:pt-6 sm:pr-2 sm:pb-10"
     >
-      <div className="grid gap-4 md:grid-cols-[200px_minmax(0,1fr)]">
-            <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
-              {SETTINGS_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`min-h-11 shrink-0 snap-start rounded-[16px] border px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors md:w-full md:px-4 md:text-xs md:tracking-[0.18em] ${
-                    activeTab === tab.id
-                      ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
-                      : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
-                  }`}
-                >
-                  {t(`tabs.${tab.id}`)}
-                </button>
-              ))}
-            </nav>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 md:min-h-[28rem] md:flex-row md:overflow-hidden">
+            <aside className="flex shrink-0 flex-col md:w-[200px] md:justify-between">
+              <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
+                {SETTINGS_TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`min-h-11 shrink-0 snap-start rounded-[16px] border px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors md:w-full md:px-4 md:text-xs md:tracking-[0.18em] ${
+                      activeTab === tab.id
+                        ? "border-sky-400/60 bg-sky-500/14 text-sky-100"
+                        : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
+                    }`}
+                  >
+                    {t(`tabs.${tab.id}`)}
+                  </button>
+                ))}
+              </nav>
+              <div className="hidden shrink-0 border-t border-white/5 pt-6 pb-8 md:block">
+                <ResetAllFooter resetAllPreferences={resetAllPreferences} />
+              </div>
+            </aside>
 
-            <div className="min-w-0">
+            <div className="thin-scrollbar flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pb-4 pr-3 md:pr-4">
               {activeTab === "gameplay" && (
                 <SettingsSection title={t("gameplay.title")}>
                   <SettingGroup label={t("gameplay.language")}>
@@ -347,22 +391,16 @@ export function PreferencesModal({
                     }`}
                   >
                     <SettingGroup label={t("gameplay.boardBackground")}>
-                      <SelectField
+                      <MenuSelect
+                        ariaLabel={t("gameplay.boardBackground")}
+                        label={selectedBoardBackgroundLabel}
+                        selectedValue={boardBackground}
+                        groups={boardBackgroundMenuGroups}
+                        onSelect={setBoardBackground}
+                        menuLayout="dropdown"
                         wrapperClassName="w-full"
-                        value={boardBackground}
-                        onChange={(e) => setBoardBackground(e.target.value)}
-                        className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
-                      >
-                        {BOARD_BACKGROUND_GROUPS.map((group) => (
-                          <optgroup key={group.labelKey} label={t(group.labelKey)}>
-                            {group.options.map((bg) => (
-                              <option key={bg.value} value={bg.value}>
-                                {bg.labelKey ? t(bg.labelKey) : bg.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </SelectField>
+                        className={SETTINGS_MENU_CLASS}
+                      />
                       {boardBackground === "custom" && (
                         <input
                           type="url"
@@ -566,19 +604,16 @@ export function PreferencesModal({
 
                 <SettingsSection title={t("audioTheme.title")}>
                   <SettingGroup label={t("audioTheme.theme")}>
-                    <SelectField
+                    <MenuSelect
+                      ariaLabel={t("audioTheme.theme")}
+                      label={selectedAudioThemeLabel}
+                      selectedValue={audioThemeId}
+                      items={audioThemeItems}
+                      onSelect={handleThemeChange}
+                      menuLayout="dropdown"
                       wrapperClassName="w-full"
-                      value={audioThemeId}
-                      onChange={(e) => handleThemeChange(e.target.value)}
-                      className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
-                    >
-                      {Object.values(BUILT_IN_THEMES).map((t) => (
-                        <option key={t.id} value={t.id}>{t.name}</option>
-                      ))}
-                      {customThemeUrls.map((t) => (
-                        <option key={t.id} value={t.id}>{t.id}</option>
-                      ))}
-                    </SelectField>
+                      className={SETTINGS_MENU_CLASS}
+                    />
                   </SettingGroup>
 
                   <SettingGroup label={t("audioTheme.importTheme")}>
@@ -652,8 +687,10 @@ export function PreferencesModal({
           <DataSection />
         </>
       )}
+              <div className="border-t border-white/5 py-4 md:hidden">
+                <ResetAllFooter resetAllPreferences={resetAllPreferences} />
+              </div>
             </div>
-            <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
     </ModalPanelShell>
   );
@@ -676,15 +713,13 @@ function ResetAllFooter({
   }, [resetAllPreferences, t]);
 
   return (
-    <div className="mt-4 flex justify-end border-t border-white/5 pt-3">
-      <button
-        type="button"
-        onClick={onClick}
-        className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
-      >
-        {t("resetAll.button")}
-      </button>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
+    >
+      {t("resetAll.button")}
+    </button>
   );
 }
 

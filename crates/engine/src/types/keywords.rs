@@ -814,11 +814,17 @@ pub enum Keyword {
     /// on target creature, which gains this creature's other abilities until EOT.
     Backup(u32),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (variable additional cost + ETB token-per-payment
-    /// not wired).
-    /// CR 702.157: Squad {cost} — as an additional cost to cast, you may pay {cost}
-    /// any number of times; ETB creates that many tokens.
+    /// CR 702.157a: Squad {cost} — "As an additional cost to cast this spell,
+    /// you may pay {cost} any number of times." "When this creature enters, if
+    /// its squad cost was paid, create a token that's a copy of it for each time
+    /// its squad cost was paid." (CR 702.157b: each instance triggers separately.)
+    ///
+    /// Runtime: `database::synthesis::synthesize_squad` builds a
+    /// `AdditionalCost::Optional { repeatability: Repeatable }` additional-cost
+    /// instance (origin: `AdditionalCostOrigin::Squad`) and an ETB copy trigger
+    /// keyed on `QuantityRef::AdditionalCostPaymentCountFor { origin: Squad }`.
+    /// `casting_costs::effective_squad_additional_cost_instances` surfaces the
+    /// per-instance additional costs during casting. Fully wired.
     Squad(ManaCost),
 
     /// CR 702.29: Typecycling — "{subtype}cycling {cost}": discard this card and pay {cost}
@@ -923,11 +929,17 @@ pub enum Keyword {
     /// mana cost.
     Replicate(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cast hook + awaken-paid branch not wired).
-    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts
-    /// N +1/+1 counters on target land, animating it as a 0/0 Elemental
-    /// creature with haste.
+    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts N +1/+1
+    /// counters on target land you control, animating it as a 0/0 Elemental
+    /// creature with haste (it's still a land). Casting with awaken follows
+    /// CR 601.2b and CR 601.2f–h. CR 702.113b: the land target exists only
+    /// when the awaken cost was paid.
+    ///
+    /// Runtime: `CastingVariant::Awaken` + `casting::handle_awaken_cost_choice`
+    /// substitutes the awaken mana cost for the printed cost and calls
+    /// `effects::awaken::append_awaken_rider` to append the resolution rider
+    /// (`PutCounter{N, land you control}` → `Animate{0/0 Elemental, Haste,
+    /// Permanent}`) at the tail of the spell's ability tree. Fully wired.
     Awaken {
         count: u32,
         cost: ManaCost,
@@ -939,40 +951,57 @@ pub enum Keyword {
     /// trigger semantics are synthesized in `database::synthesis`.
     ForMirrodin,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cost cast hook not wired).
     /// CR 702.162a: More Than Meets the Eye {cost} — alternative cost
-    /// (Transformers crossover). "You may cast this card converted by
-    /// paying [cost] rather than its mana cost." Stores the alt mana
-    /// cost; the runtime alt-cost cast hook is not yet wired.
+    /// (Transformers crossover). "You may cast this card converted by paying
+    /// [cost] rather than its mana cost." Follows CR 701.28 (Convert) —
+    /// the permanent enters the battlefield transformed (back face up).
+    /// Alternative cost rules: CR 601.2b, CR 601.2f–h, CR 118.9.
+    ///
+    /// Runtime: `CastingVariant::MoreThanMeetsTheEye` + `casting::handle_mtmte_cost_choice`
+    /// substitutes the MTMTE mana cost for the printed cost and routes through
+    /// `continue_cast_with_alternative_spell_face`, which sets the stack spell
+    /// to use back-face characteristics. On resolution, `enter_transformed`
+    /// ZoneChange seed ensures the permanent enters back face up.
+    /// `CastingVariant::restores_front_face_after_stack_exit` handles cleanup
+    /// if the spell leaves the stack without resolving. Fully wired.
     MoreThanMeetsTheEye(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cast hook + combat-damage-this-turn predicate
-    /// not wired).
-    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay
-    /// [cost] rather than pay this spell's mana cost if a player was
-    /// dealt combat damage this turn by a creature that, at the time it
-    /// dealt that damage, was an Assassin creature or a commander under
-    /// your control." Stores the alt mana cost; runtime alt-cast hook
-    /// (combat-damage-this-turn predicate) is not yet wired.
+    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay [cost]
+    /// rather than pay this spell's mana cost if a player was dealt combat damage
+    /// this turn by a creature that, at the time it dealt that damage, was an
+    /// Assassin creature or a commander under your control." Follows CR 601.2b
+    /// and CR 601.2f–h. A pure cost substitution — no resolution rider.
+    ///
+    /// Runtime: The eligibility predicate is tracked in
+    /// `GameState::assassin_or_commander_dealt_combat_damage_this_turn`
+    /// (a `HashSet<PlayerId>` seeded by `triggers::collect_pending_triggers`
+    /// when an Assassin or commander deals combat damage, per CR 702.173a).
+    /// The ledger is cleared at cleanup (CR 514) by `turns::run_cleanup`.
+    /// `casting::casting_variant_candidates` checks the ledger to surface
+    /// `CastingVariant::Freerunning`; `casting_costs` substitutes the
+    /// Freerunning cost for the printed cost. Fully wired.
     Freerunning(ManaCost),
 
     /// CR 702.191a: Increment — spell-cast trigger synthesized in
     /// `database::synthesis::synthesize_increment`.
     Increment,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (choose-color + transform hooks not wired).
-    /// CR ???: Specialize {cost} — not in CR text (needs manual
-    /// verification). Strixhaven student-into-mage transformation:
-    /// activated alt-cast that turns the source into a colour-specific
-    /// version. Stores the activation mana cost; the choose-color and
-    /// transform hooks are not yet wired. mtgish encodes activation
-    /// timing modifiers and from-graveyard variants separately; this
-    /// keyword carries only the cost (the engine drops the activation
-    /// modifier and the from-graveyard hint, mirroring how `LevelUp`
-    /// drops its `Vec<Level>` payload).
+    /// Digital-only Specialize (Alchemy Horizons: Baldur's Gate) — not in the
+    /// Comprehensive Rules; behavior follows MTG Arena. "{cost}, Discard a
+    /// colored card or a card with a basic land subtype: This permanent becomes
+    /// the matching color-specialized face permanently." Activated ability,
+    /// sorcery speed. The keyword carries only the activation mana cost; the
+    /// discard filter and color selection are built at synthesis time.
+    ///
+    /// Runtime: `database::synthesis::synthesize_specialize` builds a sorcery-
+    /// speed `AbilityKind::Activated` with `Effect::Specialize` and
+    /// `AbilityCost::Composite { Mana + Discard { filter: specialize_discard_filter } }`.
+    /// `effects::specialize::resolve` reads the discarded card's LKI snapshot to
+    /// determine eligible colors via `game::specialize::eligible_specialize_colors`,
+    /// then either calls `specialize_permanent` directly (one option) or sets
+    /// `WaitingFor::SpecializeColor` for the player to choose.
+    /// `engine_resolution_choices` dispatches `GameAction::ChooseSpecializeColor`
+    /// to complete the transformation. Fully wired.
     Specialize(ManaCost),
 
     /// CR 702.48a: "[Quality] offering" — as an additional cost to cast this
@@ -2305,7 +2334,7 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
     }
 }
 
-fn parse_protection_target(s: &str) -> ProtectionTarget {
+pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
     // Lookup table on an atomic quality string (not Oracle-text dispatch) — the
     // caller has already isolated the quality token from "protection from X".
     let lower = s.to_ascii_lowercase();
