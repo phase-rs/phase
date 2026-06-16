@@ -369,6 +369,34 @@ pub fn convert_permanent_rule(
             exemption: engine::types::statics::ActivationExemption::None,
         },
 
+        // CR 510.1c: This permanent assigns combat damage equal to its toughness
+        // rather than its power (Doran-class effects, Assault Formation global).
+        P::AssignsToughnessCombatDamage => {
+            return Ok(StaticDefinition::new(StaticMode::Continuous)
+                .affected(affected)
+                .modifications(vec![
+                    engine::types::ability::ContinuousModification::AssignDamageFromToughness,
+                ]));
+        }
+
+        // CR 510.1c: This permanent assigns combat damage as though it weren't blocked.
+        P::AssignsCombatDamageAsThoughNotBlocked => {
+            return Ok(StaticDefinition::new(StaticMode::Continuous)
+                .affected(affected)
+                .modifications(vec![
+                    engine::types::ability::ContinuousModification::AssignDamageAsThoughUnblocked,
+                ]));
+        }
+
+        // CR 510.1a: This permanent assigns no combat damage.
+        P::AssignsNoCombatDamage => {
+            return Ok(StaticDefinition::new(StaticMode::Continuous)
+                .affected(affected)
+                .modifications(vec![
+                    engine::types::ability::ContinuousModification::AssignNoCombatDamage,
+                ]));
+        }
+
         _ => {
             return Err(ConversionGap::UnknownVariant {
                 path: String::new(),
