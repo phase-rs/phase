@@ -8,7 +8,6 @@ use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{AbilityKind, Effect};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
 
 #[test]
 fn explore_spell_parses_both_effects() {
