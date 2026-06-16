@@ -4960,7 +4960,10 @@ pub(crate) fn check_trigger_condition(
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
-            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            let ctx = FilterContext::from_source_with_controller(
+                source_id.unwrap_or(ObjectId(0)),
+                controller,
+            );
             let count = state
                 .battlefield
                 .iter()
