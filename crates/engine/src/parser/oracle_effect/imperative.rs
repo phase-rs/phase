@@ -13204,7 +13204,7 @@ mod tests {
         assert_eq!(
             replace_fixed_quantity(QuantityExpr::Fixed { value: 3 }, for_each.clone()),
             QuantityExpr::Multiply {
-                factor: 3,`
+                factor: 3,
                 inner: Box::new(for_each.clone()),
             },
         );
