@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-15T00:00:00Z",
+  "updated": "2026-06-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -663,145 +663,6 @@
       ]
     },
     {
-      "name": "Orzhov Greasefang",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 1,
-          "name": "Geier Reach Sanitarium"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
-        },
-        {
-          "count": 2,
-          "name": "Brightclimb Pathway"
-        },
-        {
-          "count": 2,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 4,
-          "name": "Fleeting Spirit"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 3,
-          "name": "Guardian of New Benalia"
-        },
-        {
-          "count": 4,
-          "name": "The Mycosynth Gardens"
-        },
-        {
-          "count": 2,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 1,
-          "name": "Lively Dirge"
-        },
-        {
-          "count": 2,
-          "name": "Sheltered by Ghosts"
-        },
-        {
-          "count": 4,
-          "name": "Monument to Endurance"
-        },
-        {
-          "count": 2,
-          "name": "Bleachbone Verge"
-        },
-        {
-          "count": 4,
-          "name": "Iron-Shield Elf"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 3,
-          "name": "Doorkeeper Thrull"
-        },
-        {
-          "count": 1,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Ral Zarek, Guest Lecturer"
-        }
-      ]
-    },
-    {
       "name": "Dimir Aggro",
       "author": "MTGGoldfish",
       "colors": [
@@ -881,7 +742,7 @@
           "name": "Mockingbird"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Go for the Throat"
         },
         {
@@ -895,24 +756,28 @@
         {
           "count": 2,
           "name": "Nowhere to Run"
+        },
+        {
+          "count": 1,
+          "name": "Bitter Triumph"
         }
       ],
       "sideboard": [
+        {
+          "count": 1,
+          "name": "Go for the Throat"
+        },
+        {
+          "count": 2,
+          "name": "Path of Peril"
+        },
         {
           "count": 1,
           "name": "Languish"
         },
         {
           "count": 2,
-          "name": "Anoint with Affliction"
-        },
-        {
-          "count": 2,
           "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 2,
-          "name": "Duress"
         },
         {
           "count": 3,
@@ -928,126 +793,166 @@
         },
         {
           "count": 2,
-          "name": "Path of Peril"
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Bitter Triumph"
         }
       ]
     },
     {
-      "name": "Selesnya Company",
+      "name": "Orzhov Greasefang",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "G"
+        "B",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
           "count": 2,
-          "name": "Abandoned Air Temple"
+          "name": "Concealed Courtyard"
         },
         {
           "count": 4,
-          "name": "Archon of Emeria"
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 1,
+          "name": "Geier Reach Sanitarium"
+        },
+        {
+          "count": 2,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 4,
+          "name": "Parhelion II"
+        },
+        {
+          "count": 2,
+          "name": "Brightclimb Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 4,
+          "name": "Fleeting Spirit"
+        },
+        {
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
         },
         {
           "count": 1,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
-          "count": 4,
-          "name": "Badgermole Cub"
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 3,
+          "name": "Guardian of New Benalia"
+        },
+        {
+          "count": 3,
+          "name": "The Mycosynth Gardens"
         },
         {
           "count": 1,
-          "name": "Boseiju, Who Endures"
+          "name": "Lively Dirge"
         },
         {
           "count": 2,
-          "name": "Branchloft Pathway"
+          "name": "Sheltered by Ghosts"
         },
         {
           "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
+          "name": "Monument to Endurance"
         },
         {
           "count": 2,
-          "name": "Plains"
+          "name": "Bleachbone Verge"
         },
         {
           "count": 4,
-          "name": "Ouroboroid"
+          "name": "Iron-Shield Elf"
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 1,
+          "name": "The Mycosynth Gardens"
         },
         {
           "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
+          "name": "Fatal Push"
         },
         {
           "count": 2,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 3,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
+          "name": "Shadowy Backstreet"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 3,
-          "name": "Rest in Peace"
+          "count": 1,
+          "name": "Duress"
         },
         {
           "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
+          "name": "Damping Sphere"
         },
         {
           "count": 1,
-          "name": "Elspeth, Storm Slayer"
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Vanishing Verse"
         },
         {
           "count": 2,
-          "name": "High Noon"
+          "name": "Bitter Triumph"
         },
         {
           "count": 2,
-          "name": "Beza, the Bounding Spring"
+          "name": "Pest Control"
         },
         {
-          "count": 3,
+          "count": 1,
           "name": "Seam Rip"
+        },
+        {
+          "count": 1,
+          "name": "Ral Zarek, Guest Lecturer"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 3,
+          "name": "Doorkeeper Thrull"
         }
       ]
     },
@@ -1208,6 +1113,125 @@
         {
           "count": 1,
           "name": "Loran of the Third Path"
+        }
+      ]
+    },
+    {
+      "name": "Selesnya Company",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Branchloft Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 3,
+          "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
+        },
+        {
+          "count": 1,
+          "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
         }
       ]
     },
