@@ -6453,14 +6453,7 @@ fn apply_token_flags(mut effect: Effect, flags: &[TokenFlag]) -> ConvResult<Effe
                 // CR 614.12 + CR 614.1: token enters tapped.
                 TokenFlag::EntersTapped => *tapped = true,
                 // CR 508.4: token enters attacking.
-                // CR 508.4 (Adeline variant): token enters attacking a specific player —
-                // engine currently lacks a per-token attacking-player distinction, so we
-                // degrade to the generic "enters attacking" for now (affects token that
-                // enters attacking vs. untapping; direction is engine-resolved at ETB).
-                TokenFlag::EntersAttacking
-                | TokenFlag::EntersAttackingPlayerOrPlaneswalkerControlledBy(_) => {
-                    *enters_attacking = true
-                }
+                TokenFlag::EntersAttacking => *enters_attacking = true,
                 // CR 303.7 + CR 701.4: "create a token attached to <permanent>".
                 // The single-permanent variant binds to the explicit target.
                 TokenFlag::EntersAttachedToPermanent(p) => {
@@ -6484,8 +6477,9 @@ fn apply_token_flags(mut effect: Effect, flags: &[TokenFlag]) -> ConvResult<Effe
                     enter_with_counters.push((counter_type_name(ct), quantity::convert(n)?));
                 }
                 // Remaining flags need engine slots `Effect::Token` does not
-                // expose today (a `blocking_attacker` axis, a per-token
-                // `Vec<PermanentRule>` until-expiration). Surface as
+                // expose today (a `blocking_attacker` axis, an
+                // `attacking_player` redirect distinct from `enters_attacking`,
+                // a per-token `Vec<PermanentRule>` until-expiration). Surface as
                 // engine prerequisites so the work queue tracks them.
                 other => {
                     return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -6502,13 +6496,7 @@ fn apply_token_flags(mut effect: Effect, flags: &[TokenFlag]) -> ConvResult<Effe
                 // CR 614.12 + CR 707.2: copy-token enters tapped.
                 TokenFlag::EntersTapped => *tapped = true,
                 // CR 508.4 + CR 707.2: copy-token enters attacking.
-                // CR 508.4 (Adeline variant): token enters attacking a specific player —
-                // engine currently lacks a per-token attacking-player distinction, so we
-                // degrade to the generic "enters attacking" for now.
-                TokenFlag::EntersAttacking
-                | TokenFlag::EntersAttackingPlayerOrPlaneswalkerControlledBy(_) => {
-                    *enters_attacking = true
-                }
+                TokenFlag::EntersAttacking => *enters_attacking = true,
                 other => {
                     return Err(ConversionGap::EnginePrerequisiteMissing {
                         engine_type: "Effect::CopyTokenOf",
