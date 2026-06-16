@@ -6457,7 +6457,10 @@ fn apply_token_flags(mut effect: Effect, flags: &[TokenFlag]) -> ConvResult<Effe
                 // engine currently lacks a per-token attacking-player distinction, so we
                 // degrade to the generic "enters attacking" for now (affects token that
                 // enters attacking vs. untapping; direction is engine-resolved at ETB).
-                TokenFlag::EntersAttacking | TokenFlag::EntersAttackingPlayerOrPlaneswalkerControlledBy(_) => *enters_attacking = true,
+                TokenFlag::EntersAttacking
+                | TokenFlag::EntersAttackingPlayerOrPlaneswalkerControlledBy(_) => {
+                    *enters_attacking = true
+                }
                 // CR 303.7 + CR 701.4: "create a token attached to <permanent>".
                 // The single-permanent variant binds to the explicit target.
                 TokenFlag::EntersAttachedToPermanent(p) => {
@@ -6502,7 +6505,10 @@ fn apply_token_flags(mut effect: Effect, flags: &[TokenFlag]) -> ConvResult<Effe
                 // CR 508.4 (Adeline variant): token enters attacking a specific player —
                 // engine currently lacks a per-token attacking-player distinction, so we
                 // degrade to the generic "enters attacking" for now.
-                TokenFlag::EntersAttacking | TokenFlag::EntersAttackingPlayerOrPlaneswalkerControlledBy(_) => *enters_attacking = true,
+                TokenFlag::EntersAttacking
+                | TokenFlag::EntersAttackingPlayerOrPlaneswalkerControlledBy(_) => {
+                    *enters_attacking = true
+                }
                 other => {
                     return Err(ConversionGap::EnginePrerequisiteMissing {
                         engine_type: "Effect::CopyTokenOf",
