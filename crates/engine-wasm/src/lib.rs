@@ -1792,3 +1792,267 @@ mod tests {
         assert_eq!(restored.objects[&object_id].name, "Legacy Card");
     }
 }
+
+// ── Playtest WASM bindings ────────────────────────────────────────────────────
+//
+// These functions own a separate `PLAYTEST_STATE` thread-local so the playtest
+// session never conflicts with an in-progress game in `GAME_STATE`.
+
+use engine::game::playtest_stats::{run_simulation, SimulationConfig};
+use engine::game::solitaire::{PlaytestObjectId, PlaytestSession};
+
+thread_local! {
+    /// Active playtest session. Kept separate from GAME_STATE so a user can
+    /// playtest a deck while an AI game is paused.
+    static PLAYTEST_STATE: Cell<Option<PlaytestSession>> = const { Cell::new(None) };
+}
+
+fn with_playtest_mut<R>(f: impl FnOnce(&mut PlaytestSession) -> R) -> Result<R, JsValue> {
+    PLAYTEST_STATE.with(|cell| {
+        let mut session = cell.take().ok_or_else(|| {
+            JsValue::from_str("PLAYTEST_NOT_INITIALIZED: call playtest_start first")
+        })?;
+        let result = f(&mut session);
+        cell.set(Some(session));
+        Ok(result)
+    })
+}
+
+fn with_playtest<R>(f: impl FnOnce(&PlaytestSession) -> R) -> Result<R, JsValue> {
+    PLAYTEST_STATE.with(|cell| {
+        let session = cell.take().ok_or_else(|| {
+            JsValue::from_str("PLAYTEST_NOT_INITIALIZED: call playtest_start first")
+        })?;
+        let result = f(&session);
+        cell.set(Some(session));
+        Ok(result)
+    })
+}
+
+/// Start a new playtest session from a flat list of card names.
+///
+/// - `card_names_js`: `string[]` — card names from the deck (duplicates allowed).
+/// - `seed`: optional RNG seed (default 0xdeadbeef).
+/// - `going_first`: whether the player goes first (no draw on turn 1).
+///
+/// Resolves names against the loaded card database. Unresolvable names are
+/// silently skipped. Returns the initial session state as JSON.
+#[wasm_bindgen]
+pub fn playtest_start(
+    card_names_js: JsValue,
+    seed: Option<f64>,
+    going_first: Option<bool>,
+) -> Result<JsValue, JsValue> {
+    let names: Vec<String> = serde_wasm_bindgen::from_value(card_names_js)
+        .map_err(|e| JsValue::from_str(&format!("Invalid card name list: {e}")))?;
+
+    let seed = seed.map(|s| s as u64).unwrap_or(0xdead_beef);
+    let going_first = going_first.unwrap_or(true);
+
+    let deck = CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Vec::new();
+        };
+        names
+            .iter()
+            .filter_map(|name| db.get_face_by_name(name).cloned())
+            .collect::<Vec<_>>()
+    });
+
+    let session = PlaytestSession::new(deck, seed, going_first);
+    let js = to_js(&session);
+    PLAYTEST_STATE.with(|cell| cell.set(Some(session)));
+    Ok(js)
+}
+
+/// Get the current playtest session state. Returns the serialized
+/// `PlaytestSession` or an error if no session is active.
+#[wasm_bindgen]
+pub fn playtest_get_state() -> Result<JsValue, JsValue> {
+    with_playtest(|s| to_js(s))
+}
+
+/// Keep the current opening hand and transition out of mulligan phase.
+/// Returns the updated session state.
+#[wasm_bindgen]
+pub fn playtest_keep_hand() -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.keep_hand().map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Take a mulligan. Returns the updated session state including the new hand.
+#[wasm_bindgen]
+pub fn playtest_mulligan() -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.take_mulligan().map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Bottom a card (for London-mulligan bottoming step).
+/// `card_id` is the `PlaytestObjectId` (u32) of the card to place on bottom.
+#[wasm_bindgen]
+pub fn playtest_bottom_card(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.bottom_card(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Draw one card from the library into hand. Returns the updated session.
+#[wasm_bindgen]
+pub fn playtest_draw() -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.draw_one();
+        to_js(s)
+    })
+}
+
+/// Draw N cards from the library into hand. Returns the updated session.
+#[wasm_bindgen]
+pub fn playtest_draw_n(n: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.draw_n(n);
+        to_js(s)
+    })
+}
+
+/// Play a land from hand to the battlefield.
+/// `card_id` is the `PlaytestObjectId` (u32) of the land in hand.
+#[wasm_bindgen]
+pub fn playtest_play_land(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.play_land(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Move a card from hand to battlefield (permanents) or graveyard (instants/sorceries).
+/// Simulates casting without full rules processing.
+#[wasm_bindgen]
+pub fn playtest_cast(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.cast_permanent(PlaytestObjectId(card_id))
+            .map(|_| to_js(s))
+    })
+    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Discard a card from hand to the graveyard.
+#[wasm_bindgen]
+pub fn playtest_discard(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.discard(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Tap a permanent on the battlefield.
+#[wasm_bindgen]
+pub fn playtest_tap(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.tap_permanent(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Untap a permanent on the battlefield.
+#[wasm_bindgen]
+pub fn playtest_untap(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.untap_permanent(PlaytestObjectId(card_id))
+            .map(|_| to_js(s))
+    })
+    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Move a permanent from battlefield to graveyard (destroy/die effect).
+#[wasm_bindgen]
+pub fn playtest_destroy(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.destroy_permanent(PlaytestObjectId(card_id))
+            .map(|_| to_js(s))
+    })
+    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Move a permanent from battlefield to exile.
+#[wasm_bindgen]
+pub fn playtest_exile(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.exile_permanent(PlaytestObjectId(card_id))
+            .map(|_| to_js(s))
+    })
+    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Bounce a permanent from battlefield back to hand.
+#[wasm_bindgen]
+pub fn playtest_bounce(card_id: u32) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.bounce_permanent(PlaytestObjectId(card_id))
+            .map(|_| to_js(s))
+    })
+    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Advance to the next turn (untap, draw, capture snapshot).
+/// Returns `{ ok: PlaytestSession } | { err: string }` as JSON.
+#[wasm_bindgen]
+pub fn playtest_advance_turn() -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| s.advance_turn().map(|_| to_js(s)))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+}
+
+/// Reset the session to a fresh shuffled game with the same deck and seed.
+#[wasm_bindgen]
+pub fn playtest_reset() -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.reset();
+        to_js(s)
+    })
+}
+
+/// Reset the session with a new RNG seed.
+#[wasm_bindgen]
+pub fn playtest_reset_with_seed(seed: f64) -> Result<JsValue, JsValue> {
+    with_playtest_mut(|s| {
+        s.reset_with_seed(seed as u64);
+        to_js(s)
+    })
+}
+
+/// Clear the active playtest session (free memory).
+#[wasm_bindgen]
+pub fn playtest_clear() {
+    PLAYTEST_STATE.with(|cell| cell.set(None));
+}
+
+/// Run a Monte Carlo simulation on a deck and return aggregated statistics.
+///
+/// - `card_names_js`: `string[]` — card names (duplicates = copies).
+/// - `config_js`: optional `SimulationConfig` JSON. Uses sensible defaults when
+///   null/undefined (200 games, 10 turns, heuristic mulligans, going-first).
+///
+/// This function does NOT touch `PLAYTEST_STATE` or `GAME_STATE` — it is
+/// stateless and can run concurrently with an active playtest session.
+#[wasm_bindgen]
+pub fn playtest_run_simulation(
+    card_names_js: JsValue,
+    config_js: JsValue,
+) -> Result<JsValue, JsValue> {
+    let names: Vec<String> = serde_wasm_bindgen::from_value(card_names_js)
+        .map_err(|e| JsValue::from_str(&format!("Invalid card name list: {e}")))?;
+
+    let config: SimulationConfig = if !config_js.is_null() && !config_js.is_undefined() {
+        serde_wasm_bindgen::from_value(config_js)
+            .map_err(|e| JsValue::from_str(&format!("Invalid SimulationConfig: {e}")))?
+    } else {
+        SimulationConfig::default()
+    };
+
+    let deck = CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Vec::new();
+        };
+        names
+            .iter()
+            .filter_map(|name| db.get_face_by_name(name).cloned())
+            .collect::<Vec<_>>()
+    });
+
+    let result = run_simulation(&deck, &config);
+    Ok(to_js(&result))
+}

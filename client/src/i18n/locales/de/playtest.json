@@ -1,0 +1,135 @@
+{
+  "turn": "Runde {{turn}}",
+  "goingFirst": "Erster Spieler",
+  "goingSecond": "Zweiter Spieler",
+  "handQuality": "Handqualität",
+  "landsInHand": "{{count}} Land",
+  "landsInHand_other": "{{count}} Länder",
+  "spellsInHand": "{{count}} Spruch",
+  "spellsInHand_other": "{{count}} Sprüche",
+  "manaAvailable": "{{count}} Mana",
+  "phase": {
+    "idle": "Bereit",
+    "loading": "Lädt...",
+    "mulligan": "Mulligan",
+    "bottoming": "Unten legen",
+    "playing": "Spielt",
+    "cleanup": "Aufräumen",
+    "simulating": "Simuliert...",
+    "error": "Fehler"
+  },
+  "header": {
+    "back": "Deck-Builder",
+    "hideSidebar": "Seitenleiste ausblenden",
+    "showSidebar": "Seitenleiste anzeigen"
+  },
+  "controls": {
+    "keepHand": "Hand behalten",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Karten anklicken, um sie nach unten zu legen",
+    "draw": "Karte ziehen",
+    "discardFirst": "{{count}} zuerst ablegen",
+    "nextTurn": "Nächste Runde",
+    "simulate": "Simulieren",
+    "reset": "Zurücksetzen",
+    "exit": "Beenden"
+  },
+  "setup": {
+    "title": "Deck-Tester",
+    "subtitle": "Simuliere das Ziehen und Spielen von Karten aus einem gespeicherten Deck.",
+    "chooseDeck": "Deck auswählen",
+    "noDecks": "Keine gespeicherten Decks gefunden. Speichere zuerst ein Deck.",
+    "goingFirst": "Erster Spieler (Runde 1 nicht ziehen)",
+    "start": "Playtesting starten",
+    "loading": "Lädt..."
+  },
+  "hand": {
+    "title": "Hand ({{count}})",
+    "empty": "Deine Hand ist leer.",
+    "emptyMulligan": "Hand wird neu gezogen...",
+    "discardNeeded": "{{count}} Karte ablegen",
+    "discardNeeded_other": "{{count}} Karten ablegen",
+    "bottomPrompt": "Wähle {{count}} Karte für die untere Bibliothek",
+    "bottomPrompt_other": "Wähle {{count}} Karten für die untere Bibliothek"
+  },
+  "card": {
+    "playLand": "Land ausspielen",
+    "cast": "Wirken",
+    "castNoMana": "Wirken (nicht genug Mana)",
+    "discard": "Ablegen",
+    "bottom": "Nach unten legen"
+  },
+  "bf": {
+    "spells": "Dauerwirkungen",
+    "emptySpells": "Keine Dauerwirkungen im Spiel",
+    "lands": "Länder",
+    "emptyLands": "Keine Länder im Spiel",
+    "graveyard": "Friedhof ({{count}})",
+    "exile": "Exil ({{count}})",
+    "library": "Bibliothek",
+    "tap": "Tappen",
+    "untap": "Enttappen",
+    "destroy": "Zerstören",
+    "exile_action": "Verbannen",
+    "bounce": "Auf die Hand zurück",
+    "newThisTurn": "Neu"
+  },
+  "sim": {
+    "title": "Monte-Carlo-Simulation",
+    "close": "Schließen",
+    "config": "Konfiguration",
+    "numGames": "Spiele",
+    "numTurns": "Runden",
+    "goingFirst": "Erster Spieler",
+    "autoKeep": "Auto-Behalten (kein Mulligan)",
+    "run": "{{games}} Spiele ausführen",
+    "running": "Simuliert...",
+    "avgOpeningLands": "Ø Startländer",
+    "avgOpeningSpells": "Ø {{count}} Sprüche",
+    "keepFirst": "Beim ersten Zug behalten",
+    "avgMulligans": "Ø {{avg}} Mulligans",
+    "gamesSimulated": "Simulierte Spiele",
+    "perTurnTable": "Rundenübersicht",
+    "table": {
+      "turn": "Runde",
+      "mana": "Mana",
+      "lands": "Länder",
+      "playable": "Spielbar"
+    }
+  },
+  "chart": {
+    "turn": "R{{n}}",
+    "mana": "Ø Mana",
+    "lands": "Ø Länder",
+    "playable": "Ø Spielbar",
+    "handSize": "Ø Handgröße"
+  },
+  "sidebar": {
+    "boardStats": "Spielfeld",
+    "landsInPlay": "Länder",
+    "tapped": "Getappt",
+    "graveyard": "Friedhof",
+    "exile": "Exil",
+    "library": "Bibliothek",
+    "mulligans": "Mulligans",
+    "seed": "Zufallssaat",
+    "randomSeed": "Zufällig",
+    "seedHint": "Gleiche Saat = gleiche Mischreihenfolge. Ändere sie für andere Ergebnisse."
+  },
+  "history": {
+    "title": "Rundenhistorie",
+    "empty": "Noch keine Runden.",
+    "turn": "R{{turn}}",
+    "handSizeTitle": "Handgröße",
+    "landsTitle": "Länder im Spiel",
+    "manaTitle": "Verfügbares Mana",
+    "playableTitle": "Spielbare Karten",
+    "drewTitle": "Gezogene Karten dieser Runde"
+  },
+  "quality": {
+    "great": "Ausgezeichnet",
+    "good": "Gut",
+    "medium": "Mittel",
+    "poor": "Schlecht"
+  }
+}

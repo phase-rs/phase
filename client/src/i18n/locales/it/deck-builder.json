@@ -48,7 +48,9 @@
     "clone": "Clona",
     "cloneTitle": "Salva una copia con un nuovo nome",
     "loadDeck": "Carica mazzo...",
-    "nameToSave": "Dai un nome al mazzo per salvarlo"
+    "nameToSave": "Dai un nome al mazzo per salvarlo",
+    "playtest": "Testa",
+    "playtestTitle": "Apri questo mazzo nel Simulatore"
   },
   "unsaved": {
     "title": "Modifiche non salvate",

@@ -48,7 +48,9 @@
     "clone": "Klonuj",
     "cloneTitle": "Zapisz kopię pod nową nazwą",
     "loadDeck": "Wczytaj talię...",
-    "nameToSave": "Nazwij talię, aby ją zapisać"
+    "nameToSave": "Nazwij talię, aby ją zapisać",
+    "playtest": "Testuj",
+    "playtestTitle": "Otwórz tę talię w symulatorze"
   },
   "unsaved": {
     "title": "Niezapisane zmiany",

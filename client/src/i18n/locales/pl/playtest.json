@@ -1,0 +1,135 @@
+{
+  "turn": "Tura {{turn}}",
+  "goingFirst": "Idź pierwszy",
+  "goingSecond": "Idź drugi",
+  "handQuality": "Jakość ręki",
+  "landsInHand": "{{count}} ląd",
+  "landsInHand_other": "{{count}} lądy",
+  "spellsInHand": "{{count}} czar",
+  "spellsInHand_other": "{{count}} czarów",
+  "manaAvailable": "{{count}} mana",
+  "phase": {
+    "idle": "Bezczynny",
+    "loading": "Ładowanie...",
+    "mulligan": "Mulligan",
+    "bottoming": "Odkładanie na spód",
+    "playing": "W grze",
+    "cleanup": "Sprzątanie",
+    "simulating": "Symulacja...",
+    "error": "Błąd"
+  },
+  "header": {
+    "back": "Kreator talii",
+    "hideSidebar": "Ukryj panel",
+    "showSidebar": "Pokaż panel"
+  },
+  "controls": {
+    "keepHand": "Zachowaj rękę",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Kliknij karty, aby odłożyć na spód",
+    "draw": "Dobierz",
+    "discardFirst": "Odrzuć {{count}} najpierw",
+    "nextTurn": "Następna tura",
+    "simulate": "Symuluj",
+    "reset": "Resetuj",
+    "exit": "Wyjdź"
+  },
+  "setup": {
+    "title": "Symulator talii",
+    "subtitle": "Symuluj dobieranie i granie kartami z zapisanej talii.",
+    "chooseDeck": "Wybierz talię",
+    "noDecks": "Brak zapisanych talii. Najpierw zapisz talię.",
+    "goingFirst": "Idź pierwszy (brak dobierania w turze 1)",
+    "start": "Rozpocznij symulację",
+    "loading": "Ładowanie..."
+  },
+  "hand": {
+    "title": "Ręka ({{count}})",
+    "empty": "Twoja ręka jest pusta.",
+    "emptyMulligan": "Dobieranie nowej ręki...",
+    "discardNeeded": "Odrzuć {{count}} kartę",
+    "discardNeeded_other": "Odrzuć {{count}} kart",
+    "bottomPrompt": "Wybierz {{count}} kartę do odłożenia na spód",
+    "bottomPrompt_other": "Wybierz {{count}} kart do odłożenia na spód"
+  },
+  "card": {
+    "playLand": "Zagraj ląd",
+    "cast": "Zagraj",
+    "castNoMana": "Zagraj (za mało many)",
+    "discard": "Odrzuć",
+    "bottom": "Odłóż na spód"
+  },
+  "bf": {
+    "spells": "Permanenty",
+    "emptySpells": "Brak permanentów na polu bitwy",
+    "lands": "Lądy",
+    "emptyLands": "Brak lądów na polu bitwy",
+    "graveyard": "Cmentarz ({{count}})",
+    "exile": "Wygnanie ({{count}})",
+    "library": "Biblioteka",
+    "tap": "Kliknij",
+    "untap": "Odkliknij",
+    "destroy": "Zniszcz",
+    "exile_action": "Wygnaj",
+    "bounce": "Wróć do ręki",
+    "newThisTurn": "Nowy"
+  },
+  "sim": {
+    "title": "Symulacja Monte Carlo",
+    "close": "Zamknij",
+    "config": "Konfiguracja",
+    "numGames": "Gry",
+    "numTurns": "Tury",
+    "goingFirst": "Idź pierwszy",
+    "autoKeep": "Auto-zachowaj (bez mulliganów)",
+    "run": "Uruchom {{games}} gier",
+    "running": "Symulacja...",
+    "avgOpeningLands": "Śr. początkowe lądy",
+    "avgOpeningSpells": "{{count}} śr. czarów",
+    "keepFirst": "Zachowaj przy pierwszym ciągnięciu",
+    "avgMulligans": "{{avg}} śr. mulligany",
+    "gamesSimulated": "Zasymulowane gry",
+    "perTurnTable": "Podział na tury",
+    "table": {
+      "turn": "Tura",
+      "mana": "Mana",
+      "lands": "Lądy",
+      "playable": "Grywalne"
+    }
+  },
+  "chart": {
+    "turn": "T{{n}}",
+    "mana": "Śr. mana",
+    "lands": "Śr. lądy",
+    "playable": "Śr. grywalne",
+    "handSize": "Śr. ręka"
+  },
+  "sidebar": {
+    "boardStats": "Pole bitwy",
+    "landsInPlay": "Lądy",
+    "tapped": "Kliknięte",
+    "graveyard": "Cmentarz",
+    "exile": "Wygnanie",
+    "library": "Biblioteka",
+    "mulligans": "Mulligany",
+    "seed": "Ziarno losowe",
+    "randomSeed": "Losuj",
+    "seedHint": "To samo ziarno = ta sama kolejność tasowania."
+  },
+  "history": {
+    "title": "Historia tur",
+    "empty": "Brak tur.",
+    "turn": "T{{turn}}",
+    "handSizeTitle": "Rozmiar ręki",
+    "landsTitle": "Lądy na polu bitwy",
+    "manaTitle": "Dostępna mana",
+    "playableTitle": "Grywalne karty",
+    "drewTitle": "Karty dobrane tej tury"
+  },
+  "quality": {
+    "great": "Doskonała",
+    "good": "Dobra",
+    "medium": "Średnia",
+    "poor": "Zła"
+  }
+}

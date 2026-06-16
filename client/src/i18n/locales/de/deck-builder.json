@@ -48,7 +48,9 @@
     "clone": "Klonen",
     "cloneTitle": "Eine Kopie unter neuem Namen speichern",
     "loadDeck": "Deck laden...",
-    "nameToSave": "Benenne das Deck, um es zu speichern"
+    "nameToSave": "Benenne das Deck, um es zu speichern",
+    "playtest": "Testen",
+    "playtestTitle": "Dieses Deck im Playtester öffnen"
   },
   "unsaved": {
     "title": "Ungespeicherte Änderungen",

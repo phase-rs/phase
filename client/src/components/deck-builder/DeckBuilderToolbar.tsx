@@ -26,6 +26,8 @@ interface DeckBuilderToolbarProps {
   onLoad: (name: string) => void;
   format: GameFormat;
   onFormatChange: (format: GameFormat) => void;
+  /** When provided, the toolbar shows a Playtest button that launches /playtest. */
+  onPlaytest?: () => void;
 }
 
 export function DeckBuilderToolbar({
@@ -41,6 +43,7 @@ export function DeckBuilderToolbar({
   onLoad,
   format,
   onFormatChange,
+  onPlaytest,
 }: DeckBuilderToolbarProps) {
   const { t } = useTranslation("deck-builder");
   const formatLabel =
@@ -128,6 +131,16 @@ export function DeckBuilderToolbar({
             onSelect={onLoad}
             wrapperClassName="min-w-0 w-full lg:w-auto lg:shrink-0"
           />
+        )}
+        {onPlaytest && (
+          <button
+            type="button"
+            onClick={onPlaytest}
+            title={t("toolbar.playtestTitle")}
+            className="shrink-0 rounded-xl border border-emerald-500/30 bg-emerald-900/20 px-3 py-1.5 text-sm text-emerald-300 hover:bg-emerald-900/40"
+          >
+            {t("toolbar.playtest")}
+          </button>
         )}
       </div>
     </div>

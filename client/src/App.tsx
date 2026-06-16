@@ -31,6 +31,7 @@ const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ de
 const DraftSpectatorPage = lazy(() =>
   import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
 );
+const PlaytestPage = lazy(() => import("./pages/PlaytestPage").then((m) => ({ default: m.PlaytestPage })));
 
 function DevStrict({ children }: { children: ReactNode }) {
   if (!import.meta.env.DEV) return children;
@@ -117,6 +118,7 @@ function AppContent() {
             <Route path="/draft-spectator" element={<DraftSpectatorPage />} />
           </Route>
           <Route path="/game/:id" element={<GameRouteElement />} />
+          <Route path="/playtest" element={<PlaytestPage />} />
         </Routes>
       </Suspense>
       <HostControlTile />

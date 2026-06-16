@@ -1,0 +1,135 @@
+{
+  "turn": "Turno {{turn}}",
+  "goingFirst": "Ir primeiro",
+  "goingSecond": "Ir segundo",
+  "handQuality": "Qualidade da mão",
+  "landsInHand": "{{count}} terreno",
+  "landsInHand_other": "{{count}} terrenos",
+  "spellsInHand": "{{count}} feitiço",
+  "spellsInHand_other": "{{count}} feitiços",
+  "manaAvailable": "{{count}} mana",
+  "phase": {
+    "idle": "Inativo",
+    "loading": "Carregando...",
+    "mulligan": "Mulligan",
+    "bottoming": "Colocando embaixo",
+    "playing": "Jogando",
+    "cleanup": "Limpeza",
+    "simulating": "Simulando...",
+    "error": "Erro"
+  },
+  "header": {
+    "back": "Construtor de decks",
+    "hideSidebar": "Ocultar painel",
+    "showSidebar": "Mostrar painel"
+  },
+  "controls": {
+    "keepHand": "Manter mão",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Clique nas cartas para colocar embaixo",
+    "draw": "Comprar",
+    "discardFirst": "Descartar {{count}} primeiro",
+    "nextTurn": "Próximo turno",
+    "simulate": "Simular",
+    "reset": "Reiniciar",
+    "exit": "Sair"
+  },
+  "setup": {
+    "title": "Simulador de decks",
+    "subtitle": "Simule comprar e jogar cartas de qualquer deck salvo.",
+    "chooseDeck": "Escolher um deck",
+    "noDecks": "Nenhum deck salvo encontrado. Salve um deck primeiro.",
+    "goingFirst": "Ir primeiro (não comprar no turno 1)",
+    "start": "Iniciar simulação",
+    "loading": "Carregando..."
+  },
+  "hand": {
+    "title": "Mão ({{count}})",
+    "empty": "Sua mão está vazia.",
+    "emptyMulligan": "Comprando nova mão...",
+    "discardNeeded": "Descartar {{count}} carta",
+    "discardNeeded_other": "Descartar {{count}} cartas",
+    "bottomPrompt": "Escolha {{count}} carta para colocar embaixo",
+    "bottomPrompt_other": "Escolha {{count}} cartas para colocar embaixo"
+  },
+  "card": {
+    "playLand": "Jogar terreno",
+    "cast": "Conjurar",
+    "castNoMana": "Conjurar (mana insuficiente)",
+    "discard": "Descartar",
+    "bottom": "Colocar embaixo"
+  },
+  "bf": {
+    "spells": "Permanentes",
+    "emptySpells": "Nenhum permanente em jogo",
+    "lands": "Terrenos",
+    "emptyLands": "Nenhum terreno em jogo",
+    "graveyard": "Cemitério ({{count}})",
+    "exile": "Exílio ({{count}})",
+    "library": "Biblioteca",
+    "tap": "Virar",
+    "untap": "Desvirar",
+    "destroy": "Destruir",
+    "exile_action": "Exilar",
+    "bounce": "Retornar à mão",
+    "newThisTurn": "Novo"
+  },
+  "sim": {
+    "title": "Simulação Monte Carlo",
+    "close": "Fechar",
+    "config": "Configuração",
+    "numGames": "Partidas",
+    "numTurns": "Turnos",
+    "goingFirst": "Ir primeiro",
+    "autoKeep": "Manter automaticamente (sem mulligans)",
+    "run": "Executar {{games}} partidas",
+    "running": "Simulando...",
+    "avgOpeningLands": "Terrenos iniciais médios",
+    "avgOpeningSpells": "{{count}} feitiços méd.",
+    "keepFirst": "Manter na primeira mão",
+    "avgMulligans": "{{avg}} mulligans méd.",
+    "gamesSimulated": "Partidas simuladas",
+    "perTurnTable": "Análise por turno",
+    "table": {
+      "turn": "Turno",
+      "mana": "Mana",
+      "lands": "Terrenos",
+      "playable": "Jogáveis"
+    }
+  },
+  "chart": {
+    "turn": "T{{n}}",
+    "mana": "Mana méd.",
+    "lands": "Terrenos méd.",
+    "playable": "Jogáveis méd.",
+    "handSize": "Mão méd."
+  },
+  "sidebar": {
+    "boardStats": "Campo",
+    "landsInPlay": "Terrenos",
+    "tapped": "Virados",
+    "graveyard": "Cemitério",
+    "exile": "Exílio",
+    "library": "Biblioteca",
+    "mulligans": "Mulligans",
+    "seed": "Semente aleatória",
+    "randomSeed": "Aleatorizar",
+    "seedHint": "Mesma semente = mesma ordem de embaralhamento."
+  },
+  "history": {
+    "title": "Histórico de turnos",
+    "empty": "Sem turnos ainda.",
+    "turn": "T{{turn}}",
+    "handSizeTitle": "Tamanho da mão",
+    "landsTitle": "Terrenos em jogo",
+    "manaTitle": "Mana disponível",
+    "playableTitle": "Cartas jogáveis",
+    "drewTitle": "Cartas compradas neste turno"
+  },
+  "quality": {
+    "great": "Excelente",
+    "good": "Boa",
+    "medium": "Média",
+    "poor": "Ruim"
+  }
+}

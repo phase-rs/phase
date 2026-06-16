@@ -1,0 +1,135 @@
+{
+  "turn": "Turn {{turn}}",
+  "goingFirst": "Going first",
+  "goingSecond": "Going second",
+  "handQuality": "Hand quality",
+  "landsInHand": "{{count}} land",
+  "landsInHand_other": "{{count}} lands",
+  "spellsInHand": "{{count}} spell",
+  "spellsInHand_other": "{{count}} spells",
+  "manaAvailable": "{{count}} mana",
+  "phase": {
+    "idle": "Idle",
+    "loading": "Loading...",
+    "mulligan": "Mulligan",
+    "bottoming": "Bottoming",
+    "playing": "Playing",
+    "cleanup": "Cleanup",
+    "simulating": "Simulating...",
+    "error": "Error"
+  },
+  "header": {
+    "back": "Deck Builder",
+    "hideSidebar": "Hide sidebar",
+    "showSidebar": "Show sidebar"
+  },
+  "controls": {
+    "keepHand": "Keep Hand",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Click cards to put on bottom of library",
+    "draw": "Draw",
+    "discardFirst": "Discard {{count}} first",
+    "nextTurn": "Next Turn",
+    "simulate": "Simulate",
+    "reset": "Reset",
+    "exit": "Exit"
+  },
+  "setup": {
+    "title": "Deck Playtester",
+    "subtitle": "Simulate drawing and playing cards from any saved deck.",
+    "chooseDeck": "Choose a deck",
+    "noDecks": "No saved decks found. Save a deck in the Deck Builder first.",
+    "goingFirst": "Going first (skip draw on turn 1)",
+    "start": "Start Playtesting",
+    "loading": "Loading..."
+  },
+  "hand": {
+    "title": "Hand ({{count}})",
+    "empty": "Your hand is empty.",
+    "emptyMulligan": "Redrawing hand...",
+    "discardNeeded": "Discard {{count}} card",
+    "discardNeeded_other": "Discard {{count}} cards",
+    "bottomPrompt": "Choose {{count}} card to put on the bottom of your library",
+    "bottomPrompt_other": "Choose {{count}} cards to put on the bottom of your library"
+  },
+  "card": {
+    "playLand": "Play land",
+    "cast": "Cast",
+    "castNoMana": "Cast (not enough mana)",
+    "discard": "Discard",
+    "bottom": "Put on bottom"
+  },
+  "bf": {
+    "spells": "Permanents",
+    "emptySpells": "No permanents on battlefield",
+    "lands": "Lands",
+    "emptyLands": "No lands on battlefield",
+    "graveyard": "Graveyard ({{count}})",
+    "exile": "Exile ({{count}})",
+    "library": "Library",
+    "tap": "Tap",
+    "untap": "Untap",
+    "destroy": "Destroy",
+    "exile_action": "Exile",
+    "bounce": "Return to hand",
+    "newThisTurn": "New"
+  },
+  "sim": {
+    "title": "Monte Carlo Simulation",
+    "close": "Close",
+    "config": "Configuration",
+    "numGames": "Games",
+    "numTurns": "Turns",
+    "goingFirst": "Going first",
+    "autoKeep": "Auto-keep (no mulligans)",
+    "run": "Run {{games}} games",
+    "running": "Simulating...",
+    "avgOpeningLands": "Avg. opening lands",
+    "avgOpeningSpells": "{{count}} avg spells",
+    "keepFirst": "Keep on first draw",
+    "avgMulligans": "{{avg}} avg mulligans",
+    "gamesSimulated": "Games simulated",
+    "perTurnTable": "Per-turn breakdown",
+    "table": {
+      "turn": "Turn",
+      "mana": "Mana",
+      "lands": "Lands",
+      "playable": "Playable"
+    }
+  },
+  "chart": {
+    "turn": "T{{n}}",
+    "mana": "Avg Mana",
+    "lands": "Avg Lands",
+    "playable": "Avg Playable",
+    "handSize": "Avg Hand Size"
+  },
+  "sidebar": {
+    "boardStats": "Board",
+    "landsInPlay": "Lands",
+    "tapped": "Tapped",
+    "graveyard": "Graveyard",
+    "exile": "Exile",
+    "library": "Library",
+    "mulligans": "Mulligans",
+    "seed": "Random seed",
+    "randomSeed": "Randomize",
+    "seedHint": "Same seed = same shuffle order. Change to replay with different luck."
+  },
+  "history": {
+    "title": "Turn History",
+    "empty": "No turns yet.",
+    "turn": "T{{turn}}",
+    "handSizeTitle": "Hand size",
+    "landsTitle": "Lands in play",
+    "manaTitle": "Available mana",
+    "playableTitle": "Playable cards",
+    "drewTitle": "Cards drawn this turn"
+  },
+  "quality": {
+    "great": "Great",
+    "good": "Good",
+    "medium": "Medium",
+    "poor": "Poor"
+  }
+}

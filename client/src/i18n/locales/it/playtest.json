@@ -1,0 +1,135 @@
+{
+  "turn": "Turno {{turn}}",
+  "goingFirst": "Giocare per primo",
+  "goingSecond": "Giocare per secondo",
+  "handQuality": "Qualità della mano",
+  "landsInHand": "{{count}} terra",
+  "landsInHand_other": "{{count}} terre",
+  "spellsInHand": "{{count}} magia",
+  "spellsInHand_other": "{{count}} magie",
+  "manaAvailable": "{{count}} mana",
+  "phase": {
+    "idle": "Inattivo",
+    "loading": "Caricamento...",
+    "mulligan": "Mulligan",
+    "bottoming": "Messa in fondo",
+    "playing": "In gioco",
+    "cleanup": "Fine turno",
+    "simulating": "Simulazione...",
+    "error": "Errore"
+  },
+  "header": {
+    "back": "Costruttore di mazzi",
+    "hideSidebar": "Nascondi pannello",
+    "showSidebar": "Mostra pannello"
+  },
+  "controls": {
+    "keepHand": "Tieni la mano",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Clicca le carte da mettere in fondo",
+    "draw": "Pescare",
+    "discardFirst": "Scarta {{count}} prima",
+    "nextTurn": "Turno successivo",
+    "simulate": "Simula",
+    "reset": "Reimposta",
+    "exit": "Esci"
+  },
+  "setup": {
+    "title": "Simulatore di mazzi",
+    "subtitle": "Simula il pescare e giocare carte da un mazzo salvato.",
+    "chooseDeck": "Scegli un mazzo",
+    "noDecks": "Nessun mazzo salvato trovato. Salva prima un mazzo.",
+    "goingFirst": "Giocare per primo (nessuna pesca al turno 1)",
+    "start": "Inizia simulazione",
+    "loading": "Caricamento..."
+  },
+  "hand": {
+    "title": "Mano ({{count}})",
+    "empty": "La tua mano è vuota.",
+    "emptyMulligan": "Nuova mano in corso...",
+    "discardNeeded": "Scarta {{count}} carta",
+    "discardNeeded_other": "Scarta {{count}} carte",
+    "bottomPrompt": "Scegli {{count}} carta da mettere in fondo",
+    "bottomPrompt_other": "Scegli {{count}} carte da mettere in fondo"
+  },
+  "card": {
+    "playLand": "Gioca terra",
+    "cast": "Lanciare",
+    "castNoMana": "Lanciare (mana insufficiente)",
+    "discard": "Scartare",
+    "bottom": "Metti in fondo"
+  },
+  "bf": {
+    "spells": "Permanenti",
+    "emptySpells": "Nessun permanente in gioco",
+    "lands": "Terre",
+    "emptyLands": "Nessuna terra in gioco",
+    "graveyard": "Cimitero ({{count}})",
+    "exile": "Esilio ({{count}})",
+    "library": "Biblioteca",
+    "tap": "Impegnare",
+    "untap": "Disimpegnare",
+    "destroy": "Distruggere",
+    "exile_action": "Esiliare",
+    "bounce": "Torna in mano",
+    "newThisTurn": "Nuova"
+  },
+  "sim": {
+    "title": "Simulazione Monte Carlo",
+    "close": "Chiudi",
+    "config": "Configurazione",
+    "numGames": "Partite",
+    "numTurns": "Turni",
+    "goingFirst": "Giocare per primo",
+    "autoKeep": "Tieni automaticamente (nessun mulligan)",
+    "run": "Esegui {{games}} partite",
+    "running": "Simulazione...",
+    "avgOpeningLands": "Terre iniziali medie",
+    "avgOpeningSpells": "{{count}} magie medie",
+    "keepFirst": "Tenere al primo pescaggio",
+    "avgMulligans": "{{avg}} mulligan medi",
+    "gamesSimulated": "Partite simulate",
+    "perTurnTable": "Riepilogo per turno",
+    "table": {
+      "turn": "Turno",
+      "mana": "Mana",
+      "lands": "Terre",
+      "playable": "Giocabili"
+    }
+  },
+  "chart": {
+    "turn": "T{{n}}",
+    "mana": "Mana medio",
+    "lands": "Terre medie",
+    "playable": "Giocabili medi",
+    "handSize": "Mano media"
+  },
+  "sidebar": {
+    "boardStats": "Campo",
+    "landsInPlay": "Terre",
+    "tapped": "Impegnate",
+    "graveyard": "Cimitero",
+    "exile": "Esilio",
+    "library": "Biblioteca",
+    "mulligans": "Mulligan",
+    "seed": "Seme casuale",
+    "randomSeed": "Casuale",
+    "seedHint": "Stesso seme = stesso ordine di mescolamento."
+  },
+  "history": {
+    "title": "Storia dei turni",
+    "empty": "Nessun turno ancora.",
+    "turn": "T{{turn}}",
+    "handSizeTitle": "Dimensione della mano",
+    "landsTitle": "Terre in gioco",
+    "manaTitle": "Mana disponibile",
+    "playableTitle": "Carte giocabili",
+    "drewTitle": "Carte pescate questo turno"
+  },
+  "quality": {
+    "great": "Eccellente",
+    "good": "Buona",
+    "medium": "Media",
+    "poor": "Scarsa"
+  }
+}

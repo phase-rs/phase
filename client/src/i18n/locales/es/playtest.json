@@ -1,0 +1,135 @@
+{
+  "turn": "Turno {{turn}}",
+  "goingFirst": "Ir primero",
+  "goingSecond": "Ir segundo",
+  "handQuality": "Calidad de la mano",
+  "landsInHand": "{{count}} tierra",
+  "landsInHand_other": "{{count}} tierras",
+  "spellsInHand": "{{count}} hechizo",
+  "spellsInHand_other": "{{count}} hechizos",
+  "manaAvailable": "{{count}} maná",
+  "phase": {
+    "idle": "Inactivo",
+    "loading": "Cargando...",
+    "mulligan": "Mulligan",
+    "bottoming": "Poniendo abajo",
+    "playing": "Jugando",
+    "cleanup": "Limpieza",
+    "simulating": "Simulando...",
+    "error": "Error"
+  },
+  "header": {
+    "back": "Constructor de mazos",
+    "hideSidebar": "Ocultar panel",
+    "showSidebar": "Mostrar panel"
+  },
+  "controls": {
+    "keepHand": "Mantener mano",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Clic en las cartas para ponerlas debajo",
+    "draw": "Robar",
+    "discardFirst": "Descartar {{count}} primero",
+    "nextTurn": "Siguiente turno",
+    "simulate": "Simular",
+    "reset": "Reiniciar",
+    "exit": "Salir"
+  },
+  "setup": {
+    "title": "Simulador de mazos",
+    "subtitle": "Simula robar y jugar cartas de cualquier mazo guardado.",
+    "chooseDeck": "Elegir un mazo",
+    "noDecks": "No se encontraron mazos guardados. Guarda un mazo primero.",
+    "goingFirst": "Ir primero (no robar en el turno 1)",
+    "start": "Empezar simulación",
+    "loading": "Cargando..."
+  },
+  "hand": {
+    "title": "Mano ({{count}})",
+    "empty": "Tu mano está vacía.",
+    "emptyMulligan": "Robando nueva mano...",
+    "discardNeeded": "Descartar {{count}} carta",
+    "discardNeeded_other": "Descartar {{count}} cartas",
+    "bottomPrompt": "Elige {{count}} carta para poner abajo",
+    "bottomPrompt_other": "Elige {{count}} cartas para poner abajo"
+  },
+  "card": {
+    "playLand": "Jugar tierra",
+    "cast": "Lanzar",
+    "castNoMana": "Lanzar (maná insuficiente)",
+    "discard": "Descartar",
+    "bottom": "Poner debajo"
+  },
+  "bf": {
+    "spells": "Permanentes",
+    "emptySpells": "No hay permanentes en juego",
+    "lands": "Tierras",
+    "emptyLands": "No hay tierras en juego",
+    "graveyard": "Cementerio ({{count}})",
+    "exile": "Exilio ({{count}})",
+    "library": "Biblioteca",
+    "tap": "Girar",
+    "untap": "Enderezar",
+    "destroy": "Destruir",
+    "exile_action": "Exiliar",
+    "bounce": "Regresar a la mano",
+    "newThisTurn": "Nueva"
+  },
+  "sim": {
+    "title": "Simulación Monte Carlo",
+    "close": "Cerrar",
+    "config": "Configuración",
+    "numGames": "Partidas",
+    "numTurns": "Turnos",
+    "goingFirst": "Ir primero",
+    "autoKeep": "Auto-mantener (sin mulligans)",
+    "run": "Ejecutar {{games}} partidas",
+    "running": "Simulando...",
+    "avgOpeningLands": "Tierras iniciales promedio",
+    "avgOpeningSpells": "{{count}} hechizos prom.",
+    "keepFirst": "Mantener al primer robo",
+    "avgMulligans": "{{avg}} mulligans prom.",
+    "gamesSimulated": "Partidas simuladas",
+    "perTurnTable": "Desglose por turno",
+    "table": {
+      "turn": "Turno",
+      "mana": "Maná",
+      "lands": "Tierras",
+      "playable": "Jugables"
+    }
+  },
+  "chart": {
+    "turn": "T{{n}}",
+    "mana": "Maná prom.",
+    "lands": "Tierras prom.",
+    "playable": "Jugables prom.",
+    "handSize": "Mano prom."
+  },
+  "sidebar": {
+    "boardStats": "Tablero",
+    "landsInPlay": "Tierras",
+    "tapped": "Giradas",
+    "graveyard": "Cementerio",
+    "exile": "Exilio",
+    "library": "Biblioteca",
+    "mulligans": "Mulligans",
+    "seed": "Semilla aleatoria",
+    "randomSeed": "Aleatorizar",
+    "seedHint": "Misma semilla = mismo orden de barajado."
+  },
+  "history": {
+    "title": "Historial de turnos",
+    "empty": "Sin turnos aún.",
+    "turn": "T{{turn}}",
+    "handSizeTitle": "Tamaño de mano",
+    "landsTitle": "Tierras en juego",
+    "manaTitle": "Maná disponible",
+    "playableTitle": "Cartas jugables",
+    "drewTitle": "Cartas robadas este turno"
+  },
+  "quality": {
+    "great": "Excelente",
+    "good": "Buena",
+    "medium": "Regular",
+    "poor": "Mala"
+  }
+}

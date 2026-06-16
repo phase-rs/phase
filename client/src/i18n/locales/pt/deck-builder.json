@@ -48,7 +48,9 @@
     "clone": "Clonar",
     "cloneTitle": "Salvar uma cópia com um novo nome",
     "loadDeck": "Carregar deck...",
-    "nameToSave": "Dê um nome ao deck para salvá-lo"
+    "nameToSave": "Dê um nome ao deck para salvá-lo",
+    "playtest": "Testar",
+    "playtestTitle": "Abrir este deck no Simulador"
   },
   "unsaved": {
     "title": "Alterações não salvas",

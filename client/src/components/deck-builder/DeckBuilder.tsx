@@ -270,6 +270,11 @@ export function DeckBuilder({
         onLoad={requestLoad}
         format={format}
         onFormatChange={onFormatChange}
+        onPlaytest={
+          deckName.trim()
+            ? () => navigate(`/playtest?deck=${encodeURIComponent(deckName)}&goingFirst=true`)
+            : undefined
+        }
       />
 
       <DeckBuilderTabBar

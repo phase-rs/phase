@@ -48,7 +48,9 @@
     "clone": "Clonar",
     "cloneTitle": "Guardar una copia con un nombre nuevo",
     "loadDeck": "Cargar mazo...",
-    "nameToSave": "Pon un nombre al mazo para guardarlo"
+    "nameToSave": "Pon un nombre al mazo para guardarlo",
+    "playtest": "Probar",
+    "playtestTitle": "Abrir este mazo en el Simulador"
   },
   "unsaved": {
     "title": "Cambios sin guardar",

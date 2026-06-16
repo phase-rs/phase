@@ -1,0 +1,135 @@
+{
+  "turn": "Tour {{turn}}",
+  "goingFirst": "Jouer en premier",
+  "goingSecond": "Jouer en second",
+  "handQuality": "Qualité de la main",
+  "landsInHand": "{{count}} terrain",
+  "landsInHand_other": "{{count}} terrains",
+  "spellsInHand": "{{count}} sort",
+  "spellsInHand_other": "{{count}} sorts",
+  "manaAvailable": "{{count}} mana",
+  "phase": {
+    "idle": "Inactif",
+    "loading": "Chargement...",
+    "mulligan": "Mulligan",
+    "bottoming": "Mise en dessous",
+    "playing": "En jeu",
+    "cleanup": "Nettoyage",
+    "simulating": "Simulation...",
+    "error": "Erreur"
+  },
+  "header": {
+    "back": "Créateur de deck",
+    "hideSidebar": "Masquer le panneau",
+    "showSidebar": "Afficher le panneau"
+  },
+  "controls": {
+    "keepHand": "Garder la main",
+    "mulligan": "Mulligan",
+    "bottomingPrompt": "Cliquez pour mettre des cartes en dessous",
+    "draw": "Piocher",
+    "discardFirst": "Défausser {{count}} d'abord",
+    "nextTurn": "Tour suivant",
+    "simulate": "Simuler",
+    "reset": "Réinitialiser",
+    "exit": "Quitter"
+  },
+  "setup": {
+    "title": "Simulateur de deck",
+    "subtitle": "Simulez la pioche et le jeu de cartes depuis un deck sauvegardé.",
+    "chooseDeck": "Choisir un deck",
+    "noDecks": "Aucun deck sauvegardé. Sauvegardez d'abord un deck.",
+    "goingFirst": "Jouer en premier (ne pas piocher au tour 1)",
+    "start": "Commencer la simulation",
+    "loading": "Chargement..."
+  },
+  "hand": {
+    "title": "Main ({{count}})",
+    "empty": "Votre main est vide.",
+    "emptyMulligan": "Nouvelle main en cours...",
+    "discardNeeded": "Défaussez {{count}} carte",
+    "discardNeeded_other": "Défaussez {{count}} cartes",
+    "bottomPrompt": "Choisissez {{count}} carte à mettre en dessous",
+    "bottomPrompt_other": "Choisissez {{count}} cartes à mettre en dessous"
+  },
+  "card": {
+    "playLand": "Jouer un terrain",
+    "cast": "Lancer",
+    "castNoMana": "Lancer (mana insuffisant)",
+    "discard": "Défausser",
+    "bottom": "Mettre en dessous"
+  },
+  "bf": {
+    "spells": "Permanents",
+    "emptySpells": "Aucun permanent en jeu",
+    "lands": "Terrains",
+    "emptyLands": "Aucun terrain en jeu",
+    "graveyard": "Cimetière ({{count}})",
+    "exile": "Exil ({{count}})",
+    "library": "Bibliothèque",
+    "tap": "Engager",
+    "untap": "Dégager",
+    "destroy": "Détruire",
+    "exile_action": "Exiler",
+    "bounce": "Retourner en main",
+    "newThisTurn": "Nouveau"
+  },
+  "sim": {
+    "title": "Simulation Monte Carlo",
+    "close": "Fermer",
+    "config": "Configuration",
+    "numGames": "Parties",
+    "numTurns": "Tours",
+    "goingFirst": "Jouer en premier",
+    "autoKeep": "Garder automatiquement (sans mulligan)",
+    "run": "Lancer {{games}} parties",
+    "running": "Simulation...",
+    "avgOpeningLands": "Terrains initiaux moy.",
+    "avgOpeningSpells": "{{count}} sorts moy.",
+    "keepFirst": "Garder au premier tirage",
+    "avgMulligans": "{{avg}} mulligans moy.",
+    "gamesSimulated": "Parties simulées",
+    "perTurnTable": "Résumé par tour",
+    "table": {
+      "turn": "Tour",
+      "mana": "Mana",
+      "lands": "Terrains",
+      "playable": "Jouables"
+    }
+  },
+  "chart": {
+    "turn": "T{{n}}",
+    "mana": "Mana moy.",
+    "lands": "Terrains moy.",
+    "playable": "Jouables moy.",
+    "handSize": "Main moy."
+  },
+  "sidebar": {
+    "boardStats": "Plateau",
+    "landsInPlay": "Terrains",
+    "tapped": "Engagés",
+    "graveyard": "Cimetière",
+    "exile": "Exil",
+    "library": "Bibliothèque",
+    "mulligans": "Mulligans",
+    "seed": "Graine aléatoire",
+    "randomSeed": "Aléatoire",
+    "seedHint": "Même graine = même ordre de mélange."
+  },
+  "history": {
+    "title": "Historique des tours",
+    "empty": "Pas encore de tours.",
+    "turn": "T{{turn}}",
+    "handSizeTitle": "Taille de la main",
+    "landsTitle": "Terrains en jeu",
+    "manaTitle": "Mana disponible",
+    "playableTitle": "Cartes jouables",
+    "drewTitle": "Cartes piochées ce tour"
+  },
+  "quality": {
+    "great": "Excellente",
+    "good": "Bonne",
+    "medium": "Moyenne",
+    "poor": "Mauvaise"
+  }
+}
