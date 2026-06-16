@@ -18,7 +18,7 @@
 //!   5+  → small bonus     (meaningful selection pressure)
 
 use engine::game::players;
-use engine::types::ability::{Effect, VoterScope};
+use engine::types::ability::{Effect, PlayerScope, VoterScope};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -26,6 +26,7 @@ use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use crate::ability_chain::collect_chain_effects;
 use crate::features::DeckFeatures;
 
 /// Minimum opponent-creature count at which the spell provides real selection
@@ -71,12 +72,12 @@ impl TacticalPolicy for SeparatePilesTimingPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("separate_piles_na"));
         };
 
-        // Only applies to spells that have a SeparateIntoPiles effect
-        // targeting each opponent's creatures. Neutral on all other spells.
+        // Only applies to spells where the AI is the pile-chooser and each
+        // opponent partitions their own creatures. Neutral on all other spells.
         let has_separate_piles = obj
             .abilities
             .iter()
-            .any(|ability| ability_has_opponent_separate_piles(&ability.effect));
+            .any(|ability| ability_is_opponent_separate_piles_ai_chooses(ability));
         if !has_separate_piles {
             return PolicyVerdict::neutral(PolicyReason::new("separate_piles_na"));
         }
@@ -134,16 +135,28 @@ impl TacticalPolicy for SeparatePilesTimingPolicy {
     }
 }
 
-/// True when the given `effect` (or any effect reachable through its
-/// `sub_ability` chain) is a `SeparateIntoPiles` whose `partition_subject`
-/// targets each opponent (the Make-an-Example shape).
-fn ability_has_opponent_separate_piles(effect: &Effect) -> bool {
-    match effect {
-        Effect::SeparateIntoPiles {
-            partition_subject, ..
-        } => *partition_subject == VoterScope::EachOpponent,
-        _ => false,
-    }
+/// True when `ability`'s full effect chain contains a `SeparateIntoPiles`
+/// where each opponent partitions (`EachOpponent`) and the AI is the
+/// pile-chooser (`Controller`). Uses `collect_chain_effects` so the check
+/// covers top-level and sub-ability placement equally.
+///
+/// The `chooser == Controller` guard is load-bearing: the "opponent keeps
+/// the better half" value model only holds when the AI makes the pile
+/// selection. If a future card gives the opponent the choice, the value
+/// model flips and this policy must bail to neutral.
+fn ability_is_opponent_separate_piles_ai_chooses(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> bool {
+    collect_chain_effects(ability).into_iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                chooser: PlayerScope::Controller,
+                ..
+            }
+        )
+    })
 }
 
 /// Count the total number of creature permanents controlled by any opponent of
