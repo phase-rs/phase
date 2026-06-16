@@ -50,31 +50,3 @@ fn greatest_variant_parses_without_swallowing_dynamic_qty() {
     // If we reach here without panicking, the card parsed successfully.
     // The unit test verifies the internal structure is correct (Aggregate with Max).
 }
-
-#[test]
-fn stinging_study_runtime_without_choice_path_resolves_to_zero() {
-    // This test documents the bug: without the runtime choice prompt/storage
-    // path, Stinging Study resolves to X=0 (draws 0, loses 0 life) even when
-    // commanders are present.
-    //
-    // The quantity.rs resolver for ChosenObject (lines 2116-2143) reads
-    // ChosenAttribute::Object from the source and falls back to ObjectId(0)
-    // when absent. ObjectId(0) has mana_value 0, so X=0.
-    //
-    // Once the full runtime path is implemented (effect-chain prompt +
-    // ChosenAttribute::Object storage), this test should be updated to:
-    // 1. Set up two commanders with different mana values (e.g., 3 and 5)
-    // 2. Cast Stinging Study
-    // 3. Verify the player is prompted to choose a commander
-    // 4. After choosing, verify X equals the chosen commander's mana value
-    // 5. Verify the player draws and loses that many cards/life
-    //
-    // For now, this test is a placeholder documenting the missing runtime path.
-    // The actual integration test would require:
-    // - Effect::ChooseFromZone or similar to prompt for object choice
-    // - Storage of chosen object ID in source's ChosenAttribute::Object
-    // - Resolver reading the choice and returning the property
-
-    // This test is intentionally left as a placeholder.
-    // Once the runtime path is implemented, replace this with the full test.
-}
