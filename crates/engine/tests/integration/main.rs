@@ -47,6 +47,7 @@ mod craft_tithing_blade_transform;
 mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;
+mod daretti_emblem_simultaneous_death;
 mod dark_confidant_upkeep;
 mod dark_depths_thespian_stage;
 mod destroy_redirect_to_battlefield_delivery_tail;

@@ -2334,7 +2334,7 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
     }
 }
 
-fn parse_protection_target(s: &str) -> ProtectionTarget {
+pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
     // Lookup table on an atomic quality string (not Oracle-text dispatch) — the
     // caller has already isolated the quality token from "protection from X".
     let lower = s.to_ascii_lowercase();
