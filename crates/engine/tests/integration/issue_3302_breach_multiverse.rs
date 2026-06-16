@@ -32,7 +32,7 @@
 //! CR 400.7: a card stays in its current zone until an effect moves it.
 //! CR 608.2c: "those cards" refers to the cards chosen in the preceding clause.
 //! CR 110.2a: "under your control" sets the entering object's controller.
-//! CR 205.3: "becomes a Phyrexian" adds the Phyrexian creature subtype.
+//! CR 205.1b: "becomes a Phyrexian" adds the Phyrexian creature subtype.
 
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::actions::GameAction;
@@ -163,7 +163,7 @@ fn answer_pick(runner: &mut GameRunner, expected_chooser: PlayerId, pick: Object
         .expect("selecting one legal creature must succeed");
 }
 
-/// CR 400.7 + CR 608.2c + CR 110.2a + CR 205.3: Breach reanimates exactly the
+/// CR 400.7 + CR 608.2c + CR 110.2a + CR 205.1b: Breach reanimates exactly the
 /// chosen creature from each player's graveyard under the caster's control as a
 /// Phyrexian; every non-chosen card (extra creatures, instants, milled
 /// creatures) stays in its graveyard.
@@ -284,7 +284,7 @@ fn breach_reanimates_only_chosen_cards_under_caster_as_phyrexian() {
             P0,
             "the reanimated creature {chosen:?} must enter under the caster's control"
         );
-        // CR 205.3: every creature the caster controls becomes a Phyrexian.
+        // CR 205.1b: every creature the caster controls becomes a Phyrexian.
         assert!(
             has_subtype(&runner, chosen, "Phyrexian"),
             "the reanimated creature {chosen:?} must become a Phyrexian"

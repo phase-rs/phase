@@ -99,7 +99,7 @@ pub fn resolve(
 /// CR 101.4 + CR 608.2c: Park the next eligible player's `ChooseFromZoneChoice`
 /// for a `ChooseFromZone { zone_owner: EachPlayer }` iteration, stashing the
 /// players still to be prompted in `pending_per_player_zone_choice`. Players
-/// whose zone holds no matching candidate are skipped (CR 700.2 — there's
+/// whose zone holds no matching candidate are skipped (CR 608.2c — there's
 /// nothing to choose). When no eligible player remains, the iteration is
 /// disposed (the parked `pending_continuation` then runs). Drives both the
 /// initial call from `resolve` and each resumed call from
@@ -150,7 +150,7 @@ fn prompt_next_each_player(
         }
 
         let clamped_count = count.min(cards.len());
-        // CR 700.2: For "for each player, choose ...", the spell's controller is
+        // CR 101.4 + CR 608.2c: For "for each player, choose ...", the spell's controller is
         // the chooser regardless of whose zone is scanned (Breach the
         // Multiverse). `Chooser::Opponent` would route to an opponent; honor it.
         let choosing_player = resolve_chooser(state, ability, chooser);
@@ -172,7 +172,7 @@ fn prompt_next_each_player(
         return Ok(());
     }
 
-    // CR 700.2: No player had an eligible card — emit the resolution event so the
+    // CR 608.2c: No player had an eligible card — emit the resolution event so the
     // parked continuation ("put those cards onto the battlefield") still runs.
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
