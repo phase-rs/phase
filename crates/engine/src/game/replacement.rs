@@ -4728,7 +4728,12 @@ impl CommuteClass {
 
 fn quantity_commute_class(modification: &QuantityModification) -> CommuteClass {
     match modification {
-        QuantityModification::Double | QuantityModification::Half => CommuteClass::Multiplicative,
+        QuantityModification::Double => CommuteClass::Multiplicative,
+        // CR 616.1: integer halving (rounded down) does NOT commute with ×2 —
+        // e.g. count 3 gives ×2÷2 = 3 but ÷2×2 = 2 — so it cannot share the
+        // Multiplicative commuting class. The affected player must always choose
+        // the application order (it is its own non-commuting class).
+        QuantityModification::Half => CommuteClass::NonCommuting,
         QuantityModification::Plus { .. } => CommuteClass::Additive,
         QuantityModification::Minus { .. } => CommuteClass::Subtractive,
         QuantityModification::Prevent => CommuteClass::NonCommuting,
@@ -10449,6 +10454,73 @@ mod tests {
         let ReplacementResult::NeedsChoice(player) = result else {
             panic!(
                 "expected NeedsChoice for non-commuting Double+Plus, got {:?}",
+                result
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+    }
+
+    #[test]
+    fn mixed_double_and_half_do_not_commute_prompt_required() {
+        // CR 616.1: ×2 and ÷2-rounded-down do NOT commute (count 3 → ×2÷2 = 3
+        // but ÷2×2 = 2), so Halving Season + a doubler on the same counter event
+        // must prompt the affected player to choose the order — Half must NOT
+        // share the Multiplicative commuting class with Double.
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+        let halver_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Half);
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl].into();
+        let mut hs = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Halving Season".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![halver_repl].into();
+        state.objects.insert(ObjectId(10), ds);
+        state.objects.insert(ObjectId(20), hs);
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
+
+        let target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(30), target);
+
+        let proposed = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!(
+                "expected NeedsChoice for non-commuting Double+Half, got {:?}",
                 result
             );
         };

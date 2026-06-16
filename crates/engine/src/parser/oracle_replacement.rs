@@ -12356,7 +12356,6 @@ mod tests {
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
     }
-
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
