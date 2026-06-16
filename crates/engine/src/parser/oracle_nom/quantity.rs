@@ -433,6 +433,34 @@ fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, Quanti
     Ok((rest, QuantityRef::CardsDrawnThisTurn { player }))
 }
 
+/// CR 701.9 + CR 603.4: "card(s) [you('ve)] discarded this turn". Reuses the
+/// runtime `CardsDiscardedThisTurn` quantity ref already wired for condition
+/// checks; this routes it into the dynamic "for each" count path (Misty Knight,
+/// Green Goblin, Astonishing Spider-Man: "draw a card for each card you've
+/// discarded this turn"). Mirrors `parse_number_of_cards_drawn_this_turn`: the
+/// leading "card" word is optionally plural so both the "the number of *cards* …"
+/// count phrase and the "for each *card* …" clause are served uniformly.
+fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, player) = alt((
+        // CR 701.9 + CR 102.2/102.3: opponents' discards this turn, summed
+        // across all opponents.
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+            tag("your opponents have discarded this turn"),
+        ),
+        // CR 701.9: the caster's own discards this turn.
+        value(PlayerScope::Controller, tag("you've discarded this turn")),
+        value(PlayerScope::Controller, tag("you have discarded this turn")),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
+}
+
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
 ///
 /// CR 107.1a: Oracle text must specify rounding direction for fractional
@@ -518,6 +546,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // exact complete phrase (no greedy prefix consumption).
         alt((
             parse_number_of_cards_drawn_this_turn,
+            parse_number_of_cards_discarded_this_turn,
             parse_cards_in_zone_ref,
         )),
         parse_self_power_ref,
@@ -775,9 +804,14 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_number_of_controlled_type`, whose " you control" suffix does
         // not match the battlefield-wide form.
         parse_number_of_type_on_battlefield_with_keyword,
-        // CR 121.1: "cards you've drawn this turn" — must precede generic
-        // controlled-type arms whose type words could overlap.
-        parse_number_of_cards_drawn_this_turn,
+        // CR 121.1 + CR 701.9 + CR 603.4: "cards you've drawn this turn" and
+        // "cards you've discarded this turn" — must precede generic
+        // controlled-type arms whose type words could overlap. Nested together
+        // to stay within nom's top-level `alt` arity (nom 8.0 max: 21 items).
+        alt((
+            parse_number_of_cards_drawn_this_turn,
+            parse_number_of_cards_discarded_this_turn,
+        )),
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
