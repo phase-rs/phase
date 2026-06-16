@@ -1083,6 +1083,32 @@ mod tests {
     }
 
     #[test]
+    fn combat_assignment_permanent_rules_lower_to_continuous_modifications() {
+        let cases = [
+            (
+                PermanentRule::AssignsToughnessCombatDamage,
+                ContinuousModification::AssignDamageFromToughness,
+            ),
+            (
+                PermanentRule::AssignsCombatDamageAsThoughNotBlocked,
+                ContinuousModification::AssignDamageAsThoughUnblocked,
+            ),
+            (
+                PermanentRule::AssignsNoCombatDamage,
+                ContinuousModification::AssignNoCombatDamage,
+            ),
+        ];
+
+        for (rule, expected_modification) in cases {
+            let converted = convert_permanent_rule(&rule, TargetFilter::SelfRef).unwrap();
+
+            assert_eq!(converted.mode, StaticMode::Continuous);
+            assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(converted.modifications, vec![expected_modification]);
+        }
+    }
+
+    #[test]
     fn cant_attack_unless_defending_player_controls_lowers_to_negated_condition() {
         let condition = Condition::PlayerPassesFilter(
             Box::new(Player::DefendingPlayer),
