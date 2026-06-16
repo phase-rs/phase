@@ -5656,23 +5656,6 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
         });
     }
 
-    // CR 119.4 + CR 107.3: "pay any amount of life" — the player chooses the
-    // amount as the cost is paid (Necrodominance, Phyrexian Processor, Lurking
-    // Evil). Modeled as the same player-chosen `X` variable as "pay X life".
-    if terminated(
-        tag::<_, _, OracleError<'_>>("any amount of life"),
-        word_boundary,
-    )
-    .parse(rest)
-    .is_ok()
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::Variable {
-                name: "X".to_string(),
-            },
-        });
-    }
-
     // CR 118.8: "pay half your life[, rounded up]" — delegate the life-fraction
     // phrase to the shared quantity expression parser (`DivideRounded` over the
     // controller's `LifeTotal`), so the rounding mode and life-total wording
@@ -10663,29 +10646,6 @@ mod tests {
             shards.as_slice(),
             [crate::types::mana::ManaCostShard::X]
         ));
-    }
-
-    #[test]
-    fn parse_pay_any_amount_of_life_as_variable() {
-        // CR 119.4: Necrodominance / Phyrexian Processor / Lurking Evil —
-        // player-chosen life payment, modeled as the X variable.
-        let text = "pay any amount of life";
-        let lower = text.to_lowercase();
-        let Some(CostResourceImperativeAst::Pay {
-            cost: AbilityCost::PayLife { amount },
-        }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
-        else {
-            panic!("expected PayLife cost for {text:?}");
-        };
-        assert!(
-            matches!(
-                amount,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::Variable { ref name },
-                } if name == "X"
-            ),
-            "expected variable X life payment, got {amount:?}"
-        );
     }
 
     #[test]
