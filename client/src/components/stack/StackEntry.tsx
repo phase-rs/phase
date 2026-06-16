@@ -99,7 +99,14 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
-  const paidLabels = details?.paid?.map((fact) => formatPaidFact(fact, t)) ?? [];
+  // The chosen {X} is a resolved value (like a chosen color), not just a cost —
+  // pull it out for a dedicated, always-visible badge and drop it from the
+  // capped paid-chip row so it isn't shown twice.
+  const xValueFact = details?.paid?.find((fact) => fact.type === "XValue");
+  const xValue = xValueFact?.type === "XValue" ? xValueFact.data.value : undefined;
+  const paidLabels =
+    details?.paid?.filter((fact) => fact.type !== "XValue").map((fact) => formatPaidFact(fact, t)) ??
+    [];
   const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
   const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
   const seatColor = useSeatColor(entry.controller);
@@ -195,6 +202,18 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       {groupCount > 1 && (
         <span className="absolute -left-2 -top-2 rounded-full bg-purple-600 px-2 py-0.5 text-[11px] font-bold text-white shadow-md">
           ×{groupCount}
+        </span>
+      )}
+
+      {/* Chosen {X} value — a resolved choice the player needs to see at a
+          glance (e.g. Fireball cast for X=5). Top-left so it never competes with
+          the top-right status badge or the capped cost-chip row. */}
+      {xValue !== undefined && (
+        <span
+          className="absolute -left-1 -top-2 z-10 rounded-full bg-purple-600 px-2 py-0.5 text-[10px] font-bold text-white shadow-md"
+          title={t("stack.paidXValue", { value: xValue })}
+        >
+          X={xValue}
         </span>
       )}
 
