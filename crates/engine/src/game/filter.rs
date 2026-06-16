@@ -197,6 +197,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -397,6 +398,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::HasXInManaCost
+        | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -2218,6 +2220,8 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
             .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
+        // CR 702.33d: Kicker-paid state for "first kicked spell" cost reducers.
+        was_kicked: !spell_obj.kickers_paid.is_empty(),
         cast_variant: crate::types::game_state::CastingVariant::Normal,
     }
 }
@@ -2455,6 +2459,21 @@ fn spell_object_matches_property(
                 &source,
             )
         }
+        // CR 702.33d: Kicker-paid during live cost-modifier evaluation.
+        FilterProp::WasKicked => context.is_some_and(|ctx| {
+            let Some(spell_id) = ctx.spell_object_id else {
+                return false;
+            };
+            if let Some(pending) = ctx.state.pending_cast.as_ref() {
+                if pending.object_id == spell_id {
+                    return !pending.ability.context.kickers_paid.is_empty();
+                }
+            }
+            ctx.state
+                .objects
+                .get(&spell_id)
+                .is_some_and(|obj| !obj.kickers_paid.is_empty())
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -2542,6 +2561,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        FilterProp::WasKicked => record.was_kicked,
         FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
@@ -2980,6 +3000,14 @@ fn matches_filter_prop(
         // typed type/controller filters via `TargetFilter::And`/`Or`.
         FilterProp::HasXInActivationCost => {
             crate::game::casting_costs::pending_activation_cost_has_x(state, object_id)
+        }
+        FilterProp::WasKicked => {
+            if let Some(pending) = state.pending_cast.as_ref() {
+                if pending.object_id == object_id {
+                    return !pending.ability.context.kickers_paid.is_empty();
+                }
+            }
+            !obj.kickers_paid.is_empty()
         }
         // CR 605.1: Delegate to the single mana-ability classifier instead of
         // duplicating the definition at the filter layer.
@@ -3816,6 +3844,7 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
@@ -4935,6 +4964,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -4976,6 +5006,7 @@ mod tests {
             has_x_in_cost: true,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -5056,6 +5087,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -8400,6 +8432,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }
         };
 
@@ -8854,6 +8887,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
+            was_kicked: false,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

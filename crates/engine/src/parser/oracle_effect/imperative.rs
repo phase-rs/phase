@@ -7703,6 +7703,23 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 601.2d + CR 615.7: "prevent N damage divided/distributed among [targets]"
+        // — intercepted here so `distribute` and `multi_target` propagate to
+        // `ParsedEffectClause`. The bare Effect returned by `lower_utility_imperative_ast`
+        // cannot carry these fields. Mirrors the ZoneCounter { unless_pay } intercept above.
+        ImperativeFamilyAst::Structured(ImperativeAst::Utility(
+            UtilityImperativeAst::Prevent { ref text },
+        )) => {
+            if let Some(clause) = super::lower::try_parse_prevent_distribute(text) {
+                return clause;
+            }
+            // Fallback: standard prevent with no distribution.
+            // lower_utility_imperative_ast is defined in THIS file (imperative.rs),
+            // called unqualified — NOT super::lower::lower_utility_imperative_ast.
+            parsed_clause(lower_utility_imperative_ast(
+                UtilityImperativeAst::Prevent { text: text.clone() },
+            ))
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }

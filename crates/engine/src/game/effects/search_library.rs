@@ -2004,6 +2004,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opponent_direct_search_muzzled() {
+        // CR 701.23: "Your opponents can't search libraries." — cause=Opponents
+        // muzzles an opponent's own library search (Mindlock Orb opponent variant).
+        let mut state = GameState::new_two_player(42);
+        add_cant_search_library_permanent(&mut state, PlayerId(0), ProhibitionScope::Opponents);
+
+        let _bear = add_library_creature(&mut state, 1, PlayerId(1), "Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
+            },
+            vec![],
+            ObjectId(9996),
+            PlayerId(1),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state
+                .players_who_searched_library_this_turn
+                .contains(&PlayerId(1)),
+            "Opponent direct search must be muzzled"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::SearchChoice { .. }),
+            "Muzzled search must NOT transition to SearchChoice"
+        );
+    }
+
     /// CR 608.2c + CR 701.23a: Assassin's Trophy-shape search with
     /// `target_player = Some(ParentTargetController)` + parent target = an
     /// opponent's permanent. The opponent (destroyed permanent's controller)

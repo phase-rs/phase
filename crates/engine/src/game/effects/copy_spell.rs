@@ -385,6 +385,7 @@ pub(crate) fn copy_count_with_replacements(
         }
         count = match def.quantity_modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Half) => count / 2,
             Some(QuantityModification::Plus { value }) => count.saturating_add(value as usize),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value as usize),
             // `Prevent` / unspecified is not a copy-count increase — leave as-is.
