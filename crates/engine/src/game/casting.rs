@@ -10642,11 +10642,37 @@ fn apply_mana_spell_grants(
             else {
                 continue;
             };
-            if restriction.as_ref().is_some_and(|restriction| {
-                !spell_meta
+            // CR 106.6: Gate the reflexive trigger on the spend filter. Most
+            // restrictions are evaluated purely from `SpellMeta` via
+            // `allows_spell`; the commander-relational filter
+            // (`SharesCreatureTypeWithCommander`) needs game state and is
+            // evaluated here, the single authoritative spend-check site.
+            let passes = match restriction.as_ref() {
+                None => true,
+                Some(crate::types::mana::ManaRestriction::SharesCreatureTypeWithCommander) => {
+                    spell_meta.as_ref().is_some_and(|meta| {
+                        // CR 205.3m + CR 903.3: the spell must be a creature AND
+                        // share at least one creature type with the controller's
+                        // commander(s).
+                        let is_creature = meta
+                            .types
+                            .iter()
+                            .any(|t| t.eq_ignore_ascii_case("Creature"));
+                        if !is_creature {
+                            return false;
+                        }
+                        let commander_types =
+                            super::commander::commander_creature_types(state, caster);
+                        meta.subtypes
+                            .iter()
+                            .any(|s| commander_types.iter().any(|c| c.eq_ignore_ascii_case(s)))
+                    })
+                }
+                Some(restriction) => spell_meta
                     .as_ref()
-                    .is_some_and(|meta| restriction.allows_spell(meta))
-            }) {
+                    .is_some_and(|meta| restriction.allows_spell(meta)),
+            };
+            if !passes {
                 continue;
             }
             let timestamp = state.next_timestamp() as u32;
@@ -14272,6 +14298,127 @@ mod tests {
             state.deferred_triggers.len(),
             deferred_before + 1,
             "spending on a non-matching spell must not queue another trigger"
+        );
+    }
+
+    /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's
+    /// `SharesCreatureTypeWithCommander` spend filter fires the reflexive scry
+    /// only when the spell is a creature sharing a creature type with the
+    /// controller's commander. Evaluated at the spend-check site (game-state
+    /// aware), not via `allows_spell`.
+    #[test]
+    fn mana_spend_trigger_shares_creature_type_with_commander() {
+        let mut state = setup_game_at_main_phase();
+        // Elf commander in the command zone for PlayerId(0).
+        let commander = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Elvish Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let c = state.objects.get_mut(&commander).unwrap();
+            c.is_commander = true;
+            c.card_types.core_types.push(CoreType::Creature);
+            c.card_types.subtypes.push("Elf".to_string());
+        }
+
+        let path = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Path of Ancestry".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&path)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // An Elf creature spell (shares a type), a Goblin creature spell (no
+        // shared type), and an Elf-typed noncreature (Tribal instant) spell.
+        let elf_id = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(0),
+            "Elvish Mystic".to_string(),
+            Zone::Stack,
+        );
+        {
+            let e = state.objects.get_mut(&elf_id).unwrap();
+            e.card_types.core_types.push(CoreType::Creature);
+            e.card_types.subtypes.push("Elf".to_string());
+        }
+        let goblin_id = create_object(
+            &mut state,
+            CardId(403),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Stack,
+        );
+        {
+            let g = state.objects.get_mut(&goblin_id).unwrap();
+            g.card_types.core_types.push(CoreType::Creature);
+            g.card_types.subtypes.push("Goblin".to_string());
+        }
+        let elf_instant_id = create_object(
+            &mut state,
+            CardId(404),
+            PlayerId(0),
+            "Elvish Promise".to_string(),
+            Zone::Stack,
+        );
+        {
+            let i = state.objects.get_mut(&elf_instant_id).unwrap();
+            i.card_types.core_types.push(CoreType::Instant);
+            i.card_types.subtypes.push("Elf".to_string());
+        }
+
+        let trigger_ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let unit = ManaUnit {
+            color: ManaType::Green,
+            source_id: path,
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![ManaSpellGrant::TriggerOnSpend {
+                restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
+                ability: Box::new(trigger_ability),
+            }],
+            expiry: None,
+        };
+
+        let base = state.deferred_triggers.len();
+        // Elf creature spell shares the Elf creature type → reflexive scry queued.
+        apply_mana_spell_grants(&mut state, elf_id, std::slice::from_ref(&unit));
+        assert_eq!(
+            state.deferred_triggers.len(),
+            base + 1,
+            "an Elf creature spell shares a type with the Elf commander"
+        );
+        // Goblin creature spell shares no creature type → no trigger.
+        apply_mana_spell_grants(&mut state, goblin_id, std::slice::from_ref(&unit));
+        assert_eq!(
+            state.deferred_triggers.len(),
+            base + 1,
+            "a Goblin creature spell shares no type with the Elf commander"
+        );
+        // Elf-typed noncreature spell is not a creature → no trigger.
+        apply_mana_spell_grants(&mut state, elf_instant_id, &[unit]);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            base + 1,
+            "a noncreature spell never qualifies even when it shares a subtype"
         );
     }
 
