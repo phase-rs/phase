@@ -13022,6 +13022,20 @@ pub enum TriggerCondition {
     /// Checked at both fire-time and resolution-time per CR 603.4.
     EventDamageSourceMatchesFilter { filter: TargetFilter },
 
+    /// CR 120.1 + CR 108.3 + CR 603.4: Intervening-if predicate that holds when
+    /// the player dealt the triggering damage is the OWNER of the object that
+    /// dealt it ("deals combat damage to its owner"). Reads the triggering
+    /// `GameEvent::DamageDealt`: true when `target == Player(p)` and the damage
+    /// source object's `owner == p` (CR 120.1: the object that deals damage is
+    /// the source of that damage). Distinct from `EventDamageSourceMatchesFilter`
+    /// (which filters the damage *source* by a TargetFilter) and from
+    /// `DealtDamageBySourceThisTurn` (which gates a dying creature against
+    /// this-turn damage records) — this gates the recipient↔source-owner
+    /// relation, which no static `TargetFilter` can express. Evaluated at both
+    /// fire-time and resolution-time per CR 603.4, and per synthetic per-source
+    /// event on the aggregate combat-damage path. The Beast, Deathless Prince.
+    DamagedPlayerIsEventSourceOwner,
+
     /// CR 614.12c + CR 607.2d + CR 603.4: True when the trigger source's
     /// persisted `ChosenAttribute::Label` matches the given anchor word.
     /// Used by anchor-word modal permanents (Khans of Tarkir Sieges, Tarkir:

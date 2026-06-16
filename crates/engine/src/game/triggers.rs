@@ -4869,6 +4869,34 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some(),
+        // CR 120.1 + CR 108.3: "deals combat damage to its owner" — the damaged
+        // player must be the owner of the object that dealt the damage (CR 120.1:
+        // the object that deals damage is the source of that damage). Two event
+        // shapes reach this gate: the per-source synthetic `DamageDealt` produced
+        // by `matching_damage_done_events` after aggregate expansion, AND the
+        // un-expanded aggregate `CombatDamageDealtToPlayer` itself, which the
+        // early intervening-if gate in `collect_matching_triggers` evaluates
+        // BEFORE per-source expansion. The aggregate arm must return true when
+        // any of its `source_amounts` sources is owned by the damaged player, or
+        // a non-SelfRef aggregate listener (e.g. The Beast, Deathless Prince)
+        // would be dropped at the early gate and never expanded. Damage to an
+        // object recipient never satisfies this (owner is a player), so the
+        // Player-only match arm is exhaustive for the relation.
+        TriggerCondition::DamagedPlayerIsEventSourceOwner => match trigger_event {
+            Some(GameEvent::DamageDealt {
+                source_id: dmg_src,
+                target: TargetRef::Player(pid),
+                ..
+            }) => state.objects.get(dmg_src).map(|o| o.owner) == Some(*pid),
+            Some(GameEvent::CombatDamageDealtToPlayer {
+                player_id,
+                source_amounts,
+                ..
+            }) => source_amounts.iter().any(|(dmg_src, _)| {
+                state.objects.get(dmg_src).map(|o| o.owner) == Some(*player_id)
+            }),
+            _ => false,
+        },
         // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
         // persisted `ChosenAttribute::Label` (set when the anchor-word
         // permanent entered the battlefield) matches the linked anchor word.
@@ -5726,9 +5754,9 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp, KickerVariant,
-        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
+        DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp,
+        KickerVariant, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
         SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
         TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
@@ -10712,6 +10740,169 @@ pub mod tests {
             Some(source),
             None,
         ));
+    }
+
+    /// CR 120.1 + CR 108.3: `DamagedPlayerIsEventSourceOwner` holds only when the
+    /// damaged player is the OWNER of the damaging object (The Beast). A creature
+    /// owned by P0 dealing combat damage to P0 satisfies it; to P1 does not; an
+    /// object recipient never does; an absent event does not.
+    #[test]
+    fn test_damaged_player_is_event_source_owner_condition() {
+        let mut state = setup();
+        // Creature owned by P0.
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Owned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        // Some other object (the trigger source need not be the damage source).
+        let beast = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "The Beast".to_string(),
+            Zone::Battlefield,
+        );
+
+        let condition = TriggerCondition::DamagedPlayerIsEventSourceOwner;
+
+        // Creature owned by P0 deals combat damage to P0 (its owner) → true.
+        let to_owner = GameEvent::DamageDealt {
+            source_id: creature,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            Some(&to_owner),
+        ));
+
+        // Same creature deals combat damage to P1 (not its owner) → false.
+        let to_non_owner = GameEvent::DamageDealt {
+            source_id: creature,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            Some(&to_non_owner),
+        ));
+
+        // Object recipient → false (owner is a player, never an object).
+        let to_object = GameEvent::DamageDealt {
+            source_id: creature,
+            target: TargetRef::Object(beast),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            Some(&to_object),
+        ));
+
+        // Absent event → false.
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(1),
+            Some(beast),
+            None,
+        ));
+    }
+
+    /// CR 120.1 + CR 108.3 + CR 603.4: production firing path for The Beast,
+    /// Deathless Prince. The Beast is a non-SelfRef aggregate combat-damage
+    /// listener (`valid_source = creature`), so `collect_pending_triggers`
+    /// passes it the UN-expanded `CombatDamageDealtToPlayer` aggregate through
+    /// the early intervening-if gate BEFORE per-source expansion. The
+    /// `DamagedPlayerIsEventSourceOwner` condition must hold against that
+    /// aggregate shape, or the trigger is dropped before expansion. This test
+    /// drives the real `collect_pending_triggers` path the engine uses (the
+    /// per-source `check_trigger_condition` unit test does not), proving the
+    /// trigger is collected when the damaged player owns the source and dropped
+    /// when they do not.
+    #[test]
+    fn the_beast_owner_relation_fires_through_aggregate_early_gate() {
+        fn beast_trigger() -> TriggerDefinition {
+            let mut trigger = make_trigger(TriggerMode::DamageDone);
+            trigger.valid_source = Some(TargetFilter::Typed(TypedFilter::creature()));
+            trigger.condition = Some(TriggerCondition::DamagedPlayerIsEventSourceOwner);
+            trigger.damage_kind = DamageKindFilter::CombatOnly;
+            trigger
+        }
+
+        // Damaged player (P0) owns the creature that dealt the damage → fires.
+        {
+            let mut state = setup();
+            let beast = make_creature(&mut state, PlayerId(0), "The Beast, Deathless Prince", 7, 7);
+            // Damage source is owned by P0 — the damaged player.
+            let source = make_creature(&mut state, PlayerId(0), "Owned Attacker", 4, 4);
+            state
+                .objects
+                .get_mut(&beast)
+                .unwrap()
+                .trigger_definitions
+                .push(beast_trigger());
+
+            let events = vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(source, 4)],
+                total_damage: 4,
+            }];
+            let pending = collect_pending_triggers(&mut state, &events);
+            assert_eq!(
+                pending
+                    .iter()
+                    .filter(|ctx| ctx.pending.source_id == beast)
+                    .count(),
+                1,
+                "The Beast must fire when the damaged player owns the damaging creature"
+            );
+        }
+
+        // Damaged player (P0) does NOT own the source (owned by P1) → no fire.
+        {
+            let mut state = setup();
+            let beast = make_creature(&mut state, PlayerId(0), "The Beast, Deathless Prince", 7, 7);
+            let source = make_creature(&mut state, PlayerId(1), "Unowned Attacker", 4, 4);
+            state
+                .objects
+                .get_mut(&beast)
+                .unwrap()
+                .trigger_definitions
+                .push(beast_trigger());
+
+            let events = vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(source, 4)],
+                total_damage: 4,
+            }];
+            let pending = collect_pending_triggers(&mut state, &events);
+            assert_eq!(
+                pending
+                    .iter()
+                    .filter(|ctx| ctx.pending.source_id == beast)
+                    .count(),
+                0,
+                "The Beast must NOT fire when the damaged player does not own the damaging creature"
+            );
+        }
     }
 
     #[test]
