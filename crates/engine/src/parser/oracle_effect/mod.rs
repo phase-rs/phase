@@ -3433,12 +3433,11 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
-    // Phase 2 PoC: peel structural slots off the head of the clause before
-    // body parsing. The recursive shell strips slot-bearing prefixes
-    // (currently just "you may " for the Optional slot) and accumulates them
+    // Phase 2: peel structural slots off the head of the clause before
+    // body parsing. The recursive shell strips slot-bearing prefixes/suffixes
+    // (optional, opponent-may, condition, duration, for-each, player-scope)
     // into a `ClauseContext`. The bare imperative remainder is parsed by the
-    // existing pipeline; the context is applied onto the result before
-    // return so no slot is silently dropped.
+    // existing pipeline; the context is applied onto the result before return.
     //
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
@@ -17209,7 +17208,7 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text, None)
         } else {
             let reference_target = for_each_clause_target_controller_filter(&text);
-            let (repeat_for, text) = strip_for_each_prefix(&text);
+            let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
             let reference_target = repeat_for.as_ref().and(reference_target);
             (repeat_for, text, reference_target)
         };
@@ -17221,7 +17220,8 @@ pub(crate) fn parse_effect_chain_ir(
         };
         // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
-            let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
+            let (repeat_count, stripped_text) =
+                super::clause_shell::peel_repeat_count_suffix(&text_without_where_x);
             if repeat_count.is_some() {
                 (repeat_count, stripped_text)
             } else {
@@ -17236,7 +17236,7 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = strip_player_scope_subject(&text);
+        let (player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
