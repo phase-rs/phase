@@ -15,6 +15,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { RichLabel } from "../mana/RichLabel.tsx";
 import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
 
 interface StackEntryProps {
@@ -214,11 +215,17 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
           title={stackEntryTitle(abilityLabel, triggerDescription, targetLabels, paidLabels, contextLabels, t)}
         >
-          <div className="truncate pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
+          <RichLabel
+            text={abilityLabel}
+            size="xs"
+            className="block truncate pr-8 text-[9px] font-semibold text-purple-300"
+          />
           {triggerDescription && (
-            <div className="mt-0.5 line-clamp-3 pr-6 text-[8px] leading-tight text-gray-300">
-              {triggerDescription}
-            </div>
+            <RichLabel
+              text={triggerDescription}
+              size="xs"
+              className="mt-0.5 line-clamp-3 pr-6 text-[8px] leading-tight text-gray-300"
+            />
           )}
         </div>
       )}
