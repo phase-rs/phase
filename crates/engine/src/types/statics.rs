@@ -692,6 +692,19 @@ pub enum StaticMode {
     /// layer 7 — there is no continuous P/T or keyword grant; the static is a
     /// pure "session-start +1 votes" signal.
     GrantsExtraVote,
+    /// CR 701.55c: A replacement effect causes an opponent who would face a
+    /// villainous choice to face that choice some number of additional times
+    /// (The Valeyard — "If an opponent would face a villainous choice, they face
+    /// that choice an additional time."). Each active source controlled by an
+    /// opponent of the facing player adds +1 additional villainous-choice
+    /// instance for that player; the whole CR 701.55a process is then performed
+    /// that many additional times, one at a time (CR 701.55c). Parallel to
+    /// `GrantsExtraVote` (CR 701.38d), but counts a different keyword action read
+    /// by a different resolver (`choose_one_of`), so the two are not unifiable
+    /// (categorical-boundary rule: CR 701.55 vs CR 701.38 are separate sections).
+    /// Like `GrantsExtraVote`, it does not feed into layer 7 — there is no
+    /// continuous P/T or keyword grant.
+    GrantsExtraVillainousChoice,
     /// CR 702.51a: Grants a keyword to spells during casting.
     /// Generalized version of CastWithFlash — the `spell_filter` on the StaticDefinition
     /// determines which spells are affected (e.g., "Creature spells you cast have convoke").
@@ -1571,6 +1584,7 @@ impl StaticMode {
             | StaticMode::CantCauseSacrificeOrExile { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
+            | StaticMode::GrantsExtraVillainousChoice
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::AlternativeKeywordCost { .. }
@@ -1681,6 +1695,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CastWithFlash => write!(f, "CastWithFlash"),
             StaticMode::GrantsExtraVote => write!(f, "GrantsExtraVote"),
+            StaticMode::GrantsExtraVillainousChoice => {
+                write!(f, "GrantsExtraVillainousChoice")
+            }
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
@@ -2276,6 +2293,9 @@ impl FromStr for StaticMode {
             }
             // CR 701.38d: "While voting, you may vote an additional time."
             "GrantsExtraVote" => StaticMode::GrantsExtraVote,
+            // CR 701.55c: "If an opponent would face a villainous choice, they
+            // face that choice an additional time." (The Valeyard)
+            "GrantsExtraVillainousChoice" => StaticMode::GrantsExtraVillainousChoice,
             // Parameterized
             other => {
                 if let Some(inner) = other
@@ -2650,6 +2670,17 @@ mod tests {
         assert_eq!(
             StaticMode::from_str("IgnoreHexproof").unwrap(),
             StaticMode::IgnoreHexproof
+        );
+        // CR 701.55c: GrantsExtraVillainousChoice (The Valeyard) must round-trip
+        // through Display/FromStr so card data persists the variant across the
+        // WASM serde boundary, mirroring its CR 701.38d twin GrantsExtraVote.
+        assert_eq!(
+            StaticMode::from_str("GrantsExtraVillainousChoice").unwrap(),
+            StaticMode::GrantsExtraVillainousChoice
+        );
+        assert_eq!(
+            StaticMode::GrantsExtraVillainousChoice.to_string(),
+            "GrantsExtraVillainousChoice"
         );
     }
 

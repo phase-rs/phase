@@ -520,6 +520,16 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
+    // CR 701.55c: "If an opponent would face a villainous choice, they face that
+    // choice an additional time." (The Valeyard) leads with "if …" and contains
+    // "would ", so it is otherwise classified as a replacement and never reaches
+    // the static parser. It is in fact an extra-instance rule-modifying static
+    // (`StaticMode::GrantsExtraVillainousChoice`, the CR 701.55c twin of
+    // `GrantsExtraVote`). Route it to Priority 7 static dispatch — which runs
+    // before the Priority 8 replacement gate — so it lowers to the static.
+    if scan_contains(lower, "face a villainous choice") && scan_contains(lower, "additional time") {
+        return true;
+    }
     false
 }
 

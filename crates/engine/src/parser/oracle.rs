@@ -5493,6 +5493,38 @@ mod tests {
         assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
     }
 
+    /// CR 701.55c (cluster 32, Class D — The Valeyard): "If an opponent would
+    /// face a villainous choice, they face that choice an additional time." leads
+    /// with "if …" and contains "would ", so without the classifier redirect it
+    /// is classified as a replacement and falls through to an
+    /// `Unimplemented{name:"replacement_structure"}`. The
+    /// `is_static_compound_pattern` gate must route it to Priority 7 static
+    /// dispatch, which lowers it to `StaticMode::GrantsExtraVillainousChoice`.
+    /// Tests the classifier+dispatch building blocks, asserting NO Unimplemented.
+    #[test]
+    fn valeyard_grants_extra_villainous_choice_static() {
+        let r = parse(
+            "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)",
+            "The Valeyard",
+            &[],
+            &["Legendary", "Creature"],
+            &[],
+        );
+
+        assert_eq!(
+            r.statics.len(),
+            1,
+            "expected one extra-villainous-choice static, got {r:#?}"
+        );
+        assert_eq!(r.statics[0].mode, StaticMode::GrantsExtraVillainousChoice);
+        assert!(
+            r.abilities
+                .iter()
+                .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })),
+            "the Valeyard line must not produce an Unimplemented effect, got {r:#?}"
+        );
+    }
+
     #[test]
     fn mindlock_orb_routes_to_static_search_prohibition() {
         let r = parse(

@@ -515,6 +515,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     // ("get +2/+0 and gain haste ... and attack this turn if able") are body
     // delimiters owned by `try_parse_compound_subject_each`, not clause splits.
     let mut compound_subject_each_sticky = false;
+    // CR 701.55a + CR 701.55d: once a villainous-choice head ("[subject] face(s)
+    // a villainous choice — ") is detected, keep the WHOLE choice block intact
+    // for the rest of the current sentence. Everything after the em-dash is one
+    // indivisible instruction whose internal "," / " then " / " and " / " or "
+    // are branch delimiters owned by `try_parse_choose_one_of_inline`, not clause
+    // splits. Without this latch the chunker bisects a branch body (e.g. Ensnared
+    // by the Mara: "... until they exile a nonland card, then you may cast that
+    // card ...") and the lead-in is severed into a failing `Unimplemented{face}`.
+    let mut villainous_choice_sticky = false;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -548,6 +557,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     }
                 }
             }
+            ',' if paren_depth == 0
+                && !in_single_quote
+                && !in_double_quote
+                // CR 701.55a: inside a latched villainous-choice block, "," is a
+                // branch delimiter (", then" / ", or"), not a clause boundary.
+                && villainous_choice_sticky =>
+            {
+                current.push(ch);
+            }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
                 if let Some((boundary, chars_to_skip)) =
@@ -567,12 +585,27 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
+                // CR 701.55a: a true sentence boundary ends the choice block.
+                villainous_choice_sticky = false;
                 while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
                     chars.next();
                 }
             }
             _ => {
                 current.push(ch);
+                // CR 701.55a: latch the villainous-choice block once the chunk
+                // accumulated so far contains the choice opener "a villainous
+                // choice — " (em-dash + trailing space). Anchored on the full
+                // opener so it covers "face"/"faces" and any chooser prefix
+                // ("that creature's controller faces a villainous choice — ").
+                if !villainous_choice_sticky
+                    && nom_primitives::scan_contains(
+                        &current.to_ascii_lowercase(),
+                        "a villainous choice \u{2014} ",
+                    )
+                {
+                    villainous_choice_sticky = true;
+                }
                 // Detect bare " and " at word boundary followed by an imperative verb.
                 // Handles patterns like "you lose 1 life and create a Treasure token".
                 // Uses a restricted verb list to avoid false positives on noun phrases
@@ -782,6 +815,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || choice_partition_remainder
                         || compound_subject_each
                         || compound_subject_each_sticky // CR 109.5 + CR 115.1: keep the whole compound-subject body intact
+                        || villainous_choice_sticky // CR 701.55a: keep the whole villainous-choice block intact
                         || inside_otherwise_body
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct

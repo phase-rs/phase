@@ -417,6 +417,40 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 701.55c: "If an opponent would face a villainous choice, they face that
+    // choice an additional time." (The Valeyard) — an extra-instance replacement
+    // static, the structural twin of `GrantsExtraVote` (CR 701.38d). `affected`
+    // is `Player` (mirroring `GrantsExtraVote`); the opponent-of-the-facing-
+    // player scoping is owned by the resolver
+    // (`choose_one_of::villainous_extra_instances_for`), which counts only
+    // sources controlled by an opponent of the facing player — `affected` here is
+    // a coverage/semantic marker, not the scope authority. Reminder text "(They
+    // can make the same or different choices.)" is already stripped above by
+    // `strip_reminder_text`. Comma/no-comma variants are alt arms, not flat
+    // full-sentence equality, matching the GrantsExtraVote pattern.
+    {
+        let lower_trim = tp.lower.trim_end_matches('.').trim();
+        let res: nom::IResult<&str, (), OracleError<'_>> = nom::combinator::value(
+            (),
+            nom::branch::alt((
+                nom::bytes::complete::tag(
+                    "if an opponent would face a villainous choice, they face that choice an additional time",
+                ),
+                nom::bytes::complete::tag(
+                    "if an opponent would face a villainous choice they face that choice an additional time",
+                ),
+            )),
+        )
+        .parse(lower_trim);
+        if res.is_ok() {
+            return Some(
+                StaticDefinition::new(StaticMode::GrantsExtraVillainousChoice)
+                    .affected(TargetFilter::Player)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
     // top of your library [rider]." Top-of-library cast permission class
     // (Realmwalker, Future Sight, Bolas's Citadel, Magus of the Future, Vivien

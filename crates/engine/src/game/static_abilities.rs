@@ -298,6 +298,14 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // scans active_static_definitions at vote-session start. No continuous-effect
     // plumbing needed; registered here so coverage marks the card as supported.
     registry.insert(StaticMode::GrantsExtraVote, handle_rule_mod);
+    // CR 701.55c: GrantsExtraVillainousChoice — "If an opponent would face a
+    // villainous choice, they face that choice an additional time." (The
+    // Valeyard). Runtime enforcement is in
+    // game/effects/choose_one_of.rs::villainous_extra_instances_for(), which
+    // scans active_static_definitions when assembling the facing-player list. No
+    // continuous-effect plumbing needed; registered here so coverage marks the
+    // card as supported.
+    registry.insert(StaticMode::GrantsExtraVillainousChoice, handle_rule_mod);
 
     // No generic `StaticMode::Other(...)` stubs are currently needed.
     //
