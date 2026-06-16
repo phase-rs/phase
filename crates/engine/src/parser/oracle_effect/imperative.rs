@@ -6059,6 +6059,13 @@ pub(super) fn parse_imperative_family_ast(
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
+    // CR 701.12a: player-to-player life-total exchange — "two target players
+    // exchange life totals" (Soul Conduit, Axis of Mortality) and "exchange life
+    // totals with target opponent" (Mirror Universe, Magus of the Mirror).
+    if let Some((player_a, player_b)) = try_parse_exchange_life_totals(lower) {
+        return Some(ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b });
+    }
+
     // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
     // Glorious End, Discontinuity, Day's Undoing). Whole-phrase imperative
     // with no target; parse it as an anchored nom production rather than a
@@ -7012,6 +7019,32 @@ fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
     .ok()
 }
 
+/// CR 701.12a: "exchange life totals with target opponent/player" and "two target
+/// players exchange life totals". Returns the two participant filters.
+pub(super) fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFilter)> {
+    let trimmed = lower.trim_end_matches(['.', ';']).trim();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exchange life totals with ").parse(trimmed)
+    {
+        let (_, filter) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag::<_, _, OracleError<'_>>("target opponent"),
+            ),
+            value(TargetFilter::Player, tag("target player")),
+        ))
+        .parse(rest.trim())
+        .ok()?;
+        return Some((TargetFilter::Controller, filter));
+    }
+    if tag::<_, _, OracleError<'_>>("two target players exchange life totals")
+        .parse(trimmed)
+        .is_ok()
+    {
+        return Some((TargetFilter::Player, TargetFilter::Player));
+    }
+    None
+}
+
 /// CR 701.12a: Extract the two per-slot target filters from the "<...>" body of
 /// "exchange control of <...>". Returns `None` for unrecognised shapes so the
 /// caller can fall through (no Effect is emitted) rather than silently dropping
@@ -7869,6 +7902,9 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         }
         ImperativeFamilyAst::ExchangeLifeWithStat { player, stat } => {
             Effect::ExchangeLifeWithStat { player, stat }
+        }
+        ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
+            Effect::ExchangeLifeTotals { player_a, player_b }
         }
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to

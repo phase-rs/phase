@@ -452,6 +452,11 @@ pub(crate) enum ImperativeFamilyAst {
         player: TargetFilter,
         stat: PtStat,
     },
+    /// CR 701.12a: Exchange life totals between two players.
+    ExchangeLifeTotals {
+        player_a: TargetFilter,
+        player_b: TargetFilter,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,

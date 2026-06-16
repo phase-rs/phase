@@ -9027,6 +9027,20 @@ pub enum Effect {
         player: TargetFilter,
         stat: PtStat,
     },
+    /// CR 701.12a: Exchange life totals between two players. Each player's life
+    /// total becomes the other's previous total (CR 119.5 gain/lose-to-reach).
+    /// All-or-nothing per CR 701.12a + CR 119.7/119.8: if either player's life
+    /// change is forbidden, no part of the exchange occurs. `player_a` / `player_b`
+    /// select the participants (`Controller` + opponent filter for "exchange life
+    /// totals with target opponent"; identical `Player` filters for "two target
+    /// players exchange life totals"). Soul Conduit, Mirror Universe, Magus of
+    /// the Mirror, Axis of Mortality.
+    ExchangeLifeTotals {
+        #[serde(default = "default_target_filter_any")]
+        player_a: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        player_b: TargetFilter,
+    },
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
@@ -10023,6 +10037,7 @@ impl Effect {
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeTotals { .. }
             // CR 601.2a: candidates gathered by `filter`/`zones` at resolution,
             // no player-selectable target slot.
             | Effect::FreeCastFromZones { .. }
@@ -10266,6 +10281,7 @@ impl Effect {
             | Effect::DraftFromSpellbook { .. }
             | Effect::Endure { .. }
             | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeTotals { .. }
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard
@@ -10467,6 +10483,7 @@ impl Effect {
             | Effect::DraftFromSpellbook { .. }
             | Effect::Endure { .. }
             | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeTotals { .. }
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard
@@ -10697,6 +10714,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Seek { .. } => "Seek",
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
         Effect::ExchangeLifeWithStat { .. } => "ExchangeLifeWithStat",
+        Effect::ExchangeLifeTotals { .. } => "ExchangeLifeTotals",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
@@ -10896,6 +10914,7 @@ pub enum EffectKind {
     Seek,
     SetLifeTotal,
     ExchangeLifeWithStat,
+    ExchangeLifeTotals,
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
@@ -11110,6 +11129,7 @@ impl From<&Effect> for EffectKind {
             Effect::Seek { .. } => EffectKind::Seek,
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
             Effect::ExchangeLifeWithStat { .. } => EffectKind::ExchangeLifeWithStat,
+            Effect::ExchangeLifeTotals { .. } => EffectKind::ExchangeLifeTotals,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,

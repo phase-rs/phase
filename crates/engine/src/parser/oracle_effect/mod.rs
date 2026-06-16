@@ -15582,6 +15582,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_exchange_life_totals_chain(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -15608,10 +15611,26 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_exchange_life_totals_chain(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
     def
+}
+
+/// CR 701.12a: Soul Conduit / Mirror Universe class — player-to-player life exchange.
+fn try_parse_exchange_life_totals_chain(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_ascii_lowercase();
+    let (player_a, player_b) = imperative::try_parse_exchange_life_totals(&lower)?;
+    Some(AbilityDefinition::new(
+        kind,
+        Effect::ExchangeLifeTotals { player_a, player_b },
+    ))
 }
 
 /// CR 509.1g + CR 506.3e + CR 707.2 + CR 603.7: Mirror Match's whole-card idiom

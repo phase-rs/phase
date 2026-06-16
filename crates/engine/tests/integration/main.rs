@@ -229,6 +229,7 @@ mod issue_3323_nexus_of_fate_extra_turn;
 mod issue_3324_haunted_one;
 mod issue_3325_umbral_mantle;
 mod issue_3425_legend_rule_exemption_scopes;
+mod issue_3486_exchange_life_totals;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;

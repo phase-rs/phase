@@ -26,12 +26,135 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let stat = match &ability.effect {
-        Effect::ExchangeLifeWithStat { stat, .. } => *stat,
-        // Dispatcher in effects/mod.rs only routes ExchangeLifeWithStat here.
-        _ => return Ok(()),
+    match &ability.effect {
+        Effect::ExchangeLifeTotals { .. } => resolve_life_totals(state, ability, events),
+        Effect::ExchangeLifeWithStat { stat, .. } => {
+            resolve_life_with_stat(state, ability, *stat, events)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn life_change_blocked(
+    state: &GameState,
+    player_id: crate::types::player::PlayerId,
+    from: i32,
+    to: i32,
+) -> bool {
+    match to.cmp(&from) {
+        std::cmp::Ordering::Greater => player_has_cant_gain_life(state, player_id),
+        std::cmp::Ordering::Less => player_has_cant_lose_life(state, player_id),
+        std::cmp::Ordering::Equal => false,
+    }
+}
+
+/// CR 701.12a: Exchange life totals between two players (Soul Conduit, Mirror
+/// Universe, Magus of the Mirror, Axis of Mortality). Each player's life total
+/// becomes the other's previous total via gain/loss (CR 119.5). All-or-nothing
+/// when either change is forbidden (CR 119.7 / CR 119.8).
+fn resolve_life_totals(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Effect::ExchangeLifeTotals { player_a, player_b } = &ability.effect else {
+        return Ok(());
+    };
+    let resolved_kind = EffectKind::from(&ability.effect);
+
+    let mut player_targets = ability.targets.iter();
+    let Some(player_a_id) =
+        resolve_exchange_life_player(state, ability, player_a, &mut player_targets)
+    else {
+        events.push(GameEvent::EffectResolved {
+            kind: resolved_kind,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+    let Some(player_b_id) =
+        resolve_exchange_life_player(state, ability, player_b, &mut player_targets)
+    else {
+        events.push(GameEvent::EffectResolved {
+            kind: resolved_kind,
+            source_id: ability.source_id,
+        });
+        return Ok(());
     };
 
+    if player_a_id == player_b_id {
+        events.push(GameEvent::EffectResolved {
+            kind: resolved_kind,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    let old_a = state
+        .players
+        .iter()
+        .find(|p| p.id == player_a_id)
+        .ok_or(EffectError::PlayerNotFound)?
+        .life;
+    let old_b = state
+        .players
+        .iter()
+        .find(|p| p.id == player_b_id)
+        .ok_or(EffectError::PlayerNotFound)?
+        .life;
+
+    if life_change_blocked(state, player_a_id, old_a, old_b)
+        || life_change_blocked(state, player_b_id, old_b, old_a)
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: resolved_kind,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    for (player_id, diff) in [(player_a_id, old_b - old_a), (player_b_id, old_a - old_b)] {
+        let deferred = match diff.signum() {
+            1 => apply_life_gain(state, player_id, diff as u32, events).err(),
+            -1 => apply_damage_life_loss(state, player_id, (-diff) as u32, events).err(),
+            _ => None,
+        };
+        if deferred.is_some() {
+            return Ok(());
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: resolved_kind,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
+fn resolve_exchange_life_player<'a>(
+    _state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    player_targets: &mut impl Iterator<Item = &'a TargetRef>,
+) -> Option<crate::types::player::PlayerId> {
+    if matches!(filter, TargetFilter::Controller) {
+        return Some(ability.controller);
+    }
+    if filter.is_context_ref() {
+        return None;
+    }
+    player_targets.find_map(|t| match t {
+        TargetRef::Player(pid) => Some(*pid),
+        TargetRef::Object(_) => None,
+    })
+}
+
+fn resolve_life_with_stat(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    stat: crate::types::ability::PtStat,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let resolved_kind = EffectKind::from(&ability.effect);
 
     // "your life total" forms declare no player target and fall back to the
@@ -83,12 +206,7 @@ pub fn resolve(
     // CR 701.12g + CR 119.7 / CR 119.8: All-or-nothing. The player would gain or
     // lose life to reach `stat_value`. If that change is forbidden (can't-gain
     // when raising, can't-lose when lowering), no part of the exchange occurs.
-    let life_blocked = match stat_value.cmp(&old_life) {
-        std::cmp::Ordering::Greater => player_has_cant_gain_life(state, player_id),
-        std::cmp::Ordering::Less => player_has_cant_lose_life(state, player_id),
-        std::cmp::Ordering::Equal => false,
-    };
-    if life_blocked {
+    if life_change_blocked(state, player_id, old_life, stat_value) {
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
@@ -147,7 +265,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, ControllerRef, TypedFilter};
     use crate::types::card_type::{CardType, CoreType};
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -240,9 +358,6 @@ mod tests {
         assert_eq!(state.objects.get(&source).unwrap().toughness, Some(4));
     }
 
-    /// CR 701.12a + CR 119.7: All-or-nothing. If the player can't gain life and
-    /// the exchange would raise their life, no part of the exchange occurs — the
-    /// toughness is not set either.
     #[test]
     fn exchange_blocked_when_cant_gain_life_does_nothing() {
         use crate::types::ability::{StaticDefinition, TargetFilter as TF};
@@ -291,5 +406,77 @@ mod tests {
                 Some(ContinuousModification::SetToughness { .. })
             )
         }));
+    }
+
+    /// CR 701.12a: Two players exchange life totals simultaneously.
+    #[test]
+    fn exchange_life_totals_swaps_two_players() {
+        let mut state = GameState::new_two_player(11);
+        state.players[0].life = 20;
+        state.players[1].life = 5;
+
+        let ability = ResolvedAbility::new(
+            Effect::ExchangeLifeTotals {
+                player_a: TargetFilter::Player,
+                player_b: TargetFilter::Player,
+            },
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 5);
+        assert_eq!(state.players[1].life, 20);
+    }
+
+    /// CR 701.12a + CR 119.7: Player-to-player exchange is all-or-nothing.
+    #[test]
+    fn exchange_life_totals_blocked_when_either_player_cant_gain() {
+        use crate::types::ability::{StaticDefinition, TargetFilter as TF};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(12);
+        state.players[0].life = 20;
+        state.players[1].life = 5;
+        let lock = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(1),
+            "Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantGainLife).affected(TF::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+
+        let ability = ResolvedAbility::new(
+            Effect::ExchangeLifeTotals {
+                player_a: TargetFilter::Player,
+                player_b: TargetFilter::Player,
+            },
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 5);
     }
 }

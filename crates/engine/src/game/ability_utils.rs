@@ -1419,6 +1419,28 @@ fn collect_target_slots(
         return Ok(());
     }
 
+    // CR 701.12a: ExchangeLifeTotals carries two participant filters. Controller
+    // is filled from ability.controller and needs no target slot.
+    if let Effect::ExchangeLifeTotals { player_a, player_b } = &ability.effect {
+        for filter in [player_a, player_b] {
+            if filter.is_context_ref() {
+                continue;
+            }
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            acc.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
+        return Ok(());
+    }
+
     if let Effect::MoveCounters {
         source,
         target,
@@ -2490,6 +2512,22 @@ fn collect_target_slot_specs(
     if let Effect::ExchangeControl { target_a, target_b } = &ability.effect {
         for filter in [target_a, target_b] {
             if matches!(filter, TargetFilter::SelfRef) {
+                continue;
+            }
+            let id = TargetInstanceId(*next_instance);
+            *next_instance += 1;
+            specs.push(TargetSlotSpec {
+                filter: filter.clone(),
+                optional: ability.optional_targeting,
+                instance: id,
+            });
+        }
+        return;
+    }
+
+    if let Effect::ExchangeLifeTotals { player_a, player_b } = &ability.effect {
+        for filter in [player_a, player_b] {
+            if filter.is_context_ref() {
                 continue;
             }
             let id = TargetInstanceId(*next_instance);

@@ -2509,7 +2509,9 @@ pub fn resolve_effect(
         Effect::Forage => forage::resolve(state, ability, events),
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
-        Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
+        Effect::ExchangeLifeWithStat { .. } | Effect::ExchangeLifeTotals { .. } => {
+            exchange_life::resolve(state, ability, events)
+        }
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())
