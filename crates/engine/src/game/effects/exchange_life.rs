@@ -48,10 +48,10 @@ fn life_change_blocked(
     }
 }
 
-/// CR 701.12a: Exchange life totals between two players (Soul Conduit, Mirror
+/// CR 701.12c: Exchange life totals between two players (Soul Conduit, Mirror
 /// Universe, Magus of the Mirror, Axis of Mortality). Each player's life total
 /// becomes the other's previous total via gain/loss (CR 119.5). All-or-nothing
-/// when either change is forbidden (CR 119.7 / CR 119.8).
+/// per CR 701.12a when either change is forbidden (CR 119.7 / CR 119.8).
 fn resolve_life_totals(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -103,6 +103,8 @@ fn resolve_life_totals(
         .ok_or(EffectError::PlayerNotFound)?
         .life;
 
+    // CR 701.12c + CR 701.12a: can't-gain/can't-lose riders forbid the exchange;
+    // if either side can't complete, no part of the exchange occurs.
     if life_change_blocked(state, player_a_id, old_a, old_b)
         || life_change_blocked(state, player_b_id, old_b, old_a)
     {
@@ -408,7 +410,7 @@ mod tests {
         }));
     }
 
-    /// CR 701.12a: Two players exchange life totals simultaneously.
+    /// CR 701.12c: Two players exchange life totals simultaneously.
     #[test]
     fn exchange_life_totals_swaps_two_players() {
         let mut state = GameState::new_two_player(11);
@@ -434,7 +436,7 @@ mod tests {
         assert_eq!(state.players[1].life, 20);
     }
 
-    /// CR 701.12a + CR 119.7: Player-to-player exchange is all-or-nothing.
+    /// CR 701.12c + CR 701.12a + CR 119.7: Player-to-player exchange is all-or-nothing.
     #[test]
     fn exchange_life_totals_blocked_when_either_player_cant_gain() {
         use crate::types::ability::{StaticDefinition, TargetFilter as TF};

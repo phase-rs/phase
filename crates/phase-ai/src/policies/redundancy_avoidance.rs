@@ -577,7 +577,7 @@ fn redundancy_delta(
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
         | Effect::ReturnAsAura { .. }
-        // CR 701.12a: ExchangeLifeWithStat / ExchangeLifeTotals value depends on the live gap
+        // CR 701.12g / CR 701.12c: ExchangeLifeWithStat / ExchangeLifeTotals value depends on the live gap
         // between player life totals (and source stat for WithStat) — no static redundancy
         // signal (it never "does nothing" the way a duplicate keyword grant does).
         | Effect::ExchangeLifeWithStat { .. }

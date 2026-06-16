@@ -9027,7 +9027,7 @@ pub enum Effect {
         player: TargetFilter,
         stat: PtStat,
     },
-    /// CR 701.12a: Exchange life totals between two players. Each player's life
+    /// CR 701.12c: Exchange life totals between two players. Each player's life
     /// total becomes the other's previous total (CR 119.5 gain/lose-to-reach).
     /// All-or-nothing per CR 701.12a + CR 119.7/119.8: if either player's life
     /// change is forbidden, no part of the exchange occurs. `player_a` / `player_b`

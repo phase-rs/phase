@@ -1419,7 +1419,7 @@ fn collect_target_slots(
         return Ok(());
     }
 
-    // CR 701.12a: ExchangeLifeTotals carries two participant filters. Controller
+    // CR 701.12c: ExchangeLifeTotals carries two participant filters. Controller
     // is filled from ability.controller and needs no target slot.
     if let Effect::ExchangeLifeTotals { player_a, player_b } = &ability.effect {
         for filter in [player_a, player_b] {

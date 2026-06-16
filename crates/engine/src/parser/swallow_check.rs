@@ -23,6 +23,7 @@
 
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
+use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
     CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
@@ -1927,7 +1928,7 @@ fn detect_condition_if(
     // sub_ability's EventContextAmount count is the "that many cards" anaphor
     // scoped to the exchange resolution; the exchange→draw chain IS the
     // representation, not a separate AbilityCondition leaf.
-    if stripped.contains("if you lost life this way")
+    if nom_primitives::scan_contains(&stripped, "if you lost life this way")
         && any_ability_has_exchange_life_event_context_draw(parsed)
     {
         return;

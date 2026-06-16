@@ -452,7 +452,7 @@ pub(crate) enum ImperativeFamilyAst {
         player: TargetFilter,
         stat: PtStat,
     },
-    /// CR 701.12a: Exchange life totals between two players.
+    /// CR 701.12c: Exchange life totals between two players.
     ExchangeLifeTotals {
         player_a: TargetFilter,
         player_b: TargetFilter,

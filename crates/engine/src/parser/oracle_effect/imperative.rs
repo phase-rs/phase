@@ -6059,7 +6059,7 @@ pub(super) fn parse_imperative_family_ast(
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
-    // CR 701.12a: player-to-player life-total exchange — "two target players
+    // CR 701.12c: player-to-player life-total exchange — "two target players
     // exchange life totals" (Soul Conduit, Axis of Mortality) and "exchange life
     // totals with target opponent" (Mirror Universe, Magus of the Mirror).
     if let Some((player_a, player_b)) = try_parse_exchange_life_totals(lower) {
@@ -7019,7 +7019,7 @@ fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
     .ok()
 }
 
-/// CR 701.12a: "exchange life totals with target opponent/player" and "two target
+/// CR 701.12c: "exchange life totals with target opponent/player" and "two target
 /// players exchange life totals". Returns the two participant filters.
 ///
 /// Uses `all_consuming` so compound lines (Profane Transfusion, Mister Negative)
