@@ -48,6 +48,7 @@ mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;
 mod dark_confidant_upkeep;
+mod dark_depths_thespian_stage;
 mod destroy_redirect_to_battlefield_delivery_tail;
 mod devour_co_entry_regression;
 mod devour_intellect_treasure_rider;
