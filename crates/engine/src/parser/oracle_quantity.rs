@@ -1783,18 +1783,23 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
             // "permanent"/"permanents" so parse_type_phrase can extract the full
             // filter (e.g. NonLand + Permanent) rather than leaving "card" as an
             // unrecognised remainder and falling back to the unfiltered TrackedSetSize.
+            // Pattern 2a: terminated(take_until(suffix), tag(suffix)) consumes
+            // "cards"/"card" tail, yielding a prefix we can re-join with the
+            // permanent synonym.
+            let t = filter_phrase.trim();
             let normalized;
-            let phrase = {
-                let t = filter_phrase.trim();
-                if let Some(prefix) = t.strip_suffix(" cards") {
-                    normalized = format!("{prefix} permanents");
-                    &normalized
-                } else if let Some(prefix) = t.strip_suffix(" card") {
-                    normalized = format!("{prefix} permanent");
-                    &normalized
-                } else {
-                    t
-                }
+            let phrase = if let Ok(("", prefix)) =
+                terminated(take_until(" cards"), tag(" cards")).parse(t) as OracleResult<'_, &str>
+            {
+                normalized = format!("{prefix} permanents");
+                &normalized as &str
+            } else if let Ok(("", prefix)) =
+                terminated(take_until(" card"), tag(" card")).parse(t) as OracleResult<'_, &str>
+            {
+                normalized = format!("{prefix} permanent");
+                &normalized as &str
+            } else {
+                t
             };
             let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(phrase);
             if remainder.trim().is_empty() {
