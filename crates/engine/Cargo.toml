@@ -36,6 +36,10 @@ path = "src/bin/coverage_report.rs"
 test = false
 
 [[bin]]
+name = "set-check"
+path = "src/bin/set_check.rs"
+
+[[bin]]
 name = "parser-gap-analyzer"
 path = "src/bin/parser_gap_analyzer.rs"
 test = false
