@@ -8005,6 +8005,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -8017,6 +8018,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );

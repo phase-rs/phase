@@ -4572,9 +4572,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 601.2d: "distribute N [type] counters among [targets]" →
     // PutCounter with distribute: Some(Counters(type)).
-    if tag::<_, _, OracleError<'_>>("distribute ")
-        .parse(lower.as_str())
-        .is_ok()
+    if (scan_contains_phrase(&lower, "distribute ") || scan_contains_phrase(&lower, "distributes "))
         && scan_contains_phrase(&lower, "counter")
         && scan_contains_phrase(&lower, "among")
     {

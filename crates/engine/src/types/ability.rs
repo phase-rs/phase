@@ -2601,6 +2601,11 @@ pub enum FilterProp {
     /// contains an `{X}` shard. Used for "activate an ability with {X} in its
     /// activation cost" on `AbilityActivated` delayed triggers (Magus Lucea Kane).
     HasXInActivationCost,
+    /// CR 702.33d: Matches spells whose kicker additional cost was paid for this
+    /// cast. Used for "the first kicked spell you cast each turn" cost reducers
+    /// (Vine Gecko). Live evaluation reads `pending_cast` / `GameObject.kickers_paid`;
+    /// turn-history evaluation reads `SpellCastRecord.was_kicked`.
+    WasKicked,
     /// CR 605.1: Matches objects that have at least one ability classified as a
     /// mana ability by the engine's authoritative mana-ability classifier.
     /// Used for library filters such as "artifact card with a mana ability".

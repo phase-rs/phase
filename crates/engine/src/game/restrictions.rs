@@ -207,6 +207,8 @@ pub fn record_spell_cast_from_zone(
         // spell-history conditions ("a spell was warped this turn") can
         // resolve after the spell has left the stack.
         cast_variant,
+        // CR 702.33d: Kicker-paid state captured at cast time.
+        was_kicked: !obj.kickers_paid.is_empty(),
     };
     state
         .spells_cast_this_turn_by_player
@@ -2552,6 +2554,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
 
@@ -2586,6 +2589,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -2598,6 +2602,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -2610,6 +2615,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );

@@ -98,12 +98,14 @@ pub(crate) fn parse_legend_rule_exemption(
 }
 
 /// CR 704.5j: Resolve the `<scope>` noun phrase of a legend-rule exemption
-/// ("permanents you control", "Slivers you control", ...) into a
-/// controller-scoped `affected` filter. Returns `None` for scopes this parser
-/// cannot resolve precisely ("tokens", "commanders", "them"),
-/// so those cards are deferred rather than given a filter that silently matches
-/// nothing. "creature tokens you control" is handled explicitly (The Master,
-/// Multiplied).
+/// ("permanents you control", "creatures you control", "tokens you control",
+/// "commanders you control", "Slivers you control", ...) into a
+/// controller-scoped `affected` filter. The legend rule applies only to
+/// permanents (CR 704.5j: "legendary permanents"), so only permanent card
+/// types are accepted as bare-type scopes. Returns `None` for scopes this
+/// parser cannot resolve precisely (e.g. the bare pronoun "them"), so those
+/// cards are deferred rather than given a filter that silently matches nothing.
+/// "creature tokens you control" is handled explicitly (The Master, Multiplied).
 /// CR 109.5: "you control" resolves to the source's controller.
 pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
     // Drop the trailing sentence terminator so the combinator suffix split sees
@@ -132,6 +134,37 @@ pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilt
         ));
     }
 
+    // CR 704.5j: bare permanent card-type scopes ("creatures you control",
+    // "artifacts you control", ...). Generalizes the "creatures" case (Council
+    // of Reeds) to the whole "<permanent type>s you control" class. Only
+    // permanent types map — the legend rule applies solely to permanents.
+    if let Some(card_type) = legend_rule_permanent_type(base.lower) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::new(card_type).controller(ControllerRef::You),
+        ));
+    }
+
+    // CR 111.1 + CR 704.5j: "tokens you control" — any token permanent (Cadric,
+    // Soul Kindler). Token-ness is a property, not a card type.
+    if base.lower == "tokens" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You),
+        ));
+    }
+
+    // CR 903.3 + CR 704.5j: "commanders you control" — permanents that are
+    // commanders. Commander designation is a card attribute, modeled as a
+    // permanent property.
+    if base.lower == "commanders" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::IsCommander])
+                .controller(ControllerRef::You),
+        ));
+    }
+
     if let Some((canonical, consumed)) = parse_subtype(base.original) {
         if consumed == base.original.len() {
             return Some(TargetFilter::Typed(
@@ -143,6 +176,31 @@ pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilt
     }
 
     None
+}
+
+/// CR 704.5j: Map a plural permanent card-type word ("creatures", "artifacts",
+/// …) to its `TypeFilter`. Only permanent types are returned — the legend rule
+/// applies solely to permanents — so instant/sorcery words (and anything else)
+/// yield `None` and the card stays deferred rather than mis-scoped.
+fn legend_rule_permanent_type(word: &str) -> Option<crate::types::ability::TypeFilter> {
+    use crate::types::ability::TypeFilter;
+    // Composed via nom `alt`/`value` per the combinator mandate; a new permanent
+    // type is one extra `value(..., tag(...))` branch. Instant/sorcery words (and
+    // anything else) fail every branch, so the card stays deferred.
+    let (rest, tf) = alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, OracleError<'_>>("creatures"),
+        ),
+        value(TypeFilter::Artifact, tag("artifacts")),
+        value(TypeFilter::Enchantment, tag("enchantments")),
+        value(TypeFilter::Planeswalker, tag("planeswalkers")),
+        value(TypeFilter::Land, tag("lands")),
+        value(TypeFilter::Battle, tag("battles")),
+    ))
+    .parse(word)
+    .ok()?;
+    rest.is_empty().then_some(tf)
 }
 
 /// Parse the subject of "X can't be countered" lines.

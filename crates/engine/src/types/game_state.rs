@@ -258,6 +258,10 @@ pub struct SpellCastRecord {
     /// for serialized snapshots predating this field.
     #[serde(default)]
     pub cast_variant: CastingVariant,
+    /// CR 702.33d: Whether kicker was paid when this spell was cast. Captured at
+    /// cast-time for per-turn spell-history filters ("first kicked spell each turn").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub was_kicked: bool,
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -289,6 +293,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: CastingVariant::Normal,
+            was_kicked: false,
         }
     }
 }
@@ -8765,6 +8770,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Graveyard,
             cast_variant: CastingVariant::Normal,
+            was_kicked: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
