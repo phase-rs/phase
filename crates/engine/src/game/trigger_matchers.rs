@@ -974,12 +974,7 @@ fn zone_change_clause_matches(
     // object was created directly in `to` (token creation / emblem). Any
     // constraint that names a specific source zone cannot match such an event;
     // `OriginConstraint::Any` matches regardless.
-    let origin_ok = match origin {
-        OriginConstraint::Any => true,
-        OriginConstraint::Equals(z) => from == &Some(*z),
-        OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
-        OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
-    };
+    let origin_ok = origin.matches_from(from);
     if !origin_ok {
         return false;
     }

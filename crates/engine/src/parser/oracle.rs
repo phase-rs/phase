@@ -7947,16 +7947,23 @@ mod tests {
             &[],
         );
         assert!(!r.abilities.is_empty());
+        // CR 508.1d + CR 608.2c + CR 611.2c: the targeted creature must be bound —
+        // `target` carries the creature slot and the embedded static's `affected`
+        // resolves to `ParentTarget` so the MustAttack requirement attaches to the
+        // chosen creature (not silently dropped). On reverted main both are None.
         assert!(
             matches!(
                 &*r.abilities[0].effect,
                 crate::types::ability::Effect::GenericEffect {
                     static_abilities,
+                    target: Some(crate::types::ability::TargetFilter::Typed(_)),
                     ..
                 } if !static_abilities.is_empty()
                     && static_abilities[0].mode == crate::types::statics::StaticMode::MustAttack
+                    && static_abilities[0].affected
+                        == Some(crate::types::ability::TargetFilter::ParentTarget)
             ),
-            "Expected GenericEffect with MustAttack, got {:?}",
+            "Expected GenericEffect with MustAttack bound to ParentTarget + Typed(Creature) target, got {:?}",
             r.abilities[0].effect
         );
     }

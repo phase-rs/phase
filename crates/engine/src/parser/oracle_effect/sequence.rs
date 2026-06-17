@@ -2504,6 +2504,14 @@ pub(super) fn apply_clause_continuation(
                     | Effect::ChangeZone {
                         face_down_profile: fdp @ Some(_),
                         ..
+                    }
+                    // CR 708.2a: "put the top N ... onto the battlefield face
+                    // down" lowers to `Effect::Manifest` (Cybership). Overwrite
+                    // the seeded vanilla 2/2 profile with the spec's
+                    // characteristics ("2/2 Cyberman artifact creatures").
+                    | Effect::Manifest {
+                        profile: fdp @ Some(_),
+                        ..
                     } => {
                         *fdp = Some(profile);
                         break;
@@ -4517,7 +4525,14 @@ pub(super) fn parse_followup_continuation_ast(
         // preceding Mill/ChangeZone/ChangeZoneAll carries `face_down_profile`).
         // Refines the face-down profile with the specified characteristics. Placed
         // BEFORE the broad Mill/Dig from-among arm so it claims the spec sentence.
-        Effect::Mill { .. } | Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+        Effect::Mill { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        // CR 701.40a + CR 708.2a: "put the top N ... onto the battlefield face
+        // down" lowers to `Effect::Manifest` (Cybership), seeded with a
+        // `Some(_)` profile by the put-clause. The trailing "They're 2/2 Cyberman
+        // artifact creatures." spec refines that seed via the back-walk patcher.
+        | Effect::Manifest { profile: Some(_), .. }
             if face_down_profile_spec.is_some() =>
         {
             let profile = face_down_profile_spec.clone()?;
@@ -7011,6 +7026,69 @@ mod tests {
         };
         assert_eq!(quantity, PutCount::All);
         assert_eq!(face_down_profile, Some(FaceDownProfile::vanilla_2_2()));
+    }
+
+    /// CR 701.40a + CR 708.2a + CR 110.2a: Cybership's two-sentence body —
+    /// "put the top two cards of [a player]'s library onto the battlefield face
+    /// down under your control. They're 2/2 Cyberman artifact creatures." — must
+    /// assemble into an `Effect::Manifest` whose `profile` is refined from the
+    /// seeded vanilla 2/2 to the Cyberman characteristics by the back-walk
+    /// patcher, and whose `enters_under` carries the controller override.
+    #[test]
+    fn cybership_put_top_face_down_manifest_profile_chain() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Put the top two cards of your library onto the battlefield face down under your control. They're 2/2 Cyberman artifact creatures.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        // No Unimplemented{they're} anywhere in the chain.
+        for d in &effects {
+            assert!(
+                !matches!(&*d.effect, Effect::Unimplemented { name, .. } if name == "they're"),
+                "the 'They're ...' clause must not produce Unimplemented, got {:?}",
+                d.effect
+            );
+        }
+
+        let manifest = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::Manifest { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a Manifest effect, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+
+        let Effect::Manifest {
+            count,
+            profile,
+            enters_under,
+            ..
+        } = &*manifest.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 }, "top TWO cards");
+        assert_eq!(
+            *enters_under,
+            Some(ControllerRef::You),
+            "under your control"
+        );
+        let profile = profile.as_ref().expect("manifest profile must be set");
+        assert_eq!(profile.power, Some(2));
+        assert_eq!(profile.toughness, Some(2));
+        assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
     }
 
     /// Parser AST-shape test (issue #420). Birthing Ritual's full triggered-

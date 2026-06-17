@@ -6668,6 +6668,30 @@ mod tests {
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
     }
 
+    /// The "Villain" creature subtype (Marvel set) must be recognized so that
+    /// "you control a Villain" conditions parse — e.g. the conditional self
+    /// cost-reduction on Visions of Villainy / Venom's Hunger.
+    #[test]
+    fn test_you_control_a_villain_subtype() {
+        let (rest, c) = parse_inner_condition("you control a villain").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// Recent Universe Beyond / Standard creature subtypes (Hero, Spy,
+    /// Scientist, Cyborg, Sorcerer) must be recognized so their oracle-text
+    /// references ("you control a <type>", typed tokens, etc.) parse.
+    #[test]
+    fn test_you_control_recent_subtypes() {
+        for w in ["hero", "spy", "scientist", "cyborg", "sorcerer"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
     #[test]
     fn test_you_control_compound_presence() {
         let (rest, c) =

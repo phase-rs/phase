@@ -19,32 +19,61 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, count) = match &ability.effect {
-        Effect::Manifest { target, count } => (
+    let (target, count, profile, enters_under) = match &ability.effect {
+        Effect::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
+        } => (
             target.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
+            profile.clone(),
+            enters_under.clone(),
         ),
         _ => return Err(EffectError::MissingParam("count".to_string())),
     };
 
+    // `player` is the LIBRARY OWNER (whose top cards are manifested), resolved
+    // from `target`. `controller` is the optional CR 110.2a override for which
+    // player the cards enter the battlefield under ("under your control").
     let player = super::resolve_player_for_context_ref(state, ability, &target);
+    // CR 110.2a: Resolve the optional controller override through the single
+    // canonical authority shared with `ChangeZone`/`ChangeZoneAll` — never a
+    // hand-rolled second resolver (per the single-authority rule). `None` keeps
+    // each manifested card under its library owner's control (CR 701.40a).
+    let controller = super::change_zone::resolve_enters_under_player(
+        state,
+        ability,
+        "Manifest",
+        enters_under.as_ref(),
+    )?;
+
+    // CR 708.2a: Use the effect-specified face-down profile when present
+    // ("They're 2/2 Cyberman artifact creatures."), otherwise the vanilla 2/2
+    // manifest default (CR 701.40a).
+    let profile = profile.unwrap_or_else(crate::types::ability::FaceDownProfile::vanilla_2_2);
 
     // CR 701.40e: Manifest cards one at a time
     for _ in 0..count {
-        let has_cards = state
-            .players
-            .iter()
-            .find(|p| p.id == player)
-            .map(|p| !p.library.is_empty())
-            .unwrap_or(false);
-
-        if !has_cards {
-            break;
-        }
-
-        // CR 701.40a: Manifest the top card using the shared morph infrastructure
-        crate::game::morph::manifest(state, player, events)
-            .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+        // CR 701.40a: Resolve the top card of the library owner's library, then
+        // manifest it through the shared morph infrastructure, routing the
+        // effect-specified profile and the optional controller override.
+        let object_id = match crate::game::morph::top_library_object(state, player) {
+            Ok(id) => id,
+            // The library owner has no cards left — stop manifesting.
+            Err(_) => break,
+        };
+        crate::game::morph::manifest_card(
+            state,
+            player,
+            object_id,
+            ability.source_id,
+            profile.clone(),
+            controller,
+            events,
+        )
+        .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
     }
 
     events.push(GameEvent::EffectResolved {
@@ -70,6 +99,8 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: count },
+                profile: None,
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -86,6 +117,8 @@ mod tests {
             Effect::Manifest {
                 target: target_filter,
                 count: QuantityExpr::Fixed { value: count },
+                profile: None,
+                enters_under: None,
             },
             targets,
             ObjectId(100),
@@ -329,5 +362,123 @@ mod tests {
         assert!(obj.face_down);
         assert_eq!(obj.zone, Zone::Battlefield);
         assert_eq!(obj.controller, damaged_player);
+    }
+
+    /// CR 708.2a + CR 110.2a: Manifest with an effect-specified `profile`
+    /// (the Cybership "2/2 Cyberman artifact creature" shape) and an
+    /// `enters_under` controller override must move the LIBRARY OWNER's top
+    /// cards onto the battlefield face down, applying the profile's
+    /// characteristics, while routing control to the override player. Exercises
+    /// the new `profile`/`enters_under` parameters, not Cybership specifically.
+    #[test]
+    fn manifest_with_profile_and_controller_override() {
+        use crate::types::ability::{FaceDownProfile, ResolvedAbility};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0); // "under your control"
+        let library_owner = PlayerId(1); // "that player's library"
+
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            library_owner,
+            "Owner Top".to_string(),
+            Zone::Library,
+        );
+        let card2 = create_object(
+            &mut state,
+            CardId(2),
+            library_owner,
+            "Owner Next".to_string(),
+            Zone::Library,
+        );
+
+        let profile = FaceDownProfile {
+            power: None,
+            toughness: None,
+            body: crate::types::ability::FaceDownBody::Creature,
+            extra_core_types: vec![CoreType::Artifact],
+            subtypes: vec!["Cyberman".to_string()],
+            ward: None,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Manifest {
+                target: TargetFilter::TriggeringPlayer,
+                count: QuantityExpr::Fixed { value: 2 },
+                profile: Some(profile),
+                enters_under: Some(crate::types::ability::ControllerRef::You),
+            },
+            vec![],
+            ObjectId(100),
+            controller,
+        );
+
+        // Bind TriggeringPlayer to the library owner via a combat-damage event.
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            controller,
+            "Cybership".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(library_owner),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        for id in [card1, card2] {
+            let obj = &state.objects[&id];
+            assert!(obj.face_down, "card {id:?} should be face down");
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert_eq!(obj.power, Some(2));
+            assert_eq!(obj.toughness, Some(2));
+            // CR 708.2a: Creature is always present + Artifact layered on.
+            assert!(obj.card_types.core_types.contains(&CoreType::Creature));
+            assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+            assert_eq!(obj.card_types.subtypes, vec!["Cyberman".to_string()]);
+            // CR 110.2a: enters under the override controller, not the owner.
+            assert_eq!(obj.controller, controller);
+            assert_eq!(obj.owner, library_owner);
+        }
+    }
+
+    /// CR 701.40a: Without a `profile`/`enters_under` override, Manifest still
+    /// yields the vanilla 2/2 default under the library owner's control —
+    /// confirming the new fields are additive and the existing behavior is
+    /// preserved.
+    #[test]
+    fn manifest_without_overrides_is_vanilla_under_owner() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Vanilla".to_string(),
+            Zone::Library,
+        );
+
+        let ability = make_manifest_ability(1);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&id];
+        assert!(obj.face_down);
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.power, Some(2));
+        assert_eq!(obj.toughness, Some(2));
+        assert_eq!(
+            obj.card_types.core_types,
+            vec![crate::types::card_type::CoreType::Creature]
+        );
+        assert!(obj.card_types.subtypes.is_empty());
+        assert_eq!(obj.controller, owner, "no override → owner controls");
     }
 }

@@ -61,7 +61,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{anychar, multispace1};
+use nom::character::complete::{anychar, multispace1, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
@@ -94,13 +94,13 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
     DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
     GameRestriction, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
-    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition, ZoneOwner,
+    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, OriginConstraint,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode, SharedQuality,
+    SharedQualityRelation, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -1025,6 +1025,132 @@ fn try_parse_global_damage_modification_replacement(text: &str) -> Option<Effect
     if replacement.expiry.is_none() {
         replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
     }
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::None,
+    })
+}
+
+/// CR 614.1a + CR 614.1d + CR 601: Recognize a floating zone-change redirect
+/// replacement of the shape
+/// "if one or more <creatures/permanents> would enter [from <zone>]
+///  [or after being cast from <zone>], <redirect> into their libraries instead",
+/// e.g. Don't Blink ("if one or more creatures would enter from exile or after
+/// being cast from exile, their owners shuffle them into their libraries
+/// instead"). Lifts to an `Effect::AddTargetReplacement { target: None }` that
+/// installs a global `ChangeZone` replacement gated by
+/// `ReplacementCondition::EnteredFromZone`, redirecting the battlefield entry to
+/// the object's owner's library (CR 400.7 auto-shuffle).
+///
+/// `norm_lower` is the already-lowercased, duration-stripped clause text — the
+/// leading "until end of turn," is consumed upstream by `strip_leading_duration`
+/// and re-attached to `AbilityDefinition.duration` via `with_clause_duration`,
+/// so this parser must NOT consume a leading duration. `expiry` is left `None`
+/// on the produced definition; the install resolver derives it from
+/// `ability.duration` via `expiry_from_duration`.
+///
+/// Nom-only: the physical "would enter from <zone>" half reuses the existing
+/// `parse_enters_origin_zone` combinator; the "or after being cast from <zone>"
+/// half uses `parse_zone_word` (its lead-in is "being cast from ", not the bare
+/// "from " that `parse_enters_origin_zone` bundles). The combinator IS the
+/// detector — any structural mismatch yields `None` and falls through to the
+/// existing dispatch.
+fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect> {
+    use crate::parser::oracle_nom::filter::{parse_enters_origin_zone, parse_zone_word};
+
+    // CR 614.1d: subject → valid_card type filter. One `alt` over the subject
+    // axis; "one or more <noun>" and "a <noun>" both lower to the same filter.
+    fn parse_subject(input: &str) -> OracleResult<'_, TypedFilter> {
+        alt((
+            value(TypedFilter::creature(), tag("one or more creatures")),
+            value(TypedFilter::creature(), tag("a creature")),
+            value(TypedFilter::permanent(), tag("one or more permanents")),
+            value(TypedFilter::permanent(), tag("a permanent")),
+        ))
+        .parse(input)
+    }
+
+    // CR 614.1a: the redirect verb clause → `Zone::Library` destination. One
+    // `alt` over the redirect-phrasing axis; all forms route the entering
+    // object(s) to their owner's library.
+    fn parse_redirect_to_library(input: &str) -> OracleResult<'_, Zone> {
+        alt((
+            value(
+                Zone::Library,
+                tag("their owners shuffle them into their libraries"),
+            ),
+            value(
+                Zone::Library,
+                tag("their owner shuffles it into their library"),
+            ),
+            value(Zone::Library, tag("shuffle them into their libraries")),
+            value(Zone::Library, tag("shuffle it into its owner's library")),
+        ))
+        .parse(input)
+    }
+
+    let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(norm_lower).ok()?;
+    let (input, subject_filter) = parse_subject(input).ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" would enter")
+        .parse(input)
+        .ok()?;
+    // Physical "from <zone>" half (REUSE parse_enters_origin_zone).
+    let (input, physical_zone) = opt(preceded(space1, parse_enters_origin_zone))
+        .parse(input)
+        .ok()?;
+    // Cast-origin "or after being cast from <zone>" half (parse_zone_word).
+    let (input, cast_origin) = opt(preceded(tag(" or after being cast from "), parse_zone_word))
+        .parse(input)
+        .ok()?;
+    // Require at least one origin half so this never fires on a bare
+    // "if a creature would enter" with no exile/cast qualifier.
+    if physical_zone.is_none() && cast_origin.is_none() {
+        return None;
+    }
+    let (input, _) = tag::<_, _, OracleError<'_>>(", ").parse(input).ok()?;
+    let (input, destination) = parse_redirect_to_library(input).ok()?;
+    // CR 614.1a: the redirect clause ends with an optional " instead" and a
+    // trailing period. Be all-consuming — reject (fall through) if any other
+    // effect text trails the library-shuffle phrase, so an unrelated tail is
+    // never silently swallowed into a typed replacement.
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" instead"))
+        .parse(input)
+        .ok()?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(input).ok()?;
+    if !input.trim().is_empty() {
+        return None;
+    }
+
+    // CR 614.1d: physical-from constraint via the reused `OriginConstraint`.
+    // `None` when only the cast-origin half is present, so the evaluator's
+    // physical path stays inert rather than matching every entry.
+    let origin_constraint = physical_zone.map(OriginConstraint::Equals);
+    let condition = ReplacementCondition::EnteredFromZone {
+        origin_constraint,
+        cast_origin,
+    };
+
+    let replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .valid_card(TargetFilter::Typed(subject_filter))
+        .destination_zone(Zone::Battlefield)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: Default::default(),
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                face_down_profile: None,
+            },
+        ))
+        .condition(condition);
+
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
         target: TargetFilter::None,
@@ -4602,6 +4728,20 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     if let Some((duration, rest)) = strip_leading_duration(text) {
         return with_clause_duration(parse_effect_clause(rest, ctx), duration);
+    }
+
+    // CR 614.1a + CR 514.2: floating turn-bound zone-change redirect ("if one or
+    // more creatures would enter from exile ... shuffle them into their libraries
+    // instead" — Don't Blink). Dispatched AFTER `strip_leading_duration` above so
+    // the recursive (duration-stripped) call reaches it; the leading "until end
+    // of turn," is re-attached by `with_clause_duration`, so
+    // `AbilityDefinition.duration == UntilEndOfTurn` reaches `expiry_from_duration`
+    // in the install resolver. Lifts to global pending replacements with
+    // `target: None`. Placed above the imperative-shuffle producer so the trailing
+    // "shuffle them into their libraries" never collapses into a bare
+    // `Effect::Shuffle`.
+    if let Some(effect) = parse_enter_from_zone_redirect_replacement(&lower) {
+        return parsed_clause(effect);
     }
 
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
@@ -11385,6 +11525,8 @@ fn lower_subject_predicate_ast(
                 return parsed_clause(Effect::Manifest {
                     target: subject.affected,
                     count,
+                    profile: None,
+                    enters_under: None,
                 });
             }
             let mut clause = lower_imperative_clause(&text, ctx);
@@ -27133,7 +27275,8 @@ mod tests {
                 e,
                 Effect::Manifest {
                     target: TargetFilter::Controller,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ Controller, count: 1 }}, got: {e:?}"
@@ -27148,7 +27291,8 @@ mod tests {
                 e,
                 Effect::Manifest {
                     target: TargetFilter::Controller,
-                    count: QuantityExpr::Fixed { value: 2 }
+                    count: QuantityExpr::Fixed { value: 2 },
+                    ..
                 }
             ),
             "expected Manifest {{ Controller, count: 2 }}, got: {e:?}"
@@ -27171,11 +27315,89 @@ mod tests {
                 *def.effect,
                 Effect::Manifest {
                     target: TargetFilter::TriggeringPlayer,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
             def.effect
+        );
+    }
+
+    /// CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+    /// library onto the battlefield face down [under your control]" lowers to
+    /// `Effect::Manifest` (Cybership's put-clause surface form), preserving the
+    /// count (top-N), the library-owner binding, the seeded face-down profile,
+    /// and the controller override. Exercises the player × face-down axes.
+    #[test]
+    fn effect_put_top_onto_battlefield_face_down_lowers_to_manifest() {
+        // Cybership: "that player's library" (DamageDone → TriggeringPlayer) +
+        // "face down" + "under your control".
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "Put the top two cards of that player's library onto the battlefield face down under your control",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let Effect::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
+        } = &*def.effect
+        else {
+            panic!("expected Manifest, got {:?}", def.effect);
+        };
+        assert_eq!(*target, TargetFilter::TriggeringPlayer);
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(*enters_under, Some(ControllerRef::You));
+        assert_eq!(
+            *profile,
+            Some(crate::types::ability::FaceDownProfile::vanilla_2_2()),
+            "face down → seeded vanilla 2/2 profile"
+        );
+
+        // "your library" binds to the controller.
+        let your = parse_effect("Put the top card of your library onto the battlefield face down");
+        assert!(
+            matches!(
+                &your,
+                Effect::Manifest {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    profile: Some(_),
+                    enters_under: None,
+                }
+            ),
+            "your library → Controller, face down, no controller override, got: {your:?}"
+        );
+
+        // "target player's library" binds to a chosen player.
+        let target_player = parse_effect(
+            "Put the top three cards of target player's library onto the battlefield face down",
+        );
+        assert!(
+            matches!(
+                &target_player,
+                Effect::Manifest {
+                    target: TargetFilter::Player,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "target player's library → Player, got: {target_player:?}"
+        );
+
+        // No "face down" → NOT a manifest (a non-face-down put onto the
+        // battlefield is a regular ChangeZone, not CR 701.40a manifest). Proves
+        // the face-down axis is part of the dispatch decision.
+        let no_face_down = parse_effect("Put the top card of your library onto the battlefield");
+        assert!(
+            !matches!(no_face_down, Effect::Manifest { .. }),
+            "without 'face down' the put-onto-battlefield form must NOT be a Manifest, got: {no_face_down:?}"
         );
     }
 
@@ -27203,7 +27425,8 @@ mod tests {
                 *sub.effect,
                 Effect::Manifest {
                     target: TargetFilter::ParentTargetController,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ ParentTargetController, count: 1 }}, got: {:?}",
@@ -28923,6 +29146,102 @@ mod tests {
             } if static_abilities.len() == 1
                 && static_abilities[0].mode == StaticMode::MustAttack
         ));
+    }
+
+    /// CR 508.1d + CR 608.2c + CR 611.2c: standalone "Target creature attacks
+    /// this turn if able" (Boiling Blood, Heckling Fiends, Incite, …). The
+    /// subject-layer interceptor must bind the targeted creature: `target =
+    /// Some(Typed(Creature))` and the embedded MustAttack static's `affected =
+    /// Some(ParentTarget)`. On reverted main both are None (the requirement is
+    /// silently dropped) — this is the discriminating gate.
+    #[test]
+    fn target_creature_attacks_if_able_binds_to_parent_target() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Target creature attacks this turn if able.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert!(
+                    matches!(target, Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)),
+                    "target must be the chosen creature, got {target:?}"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTarget),
+                    "MustAttack must bind to the chosen creature, not nothing"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1d: the combat-duration wording variant — "attacks this combat if
+    /// able" → UntilEndOfCombat, with the same ParentTarget binding.
+    #[test]
+    fn target_creature_attacks_this_combat_if_able_binds_with_combat_duration() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Target creature attacks this combat if able.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfCombat));
+                assert!(
+                    matches!(target, Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)),
+                    "target must be the chosen creature, got {target:?}"
+                );
+                assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTarget)
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1d: activated representative through the full `parse_oracle_text`
+    /// path — Heckling Fiends ("{2}{R}: Target creature attacks this turn if
+    /// able."). The activated ability's effect must bind the target.
+    #[test]
+    fn activated_attacks_if_able_binds_target_via_full_parse() {
+        use crate::types::statics::StaticMode;
+        let r = crate::parser::parse_oracle_text(
+            "{2}{R}: Target creature attacks this turn if able.",
+            "Heckling Fiends",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+        );
+        assert!(!r.abilities.is_empty(), "expected an activated ability");
+        let effect = &r.abilities[0].effect;
+        assert!(
+            matches!(
+                &**effect,
+                Effect::GenericEffect {
+                    static_abilities,
+                    target: Some(TargetFilter::Typed(tf)),
+                    ..
+                } if tf.type_filters.contains(&TypeFilter::Creature)
+                    && static_abilities[0].mode == StaticMode::MustAttack
+                    && static_abilities[0].affected == Some(TargetFilter::ParentTarget)
+            ),
+            "activated ability must bind the targeted creature, got {effect:?}"
+        );
     }
 
     #[test]
@@ -50260,6 +50579,171 @@ mod tests {
             "\"they own\" must add ownership filter to the mass target, got {:#?}",
             typed
         );
+    }
+
+    /// CR 614.1a + CR 614.1d + CR 601: Don't Blink — the floating turn-bound
+    /// "if one or more creatures would enter from exile or after being cast from
+    /// exile, their owners shuffle them into their libraries instead" line must
+    /// lift to an `AddTargetReplacement { target: None }` installing a
+    /// `ChangeZone` redirect gated by `EnteredFromZone`, NOT collapse to a bare
+    /// `Effect::Shuffle{Controller}`. Also asserts the leading "Until end of
+    /// turn," threads onto `AbilityDefinition.duration` (the install resolver
+    /// reads it via `expiry_from_duration`) and the swallow warning clears.
+    #[test]
+    fn dont_blink_lifts_to_floating_zone_redirect_replacement() {
+        let result = parse_oracle_text(
+            "Until end of turn, if one or more creatures would enter from exile or after being cast from exile, their owners shuffle them into their libraries instead.",
+            "Don't Blink",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let ability = &result.abilities[0];
+        assert_eq!(
+            ability.duration,
+            Some(Duration::UntilEndOfTurn),
+            "leading duration must thread onto AbilityDefinition.duration"
+        );
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = &*ability.effect
+        else {
+            panic!("expected AddTargetReplacement, got {:?}", ability.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::None,
+            "global install uses target None"
+        );
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(
+            replacement.condition,
+            Some(ReplacementCondition::EnteredFromZone {
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Exile)),
+                cast_origin: Some(Zone::Exile),
+            })
+        );
+        assert!(
+            replacement.expiry.is_none(),
+            "expiry derived from ability.duration"
+        );
+        let execute = replacement.execute.as_ref().expect("redirect execute");
+        let Effect::ChangeZone { destination, .. } = &*execute.effect else {
+            panic!("expected ChangeZone redirect, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *destination,
+            Zone::Library,
+            "redirect routes to owner's library"
+        );
+        assert!(
+            !result.parse_warnings.iter().any(|w| matches!(
+                w,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )),
+            "the Condition_If swallow warning must clear: {:?}",
+            result.parse_warnings
+        );
+    }
+
+    /// Build-for-the-class: a synthesized "if a permanent would enter from a
+    /// graveyard ... instead" line (no cast-origin half) must redirect with
+    /// `origin_constraint: Equals(Graveyard)` and `cast_origin: None`. Proves the
+    /// subject `alt`, the `parse_enters_origin_zone` reuse across zones, and the
+    /// optional cast half — not the one card.
+    #[test]
+    fn enter_from_graveyard_redirect_covers_the_class() {
+        let effect = parse_enter_from_zone_redirect_replacement(
+            "if a permanent would enter from a graveyard, shuffle it into its owner's library instead",
+        )
+        .expect("graveyard-origin redirect must parse");
+        let Effect::AddTargetReplacement { replacement, .. } = effect else {
+            panic!("expected AddTargetReplacement");
+        };
+        assert_eq!(
+            replacement.condition,
+            Some(ReplacementCondition::EnteredFromZone {
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Graveyard)),
+                cast_origin: None,
+            })
+        );
+        assert_eq!(
+            replacement.valid_card,
+            Some(TargetFilter::Typed(TypedFilter::permanent()))
+        );
+    }
+
+    /// The cast-origin-only half ("...or after being cast from exile...") must
+    /// populate `cast_origin: Some(Exile)` end-to-end through the combinator.
+    #[test]
+    fn cast_from_exile_half_populates_cast_origin() {
+        let effect = parse_enter_from_zone_redirect_replacement(
+            "if one or more creatures would enter from exile or after being cast from exile, their owners shuffle them into their libraries instead",
+        )
+        .expect("must parse");
+        let Effect::AddTargetReplacement { replacement, .. } = effect else {
+            panic!("expected AddTargetReplacement");
+        };
+        assert_eq!(
+            replacement.condition,
+            Some(ReplacementCondition::EnteredFromZone {
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Exile)),
+                cast_origin: Some(Zone::Exile),
+            })
+        );
+    }
+
+    /// Negative: a plain imperative "shuffle your library" must NOT be shadowed
+    /// by the redirect combinator (it returns None and falls through).
+    #[test]
+    fn plain_shuffle_not_shadowed_by_redirect() {
+        assert!(
+            parse_enter_from_zone_redirect_replacement("shuffle your library").is_none(),
+            "imperative shuffle must not match the zone-redirect combinator"
+        );
+        assert!(
+            parse_enter_from_zone_redirect_replacement(
+                "if a creature would enter, draw a card instead"
+            )
+            .is_none(),
+            "entry with no exile/cast origin half must not match"
+        );
+    }
+
+    /// All-consuming guard (blocker, PR #3419): the redirect combinator must
+    /// reject a clause that trails additional effect text after the
+    /// library-shuffle phrase rather than silently swallowing it. Pre-fix the
+    /// parser ignored all remaining input and still returned a typed
+    /// replacement, dropping the trailing effect.
+    #[test]
+    fn trailing_effect_text_after_redirect_is_not_swallowed() {
+        assert!(
+            parse_enter_from_zone_redirect_replacement(
+                "if a creature would enter from exile, shuffle it into its owner's library and you draw a card instead"
+            )
+            .is_none(),
+            "an extra effect after the shuffle phrase must fall through, not be swallowed"
+        );
+        assert!(
+            parse_enter_from_zone_redirect_replacement(
+                "if a creature would enter from exile, shuffle it into its owner's library instead, then you lose 1 life"
+            )
+            .is_none(),
+            "a trailing clause after ' instead' must fall through, not be swallowed"
+        );
+    }
+
+    /// `parse_zone_word` (cast-origin lead-in helper) parses bare zone names.
+    #[test]
+    fn parse_zone_word_parses_bare_zones() {
+        use crate::parser::oracle_nom::filter::parse_zone_word;
+        assert_eq!(parse_zone_word("exile").unwrap().1, Zone::Exile);
+        assert_eq!(parse_zone_word("a graveyard").unwrap().1, Zone::Graveyard);
+        assert_eq!(parse_zone_word("a library").unwrap().1, Zone::Library);
+        assert_eq!(parse_zone_word("their library").unwrap().1, Zone::Library);
+        assert_eq!(parse_zone_word("the stack").unwrap().1, Zone::Stack);
     }
 }
 
