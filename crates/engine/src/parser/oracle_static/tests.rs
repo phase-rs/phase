@@ -17564,3 +17564,41 @@ fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
     assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
     assert_eq!(evasion.condition, expected_condition);
 }
+
+#[test]
+fn self_static_resolves_it_pronoun_subject_to_source() {
+    // CR 611.3a: "it" in a self-referential static gate refers to the source, so
+    // "as long as it's untapped" must type to the same Not(SourceIsTapped) as the
+    // explicit "~ is untapped" form — not fall through to Unrecognized.
+    // Discriminating: before resolving the pronoun this came back Unrecognized.
+    let def = parse_static_line("This creature gets +0/+3 as long as it's untapped.")
+        .expect("self static def");
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn aura_static_does_not_bind_it_pronoun_to_source() {
+    // The Aura's "it" refers to the enchanted creature, NOT the Aura source, so it
+    // must NOT collapse to Not(SourceIsTapped) (which would silently check the
+    // Aura's own untapped state). An honest gap is correct here.
+    let defs = parse_static_line_multi("Enchanted creature has shroud as long as it's untapped.");
+    for d in &defs {
+        assert!(
+            !matches!(
+                d.condition.as_ref(),
+                Some(StaticCondition::Not { condition })
+                    if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+            ),
+            "Aura 'it' must not resolve to the source, got {:?}",
+            d.condition
+        );
+    }
+}

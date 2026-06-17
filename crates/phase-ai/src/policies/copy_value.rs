@@ -472,6 +472,7 @@ mod tests {
                 max: 3,
                 pending_cast: Box::new(pending_cast),
                 convoke_mode: None,
+                x_cost_previews: vec![],
             },
             candidates: Vec::new(),
         };
@@ -540,6 +541,7 @@ mod tests {
                 max: 3,
                 pending_cast: Box::new(pending_cast),
                 convoke_mode: None,
+                x_cost_previews: vec![],
             },
             candidates: Vec::new(),
         };

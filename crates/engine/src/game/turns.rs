@@ -1885,10 +1885,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::DeclareBlockers => {
                 // CR 509.1: Defending player declares blockers as a turn-based action.
-                let has_attackers = state
-                    .combat
-                    .as_ref()
-                    .is_some_and(|c| !c.attackers.is_empty());
+                super::combat::prune_attackers_not_in_play(state);
+                let has_attackers = super::combat::has_attackers_in_play(state);
                 if has_attackers {
                     // CR 509.1 + CR 117.1c: The declare blockers turn-based action always
                     // runs — even when no legal blocks are available — and the active
@@ -2046,9 +2044,23 @@ mod tests {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(0);
         state.phase = Phase::DeclareBlockers;
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
         state.combat = Some(combat::CombatState {
             attackers: vec![combat::AttackerInfo::new(
-                ObjectId(1),
+                attacker,
                 combat::AttackTarget::Player(PlayerId(2)),
                 PlayerId(2),
             )],

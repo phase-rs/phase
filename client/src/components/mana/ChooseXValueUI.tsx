@@ -29,19 +29,22 @@ export function ChooseXValueUI() {
   const hasValidBounds = min <= max;
   const defaultValue = hasValidBounds ? Math.max(min, 0) : 0;
   const pendingCast = isChooseX ? waitingFor.data.pending_cast : null;
+  const xCostPreviews = isChooseX ? waitingFor.data.x_cost_previews : undefined;
+
+  const [value, setValue] = useState(0);
 
   const pendingCostShards = useMemo(() => {
     if (!pendingCast) return null;
-    const shards = manaCostToShards(pendingCast.cost);
+    const previewCost = xCostPreviews?.find(([x]) => x === value)?.[1];
+    const cost = previewCost ?? pendingCast.cost;
+    const shards = manaCostToShards(cost);
     return shards.length > 0 ? shards : null;
-  }, [pendingCast]);
+  }, [pendingCast, xCostPreviews, value]);
 
   const cardName = useMemo(() => {
     if (!gameState || !pendingCast) return null;
     return gameState.objects[pendingCast.object_id]?.name ?? null;
   }, [gameState, pendingCast]);
-
-  const [value, setValue] = useState(0);
 
   useEffect(() => {
     if (isChooseX) setValue(defaultValue);

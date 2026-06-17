@@ -1256,6 +1256,7 @@ mod tests {
             max: 5,
             pending_cast: pending.clone(),
             convoke_mode: None,
+            x_cost_previews: vec![],
         };
         state.pending_cast = Some(pending);
 

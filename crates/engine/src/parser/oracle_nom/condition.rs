@@ -563,6 +563,21 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::IsMonarch,
             alt((tag("you're the monarch"), tag("you are the monarch"))),
         ),
+        // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
+        // is not the controller. Distinct from `Not(IsMonarch)` (also true when
+        // no monarch exists) and from `NoMonarch` (true only when vacant).
+        map(tag("an opponent is the monarch"), |_| {
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsMonarch),
+                    },
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::NoMonarch),
+                    },
+                ],
+            }
+        }),
         // CR 726.3: Initiative status
         value(
             StaticCondition::IsInitiative,
@@ -8591,6 +8606,25 @@ mod tests {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_an_opponent_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("an opponent is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsMonarch),
+                    },
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::NoMonarch),
+                    },
+                ],
+            }
+        );
     }
 
     #[test]

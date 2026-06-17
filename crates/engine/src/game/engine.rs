@@ -1208,7 +1208,10 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player) && valid_blocker_ids.is_empty() => {
+            } if !phase_stop_hit(state, *player)
+                && (valid_blocker_ids.is_empty()
+                    || !super::combat::has_attackers_in_play(state)) =>
+            {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
@@ -21593,6 +21596,163 @@ mod crew_tests {
             ),
             other => panic!("Expected CrewVehicle, got {:?}", other),
         }
+    }
+
+    /// Build a Vehicle (Artifact + "Vehicle" subtype) with a printed
+    /// `Crew { power }` in BOTH `base_keywords` and `keywords`, so the printed
+    /// keyword survives the `obj.keywords = obj.base_keywords.clone()` reset
+    /// at the top of every `evaluate_layers` pass.
+    fn make_printed_crew_vehicle(
+        state: &mut GameState,
+        card: CardId,
+        controller: PlayerId,
+        crew_power: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            card,
+            controller,
+            "Printed Vehicle".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Vehicle".to_string());
+        let crew = crate::types::keywords::Keyword::Crew {
+            power: crew_power,
+            once_per_turn: None,
+        };
+        obj.base_keywords.push(crew.clone());
+        obj.keywords.push(crew);
+        obj.base_power = Some(6);
+        obj.base_toughness = Some(5);
+        obj.power = Some(6);
+        obj.toughness = Some(5);
+        id
+    }
+
+    /// Attach a "Vehicles you control have crew N" continuous static (the
+    /// Kotori, Pilot Prodigy class) to `source`, scoped to Vehicles controlled
+    /// by `source`'s controller.
+    fn attach_crew_grant_static(state: &mut GameState, source: ObjectId, granted_power: u32) {
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, TargetFilter, TypedFilter,
+        };
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .subtype("Vehicle".to_string()),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Crew {
+                    power: granted_power,
+                    once_per_turn: None,
+                },
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+    }
+
+    fn crew_powers(state: &GameState, vehicle: ObjectId) -> Vec<u32> {
+        state.objects[&vehicle]
+            .keywords
+            .iter()
+            .filter_map(|kw| match kw {
+                crate::types::keywords::Keyword::Crew { power, .. } => Some(*power),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Issue #2342 — Kotori, Pilot Prodigy: "Vehicles you control have crew 2."
+    /// A granted single-authoritative-value Crew must REPLACE the printed Crew
+    /// rather than coexist with it, so `handle_crew_activation`'s `find_map`
+    /// reads the granted value. Before the CR 613.7 override branch in
+    /// `apply_keyword_modification`, the printed `Crew { power: 3 }` and granted
+    /// `Crew { power: 2 }` would both survive (PartialEq sees them as distinct),
+    /// leaving two Crew entries and letting the stale printed `3` win the read.
+    #[test]
+    fn granted_crew_value_overrides_printed_value() {
+        let mut state = setup_game_at_main_phase();
+        let vehicle = make_printed_crew_vehicle(&mut state, CardId(300), PlayerId(0), 3);
+        let kotori = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Kotori".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kotori).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        attach_crew_grant_static(&mut state, kotori, 2);
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // Exactly one Crew entry, carrying the granted value (2), not the
+        // printed value (3) — the printed duplicate was removed, not appended.
+        assert_eq!(
+            crew_powers(&state, vehicle),
+            vec![2],
+            "granted crew 2 must replace printed crew 3, leaving a single Crew entry"
+        );
+    }
+
+    /// Negative control: with no granting static in play, the printed Crew
+    /// value is left untouched by the override branch. Proves the fix does not
+    /// regress the default (single printed keyword) case.
+    #[test]
+    fn printed_crew_value_unchanged_without_granting_static() {
+        let mut state = setup_game_at_main_phase();
+        let vehicle = make_printed_crew_vehicle(&mut state, CardId(310), PlayerId(0), 3);
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            crew_powers(&state, vehicle),
+            vec![3],
+            "without a granting static the printed crew 3 must be preserved"
+        );
+    }
+
+    /// Filter-scope exclusion: the "Vehicles you control" static grant must
+    /// compose with the existing `TargetFilter`/`ControllerRef` scoping — an
+    /// opponent-controlled Vehicle is outside the `controller=You` scope and
+    /// must keep its printed crew value, proving the override branch does not
+    /// blindly rewrite every Crew entry engine-wide.
+    #[test]
+    fn granted_crew_does_not_override_opponents_vehicle() {
+        let mut state = setup_game_at_main_phase();
+        // Opponent's Vehicle with printed Crew 4.
+        let opp_vehicle = make_printed_crew_vehicle(&mut state, CardId(320), PlayerId(1), 4);
+        // Granting static controlled by PlayerId(0) — "you control" excludes
+        // the opponent's Vehicle.
+        let kotori = create_object(
+            &mut state,
+            CardId(321),
+            PlayerId(0),
+            "Kotori".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kotori).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        attach_crew_grant_static(&mut state, kotori, 2);
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            crew_powers(&state, opp_vehicle),
+            vec![4],
+            "opponent's Vehicle is outside the 'you control' scope and must keep printed crew 4"
+        );
     }
 }
 

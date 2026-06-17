@@ -3766,17 +3766,32 @@ fn apply_continuous_effect_filtered(
                     },
                     other => other.clone(),
                 };
+                // Three-way grant policy:
                 // CR 702.164b: summing keywords (Toxic) accumulate even when an
                 // identical instance is already present (granted Toxic 1 on
-                // printed Toxic 1 -> total 2). All other parameterized keywords
-                // keep deduping identical instances per CR 702.16g (Protection
-                // A+B are separate abilities; Ward/Annihilator each apply
-                // independently). `evaluate_layers` resets `obj.keywords =
-                // obj.base_keywords.clone()` each pass, so this never accumulates
-                // unbounded across re-evaluations.
-                if resolved_keyword.sums_across_instances()
-                    || !obj.keywords.contains(&resolved_keyword)
-                {
+                // printed Toxic 1 -> total 2).
+                // CR 613.7: single-authoritative-value keywords (Crew/Saddle/Enchant,
+                // see `overrides_same_kind_on_grant`) replace any earlier same-kind
+                // instance so a "first match" reader never sees a stale value.
+                // All other parameterized keywords keep deduping identical instances
+                // per CR 702.16g (Protection A+B are separate abilities;
+                // Ward/Annihilator each apply independently). `evaluate_layers` resets
+                // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
+                // accumulates unbounded across re-evaluations.
+                if resolved_keyword.sums_across_instances() {
+                    obj.keywords.push(resolved_keyword.clone());
+                } else if resolved_keyword.overrides_same_kind_on_grant() {
+                    // CR 613.7: this grant is a single-authoritative-value keyword — the
+                    // most recently applied instance (this one, since modifications are
+                    // applied in ascending timestamp order, see `order_by_timestamp`)
+                    // replaces any earlier same-discriminant instance (printed or a prior
+                    // grant) rather than coexisting with it. Mirrors `RemoveKeyword`'s
+                    // discriminant technique below, but replaces instead of strips.
+                    obj.keywords.retain(|k| {
+                        std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword)
+                    });
+                    obj.keywords.push(resolved_keyword.clone());
+                } else if !obj.keywords.contains(&resolved_keyword) {
                     obj.keywords.push(resolved_keyword.clone());
                 }
                 for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {

@@ -1791,6 +1791,10 @@ pub(super) fn strip_suffix_conditional(
         return (Some(cond), effect_text);
     }
 
+    if let Some(cond) = parse_mana_spent_vs_mana_value_target_condition_text(condition_core) {
+        return (Some(cond), effect_text);
+    }
+
     if let Some(condition) = parse_triggering_spell_targets_filter_ability_condition(condition_core)
         .or_else(|| try_nom_condition_as_ability_condition(condition_core, ctx))
         .or_else(|| parse_condition_text(condition_core))
@@ -1872,6 +1876,49 @@ fn parse_was_kicked_condition(input: &str) -> OracleResult<'_, AbilityCondition>
     Ok((rest, AbilityCondition::additional_cost_paid_any()))
 }
 
+/// CR 601.2h + CR 608.2c: "if the amount of mana spent to cast it/that spell
+/// was less than its mana value" on a targeted spell effect — the spell
+/// anaphors to the ability's object target (Unravel-class riders).
+fn parse_mana_spent_vs_mana_value_target_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_mana_spent_vs_mana_value_target_condition).parse(input)
+    })
+}
+
+fn parse_mana_spent_vs_mana_value_target_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, (_, _, _, comparator, _)) = (
+        tag("the amount of mana spent to cast "),
+        alt((tag("it"), tag("that spell"), tag("this spell"))),
+        alt((tag(" was "), tag(" is "))),
+        alt((
+            value(Comparator::LT, tag("less than")),
+            value(Comparator::GT, tag("greater than")),
+        )),
+        tag(" its mana value"),
+    )
+        .parse(input)?;
+    Ok((
+        rest,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: CastManaSpentMetric::Total,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            },
+        },
+    ))
+}
+
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
@@ -1880,6 +1927,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_was_kicked_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_mana_spent_vs_mana_value_target_condition_text(text) {
         return Some(condition);
     }
 
@@ -4334,6 +4385,38 @@ mod tests {
         );
         assert_eq!(text, "Counter target spell");
         assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
+    }
+
+    #[test]
+    fn parse_mana_spent_vs_mana_value_target_condition_reads_ability_target_mana() {
+        let cond = parse_mana_spent_vs_mana_value_target_condition_text(
+            "the amount of mana spent to cast that spell was less than its mana value",
+        )
+        .expect("should parse target mana-spent comparison");
+        assert!(matches!(
+            cond,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::AbilityTarget,
+                        metric: CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                },
+            }
+        ));
+
+        let (cond, text) = strip_leading_general_conditional(
+            "If the amount of mana spent to cast that spell was less than its mana value, you draw a card.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "you draw a card.");
+        assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
     }
 
     /// CR 508.1a: filtered attack-history condition — "you attacked with <X>"

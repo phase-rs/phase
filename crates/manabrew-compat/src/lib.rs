@@ -2323,6 +2323,7 @@ mod tests {
                     max: 3,
                     pending_cast: dummy_pending_cast(),
                     convoke_mode: None,
+                    x_cost_previews: vec![],
                 },
             ),
             (

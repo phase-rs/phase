@@ -4345,6 +4345,32 @@ pub(super) fn concrete_cost_for_x(
     cost
 }
 
+/// CR 601.2f + CR 702.41a: Build per-X total cost previews for the Choose-X UI.
+/// Each entry is `(x, concrete_cost)` after Affinity/reductions/floors. Empty
+/// when `base_cost` is unavailable or the legal range exceeds 100 values.
+pub(super) fn build_choose_x_cost_previews(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    min: u32,
+    max: u32,
+) -> Vec<(u32, ManaCost)> {
+    let Some(base) = pending.base_cost.as_ref() else {
+        return Vec::new();
+    };
+    if min > max || max.saturating_sub(min) > 100 {
+        return Vec::new();
+    }
+    (min..=max)
+        .map(|x| {
+            (
+                x,
+                concrete_cost_for_x(state, player, pending.object_id, &pending.ability, base, x),
+            )
+        })
+        .collect()
+}
+
 /// CR 601.2f + CR 107.3g: Re-derive a pending `{X}` spell's full concrete cost
 /// AFTER the chosen X is known. Rebuilds from the captured tax-inclusive base
 /// via `concrete_cost_for_x`, re-applying all reductions, target-dependent
@@ -20466,6 +20492,37 @@ mod tests {
         // affordable X effectively costs 1 less mana — max X is 3 higher.
         let (mut affinity_state, affinity_spell) = build_state(3);
         let affinity_max = choose_max(&mut affinity_state, affinity_spell);
+
+        match &affinity_state.waiting_for {
+            WaitingFor::ChooseXValue {
+                x_cost_previews,
+                min,
+                max,
+                ..
+            } => {
+                assert_eq!(*min, 0);
+                assert_eq!(*max, affinity_max);
+                assert_eq!(
+                    x_cost_previews.len(),
+                    (max - min + 1) as usize,
+                    "Choose-X UI must receive per-X cost previews"
+                );
+                let cost_at_3 = x_cost_previews
+                    .iter()
+                    .find(|(x, _)| *x == 3)
+                    .map(|(_, cost)| cost.clone())
+                    .expect("preview for X=3");
+                assert_eq!(
+                    cost_at_3,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                        generic: 0,
+                    },
+                    "3 creature Affinity on {{X}}{{B}}{{B}} at X=3 must preview as two black mana"
+                );
+            }
+            other => panic!("expected ChooseXValue with previews, got {other:?}"),
+        }
 
         assert_eq!(
             affinity_max,

@@ -2679,6 +2679,10 @@ pub enum WaitingFor {
     /// `convoke_mode` passes through to the subsequent `ManaPayment` step.
     /// `pending_cast` is embedded so filtered state snapshots (multiplayer)
     /// still carry enough context for the UI to render the spell name/cost.
+    /// `x_cost_previews` maps each legal X in `[min, max]` to the engine-
+    /// authoritative total mana cost after concretizing X and applying cost
+    /// modifiers (Affinity, reductions, floors). Display-only for the Choose-X
+    /// UI — omitted when the range is empty or unreasonably large.
     ChooseXValue {
         player: PlayerId,
         #[serde(default)]
@@ -2687,6 +2691,8 @@ pub enum WaitingFor {
         pending_cast: Box<PendingCast>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        x_cost_previews: Vec<(u32, ManaCost)>,
     },
     TargetSelection {
         player: PlayerId,
@@ -8237,6 +8243,7 @@ mod tests {
             max: 5,
             pending_cast: pending,
             convoke_mode: None,
+            x_cost_previews: vec![],
         };
         assert!(choose_x.pending_cast_ref().is_some());
         assert!(choose_x.has_pending_cast());
