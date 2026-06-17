@@ -9,7 +9,7 @@
 //! activations; this policy is a defense-in-depth gate keyed on the **land
 //! sacrifice cost axis** so land outlets cannot slip through if the generic
 //! classifier or search path ever mis-scores them. It reuses
-//! `self_protection_classify` for effect/threat assessment — no parallel heuristics.
+//! `self_protection_classify` for effect/threat classification only.
 //!
 //! CR 701.21: Sacrifice moves the chosen land to the graveyard.
 //! CR 702.18a: Shroud prevents targeting — only valuable when a spell/ability is
@@ -25,8 +25,7 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_protection_classify::{
-    any_immediate_threat, combat_step_allows_protection,
-    is_land_sacrifice_self_protection_activation,
+    any_land_sacrifice_protection_payoff, is_land_sacrifice_self_protection_activation,
 };
 use crate::features::DeckFeatures;
 
@@ -69,15 +68,9 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("sacrifice_land_protection_na"));
         }
 
-        if any_immediate_threat(ctx.state, ctx.ai_player) {
+        if any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, ability) {
             return PolicyVerdict::neutral(PolicyReason::new(
-                "sacrifice_land_protection_threat_present",
-            ));
-        }
-
-        if combat_step_allows_protection(ctx.state) {
-            return PolicyVerdict::neutral(PolicyReason::new(
-                "sacrifice_land_protection_combat_payoff",
+                "sacrifice_land_protection_answerable_threat",
             ));
         }
 
@@ -182,7 +175,7 @@ mod tests {
         for i in 0..count {
             let id = create_object(
                 state,
-                CardId(100 + i as u32),
+                CardId(100 + i as u64),
                 AI,
                 format!("Forest {i}"),
                 Zone::Battlefield,
@@ -329,6 +322,120 @@ mod tests {
     }
 
     #[test]
+    fn safekeeper_rejected_on_opponent_board_pressure_only() {
+        use super::super::self_protection_classify::THREAT_FLOOR;
+        use crate::eval::threat_level;
+        use engine::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let opp = PlayerId(1);
+        state.active_player = opp;
+        add_lands(&mut state, 5);
+        let threat = create_object(
+            &mut state,
+            CardId(50),
+            opp,
+            "Big Threat".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&threat).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(14);
+        obj.toughness = Some(14);
+        assert!(threat_level(&state, AI, opp) >= THREAT_FLOOR);
+
+        let id = safekeeper_on_battlefield(&mut state);
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "sacrifice_land_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => {
+                panic!("board pressure alone must not waive land-sacrifice shroud gate")
+            }
+        }
+    }
+
+    #[test]
+    fn safekeeper_allowed_when_removal_targets_ai_creature() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        add_lands(&mut state, 5);
+        let id = safekeeper_on_battlefield(&mut state);
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            AI,
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Creature);
+        let opp = PlayerId(1);
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Doom Blade".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            engine::types::ability::Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(creature)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "sacrifice_land_protection_answerable_threat");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("must allow when removal targets AI creature"),
+        }
+    }
+
+    #[test]
+    fn safekeeper_rejected_at_declare_blockers_without_stack() {
+        use engine::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        state.phase = Phase::DeclareBlockers;
+        add_lands(&mut state, 5);
+        let id = safekeeper_on_battlefield(&mut state);
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "sacrifice_land_protection_no_payoff");
+            }
+            PolicyVerdict::Score { .. } => {
+                panic!("shroud has no combat-only payoff without a stack target")
+            }
+        }
+    }
+
+    #[test]
     fn parsed_sylvan_safekeeper_rejected_by_both_policies() {
         use super::super::reactive_self_protection::ReactiveSelfProtectionPolicy;
         use engine::parser::oracle::parse_oracle_text;
@@ -341,8 +448,8 @@ mod tests {
             "Sacrifice a land: Target creature you control gains shroud until end of turn.",
             "Sylvan Safekeeper",
             &[],
-            &["Creature"],
-            &["Human", "Wizard"],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Wizard".to_string()],
         );
         let ability = parsed
             .abilities

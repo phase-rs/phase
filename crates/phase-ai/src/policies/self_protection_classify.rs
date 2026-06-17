@@ -220,6 +220,85 @@ fn any_stack_targets_ai_or_ai_permanent(state: &GameState, ai_player: PlayerId) 
     })
 }
 
+/// CR 702.18a / CR 702.11a: Shroud and hexproof on a creature answer only
+/// incoming **targeted** spells or abilities on that permanent — not life loss,
+/// board pressure, combat damage, or untargeted mass removal. Returns true when
+/// an opponent-controlled stack entry targets an AI-controlled object (the
+/// permanent a Safekeeper-style grant would be placed on).
+pub(crate) fn any_stack_targets_ai_creature_for_shroud_grant(
+    state: &GameState,
+    ai_player: PlayerId,
+) -> bool {
+    use engine::types::ability::TargetRef;
+    use engine::types::card_type::CoreType;
+    state.stack.iter().any(|entry| {
+        if entry.controller == ai_player {
+            return false;
+        }
+        let Some(ability) = entry.ability() else {
+            return false;
+        };
+        ability.targets.iter().any(|t| match t {
+            TargetRef::Player(_) => false,
+            TargetRef::Object(obj_id) => state.objects.get(obj_id).is_some_and(|obj| {
+                obj.controller == ai_player
+                    && obj.card_types.core_types.contains(&CoreType::Creature)
+            }),
+        })
+    })
+}
+
+/// Whether a land-sacrifice self-protection activation has a concrete payoff
+/// right now. Targeting grants (shroud, hexproof, protection) answer stack
+/// removal on an AI creature; protection also has combat-step payoff (CR
+/// 509.1b color dodge). Deliberately excludes low life, board pressure, and
+/// untargeted mass effects — sacrificing a land to shroud one creature does not
+/// answer those threats.
+pub(crate) fn any_land_sacrifice_protection_payoff(
+    state: &GameState,
+    ai_player: PlayerId,
+    ability: &AbilityDefinition,
+) -> bool {
+    if any_stack_targets_ai_creature_for_shroud_grant(state, ai_player) {
+        return true;
+    }
+    if ability_grants_combat_step_protection(ability) && combat_step_allows_protection(state) {
+        return true;
+    }
+    false
+}
+
+/// Protection-from-color grants can matter during combat (dodge a blocker).
+fn ability_grants_combat_step_protection(ability: &AbilityDefinition) -> bool {
+    collect_chain_effects(ability)
+        .iter()
+        .any(|effect| match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => static_abilities.iter().any(|sd| {
+                let affects_self = match sd.affected.as_ref() {
+                    Some(TargetFilter::ParentTarget) => {
+                        target.as_ref().is_some_and(target_filter_self_scoped)
+                    }
+                    Some(f) => target_filter_self_scoped(f),
+                    None => false,
+                };
+                affects_self
+                    && sd.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Protection(_)
+                            }
+                        )
+                    })
+            }),
+            _ => false,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,7 +365,7 @@ mod tests {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::ParentTarget)
                 .modifications(vec![ContinuousModification::GrantAbility {
-                    definition: inner,
+                    definition: Box::new(inner),
                 }])],
             target: Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
@@ -365,5 +444,42 @@ mod tests {
             )),
             Keyword::Protection(ProtectionTarget::ChosenColor),
         )));
+    }
+
+    #[test]
+    fn shroud_payoff_requires_creature_stack_target_not_player_burn() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::ObjectId;
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        state.players[ai.0 as usize].life = 5;
+
+        let spell_id = ObjectId(99);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Player,
+                damage_source: None,
+            },
+            vec![TargetRef::Player(ai)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: engine::types::identifiers::CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        assert!(!any_stack_targets_ai_creature_for_shroud_grant(&state, ai));
     }
 }
