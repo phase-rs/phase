@@ -4,9 +4,13 @@ use crate::types::ability::{
     AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
+use crate::types::game_state::{
+    GameState, IterCtx, IterItem, IterKind, ResolutionFrame, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+
+use std::collections::VecDeque;
 
 /// CR 701.55a-b + CR 608.2d: Prompt the instructed player to choose one
 /// branch at resolution. The branch itself is not pre-validated for
@@ -29,7 +33,7 @@ pub fn resolve(
         return Ok(());
     }
 
-    let players = choosing_players(state, ability, chooser);
+    let mut players: VecDeque<PlayerId> = VecDeque::from(choosing_players(state, ability, chooser));
     if players.is_empty() {
         // CR 608.2d: A branch choice must be made by an eligible player. An
         // empty chooser set means the effect cannot legally begin — fail loud
@@ -38,15 +42,31 @@ pub fn resolve(
             "ChooseOneOf: no eligible player for chooser {chooser:?}"
         )));
     }
-    prompt_next(
+    // CR 701.55d + CR 608.2: Prompt the first eligible chooser, then push an
+    // `Iterate` frame carrying the rest. The driver re-prompts the next player
+    // each time the previous player's branch finishes resolving.
+    let first = players.pop_front().expect("players is non-empty");
+    prompt_player(
         state,
+        first,
         ability.controller,
         ability.source_id,
-        branches,
+        branches.clone(),
         ability.targets.clone(),
         ability.context.clone(),
-        players,
+        players.iter().copied().collect(),
     );
+    if !players.is_empty() {
+        push_choose_one_of_iterate(
+            state,
+            ability.controller,
+            ability.source_id,
+            branches,
+            ability.targets.clone(),
+            ability.context.clone(),
+            players,
+        );
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseOneOf,
@@ -55,19 +75,50 @@ pub fn resolve(
     Ok(())
 }
 
-pub(crate) fn prompt_next(
+/// CR 701.55d + CR 608.2: Push a `ResolutionFrame::Iterate` carrying the players
+/// still awaiting their branch prompt. The body is the branch-choice prompt; the
+/// driver re-prompts the next player after each branch resolves.
+fn push_choose_one_of_iterate(
     state: &mut GameState,
     controller: PlayerId,
     source_id: ObjectId,
     branches: Vec<AbilityDefinition>,
     parent_targets: Vec<TargetRef>,
     context: crate::types::ability::SpellContext,
-    mut players: Vec<PlayerId>,
+    remaining_players: VecDeque<PlayerId>,
 ) {
-    let Some(player) = players.first().copied() else {
-        return;
-    };
-    players.remove(0);
+    state.resolution_stack.push(ResolutionFrame::Iterate {
+        remaining: remaining_players
+            .into_iter()
+            .map(IterItem::Player)
+            .collect(),
+        ctx: IterCtx {
+            source_id,
+            controller,
+            kind: IterKind::ChooseOneOf {
+                branches,
+                parent_targets,
+                context,
+            },
+        },
+    });
+}
+
+/// CR 701.55d: Prompt one player to choose a branch, parking
+/// `WaitingFor::ChooseOneOfBranch`. `remaining_players` is carried on the
+/// WaitingFor purely for legacy compatibility with consumers that read it; the
+/// authoritative remainder lives on the `Iterate` frame.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prompt_player(
+    state: &mut GameState,
+    player: PlayerId,
+    controller: PlayerId,
+    source_id: ObjectId,
+    branches: Vec<AbilityDefinition>,
+    parent_targets: Vec<TargetRef>,
+    context: crate::types::ability::SpellContext,
+    remaining_players: Vec<PlayerId>,
+) {
     let branch_descriptions = branch_descriptions(&branches);
     state.waiting_for = WaitingFor::ChooseOneOfBranch {
         player,
@@ -77,7 +128,7 @@ pub(crate) fn prompt_next(
         branch_descriptions,
         parent_targets,
         context,
-        remaining_players: players,
+        remaining_players,
     };
     // `priority_player` routing to the chooser is owned by the centralized
     // post-apply sync (`public_state::sync_priority_player_from_waiting_for`),
@@ -85,22 +136,30 @@ pub(crate) fn prompt_next(
     // `turn_control::authorized_submitter_for_player` (CR 608.2d).
 }
 
-pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        return;
-    }
-    let Some(pending) = state.pending_choose_one_of.take() else {
-        return;
-    };
-    prompt_next(
+/// CR 701.55d + CR 608.2: Advance a choose-one-of `Iterate` frame: prompt the
+/// next remaining player for a branch choice. Returns the shortened remaining
+/// players (frame must be re-pushed), or `None` when no players remain.
+pub(crate) fn advance_choose_one_of_iterate(
+    state: &mut GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+    branches: Vec<AbilityDefinition>,
+    parent_targets: Vec<TargetRef>,
+    context: crate::types::ability::SpellContext,
+    mut remaining_players: VecDeque<PlayerId>,
+) -> Option<VecDeque<PlayerId>> {
+    let player = remaining_players.pop_front()?;
+    prompt_player(
         state,
-        pending.controller,
-        pending.source_id,
-        pending.branches,
-        pending.parent_targets,
-        pending.context,
-        pending.remaining_players,
+        player,
+        controller,
+        source_id,
+        branches,
+        parent_targets,
+        context,
+        remaining_players.iter().copied().collect(),
     );
+    Some(remaining_players)
 }
 
 pub(crate) struct BranchSelection {
@@ -126,7 +185,7 @@ pub(crate) fn resolve_branch(
         branches,
         parent_targets,
         context,
-        remaining_players,
+        remaining_players: _remaining_players,
         index,
     } = selection;
     let Some(branch) = branches.get(index) else {
@@ -135,15 +194,11 @@ pub(crate) fn resolve_branch(
         )));
     };
 
-    state.pending_choose_one_of = (!remaining_players.is_empty()).then(|| PendingChooseOneOf {
-        controller,
-        source_id,
-        branches: branches.clone(),
-        parent_targets: parent_targets.clone(),
-        context: context.clone(),
-        remaining_players,
-    });
-
+    // CR 701.55d + CR 608.2: The remaining players awaiting their prompt are
+    // carried on the `Iterate` frame already pushed at initial resolution (or on
+    // the prior frame advance). The driver re-prompts the next player after this
+    // branch finishes resolving, so this resolver no longer stashes a pending
+    // struct or calls a resume helper itself.
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     resolved.targets = parent_targets;
@@ -157,7 +212,6 @@ pub(crate) fn resolve_branch(
     }
 
     super::resolve_ability_chain(state, &resolved, events, 1)?;
-    resume_pending(state, events);
     Ok(())
 }
 

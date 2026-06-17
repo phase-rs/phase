@@ -2411,7 +2411,7 @@ mod tests {
             );
             state.waiting_for = WaitingFor::Priority { player };
             state.priority_player = player;
-            crate::game::effects::drain_pending_continuation(&mut state, &mut events);
+            crate::game::effects::drive_resolution(&mut state, &mut events);
         }
 
         // Exactly two spell copies (base 1 + Twinning Staff's additional 1).

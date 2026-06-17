@@ -483,6 +483,154 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
+/// CR 608.2 + CR 609.3: Single entry point that drives the resolution-
+/// continuation machinery after an interactive choice resolves.
+///
+/// Slice 0: this is a PURE 1:1 alias for [`drain_pending_continuation`] — a
+/// single delegation with NO outer loop. `drain_pending_continuation` already
+/// self-loops/defers internally (e.g. `drain_pending_repeat_iteration`
+/// re-stashes and relies on external re-entry), so wrapping it in an outer loop
+/// would over-drain. Slices 1-3 move the drain bodies onto `resolution_stack`
+/// and turn this into the stack driver; until then it must remain
+/// behavior-identical to the legacy path.
+pub(crate) fn drive_resolution(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    drain_pending_continuation(state, events);
+}
+
+/// CR 701.38d + CR 608.2: Advance the top `ResolutionFrame::Iterate` frame iff it
+/// is a Vote iteration. Pops the frame, resolves remaining voters' ballots one at
+/// a time, and re-pushes the frame (with the shortened remainder) if a ballot
+/// parks an interactive choice. When all ballots resolve, the frame is consumed
+/// and `EffectResolved { Vote }` is emitted (by `advance_vote_ballot_iterate`).
+fn advance_top_iterate_vote(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    use crate::types::game_state::{IterCtx, IterItem, IterKind, ResolutionFrame};
+    // Only act when the top frame is a Vote iteration; otherwise leave the stack
+    // untouched so other frame kinds (or none) are handled at their own site.
+    if !matches!(
+        state.resolution_stack.last(),
+        Some(ResolutionFrame::Iterate {
+            ctx: IterCtx {
+                kind: IterKind::Vote { .. },
+                ..
+            },
+            ..
+        })
+    ) {
+        return;
+    }
+    let Some(ResolutionFrame::Iterate {
+        remaining,
+        ctx:
+            IterCtx {
+                source_id,
+                controller,
+                kind: IterKind::Vote { template },
+            },
+    }) = state.resolution_stack.pop()
+    else {
+        return;
+    };
+    let remaining_voters = remaining
+        .into_iter()
+        .map(|item| match item {
+            IterItem::Player(p) => p,
+        })
+        .collect();
+    if let Some(rest) = vote::advance_vote_ballot_iterate(
+        state,
+        &template,
+        remaining_voters,
+        source_id,
+        controller,
+        events,
+    ) {
+        // Parked mid-flight — re-push the frame with the shortened remainder.
+        state.resolution_stack.push(ResolutionFrame::Iterate {
+            remaining: rest.into_iter().map(IterItem::Player).collect(),
+            ctx: IterCtx {
+                source_id,
+                controller,
+                kind: IterKind::Vote { template },
+            },
+        });
+    }
+}
+
+/// CR 701.55d + CR 608.2: Advance the top `ResolutionFrame::Iterate` frame iff it
+/// is a ChooseOneOf iteration and the game has returned to priority (mirroring
+/// the legacy `choose_one_of::resume_pending` guard). Prompts the next remaining
+/// player for a branch choice; the frame is consumed once no players remain.
+fn advance_top_iterate_choose_one_of(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    use crate::types::game_state::{IterCtx, IterItem, IterKind, ResolutionFrame};
+    // CR 608.2c: Only re-prompt the next player once the previous branch's
+    // resolution has fully drained back to priority (legacy `resume_pending`
+    // required `WaitingFor::Priority`).
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    if !matches!(
+        state.resolution_stack.last(),
+        Some(ResolutionFrame::Iterate {
+            ctx: IterCtx {
+                kind: IterKind::ChooseOneOf { .. },
+                ..
+            },
+            ..
+        })
+    ) {
+        return;
+    }
+    let Some(ResolutionFrame::Iterate {
+        remaining,
+        ctx:
+            IterCtx {
+                source_id,
+                controller,
+                kind:
+                    IterKind::ChooseOneOf {
+                        branches,
+                        parent_targets,
+                        context,
+                    },
+            },
+    }) = state.resolution_stack.pop()
+    else {
+        return;
+    };
+    let _ = events; // ChooseOneOf advance only re-parks a prompt; emits no event.
+    let remaining_players = remaining
+        .into_iter()
+        .map(|item| match item {
+            IterItem::Player(p) => p,
+        })
+        .collect();
+    if let Some(rest) = choose_one_of::advance_choose_one_of_iterate(
+        state,
+        controller,
+        source_id,
+        branches.clone(),
+        parent_targets.clone(),
+        context.clone(),
+        remaining_players,
+    ) {
+        // A player was prompted; keep the frame for the players still queued.
+        if !rest.is_empty() {
+            state.resolution_stack.push(ResolutionFrame::Iterate {
+                remaining: rest.into_iter().map(IterItem::Player).collect(),
+                ctx: IterCtx {
+                    source_id,
+                    controller,
+                    kind: IterKind::ChooseOneOf {
+                        branches,
+                        parent_targets,
+                        context,
+                    },
+                },
+            });
+        }
+    }
+}
+
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_additions(state, events);
@@ -515,11 +663,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for) {
         drain_pending_change_zone_iteration(state, events);
     }
-    // CR 701.38d: Resume per-ballot vote iteration after an interactive
-    // choice resolves. Must run after change_zone_iteration (which may be
-    // nested inside a ballot body) and before repeat_iteration.
+    // CR 701.38d + CR 608.2: Resume per-ballot vote iteration after an
+    // interactive choice resolves. Must run after change_zone_iteration (which
+    // may be nested inside a ballot body) and before repeat_iteration. Ported
+    // (slice 1/5) onto `ResolutionFrame::Iterate`: advance the top Vote frame at
+    // this sequence position to preserve the legacy interleaving with
+    // change_zone/repeat_iteration.
     if !waits_for_resolution_choice(&state.waiting_for) {
-        vote::drain_pending_vote_ballot_iteration(state, events);
+        advance_top_iterate_vote(state, events);
     }
     // CR 609.3 + CR 109.5: After the per-iteration chain drains, drive any
     // remaining `repeat_for` iterations. Each resumed iteration may itself
@@ -528,8 +679,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for) {
         drain_pending_repeat_iteration(state, events);
     }
+    // CR 701.55d + CR 608.2: Resume per-player choose-one-of branch prompting.
+    // Ported (slice 1/5) onto `ResolutionFrame::Iterate`: advance the top
+    // ChooseOneOf frame (re-prompt the next player) at this sequence position,
+    // mirroring the legacy `choose_one_of::resume_pending` guard that only
+    // re-prompts once the previous branch resolution returns to Priority.
     if !waits_for_resolution_choice(&state.waiting_for) {
-        choose_one_of::resume_pending(state, events);
+        advance_top_iterate_choose_one_of(state, events);
     }
     // CR 608.2c + CR 107.1c: After the iteration's choice and any chained
     // continuation have fully drained (state is back at priority), resume a
@@ -11169,7 +11325,7 @@ mod tests {
         });
 
         let mut events = Vec::new();
-        drain_pending_continuation(&mut state, &mut events);
+        drive_resolution(&mut state, &mut events);
 
         assert!(
             state.pending_repeat_until.is_none(),

@@ -187,7 +187,7 @@ fn prompt_next_each_player(
 /// pick, extended on each subsequent pick) so a downstream "put those cards
 /// onto the battlefield" reads exactly the cards chosen across all players,
 /// then prompts the next eligible player. Mirrors
-/// `vote::drain_pending_vote_ballot_iteration`.
+/// `vote::advance_vote_ballot_iterate`.
 pub(crate) fn drain_pending_per_player_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],

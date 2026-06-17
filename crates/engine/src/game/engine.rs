@@ -285,7 +285,7 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
+        effects::drive_resolution(state, events);
     }
     Ok(())
 }
@@ -379,7 +379,7 @@ fn pass_priority_once_with_pipeline(
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
+        effects::drive_resolution(state, events);
     }
 
     let skip_triggers =
@@ -1288,12 +1288,12 @@ fn finalize_copy_retarget(
     {
         state.waiting_for = wf;
         state.priority_player = player;
-        effects::drain_pending_continuation(state, events);
+        effects::drive_resolution(state, events);
         return Ok(());
     }
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    effects::drive_resolution(state, events);
     Ok(())
 }
 
@@ -2619,7 +2619,7 @@ fn apply_action(
             });
             state.waiting_for = WaitingFor::Priority { player: *player };
             state.priority_player = *player;
-            effects::drain_pending_continuation(state, &mut events);
+            effects::drive_resolution(state, &mut events);
             state.waiting_for.clone()
         }
         (
@@ -3686,7 +3686,7 @@ fn apply_action(
                     if state.pending_batch_deliveries.is_some() {
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
-                    effects::drain_pending_continuation(state, &mut events);
+                    effects::drive_resolution(state, &mut events);
                     return Ok(ActionResult {
                         events,
                         waiting_for: state.waiting_for.clone(),
@@ -3724,7 +3724,7 @@ fn apply_action(
             if state.pending_batch_deliveries.is_some() {
                 super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
             }
-            effects::drain_pending_continuation(state, &mut events);
+            effects::drive_resolution(state, &mut events);
             state.waiting_for.clone()
         }
         (
@@ -4388,7 +4388,7 @@ fn apply_action(
             });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
+            effects::drive_resolution(state, &mut events);
             state.waiting_for.clone()
         }
         // CR 701.56a: Time travel — player selected objects for the current phase
@@ -4436,7 +4436,7 @@ fn apply_action(
                     });
                     state.waiting_for = WaitingFor::Priority { player: p };
                     state.priority_player = p;
-                    effects::drain_pending_continuation(state, &mut events);
+                    effects::drive_resolution(state, &mut events);
                     state.waiting_for.clone()
                 }
             } else {
@@ -4446,7 +4446,7 @@ fn apply_action(
                 });
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                effects::drive_resolution(state, &mut events);
                 state.waiting_for.clone()
             }
         }
@@ -4504,7 +4504,7 @@ fn apply_action(
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
             state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
-            effects::drain_pending_continuation(state, &mut events);
+            effects::drive_resolution(state, &mut events);
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;
             state.waiting_for.clone()
@@ -4754,7 +4754,7 @@ fn apply_action(
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                effects::drive_resolution(state, &mut events);
                 state.waiting_for.clone()
             }
         }
@@ -4783,7 +4783,7 @@ fn apply_action(
             state.priority_player = p;
             effects::counters::drain_pending_counter_moves(state, &mut events);
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                effects::drain_pending_continuation(state, &mut events);
+                effects::drive_resolution(state, &mut events);
             }
             state.waiting_for.clone()
         }
@@ -4980,7 +4980,7 @@ fn apply_retarget(
     });
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    effects::drive_resolution(state, events);
     Ok(state.waiting_for.clone())
 }
 

@@ -185,7 +185,7 @@ pub fn handle_choose_mana_effect(
 
     state.waiting_for = WaitingFor::Priority { player: recipient };
     state.priority_player = recipient;
-    super::drain_pending_continuation(state, events);
+    super::drive_resolution(state, events);
     Ok(state.waiting_for.clone())
 }
 

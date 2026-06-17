@@ -77,16 +77,18 @@ pub fn resolve(
     counter_branch.description = Some(format!("Put {amount} +1/+1 counters on it."));
 
     // CR 701.63a: "that permanent's controller" makes the choice — a single
-    // chooser. Delegate to the modal machine, which sets
-    // `WaitingFor::ChooseOneOfBranch` and owns AI/multiplayer/frontend wiring.
-    choose_one_of::prompt_next(
+    // chooser, so no per-player `Iterate` frame is needed. Delegate to the modal
+    // machine, which sets `WaitingFor::ChooseOneOfBranch` and owns
+    // AI/multiplayer/frontend wiring.
+    choose_one_of::prompt_player(
         state,
+        ability.controller,
         ability.controller,
         ability.source_id,
         vec![token_branch, counter_branch],
         ability.targets.clone(),
         ability.context.clone(),
-        vec![ability.controller],
+        Vec::new(),
     );
 
     events.push(GameEvent::EffectResolved {

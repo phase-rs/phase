@@ -1091,7 +1091,7 @@ pub(super) fn handle_resolution_choice(
             // sub_ability here and hand priority back to the clashing player.
             if !matches!(state.waiting_for, WaitingFor::ClashCardPlacement { .. }) {
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                effects::drive_resolution(state, events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -1617,7 +1617,7 @@ pub(super) fn handle_resolution_choice(
                 }
                 set_priority(state, player);
                 if decline_runs_continuation {
-                    effects::drain_pending_continuation(state, events);
+                    effects::drive_resolution(state, events);
                 } else {
                     state.pending_continuation = None;
                 }
@@ -1668,7 +1668,7 @@ pub(super) fn handle_resolution_choice(
                     cont.chain.context.optional_effect_performed = true;
                 }
             }
-            effects::drain_pending_continuation(state, events);
+            effects::drive_resolution(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1774,7 +1774,7 @@ pub(super) fn handle_resolution_choice(
                 // the primary destination and the rest is empty. No second prompt.
                 apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                effects::drive_resolution(state, events);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
@@ -1796,7 +1796,7 @@ pub(super) fn handle_resolution_choice(
                 cont.chain.targets = continuation_targets.clone();
                 propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
             }
-            effects::drain_pending_continuation(state, events);
+            effects::drive_resolution(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1851,7 +1851,7 @@ pub(super) fn handle_resolution_choice(
                 events,
             )?;
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            effects::drive_resolution(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2095,7 +2095,7 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
             }
-            effects::drain_pending_continuation(state, events);
+            effects::drive_resolution(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2161,7 +2161,7 @@ pub(super) fn handle_resolution_choice(
             // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
             // paused on `ChooseOneOfBranch` advances past the first counter kind to
             // prompt for each remaining kind (Bribe Taker).
-            effects::drain_pending_continuation(state, events);
+            effects::drive_resolution(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -3058,7 +3058,7 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             } else {
-                effects::drain_pending_continuation(state, events);
+                effects::drive_resolution(state, events);
             }
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -3107,7 +3107,7 @@ pub(super) fn handle_resolution_choice(
                 source_filter,
             });
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            effects::drive_resolution(state, events);
             state.last_chosen_damage_source = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -3595,7 +3595,7 @@ fn finish_with_continuation(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     set_priority(state, player);
-    effects::drain_pending_continuation(state, events);
+    effects::drive_resolution(state, events);
     state.waiting_for.clone()
 }
 

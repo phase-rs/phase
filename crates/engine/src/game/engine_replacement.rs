@@ -548,7 +548,7 @@ pub(super) fn handle_replacement_choice(
                 // paused on this replacement choice (issue #535). The drain
                 // helper covers both: it runs the continuation chain (if any)
                 // then the ChangeZone iteration drain hook.
-                effects::drain_pending_continuation(state, events);
+                effects::drive_resolution(state, events);
                 // CR 616.1e: The continuation may itself pause on another replacement
                 // (e.g., the second direction of fight damage hitting the same shield),
                 // in which case it sets `state.waiting_for` to the next ReplacementChoice.
@@ -632,7 +632,7 @@ pub(super) fn handle_replacement_choice(
                 };
                 effects::counters::drain_pending_counter_moves(state, events);
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    effects::drain_pending_continuation(state, events);
+                    effects::drive_resolution(state, events);
                 }
                 return Ok(state.waiting_for.clone());
             }
@@ -819,7 +819,7 @@ pub(super) fn replay_deferred_entry_events(
         let delayed_events = super::triggers::check_delayed_triggers(state, &deferred);
         events.extend(delayed_events);
     }
-    effects::drain_pending_continuation(state, events);
+    effects::drive_resolution(state, events);
     // CR 113.2c + CR 603.3b + CR 707.10: `process_triggers` above may have
     // paused on an interactive replayed ETB trigger fired by the realized
     // entry. When it pauses it sets `state.pending_trigger` for the active

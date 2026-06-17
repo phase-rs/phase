@@ -305,6 +305,7 @@ mod primo_unbounded_fractal_counters;
 mod proliferate_zero_counter;
 mod quirion_ranger_activation;
 mod refurbished_familiar;
+mod resolution_stack_iterate;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod rite_of_consumption_damage;

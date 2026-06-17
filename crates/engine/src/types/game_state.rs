@@ -831,6 +831,78 @@ pub struct CommanderDamageEntry {
 /// cannot go out of sync; two parallel `Option`s would let one be set
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
+/// CR 608.2 + CR 609.3: A single parked step in the resolution-continuation
+/// stack ([`GameState::resolution_stack`]). The unification replaces the flat
+/// `pending_*` continuation fields with one LIFO stack so nesting becomes stack
+/// depth rather than a hand-tuned drain order in `drain_pending_continuation`.
+///
+/// This slice introduces the carrier plus the generic `Iterate`
+/// (per-player/per-iteration) frame and ports the two cleanest per-player
+/// iteration drains (vote ballots, choose-one-of branches) onto it. Later work
+/// can add resolver-resume and queue variants and migrate the remaining
+/// `drain_pending_*` functions onto the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolutionFrame {
+    /// CR 608.2 + CR 701.38d + CR 701.55d: A per-item iteration that instantiates
+    /// one body per remaining `IterItem` in turn (APNAP order for player items),
+    /// parking on the body's interactive `WaitingFor` between items. Replaces the
+    /// hand-stashed `Pending*Iteration` structs whose `remaining` lists and resume
+    /// loops are byte-identical modulo the per-iteration body.
+    Iterate {
+        /// Items not yet processed. The driver advances one per resume; when this
+        /// empties, the frame is popped and any completion event is emitted.
+        remaining: VecDeque<IterItem>,
+        /// Source/controller plus the iteration-kind-specific body to instantiate.
+        ctx: IterCtx,
+    },
+}
+
+/// CR 608.2: One unit of work in a [`ResolutionFrame::Iterate`]. Currently only
+/// `Player` is needed (vote ballots, choose-one-of branches both iterate per
+/// player); future index/object kinds can be added for the repeat-iteration and
+/// zone-choice ports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IterItem {
+    /// A player whose body resolves next (APNAP order for votes/branches).
+    Player(PlayerId),
+}
+
+/// CR 608.2: Source/controller context plus the iteration-kind-specific body for
+/// a [`ResolutionFrame::Iterate`]. The vote and choose-one-of bodies are shaped
+/// differently (one ability template vs. a branch-choice prompt), so the body is
+/// carried in a typed [`IterKind`] rather than forced into one `AbilityDefinition`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IterCtx {
+    /// The object that initiated the iteration (vote/choose-one-of source).
+    pub source_id: ObjectId,
+    /// The controller of the initiating spell/ability.
+    pub controller: PlayerId,
+    /// The iteration-kind-specific per-item body.
+    pub kind: IterKind,
+}
+
+/// CR 701.38d / CR 701.55d: The per-item body shape for a
+/// [`ResolutionFrame::Iterate`]. Each variant carries exactly the data its
+/// resume step needs to instantiate one item's body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IterKind {
+    /// CR 701.38d: Per-ballot vote iteration. Each remaining voter resolves an
+    /// instantiation of `template` with `scoped_player` bound to the voter.
+    /// On completion the frame emits `EffectResolved { Vote, source_id }`.
+    Vote {
+        /// The ability template instantiated per voter (`build_per_ballot_ability`).
+        template: Box<AbilityDefinition>,
+    },
+    /// CR 701.55d: Per-player choose-one-of iteration. Each remaining player is
+    /// prompted (`WaitingFor::ChooseOneOfBranch`) to choose among `branches`; the
+    /// chosen branch resolves with `parent_targets` + `context` threaded through.
+    ChooseOneOf {
+        branches: Vec<AbilityDefinition>,
+        parent_targets: Vec<TargetRef>,
+        context: super::ability::SpellContext,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -6058,6 +6130,14 @@ pub struct GameState {
     // fires at the tail of its resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<PendingContinuation>,
+    /// CR 608.2 + CR 609.3: Unified resolution-continuation stack. Currently
+    /// carries the per-player vote-ballot and choose-one-of `Iterate` frames,
+    /// driven by `drive_resolution`; future work can migrate the remaining flat
+    /// `pending_*` continuation fields onto this LIFO stack. The
+    /// `#[serde(default)]` keeps old saves (no `resolution_stack` key) loading
+    /// to an empty stack for back-compat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolution_stack: Vec<ResolutionFrame>,
 
     /// CR 609.3 + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
     /// because the inner effect entered an interactive `WaitingFor` state.
@@ -7046,6 +7126,7 @@ impl GameState {
             revealed_cards: HashSet::new(),
             public_revealed_cards: HashSet::new(),
             pending_continuation: None,
+            resolution_stack: Vec::new(),
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
             devour_eligible_snapshot: None,
@@ -7503,6 +7584,7 @@ impl PartialEq for GameState {
             && self.revealed_cards == other.revealed_cards
             && self.public_revealed_cards == other.public_revealed_cards
             && self.pending_continuation == other.pending_continuation
+            && self.resolution_stack == other.resolution_stack
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
             // `devour_eligible_snapshot` is INTENTIONALLY excluded from PartialEq.
