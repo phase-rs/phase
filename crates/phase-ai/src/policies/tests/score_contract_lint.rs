@@ -28,7 +28,7 @@ const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
     ("mill_targeting.rs", 4),
     ("planeswalker_loyalty.rs", 2),
     ("plus_one_counters.rs", 10),
-    ("reactive_self_protection.rs", 4),
+    ("reactive_self_protection.rs", 0),
     ("recursion_awareness.rs", 1),
     ("sacrifice_value.rs", 1),
     ("spellskite_priority.rs", 1),

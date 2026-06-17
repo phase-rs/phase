@@ -32,6 +32,7 @@ use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::reanimator_payoff::ReanimatorPayoffPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
+use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
 use super::separate_piles_timing::SeparatePilesTimingPolicy;
 use super::spellslinger_casting::SpellslingerCastingPolicy;
@@ -104,6 +105,7 @@ pub enum PolicyId {
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
     ReactiveSelfProtection,
+    SacrificeLandProtection,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
@@ -317,6 +319,7 @@ impl Default for PolicyRegistry {
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(SacrificeLandProtectionPolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
