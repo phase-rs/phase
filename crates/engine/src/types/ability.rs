@@ -3625,6 +3625,12 @@ pub enum QuantityRef {
     /// "with the same mana value as that spell". `CostPaidObject` subsumes the
     /// former `EventContextSourceManaValue` (CR 608.2k).
     ObjectManaValue { scope: ObjectScope },
+    /// CR 202.3 + CR 115.1: Mana value of the object chosen for a count-derived
+    /// target slot whose legal candidates are `filter` (e.g. "target artifact or
+    /// creature you control"). Distinct from `ObjectManaValue { scope: Target }`
+    /// (a possessive "that creature's mana value", filterless); this variant owns
+    /// its own target slot, surfaced via `quantity_ref_target_slot_spec`.
+    TargetObjectManaValue { filter: Box<TargetFilter> },
     /// CR 105.1 + CR 105.2: Number of colors of an object, scoped via
     /// ObjectScope. Counts the object's current W/U/B/R/G color set; colorless
     /// objects return 0. `Recipient` preserves "for each of its colors" on

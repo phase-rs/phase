@@ -4,9 +4,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardTypeSetSource, CastManaSpentMetric,
     CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, EffectScope, FilterProp,
     GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -1689,7 +1689,8 @@ fn collect_target_slots(
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
         {
-            let filter = target_creature_quantity_slot_filter();
+            let filter = effect_target_slot_filter(&ability.effect)
+                .expect("slot filter present when gate true");
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
@@ -2354,10 +2355,6 @@ pub(crate) fn collect_player_targets(
     }
 }
 
-fn target_creature_quantity_slot_filter() -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::creature())
-}
-
 fn parent_target_combat_relation_slot_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::creature())
 }
@@ -2367,7 +2364,7 @@ fn effect_needs_parent_target_combat_relation_slot(effect: &Effect) -> bool {
 }
 
 fn effect_needs_target_creature_quantity_slot(effect: &Effect) -> bool {
-    effect_references_target_creature_quantity(effect)
+    effect_target_slot_filter(effect).is_some()
         && !effect_primary_target_supplies_creature_target(effect)
 }
 
@@ -2432,12 +2429,15 @@ fn target_filter_can_supply_creature_quantity(filter: &TargetFilter) -> bool {
     )
 }
 
-fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
-    if effect
-        .target_filter()
-        .is_some_and(filter_references_target_creature_quantity)
-    {
-        return true;
+/// CR 115.1: Derive the `TargetFilter` for the count-derived target slot an
+/// effect needs, if any. Walks each amount/target arm and maps the inner
+/// quantity/filter through `quantity_ref_target_slot_spec` (the spec authority),
+/// returning the FIRST `Some`. `Some(filter)` means the effect's magnitude/scope
+/// references a value that requires its own surfaced target slot whose legal
+/// candidates are `filter`; `None` means no count-derived slot is needed.
+fn effect_target_slot_filter(effect: &Effect) -> Option<TargetFilter> {
+    if let Some(filter) = effect.target_filter().and_then(filter_target_slot_filter) {
+        return Some(filter);
     }
 
     match effect {
@@ -2454,9 +2454,7 @@ fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Sacrifice { count: amount, .. } => {
-            quantity_expr_references_target_creature(amount)
-        }
+        | Effect::Sacrifice { count: amount, .. } => quantity_expr_target_slot_filter(amount),
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::SetTapState {
@@ -2467,62 +2465,60 @@ fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => filter_references_target_creature_quantity(target),
-        _ => false,
+        | Effect::DoublePTAll { target, .. } => filter_target_slot_filter(target),
+        _ => None,
     }
 }
 
-fn filter_references_target_creature_quantity(filter: &TargetFilter) -> bool {
+fn filter_target_slot_filter(filter: &TargetFilter) -> Option<TargetFilter> {
     match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
-            .iter()
-            .any(filter_prop_references_target_creature_quantity),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(filter_references_target_creature_quantity),
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_references_target_creature_quantity(filter)
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            properties.iter().find_map(filter_prop_target_slot_filter)
         }
-        _ => false,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(filter_target_slot_filter)
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_target_slot_filter(filter)
+        }
+        _ => None,
     }
 }
 
-fn filter_prop_references_target_creature_quantity(
+fn filter_prop_target_slot_filter(
     prop: &crate::types::ability::FilterProp,
-) -> bool {
+) -> Option<TargetFilter> {
     match prop {
         crate::types::ability::FilterProp::Counters { count, .. }
         | crate::types::ability::FilterProp::Cmc { value: count, .. }
         | crate::types::ability::FilterProp::PtComparison { value: count, .. } => {
-            quantity_expr_references_target_creature(count)
+            quantity_expr_target_slot_filter(count)
         }
         crate::types::ability::FilterProp::CanEnchant { target } => {
-            filter_references_target_creature_quantity(target)
+            filter_target_slot_filter(target)
         }
-        crate::types::ability::FilterProp::AnyOf { props } => props
-            .iter()
-            .any(filter_prop_references_target_creature_quantity),
+        crate::types::ability::FilterProp::AnyOf { props } => {
+            props.iter().find_map(filter_prop_target_slot_filter)
+        }
         // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
-        crate::types::ability::FilterProp::Not { prop } => {
-            filter_prop_references_target_creature_quantity(prop)
-        }
+        crate::types::ability::FilterProp::Not { prop } => filter_prop_target_slot_filter(prop),
         crate::types::ability::FilterProp::DifferentNameFrom { filter } => {
-            filter_references_target_creature_quantity(filter)
+            filter_target_slot_filter(filter)
         }
-        crate::types::ability::FilterProp::SharesQuality { reference, .. } => reference
-            .as_deref()
-            .is_some_and(filter_references_target_creature_quantity),
+        crate::types::ability::FilterProp::SharesQuality { reference, .. } => {
+            reference.as_deref().and_then(filter_target_slot_filter)
+        }
         crate::types::ability::FilterProp::TargetsOnly { filter }
         | crate::types::ability::FilterProp::Targets { filter } => {
-            filter_references_target_creature_quantity(filter)
+            filter_target_slot_filter(filter)
         }
-        _ => false,
+        _ => None,
     }
 }
 
-fn quantity_expr_references_target_creature(expr: &QuantityExpr) -> bool {
+fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
     match expr {
-        QuantityExpr::Ref { qty } => quantity_ref_references_target_creature(qty),
+        QuantityExpr::Ref { qty } => quantity_ref_target_slot_spec(qty),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
@@ -2530,21 +2526,69 @@ fn quantity_expr_references_target_creature(expr: &QuantityExpr) -> bool {
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => quantity_expr_references_target_creature(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_target_creature),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_references_target_creature(left)
-                || quantity_expr_references_target_creature(right)
-        }
-        QuantityExpr::Fixed { .. } => false,
+        } => quantity_expr_target_slot_filter(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().find_map(quantity_expr_target_slot_filter),
+        QuantityExpr::Difference { left, right } => quantity_expr_target_slot_filter(left)
+            .or_else(|| quantity_expr_target_slot_filter(right)),
+        QuantityExpr::Fixed { .. } => None,
     }
 }
 
-fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
+/// CR 115.1: The single authority mapping a count `QuantityRef` to the
+/// `TargetFilter` of the target slot that count requires (if any). A `Some`
+/// result means this ref references a TARGET object/player and the surfaced
+/// slot's legal candidates are the returned filter; the slot filter is DERIVED
+/// from the ref itself, never assumed to be "creature". `None` means the ref
+/// reads a value that needs no target slot.
+fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
     match qty {
-        QuantityRef::Power { scope } | QuantityRef::Toughness { scope } => {
-            *scope == ObjectScope::Target
+        // CR 208.1: power/toughness are creature numbers — the target slot is a creature.
+        QuantityRef::Power {
+            scope: ObjectScope::Target,
         }
+        | QuantityRef::Toughness {
+            scope: ObjectScope::Target,
+        } => Some(TargetFilter::Typed(TypedFilter::creature())),
+        QuantityRef::Power { .. } | QuantityRef::Toughness { .. } => None,
+        // CR 202.3 + CR 115.1: the ref carries its own slot filter.
+        QuantityRef::TargetObjectManaValue { filter } => Some((**filter).clone()),
+        // CR 701.9 + CR 115.1: cards a single targeted opponent discarded this
+        // turn (Discard keyword action; NOT 121.1, which is Draw). Other player
+        // scopes are not target-bearing and fall through.
+        QuantityRef::CardsDiscardedThisTurn {
+            player: PlayerScope::Target,
+        } => Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        )),
+        QuantityRef::CardsDiscardedThisTurn { .. } => None,
+        // CR 115.1 + CR 109.4: surface an OPPONENT-scoped PLAYER slot (enumerable);
+        // TargetPlayer is non-enumerable (targeting.rs fails closed) since
+        // ability.targets is empty at selection. The derived slot must be a BARE
+        // opponent filter (identical to the CardsDiscardedThisTurn{Target} arm
+        // above) — NOT the record-match `And{[Player, Typed(controller=TargetPlayer)]}`
+        // rewritten in place. A player cannot satisfy a `Typed` (object) leaf, so an
+        // And-wrapped `Typed` slot enumerates ZERO players; for a required trigger
+        // slot that empties legal targets and `collect_target_slots` errors (CR
+        // 603.3d), so the trigger silently resolves target-less. The parser-stored
+        // record-match filter on the `QuantityRef` is UNCHANGED; resolution reads
+        // the chosen opponent from `ability.targets`. The non-targeted "your
+        // opponents" class (And{[Player, controller=Opponent]}) returns None here —
+        // it surfaces no slot.
+        QuantityRef::DamageDealtThisTurn { target, .. }
+            if relative_controller_kind(target) == Some(ControllerRef::TargetPlayer) =>
+        {
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ))
+        }
+        // CR 120.9: a DamageDealtThisTurn whose source or target embeds a
+        // target-creature quantity (e.g. aggregate over "target creature") still
+        // needs a creature slot, matching the legacy behavior; otherwise no slot.
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_target_slot_filter(source).or_else(|| filter_target_slot_filter(target))
+        }
+        // Count-over-filter refs: the slot is creature-typed when a nested filter
+        // references a target-creature quantity (preserves today's behavior).
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
@@ -2557,42 +2601,47 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctColorsAmongPermanents { filter }
-        | QuantityRef::DistinctCounterKindsAmong { filter } => {
-            filter_references_target_creature_quantity(filter)
-        }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => filter_target_slot_filter(filter),
         QuantityRef::SpellsCastThisTurn { filter, .. }
-        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
-            .as_ref()
-            .is_some_and(filter_references_target_creature_quantity),
-        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            filter_references_target_creature_quantity(source)
-                || filter_references_target_creature_quantity(target)
+        | QuantityRef::SpellsCastThisGame { filter, .. } => {
+            filter.as_ref().and_then(filter_target_slot_filter)
         }
         QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { filter } => {
-                filter_references_target_creature_quantity(filter)
-            }
+            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
+            | CardTypeSetSource::TrackedSet { .. } => None,
         },
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
-                filter_references_target_creature_quantity(source_filter)
+                filter_target_slot_filter(source_filter)
             }
-            CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
+            CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => None,
         },
         QuantityRef::PlayerCount {
             filter: crate::types::ability::PlayerFilter::ControlsCount { filter, .. },
-        } => filter_references_target_creature_quantity(filter),
+        } => filter_target_slot_filter(filter),
         // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar predicate is read
         // off each candidate player, never off a target creature, so it cannot
         // reference the resolving ability's target-creature slot.
         QuantityRef::PlayerCount {
             filter: crate::types::ability::PlayerFilter::PlayerAttribute { .. },
-        } => false,
-        _ => false,
+        } => None,
+        _ => None,
     }
+}
+
+/// Thin `.is_some()` wrapper over `quantity_expr_target_slot_filter` so the
+/// `#[cfg(test)]` assertions below still read as "references a target creature".
+#[cfg(test)]
+fn quantity_expr_references_target_creature(expr: &QuantityExpr) -> bool {
+    quantity_expr_target_slot_filter(expr).is_some()
+}
+
+/// Thin `.is_some()` wrapper retained for the `#[cfg(test)]` assertions.
+#[cfg(test)]
+fn filter_references_target_creature_quantity(filter: &TargetFilter) -> bool {
+    filter_target_slot_filter(filter).is_some()
 }
 
 fn collect_target_slot_specs(
@@ -2752,7 +2801,8 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
-                filter: target_creature_quantity_slot_filter(),
+                filter: effect_target_slot_filter(&ability.effect)
+                    .expect("slot filter present when gate true"),
                 optional: ability.optional_targeting,
                 instance: id,
             });
@@ -7901,6 +7951,101 @@ mod tests {
         assert!(quantity_expr_references_target_creature(&mana_spent));
 
         assert!(!filter_references_target_creature_quantity(&fixed_filter()));
+    }
+
+    /// CR 115.1 + CR 208.1 + CR 202.3 + CR 701.9 + CR 120.9: the count-derived
+    /// target-slot spec authority must return a filter DERIVED from the count
+    /// ref, not a hardcoded creature, and must NOT surface a slot for
+    /// non-targeted count refs. Reverting any spec arm flips one of these.
+    #[test]
+    fn quantity_ref_target_slot_spec_derives_filter_from_count_ref() {
+        // CR 208.1: power/toughness of a target → creature slot.
+        assert_eq!(
+            quantity_ref_target_slot_spec(&QuantityRef::Power {
+                scope: ObjectScope::Target,
+            }),
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            "Power {{ Target }} must surface a creature slot",
+        );
+
+        // CR 202.3 + CR 115.1: TargetObjectManaValue carries its own slot filter.
+        let artifact_or_creature = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::default()),
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert_eq!(
+            quantity_ref_target_slot_spec(&QuantityRef::TargetObjectManaValue {
+                filter: Box::new(artifact_or_creature.clone()),
+            }),
+            Some(artifact_or_creature),
+            "TargetObjectManaValue must surface the filter it carries verbatim",
+        );
+
+        // CR 701.9 + CR 115.1: a single targeted opponent's discards → an
+        // Opponent-scoped slot (NOT creature, NOT TargetPlayer).
+        assert_eq!(
+            quantity_ref_target_slot_spec(&QuantityRef::CardsDiscardedThisTurn {
+                player: PlayerScope::Target,
+            }),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            "CardsDiscardedThisTurn {{ Target }} must surface an Opponent-scoped slot",
+        );
+        // Controller-scoped discards declare no slot.
+        assert_eq!(
+            quantity_ref_target_slot_spec(&QuantityRef::CardsDiscardedThisTurn {
+                player: PlayerScope::Controller,
+            }),
+            None,
+            "CardsDiscardedThisTurn {{ Controller }} must surface NO slot",
+        );
+
+        // CR 115.1 + CR 109.4: TargetPlayer damage-history → an Opponent-rewritten
+        // slot (enumerable); the "your opponents" non-targeted class → no slot.
+        let targeted_damage = QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                    ),
+                ],
+            }),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: DamageKindFilter::Any,
+        };
+        let spec = quantity_ref_target_slot_spec(&targeted_damage)
+            .expect("targeted DamageDealtThisTurn must surface a slot");
+        // The rewritten slot filter must be Opponent-scoped (enumerable), never
+        // TargetPlayer (which fails closed at enumeration → legal_actions=0 hang).
+        assert_eq!(
+            relative_controller_kind(&spec),
+            None,
+            "the surfaced slot filter must be Opponent-scoped, not TargetPlayer (CR 109.4)",
+        );
+
+        let opponents_damage = QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                ],
+            }),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: DamageKindFilter::Any,
+        };
+        assert_eq!(
+            quantity_ref_target_slot_spec(&opponents_damage),
+            None,
+            "non-targeted 'your opponents' DamageDealtThisTurn must surface NO slot",
+        );
     }
 
     /// CR 115.1 + CR 611.2c: Continuous effects whose affected set is

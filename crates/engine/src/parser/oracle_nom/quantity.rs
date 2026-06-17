@@ -13,13 +13,14 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::context::ParseContext;
-use super::error::OracleResult;
+use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_counter_type_typed, parse_keyword_name, parse_number,
 };
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
-    parse_shared_quality, parse_shared_quality_clause, parse_type_phrase,
+    parse_shared_quality, parse_shared_quality_clause, parse_target_with_syntax, parse_type_phrase,
+    TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -456,6 +457,11 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
         // CR 701.9: the caster's own discards this turn.
         value(PlayerScope::Controller, tag("you've discarded this turn")),
         value(PlayerScope::Controller, tag("you have discarded this turn")),
+        // CR 701.9 + CR 115.1: a single targeted opponent's discards this turn.
+        value(
+            PlayerScope::Target,
+            tag("target opponent discarded this turn"),
+        ),
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
@@ -1728,27 +1734,51 @@ fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 /// Parse damage-history references such as Chandra's Incinerator's
-/// "total amount of noncombat damage dealt to your opponents this turn".
+/// "total amount of noncombat damage dealt to your opponents this turn" and
+/// Knollspine Dragon's "damage dealt to target opponent this turn".
+///
+/// CR 120.9 + CR 115.1: "damage dealt" refers only to damage dealt to the
+/// specified target opponent (115.1 targeting); the count aggregates all such
+/// damage this turn (120.9 specified-source semantics).
 fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = opt(tag("the ")).parse(input)?;
-    let (input, _) =
-        tag("total amount of noncombat damage dealt to your opponents this turn").parse(input)?;
-
-    Ok((
-        input,
-        QuantityRef::DamageDealtThisTurn {
-            source: Box::new(TargetFilter::Any),
-            target: Box::new(TargetFilter::And {
-                filters: vec![
-                    TargetFilter::Player,
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                ],
-            }),
-            aggregate: AggregateFunction::Sum,
-            group_by: None,
-            damage_kind: DamageKindFilter::NoncombatOnly,
-        },
+    alt((
+        value(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
+            },
+            tag("total amount of noncombat damage dealt to your opponents this turn"),
+        ),
+        value(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+            },
+            tag("damage dealt to target opponent this turn"),
+        ),
     ))
+    .parse(input)
 }
 
 /// Parse life-lost references: "the life you've lost this turn", "life you've lost", etc.
@@ -1999,9 +2029,44 @@ fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// references ("that creature's mana value") lower through the same
 /// `QuantityRef::ObjectManaValue` building block.
 fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // CR 202.3 + CR 115.1: "mana value of target <filter>" — a count whose value
+    // reads the object chosen for this ref's OWN target slot (Fateful Handoff,
+    // Knollspine Dragon). Tried before the bare possessive scope so the
+    // "target ..." object phrase is captured via the shared `parse_target`
+    // building block. Only fires when the phrase actually used the "target"
+    // keyword; the bare "that creature's mana value" possessive stays
+    // `ObjectManaValue { scope: Target }`.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("mana value of "),
+        tag("converted mana cost of "),
+    ))
+    .parse(input)
+    {
+        let (after, filter) = parse_target_with_syntax_target_keyword(rest)?;
+        return Ok((
+            after,
+            QuantityRef::TargetObjectManaValue {
+                filter: Box::new(filter),
+            },
+        ));
+    }
+
     let (rest, scope) = parse_object_possessive_scope(input)?;
     let (rest, _) = alt((tag(" mana value"), tag(" converted mana cost"))).parse(rest)?;
     Ok((rest, QuantityRef::ObjectManaValue { scope }))
+}
+
+/// Bridge the `parse_target` building block into the nom `OracleResult` world,
+/// requiring the phrase to have used the "target" keyword (CR 115.1). Returns
+/// `oracle_err` when the remainder is not a targeted object phrase so the caller
+/// falls through to the bare-possessive path.
+fn parse_target_with_syntax_target_keyword(input: &str) -> OracleResult<'_, TargetFilter> {
+    let mut ctx = ParseContext::default();
+    let (filter, rest, syntax) = parse_target_with_syntax(input, &mut ctx);
+    if syntax != TargetSyntax::TargetKeyword {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, filter))
 }
 
 /// CR 608.2k + CR 400.7j + CR 202.3: Previously-referenced object's mana value.
@@ -6317,6 +6382,66 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 202.3 + CR 115.1: "mana value of target <filter>" lowers to the
+    /// object-axis `TargetObjectManaValue` (Fateful Handoff, Knollspine Dragon),
+    /// carrying the parsed target filter. The bare possessive "target creature's
+    /// mana value" stays `ObjectManaValue { Target }` (test below).
+    #[test]
+    fn test_parse_target_object_mana_value_of_form() {
+        let (rest, q) =
+            parse_quantity_ref("mana value of target artifact or creature you control").unwrap();
+        match q {
+            QuantityRef::TargetObjectManaValue { filter } => {
+                assert_ne!(
+                    *filter,
+                    TargetFilter::Any,
+                    "the carried slot filter must be the parsed 'artifact or creature you control'",
+                );
+            }
+            other => panic!("expected TargetObjectManaValue, got {other:?}"),
+        }
+        assert_eq!(rest, "");
+    }
+
+    /// The bare possessive must NOT route to the of-form variant.
+    #[test]
+    fn test_parse_target_creature_possessive_mana_value_unchanged() {
+        let (rest, q) = parse_quantity_ref("target creature's mana value").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Target,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 701.9 + CR 115.1: "cards target opponent discarded this turn" lowers to
+    /// the player-axis Target scope (Dream Salvage).
+    #[test]
+    fn test_parse_cards_target_opponent_discarded_this_turn() {
+        let (rest, q) =
+            parse_quantity_ref("the number of cards target opponent discarded this turn").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::CardsDiscardedThisTurn {
+                player: PlayerScope::Target,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// Serde round-trip for the new object-axis variant.
+    #[test]
+    fn test_target_object_mana_value_serde_round_trip() {
+        let qty = QuantityRef::TargetObjectManaValue {
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        let json = serde_json::to_string(&qty).expect("serialize");
+        let back: QuantityRef = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(qty, back);
+    }
+
     #[test]
     fn test_parse_basic_land_type_count() {
         let (rest, q) =
@@ -7038,6 +7163,68 @@ mod tests {
                     controller: Some(ControllerRef::You),
                     properties: Vec::new(),
                 }),
+            }
+        );
+    }
+
+    /// CR 120.9 + CR 115.1: "(the) damage dealt to target opponent this turn"
+    /// parses to a target-player-scoped, all-damage Sum reference so the
+    /// count-derived trigger target slot resolves against `ability.targets`.
+    #[test]
+    fn test_parse_damage_dealt_target_opponent_this_turn() {
+        let (rest, q) =
+            parse_damage_dealt_this_turn_ref("damage dealt to target opponent this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+            }
+        );
+
+        // The optional "the " prefix is absorbed by the shared combinator.
+        let (rest, q_the) =
+            parse_damage_dealt_this_turn_ref("the damage dealt to target opponent this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q_the, q);
+    }
+
+    /// Regression: Chandra's Incinerator phrasing still parses to the
+    /// Opponent-scoped, noncombat-only Sum reference.
+    #[test]
+    fn test_parse_damage_dealt_chandra_noncombat_unchanged() {
+        let (rest, q) = parse_damage_dealt_this_turn_ref(
+            "the total amount of noncombat damage dealt to your opponents this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
             }
         );
     }

@@ -281,6 +281,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
@@ -462,6 +463,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
@@ -1361,6 +1363,11 @@ fn resolve_ref(
         ),
         QuantityRef::ObjectManaValue { scope } => {
             resolve_object_mana_value(state, *scope, ctx, targets, ability)
+        }
+        // CR 202.3 + CR 115.1: mana value of the object chosen for this ref's own
+        // target slot. Reuses the ObjectScope::Target read path — does NOT duplicate.
+        QuantityRef::TargetObjectManaValue { .. } => {
+            resolve_object_mana_value(state, ObjectScope::Target, ctx, targets, ability)
         }
         // CR 105.1 + CR 105.2: Count the object's current colors. The color
         // vector is maintained by layer 5, so recipient-relative static boosts
@@ -2774,6 +2781,33 @@ fn split_controller_filter(filter: &TargetFilter) -> (Option<TargetFilter>, Opti
             let controller = stripped.controller.take();
             (Some(TargetFilter::Typed(stripped)), controller)
         }
+        // CR 120.9: lift the controller predicate out of an And so the remainder
+        // evaluates structurally and the controller is checked against the
+        // DamageRecord participant. Player-targeted damage records store the
+        // controller on a `Typed{controller=..}` child alongside a
+        // `TargetFilter::Player` structural child (e.g. "damage dealt to target
+        // opponent this turn" → And{[Player, Typed(controller=TargetPlayer)]}).
+        TargetFilter::And { filters } => {
+            let mut lifted = None;
+            let mut remainder = Vec::with_capacity(filters.len());
+            for f in filters {
+                match split_controller_filter(f) {
+                    (Some(stripped), Some(ctrl)) => {
+                        lifted = lifted.or(Some(ctrl));
+                        remainder.push(stripped);
+                    }
+                    (_, Some(ctrl)) => {
+                        lifted = lifted.or(Some(ctrl));
+                    }
+                    _ => remainder.push(f.clone()),
+                }
+            }
+            if lifted.is_some() {
+                (Some(TargetFilter::And { filters: remainder }), lifted)
+            } else {
+                (None, None)
+            }
+        }
         _ => (None, None),
     }
 }
@@ -2806,12 +2840,41 @@ fn damage_record_target_matches(
                 live_target_filter.as_ref().unwrap_or(filter);
             matches_target_filter(state, object_id, live_target_filter_ref, filter_ctx)
         }
-        TargetRef::Player(player_id) => player_matches_target_filter_in_state(
-            state,
-            filter,
-            player_id,
-            filter_ctx.source_controller,
-        ),
+        // CR 120.9 + CR 109.4 + CR 115.1: a player-targeted damage record. Lift
+        // any controller predicate and check it against the record's participant
+        // controller snapshot (so TargetPlayer resolves against `ability.targets`
+        // rather than failing closed at filter.rs); evaluate the controller-
+        // stripped remainder structurally against the player. When no controller
+        // is lifted (e.g. a bare `And{[Player]}` or `TargetFilter::Player`), fall
+        // back to the full-filter player match exactly as before.
+        TargetRef::Player(player_id) => {
+            let (stripped, lifted_controller) = split_controller_filter(filter);
+            if let Some(expected) = lifted_controller.as_ref() {
+                // CR 109.4: for a player-targeted record the controller predicate
+                // is evaluated against the DAMAGED PLAYER itself (`player_id`),
+                // not the object-control snapshot — `You`/`Opponent` are relative
+                // to the resolving controller, and `TargetPlayer` resolves against
+                // `ability.targets`. Mirrors `damage_source_controller_matches`'s
+                // `actual` argument but anchored on the player participant.
+                if !damage_source_controller_matches(
+                    state,
+                    player_id,
+                    controller,
+                    quantity_ctx,
+                    ability,
+                    expected,
+                ) {
+                    return false;
+                }
+            }
+            let remainder: &TargetFilter = stripped.as_ref().unwrap_or(filter);
+            player_matches_target_filter_in_state(
+                state,
+                remainder,
+                player_id,
+                filter_ctx.source_controller,
+            )
+        }
     }
 }
 
