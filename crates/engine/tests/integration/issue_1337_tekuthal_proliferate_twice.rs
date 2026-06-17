@@ -62,8 +62,13 @@ fn parses_tekuthal_proliferate_replacement() {
     assert!(matches!(*execute.effect, Effect::Proliferate));
     assert_eq!(
         execute.repeat_for,
-        Some(engine::types::ability::QuantityExpr::Fixed { value: 2 }),
-        "Tekuthal doubles proliferate via repeat_for"
+        Some(engine::types::ability::QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(engine::types::ability::QuantityExpr::Ref {
+                qty: engine::types::ability::QuantityRef::EventContextAmount,
+            }),
+        }),
+        "Tekuthal doubles proliferate via repeat_for (Multiply so stacked doublers compound)"
     );
 }
 
@@ -187,5 +192,58 @@ fn proliferate_without_tekuthal_remains_single_choice() {
     assert_eq!(
         runner.state().objects[&creature].counters[&CounterType::Plus1Plus1],
         2
+    );
+}
+
+#[test]
+fn two_tekuthals_compound_proliferate_to_four() {
+    // CR 616.1 + the MOM ruling: two Tekuthal each apply once to the proliferate
+    // event, re-evaluating between applications, so the controller proliferates
+    // 1 -> 2 -> 4 times — four +1/+1 counters added (1 base -> 5). With the prior
+    // `Fixed { value: 2 }` model the second doubler discarded the in-flight count
+    // and yielded a flat 2 (-> 3); `Multiply { factor: 2, EventContextAmount }`
+    // compounds through the pipeline's re-evaluation.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_tekuthal(&mut scenario);
+    add_tekuthal(&mut scenario);
+    let creature = scenario.add_creature(P1, "Pumped", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
+
+    let ability = ResolvedAbility::new(Effect::Proliferate, vec![], creature, P0);
+    resolve(runner.state_mut(), &ability, &mut Vec::new()).expect("proliferate resolves");
+
+    // Drive the CR 616.1 ordering of the two doublers, then each proliferate
+    // action, to completion. Bounded to guard against a non-terminating loop.
+    // Two ×2 doublers commute, so CR 616.1 ordering is immaterial: the pipeline
+    // auto-applies both (no ReplacementChoice prompt) and resolve opens one
+    // ProliferateChoice per action. Drive each to completion (bounded guard).
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 32, "proliferate choice loop did not terminate");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ProliferateChoice { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(creature)],
+                    })
+                    .expect("proliferate target choice");
+            }
+            _ => break,
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects[&creature].counters[&CounterType::Plus1Plus1],
+        5,
+        "two Tekuthal compound to four proliferations (1 base + 4), not two"
     );
 }
