@@ -114,6 +114,7 @@ mod issue_1025_rishkars_expertise;
 mod issue_1202_prepared_spell_cast_timing;
 mod issue_1206_shelob_spider_death_tokens;
 mod issue_1297_venture_initiative_triggers;
+mod issue_1299_ugin_labyrinth_imprint_mana;
 mod issue_1302_final_parting;
 mod issue_1305_thalisse_tokens_created_this_turn;
 mod issue_1308_unstoppable_plan;
