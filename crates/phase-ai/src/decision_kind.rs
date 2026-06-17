@@ -171,7 +171,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
         // mid-resolution selection; route to the ability catch-all.
         | WaitingFor::CoinFlipKeepChoice { .. }
-        | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::ActivationCostOneOfChoice { .. }
+        | WaitingFor::ExileChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 

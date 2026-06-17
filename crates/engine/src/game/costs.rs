@@ -56,10 +56,71 @@ use super::casting::{
     pay_effect_mana_cost,
 };
 use super::engine::EngineError;
+use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
 use crate::types::ability::ResolvedAbility;
+
+/// Helper to find eligible cards for exile cost payment at resolution.
+/// Returns cards in the specified zone matching the filter, excluding the source.
+fn find_eligible_exile_targets(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    zone: Zone,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_source(state, source_id);
+    let player_state = state.players.get(player.0 as usize);
+
+    match zone {
+        Zone::Graveyard => player_state
+            .map(|p| {
+                p.graveyard
+                    .iter()
+                    .copied()
+                    .filter(|&id| {
+                        id != source_id
+                            && filter.is_none_or(|f| {
+                                super::filter::matches_target_filter(state, id, f, &ctx)
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Zone::Hand => player_state
+            .map(|p| {
+                p.hand
+                    .iter()
+                    .copied()
+                    .filter(|&id| {
+                        id != source_id
+                            && filter.is_none_or(|f| {
+                                super::filter::matches_target_filter(state, id, f, &ctx)
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Zone::Battlefield => state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|&id| {
+                state
+                    .objects
+                    .get(&id)
+                    .map(|obj| obj.controller == player)
+                    .unwrap_or(false)
+                    && id != source_id
+                    && filter
+                        .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 /// Selects the payment regime for `pay_ability_cost_inner`. The two variants
 /// capture the only CR-confirmed differences between activation-time and
@@ -535,6 +596,56 @@ fn pay_ability_cost_inner(
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
         }
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::ExileChoice.
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+        } if !matches!(filter, Some(TargetFilter::SelfRef))
+            && matches!(scope, PaymentScope::Resolution { .. }) =>
+        {
+            let count = *count as usize;
+            let effective_zone = zone.unwrap_or(Zone::Graveyard);
+            let eligible = find_eligible_exile_targets(
+                state,
+                player,
+                source_id,
+                effective_zone,
+                filter.as_ref(),
+            );
+            if eligible.len() < count {
+                return Ok(payment_failed("not enough cards to exile"));
+            }
+            if count == 0 {
+                // CR 118.12: record the (zero) paid count for downstream chain
+                // steps that read `QuantityRef::EventContextAmount`.
+                state.last_effect_count = Some(0);
+                return Ok(PaymentOutcome::Paid);
+            }
+            // Forced-choice fast path: when the eligible set exactly
+            // fills the requirement there is no choice to surface, so the
+            // exile executes immediately.
+            if eligible.len() == count {
+                for card_id in eligible {
+                    super::zones::move_to_zone(state, card_id, Zone::Exile, events);
+                }
+                state.last_effect_count = Some(count as i32);
+            } else {
+                state.waiting_for = WaitingFor::ExileChoice {
+                    player,
+                    count,
+                    cards: eligible,
+                    source_id,
+                    filter: filter.clone().unwrap_or(TargetFilter::Any),
+                    zone: effective_zone,
+                };
+                return Ok(PaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
+            }
+        }
         // CR 702.167a: Craft's materials are exiled by the interactive
         // `WaitingFor::PayCost { kind: ExileMaterials }` detour before this
         // resume runs, so this arm is an idempotent no-op (mirrors the non-self
@@ -950,6 +1061,10 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
             self_scope: DiscardSelfScope::FromHand,
             ..
         } => true,
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::PayCost before this resume runs.
+        AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1039,6 +1154,26 @@ fn can_pay_resolution(
                 .unwrap_or(0) as usize;
             let eligible =
                 find_eligible_discard_targets(state, payer, ability.source_id, filter.as_ref());
+            eligible.len() >= count
+        }
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::ExileChoice.
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+            ..
+        } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+            let count = *count as usize;
+            let effective_zone = zone.unwrap_or(Zone::Graveyard);
+            let eligible = find_eligible_exile_targets(
+                state,
+                payer,
+                ability.source_id,
+                effective_zone,
+                filter.as_ref(),
+            );
             eligible.len() >= count
         }
         // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.

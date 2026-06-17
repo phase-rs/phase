@@ -97,6 +97,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- The Mimeoplasm: "As ~ enters, you may exile N cards from graveyards. If you do, ..." ---
+    // Check before other "as enters" patterns to ensure it matches correctly
+    if let Some(def) = parse_as_enters_exile_from_graveyards(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
+
     // --- "~ enters prepared." ---
     // CR 722.3a: "enters prepared" gives the entering permanent the prepared
     // designation as part of the entry event, not through a triggered ability.
@@ -789,6 +795,90 @@ fn parse_self_enters_pay_cost_replacement(
                 cost,
                 decline: Some(Box::new(decline)),
             })
+            .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a + CR 614.12: The Mimeoplasm — "As ~ enters, you may exile N cards
+/// from graveyards. If you do, it enters as a copy of one of those cards with a
+/// number of additional +1/+1 counters on it equal to the power of the other card."
+///
+/// Emits a `ReplacementMode::MayCost` on the `Moved` event: the accept-cost is
+/// the parsed `AbilityCost::Exile` from graveyards; the "If you do" continuation
+/// is the copy + counter placement effect chain. No decline branch — the permanent
+/// enters normally (no exile, no copy, no counters) if declined.
+fn parse_as_enters_exile_from_graveyards(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Prefix: "as ~ enters, you may exile "
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            preceded(
+                tag("as "),
+                alt((
+                    tag("~ enters, you may exile "),
+                    tag("this creature enters, you may exile "),
+                )),
+            ),
+        )
+        .parse(i)
+    })?;
+
+    // Isolate the cost body from the "If you do" continuation
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (cost_body, tail) =
+        split_once_on_lower(after_prefix, &after_prefix_lower, ". if you do, ")?;
+
+    // Parse the exile cost manually to handle "from graveyards" (plural)
+    // Pattern: "[count] [type] card(s) from graveyards"
+    let cost_body_lower = cost_body.trim().to_lowercase();
+    let (count, filter_text) =
+        parse_number(&cost_body_lower).unwrap_or((1, cost_body_lower.trim()));
+
+    // Strip the "from graveyards" suffix to extract the type filter.
+    // filter_text is already lowercase (slice of cost_body_lower).
+    // Use take_until + alt to consume up to and including the zone suffix.
+    let parsed: nom::IResult<&str, (&str, &str)> = pair(
+        take_until(" from graveyard"),
+        alt((tag(" from graveyards"), tag(" from graveyard"))),
+    )
+    .parse(filter_text);
+    let Ok(("", (filter_text, _))) = parsed else {
+        return None;
+    };
+
+    // Parse the type filter (e.g., "creature")
+    let (filter, remainder) = parse_type_phrase(filter_text.trim());
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let cost = AbilityCost::Exile {
+        count,
+        zone: Some(Zone::Graveyard),
+        filter: Some(filter),
+    };
+
+    // Parse the "If you do" continuation effect
+    let continuation_text = tail.trim_end_matches('.');
+    if continuation_text.is_empty() {
+        return None;
+    }
+    let continuation = parse_effect_chain(continuation_text, AbilityKind::Spell);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: None, // No decline branch — enters normally if declined
+            })
+            .execute(continuation)
             .valid_card(TargetFilter::SelfRef)
             // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
             .destination_zone(Zone::Battlefield)
@@ -6942,6 +7032,37 @@ mod tests {
             }
             other => panic!("expected MayCost, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a + CR 614.12: The Mimeoplasm — "As ~ enters, you may exile two
+    /// creature cards from graveyards. If you do, it enters as a copy of one of
+    /// those cards with a number of additional +1/+1 counters on it equal to the
+    /// power of the other card."
+    #[test]
+    fn mimeoplasm_exile_from_graveyards_replacement() {
+        let def = parse_replacement_line(
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, \
+             it enters as a copy of one of those cards with a number of additional +1/+1 \
+             counters on it equal to the power of the other card.",
+            "The Mimeoplasm",
+        )
+        .expect("The Mimeoplasm should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        match &def.mode {
+            ReplacementMode::MayCost { cost, decline } => {
+                assert!(
+                    matches!(cost, AbilityCost::Exile { count, zone, filter } if *count == 2 && *zone == Some(Zone::Graveyard) && filter.is_some()),
+                    "expected Exile count 2 from Graveyard, got {cost:?}"
+                );
+                assert!(decline.is_none(), "The Mimeoplasm has no decline branch");
+            }
+            other => panic!("expected MayCost, got {other:?}"),
+        }
+        // Verify the continuation effect is present in execute
+        let execute = def.execute.as_ref().expect("execute must be present");
+        // The continuation should be the copy + counter placement effect
+        assert!(!matches!(&*execute.effect, Effect::Unimplemented { .. }));
     }
 
     #[test]

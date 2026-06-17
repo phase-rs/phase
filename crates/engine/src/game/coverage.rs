@@ -394,6 +394,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
+        TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
         TargetFilter::StackAbility {
             controller: None,
@@ -1162,6 +1163,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
@@ -5686,6 +5688,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
         QuantityRef::DistinctColorsAmongPermanents { .. } => {

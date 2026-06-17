@@ -116,6 +116,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::ExileChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
@@ -2412,6 +2413,64 @@ pub(super) fn handle_resolution_choice(
             // action, so batch this discard's observer triggers (Waste Not,
             // Megrim, Bone Miser) across the `DiscardChoice` pause — exactly
             // as the `Sacrifice` branch does for dies-triggers.
+            if let Some(outcome) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_effect,
+                events_after_move,
+            ) {
+                return Ok(outcome);
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        }
+        (
+            WaitingFor::ExileChoice {
+                player,
+                count,
+                cards,
+                source_id,
+                filter: _,
+                zone,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            if chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+
+            for card_id in &chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in eligible set".to_string(),
+                    ));
+                }
+                if state.objects.get(card_id).map(|obj| obj.zone) != Some(zone) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Selected card is no longer in {:?}",
+                        zone
+                    )));
+                }
+            }
+
+            let events_before_effect = events.len();
+            for &card_id in &chosen {
+                zones::move_to_zone(state, card_id, Zone::Exile, events);
+            }
+            let events_after_move = events.len();
+
+            state.last_effect_count = Some(chosen.len() as i32);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::ChangeZone,
+                source_id,
+            });
+
+            let waiting_for = finish_with_continuation(state, player, events);
+
+            // CR 603.2c: batch observer triggers across the ExileChoice pause
             if let Some(outcome) = batch_or_drain_observer_triggers(
                 state,
                 events,

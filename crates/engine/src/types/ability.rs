@@ -3138,6 +3138,13 @@ pub enum TargetFilter {
     /// CR 610.3: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
+    /// CR 406.6: References a specific card exiled by the source, indexed by order.
+    /// Used by The Mimeoplasm to distinguish "the first card exiled this way" from
+    /// "the second card exiled this way". The index is 0-based and corresponds to
+    /// the order in `state.cards_exiled_with_source_this_turn[source_id]`.
+    ExiledCardByIndex {
+        index: u32,
+    },
     /// CR 603.7c: Resolves to the controller of the spell/ability that triggered this.
     TriggeringSpellController,
     /// CR 603.7c: Resolves to the owner of the spell/ability that triggered this.
@@ -3676,6 +3683,9 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// CR 406.6: The power of a specific card exiled by the source, indexed by order.
+    /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
+    ExiledCardPower { index: u32 },
     /// CR 604.3: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
     /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller
