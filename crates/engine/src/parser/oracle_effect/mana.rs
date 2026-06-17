@@ -429,6 +429,35 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             });
         }
 
+        // CR 605.3b + CR 106.1a: "N mana of different colors" — produce N mana,
+        // each a different color from WUBRG. Materialize every distinct unordered
+        // color combination of size N; the existing `ChoiceAmongCombinations`
+        // machinery prompts among them (10 options for N=2). Only a fixed N is
+        // enumerable into a static option set; X/dynamic counts decline (no such
+        // printing exists). Class: Firemind Vessel, Component Pouch, Guild Globe,
+        // Interplanar Beacon.
+        if nom_on_lower(rest, &rest_lower, |i| {
+            value((), tag("mana of different colors")).parse(i)
+        })
+        .is_some()
+        {
+            if let QuantityExpr::Fixed { value } = count {
+                if value >= 1 {
+                    let options = combinations_of_distinct_colors(value as usize);
+                    if !options.is_empty() {
+                        return Some(Effect::Mana {
+                            produced: ManaProduction::ChoiceAmongCombinations { options },
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: where_x_target,
+                        });
+                    }
+                }
+            }
+            // non-fixed / out-of-range count: fall through to later arms.
+        }
+
         // CR 106.1: "{fixed} or one mana of the chosen color" after a count
         // prefix must retain the fixed-color alternative. Scan `rest` before
         // the bare chosen-color arm so a leading count token does not drop the
@@ -1182,6 +1211,41 @@ pub(super) fn all_mana_colors() -> Vec<ManaColor> {
         ManaColor::Red,
         ManaColor::Green,
     ]
+}
+
+/// CR 605.3b + CR 106.1a: Enumerate every distinct (unordered) combination of
+/// `n` different colors drawn from WUBRG, in canonical lexicographic order.
+/// Expands "Add N mana of different colors" into the explicit option set for
+/// `ManaProduction::ChoiceAmongCombinations` (Firemind Vessel, Component Pouch,
+/// Guild Globe, Interplanar Beacon — all N=2 → 10 pairs). Empty when `n == 0`
+/// or `n > 5` so callers decline rather than emit an empty choice.
+fn combinations_of_distinct_colors(n: usize) -> Vec<Vec<ManaColor>> {
+    let colors = ManaColor::ALL; // [ManaColor; 5], canonical WUBRG order
+    if n == 0 || n > colors.len() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // `idx` holds the current strictly-increasing combination of indices into
+    // `colors`. Emit it, then advance to the next combination in lexicographic
+    // order (standard algorithm-L style k-combination successor).
+    let mut idx: Vec<usize> = (0..n).collect();
+    loop {
+        out.push(idx.iter().map(|&i| colors[i]).collect());
+        let mut i = n;
+        loop {
+            if i == 0 {
+                return out;
+            }
+            i -= 1;
+            if idx[i] != i + colors.len() - n {
+                idx[i] += 1;
+                for j in (i + 1)..n {
+                    idx[j] = idx[j - 1] + 1;
+                }
+                break;
+            }
+        }
+    }
 }
 
 fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
@@ -2578,6 +2642,130 @@ mod tests {
             }
             other => panic!("expected ChoiceAmongCombinations, got {other:?}"),
         }
+    }
+
+    /// CR 605.3b + CR 106.1a: "Add two mana of different colors" (Firemind
+    /// Vessel, Component Pouch, Guild Globe, Interplanar Beacon) expands to the
+    /// 10 distinct WUBRG color pairs as `ChoiceAmongCombinations`.
+    #[test]
+    fn add_two_mana_of_different_colors_yields_ten_pairs() {
+        let options = extract_combinations("Add two mana of different colors")
+            .expect("different-colors form must parse to combinations");
+        assert_eq!(options.len(), 10, "C(5,2) == 10 pairs");
+        for pair in &options {
+            assert_eq!(pair.len(), 2, "each option is a 2-color pair");
+            assert_ne!(pair[0], pair[1], "the two colors must differ");
+            assert!(
+                (pair[0] as usize) < (pair[1] as usize),
+                "colors listed in canonical order"
+            );
+        }
+        assert_eq!(
+            options[0],
+            vec![ManaColor::White, ManaColor::Blue],
+            "first pair is canonical [White, Blue]"
+        );
+        // No duplicate pairs.
+        let mut sorted = options.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 10, "no duplicate pairs");
+    }
+
+    /// CR 605.3b + CR 106.1a: the combination enumerator is general across N,
+    /// not hardcoded for the only printed value (N=2).
+    #[test]
+    fn combinations_of_distinct_colors_is_general() {
+        assert_eq!(combinations_of_distinct_colors(1).len(), 5);
+        assert_eq!(combinations_of_distinct_colors(2).len(), 10);
+        assert_eq!(combinations_of_distinct_colors(3).len(), 10);
+        assert_eq!(combinations_of_distinct_colors(5).len(), 1);
+        assert!(combinations_of_distinct_colors(0).is_empty());
+        assert!(combinations_of_distinct_colors(6).is_empty());
+        let pairs = combinations_of_distinct_colors(2);
+        assert_eq!(pairs[0], vec![ManaColor::White, ManaColor::Blue]);
+        // The single 5-combination is all five colors in canonical order.
+        assert_eq!(
+            combinations_of_distinct_colors(5)[0],
+            ManaColor::ALL.to_vec()
+        );
+        // Every combination is strictly increasing (no repeats, canonical).
+        for combo in combinations_of_distinct_colors(3) {
+            for w in combo.windows(2) {
+                assert!((w[0] as usize) < (w[1] as usize));
+            }
+        }
+    }
+
+    /// CR 106.1a: "different colors" must NOT collapse into the any-color
+    /// variants — it is a distinct-combination choice, not "pick one color N
+    /// times" (`AnyOneColor`) nor a free per-mana color choice
+    /// (`AnyCombination`). Conversely, the genuine any-color phrasings still
+    /// parse to their existing variants.
+    #[test]
+    fn different_colors_is_not_any_color() {
+        let effect = try_parse_add_mana_effect("Add two mana of different colors")
+            .expect("different-colors must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        assert!(
+            matches!(produced, ManaProduction::ChoiceAmongCombinations { .. }),
+            "different colors must be ChoiceAmongCombinations, got {produced:?}"
+        );
+        assert!(
+            !matches!(produced, ManaProduction::AnyOneColor { .. }),
+            "different colors must not be AnyOneColor"
+        );
+        assert!(
+            !matches!(produced, ManaProduction::AnyCombination { .. }),
+            "different colors must not be AnyCombination"
+        );
+
+        // "two mana of any color" → AnyOneColor across all five colors.
+        let any = try_parse_add_mana_effect("Add two mana of any color")
+            .expect("any-color must still parse");
+        let Effect::Mana {
+            produced: any_produced,
+            ..
+        } = any
+        else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyOneColor { color_options, .. } = any_produced else {
+            panic!("expected AnyOneColor for any-color, got {any_produced:?}");
+        };
+        assert_eq!(color_options, all_mana_colors());
+
+        // "mana of any one color" → AnyOneColor as well.
+        let any_one = try_parse_add_mana_effect("Add mana of any one color")
+            .expect("any-one-color must still parse");
+        let Effect::Mana {
+            produced: any_one_produced,
+            ..
+        } = any_one
+        else {
+            panic!("expected Effect::Mana");
+        };
+        assert!(
+            matches!(any_one_produced, ManaProduction::AnyOneColor { .. }),
+            "any one color must be AnyOneColor, got {any_one_produced:?}"
+        );
+    }
+
+    /// CR 605.3b + CR 106.1a: Interplanar Beacon's bare effect clause (the
+    /// activated-ability text fed to `try_parse_add_mana_effect`) parses to the
+    /// 10-option different-colors choice.
+    #[test]
+    fn interplanar_beacon_effect_clause_parses() {
+        let effect = try_parse_add_mana_effect("Add two mana of different colors.")
+            .expect("Interplanar Beacon clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::ChoiceAmongCombinations { options } = produced else {
+            panic!("expected ChoiceAmongCombinations, got {produced:?}");
+        };
+        assert_eq!(options.len(), 10);
     }
 
     /// Negative: mismatched repeated count (`"X {G} or {W}"` — second disjunct
