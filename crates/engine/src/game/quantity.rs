@@ -255,7 +255,8 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::PartySize { .. }
         | QuantityRef::DistinctColorsAmongPermanents { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
-        | QuantityRef::EnteredThisTurn { .. } => true,
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::CommanderManaValue { .. } => true,
         // Distinct card types reads battlefield population ONLY when its source
         // is the object-filter variant; zone / linked-exile sources do not.
         QuantityRef::DistinctCardTypes { source } => match source {
@@ -440,6 +441,9 @@ fn entered_object_perturbs_quantity_ref(
         QuantityRef::PartySize { .. } => {
             entered.card_types.core_types.contains(&CoreType::Creature)
         }
+        // CR 903.3d: a commander entering the battlefield or command zone can change
+        // the single-commander mana value. Conservatively perturb on any commander entry.
+        QuantityRef::CommanderManaValue { .. } => entered.is_commander,
         // Player-level, single-object, history-record, payment, and choice refs:
         // an object's battlefield entry/exit cannot change their value. Identical
         // enumeration to the `false` arm of `quantity_ref_uses_object_count`.
@@ -1012,11 +1016,15 @@ pub(crate) fn object_count_matching_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let zone = filter
-        .extract_in_zone()
-        .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut ids: Vec<ObjectId> = crate::game::targeting::zone_object_ids(state, zone)
+    let zones = filter.extract_zones();
+    let zones = if zones.is_empty() {
+        vec![crate::types::zones::Zone::Battlefield]
+    } else {
+        zones
+    };
+    let mut ids: Vec<ObjectId> = zones
         .into_iter()
+        .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
         .filter(|&id| matches_target_filter(state, id, filter, filter_ctx))
         .collect();
     // Drop the triggering object for an "other than" filter (Valakut's "five
@@ -1921,6 +1929,47 @@ fn resolve_ref(
         QuantityRef::CommanderCastFromCommandZoneCount => u32_to_i32_saturating(
             super::commander::commander_casts_from_command_zone(state, controller),
         ),
+        // CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
+        // Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
+        // or in the command zone" pattern. Returns the mana value of the first matching commander
+        // (any one if multiple exist).
+        QuantityRef::CommanderManaValue { owner } => {
+            let filter = TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(owner.clone())
+                    .properties(vec![FilterProp::IsCommander]),
+            );
+
+            // Check battlefield first
+            let battlefield_ids: Vec<ObjectId> = crate::game::targeting::zone_object_ids(
+                state,
+                crate::types::zones::Zone::Battlefield,
+            )
+            .into_iter()
+            .filter(|&id| matches_target_filter(state, id, &filter, &filter_ctx))
+            .collect();
+
+            // Check command zone (zone_object_ids returns empty for Command, so use state.command_zone directly)
+            let command_zone_ids: Vec<ObjectId> = state
+                .command_zone
+                .iter()
+                .filter(|&id| matches_target_filter(state, *id, &filter, &filter_ctx))
+                .copied()
+                .collect();
+
+            let mut ids = battlefield_ids;
+            ids.extend(command_zone_ids);
+
+            // Return mana value of first matching commander (any one if multiple exist)
+            ids.first()
+                .and_then(|&id| state.objects.get(&id))
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .unwrap_or(0)
+        }
         // CR 106.1 + CR 109.1: Count distinct colors (W/U/B/R/G) among permanents
         // matching the filter. "Gold"/"multicolor"/"colorless" are not colors, so
         // each ManaColor contributes at most once per colored permanent.
@@ -4759,6 +4808,79 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &all_expr, PlayerId(0), ObjectId(0)),
             8
+        );
+    }
+
+    /// CR 903.3d: CommanderManaValue resolves to the mana value of a commander
+    /// you own on the battlefield or in the command zone. Test with commander
+    /// in command zone (Stinging Study pattern).
+    #[test]
+    fn resolve_quantity_commander_mana_value_command_zone() {
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CommanderManaValue {
+                owner: ControllerRef::You,
+            },
+        };
+
+        // No commander yet → 0.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 0);
+
+        // Build a 5-mana commander in command zone and verify the resolver returns 5.
+        let cmd_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Kaalia".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd_id).unwrap();
+            obj.is_commander = true;
+            obj.mana_cost = ManaCost::generic(5);
+        }
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "Commander in command zone should resolve to its mana value (5)"
+        );
+    }
+
+    /// CR 903.3d: CommanderManaValue resolves to the mana value of a commander
+    /// on the battlefield when no commander is in the command zone.
+    #[test]
+    fn resolve_quantity_commander_mana_value_battlefield() {
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CommanderManaValue {
+                owner: ControllerRef::You,
+            },
+        };
+
+        // Build a 3-mana commander on battlefield.
+        let cmd_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Test Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd_id).unwrap();
+            obj.is_commander = true;
+            obj.mana_cost = ManaCost::generic(3);
+        }
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            3,
+            "Commander on battlefield should resolve to its mana value (3)"
         );
     }
 

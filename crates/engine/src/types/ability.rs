@@ -4035,6 +4035,11 @@ pub enum QuantityRef {
     /// as "copy it for each time you've cast your commander from the command
     /// zone this game."
     CommanderCastFromCommandZoneCount,
+    /// CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
+    /// Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
+    /// or in the command zone" pattern. The resolver selects the first matching commander
+    /// (any one if multiple exist) and returns its mana value.
+    CommanderManaValue { owner: ControllerRef },
     /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
     /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
     /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's

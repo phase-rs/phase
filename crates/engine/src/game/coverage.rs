@@ -1357,6 +1357,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CommanderCastFromCommandZoneCount => {
             "# of commander casts from command zone".into()
         }
+        QuantityRef::CommanderManaValue { .. } => "mana value of a commander".into(),
         QuantityRef::AttachmentsOnLeavingObject { kind, controller } => {
             let kind_s = match kind {
                 crate::types::ability::AttachmentKind::Aura => "auras",
@@ -5752,6 +5753,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CommanderCastFromCommandZoneCount => {
             ("CommanderCastFromCommandZoneCount", Handled)
         }
+        QuantityRef::CommanderManaValue { .. } => ("CommanderManaValue", Handled),
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
