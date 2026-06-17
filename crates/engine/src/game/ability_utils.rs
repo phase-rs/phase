@@ -1465,6 +1465,31 @@ fn collect_target_slots(
         return Ok(());
     }
 
+    // CR 701.12a: ExchangeLifeTotals carries two distinct per-slot player filters.
+    // Context-ref filters (Controller / "you") are filled by the resolver from
+    // ability.controller and don't require a player choice. Surface one slot per
+    // non-context-ref filter, in declaration order. (Keep in sync with
+    // `build_target_slot_specs` or the slot-count invariant at ~408 fires.)
+    if let Effect::ExchangeLifeTotals { player_a, player_b } = &ability.effect {
+        for filter in [player_a, player_b] {
+            if filter.is_context_ref() {
+                continue;
+            }
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            acc.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
+        return Ok(());
+    }
+
     if let Effect::MoveCounters {
         source,
         target,
@@ -2536,6 +2561,25 @@ fn collect_target_slot_specs(
     if let Effect::ExchangeControl { target_a, target_b } = &ability.effect {
         for filter in [target_a, target_b] {
             if matches!(filter, TargetFilter::SelfRef) {
+                continue;
+            }
+            let id = TargetInstanceId(*next_instance);
+            *next_instance += 1;
+            specs.push(TargetSlotSpec {
+                filter: filter.clone(),
+                optional: ability.optional_targeting,
+                instance: id,
+            });
+        }
+        return;
+    }
+
+    // CR 701.12a: Mirror the ExchangeLifeTotals branch in `collect_target_slots`
+    // so per-slot specs match the surfaced TargetSelectionSlots one-for-one
+    // (context-ref slots like Controller are auto-resolved and not surfaced).
+    if let Effect::ExchangeLifeTotals { player_a, player_b } = &ability.effect {
+        for filter in [player_a, player_b] {
+            if filter.is_context_ref() {
                 continue;
             }
             let id = TargetInstanceId(*next_instance);

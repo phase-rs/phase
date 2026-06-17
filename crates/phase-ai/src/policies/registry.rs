@@ -11,6 +11,7 @@ use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::context::PolicyContext;
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
+use super::enchantments_payoff::EnchantmentsPayoffPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
@@ -53,6 +54,7 @@ pub enum PolicyId {
     ArtifactSynergyTactical,
     BoardDevelopment,
     EtbValue,
+    EnchantmentsPayoff,
     CopyValue,
     Tutor,
     HandDisruption,
@@ -273,6 +275,7 @@ impl Default for PolicyRegistry {
             Box::new(super::artifact_synergy::ArtifactSynergyPolicy),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(EnchantmentsPayoffPolicy),
             Box::new(CopyValuePolicy),
             Box::new(TutorPolicy),
             Box::new(HandDisruptionPolicy),

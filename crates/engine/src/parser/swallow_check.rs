@@ -1918,6 +1918,22 @@ fn detect_condition_if(
     if stripped.contains("if you don't") && any_replacement_has_may_cost_decline(parsed) {
         return;
     }
+    // CR 608.2c: "If you [lost/gained] life this way, draw that many cards"
+    // (Mister Negative). "[lost/gained] life this way" is a result-reference to
+    // the life the controller lost/gained from the preceding effect, and "that
+    // many" lowers the dependent draw to `count: EventContextAmount`. The
+    // conditional is jointly represented by the event-context quantity —
+    // drawing zero when zero life changed is exactly the no-op the "if" guards —
+    // so the leading "if" is a representation marker, not a swallowed condition.
+    // Mirrors the Screaming Nemesis "dealt damage this way" exemption above.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if (stripped.contains("lost life this way") || stripped.contains("gained life this way"))
+        && stripped.contains("that many") // allow-noncombinator: swallow detector marker scan on classified text
+        && ast_json.contains("EventContextAmount")
+    // allow-noncombinator: structural AST-shape JSON probe
+    {
+        return;
+    }
     // CR 117.6 / 702.8: A `SpellCastingOption` with `cost: Some(_)` encodes
     // the "if you pay [cost]" surcharge gate inline (Ghitu Fire, Rout-class
     // "as though it had flash if you pay X" cycle). The "if" is a cost
@@ -3335,6 +3351,28 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    /// CR 608.2c: Mister Negative's "If you lost life this way, draw that many
+    /// cards" rider — the "lost life this way" result-reference and "that many"
+    /// draw quantity are jointly represented by `Draw { count:
+    /// EventContextAmount }`, so the leading "if" must NOT be reported as a
+    /// swallowed condition.
+    #[test]
+    fn condition_if_accepts_lost_life_this_way_draw_that_many() {
+        let parsed = parse_named(
+            "Vigilance, lifelink\n\
+             When this creature enters, you may exchange life totals with target opponent. \
+             If you lost life this way, draw that many cards.",
+            "Mister Negative",
+            &["Creature"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "lost-life-this-way result-reference draw must not report a swallowed condition: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]

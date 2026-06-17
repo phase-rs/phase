@@ -51,6 +51,7 @@ fn expected_policies(kind: FeatureKind) -> &'static [&'static str] {
         FeatureKind::Control => &["SweeperTiming", "HoldManaUp", "BoardWipeTelegraph"],
         FeatureKind::Aristocrats => &["FreeOutletActivation", "SacrificeValue"],
         FeatureKind::Artifacts => &["ArtifactSynergyTactical"],
+        FeatureKind::Enchantments => &["EnchantmentsPayoff"],
         FeatureKind::AggroPressure => &["AggroPressure"],
         FeatureKind::TokensWide => &["TokensWide", "AnthemPriority"],
         FeatureKind::PlusOneCounters => &["PlusOneCountersTactical"],
@@ -117,14 +118,15 @@ fn declared_exercises_appear_in_attribution() {
             continue;
         };
         for kind in &result.exercises {
-            // ArtifactSynergyPolicy is a deliberately nudge-band policy
-            // (deploy/payoff bonuses of 0.2–0.5). Its per-decision score never
-            // reaches the top-3 this attribution test inspects, so the feature
-            // is validated at the activation level by
-            // `affinity_mirror_deck_activates_artifact_synergy`
-            // (duel_suite/tests.rs) — which asserts the tagged deck clears
+            // ArtifactSynergyPolicy and EnchantmentsPayoffPolicy are deliberately
+            // nudge-band policies (bonuses of 0.2–0.5). Their per-decision score
+            // never reaches the top-3 this attribution test inspects, so those
+            // features are validated at the activation level by
+            // `affinity_mirror_deck_activates_artifact_synergy` /
+            // `enchantress_mirror_deck_activates_enchantments_payoff`
+            // (duel_suite/tests.rs) — which assert the tagged deck clears
             // `COMMITMENT_FLOOR` — rather than via runtime attribution here.
-            if *kind == FeatureKind::Artifacts {
+            if matches!(*kind, FeatureKind::Artifacts | FeatureKind::Enchantments) {
                 continue;
             }
             let expected = expected_policies(*kind);

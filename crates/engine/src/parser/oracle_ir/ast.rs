@@ -452,6 +452,14 @@ pub(crate) enum ImperativeFamilyAst {
         player: TargetFilter,
         stat: PtStat,
     },
+    /// CR 701.12a: Two players exchange life totals (Soul Conduit, Axis of
+    /// Mortality, Magus of the Mirror, Mirror Universe). `player_a`/`player_b`
+    /// select each player (`Controller` for "you", an opponent filter for "target
+    /// opponent", `Player` for "target player").
+    ExchangeLifeTotals {
+        player_a: TargetFilter,
+        player_b: TargetFilter,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,

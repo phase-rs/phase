@@ -2840,6 +2840,7 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Untapped
             // CR 702.171b: "saddled [type]" adjective prefix.
             | FilterProp::IsSaddled
+            | FilterProp::ProtectorMatches { .. }
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
             | FilterProp::Attacking { defender: None }
             | FilterProp::Blocking
@@ -3232,6 +3233,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 // CR 702.171b: "saddled" designation as a type-phrase prefix
                 // ("saddled Mount", "saddled creature").
                 | FilterProp::IsSaddled
+                | FilterProp::ProtectorMatches { .. }
                 | FilterProp::FaceDown
                 // CR 701.60b: "suspected" is a battlefield designation that appears
                 // as an adjective prefix in type phrases ("suspected creatures").

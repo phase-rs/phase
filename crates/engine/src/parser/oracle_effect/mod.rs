@@ -9423,47 +9423,8 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
         return None;
     }
 
-    // CR 109.4 + CR 109.5: Probe for one of the three controller-suffix variants
-    // this compound class uses. All three resolve to ControllerRef::Opponent for
-    // the object filter — "they" anaphors the opponent set named in the first
-    // half; "you don't control" and "your opponents control" are direct opponent
-    // refs. The suffix presence is the gate for the compound shape — without it
-    // the " and " is part of an unrelated clause and falls through to general
-    // split. `take_until` + an anchored controller-tag alt() is the single-pass
-    // gate; the take_until result (the type-phrase prefix) is unused here because
-    // we hand the full slice to parse_target below for native consumption.
-    let mut probe = alt((
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" they control"),
-            tag(" they control"),
-        ),
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" you don't control"),
-            tag(" you don't control"),
-        ),
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" your opponents control"),
-            tag(" your opponents control"),
-        ),
-    ));
-    let (gate_rest, _) = probe.parse(after_and_each).ok()?;
-    if !gate_rest.is_empty() {
-        return None;
-    }
-
-    // Use parse_target on "each [type phrase + controller suffix]" so the controller
-    // suffix is consumed natively by the parser pipeline. parse_target returns the
-    // typed filter with controller already populated (Opponent for "you don't control"
-    // / "your opponents control"; You for "they control" — we rewrite that below).
-    let target_text = format!("each {after_and_each}");
-    let (mut object_filter, _rem) = parse_target(&target_text);
-
-    // CR 109.5: "they" in this compound damage context anaphors back to the
-    // opponent set in the first half of the conjunction, NOT to the controller.
-    // Rewrite ControllerRef::You (parse_target's default for "they control") to
-    // Opponent so the runtime targets the same opponent set as `player_filter`.
-    // "you don't control" and "your opponents control" already resolve to
-    // Opponent via `parse_zone_controller` and are left unchanged.
+    // CR 109.4 + CR 109.5: Probe for controller-suffix variants on the object
+    // half, or the battle-specific "they protect" suffix (CR 310.8a).
     fn set_opponent_controller(filter: &mut TargetFilter) {
         match filter {
             TargetFilter::Typed(tf) => {
@@ -9477,7 +9438,38 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
             _ => {}
         }
     }
-    set_opponent_controller(&mut object_filter);
+
+    let object_filter = if after_and_each == "battle they protect" {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle).properties(vec![
+            FilterProp::ProtectorMatches {
+                controller: ControllerRef::Opponent,
+            },
+        ]))
+    } else {
+        let mut probe = alt((
+            preceded(
+                take_until::<_, _, OracleError<'_>>(" they control"),
+                tag(" they control"),
+            ),
+            preceded(
+                take_until::<_, _, OracleError<'_>>(" you don't control"),
+                tag(" you don't control"),
+            ),
+            preceded(
+                take_until::<_, _, OracleError<'_>>(" your opponents control"),
+                tag(" your opponents control"),
+            ),
+        ));
+        let (gate_rest, _) = probe.parse(after_and_each).ok()?;
+        if !gate_rest.is_empty() {
+            return None;
+        }
+
+        let target_text = format!("each {after_and_each}");
+        let (mut object_filter, _rem) = parse_target(&target_text);
+        set_opponent_controller(&mut object_filter);
+        object_filter
+    };
 
     // CR 120.3: Single effect, one damage source, simultaneous batch across both
     // the player set and the object set. Replacement effects observe this as one
@@ -22022,6 +22014,31 @@ mod tests {
                 player_filter: PlayerFilter::Opponent,
             }
         ));
+    }
+
+    /// Issue #3293: Joyful Stormsculptor — "each opponent and each battle they
+    /// protect" must damage players and protected battles, not all opponent
+    /// creatures.
+    #[test]
+    fn joyful_stormsculptor_compound_opponent_and_battle_they_protect() {
+        let e = parse_effect("~ deals 1 damage to each opponent and each battle they protect");
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::Opponent),
+                ..
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Battle]);
+                assert!(tf.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::ProtectorMatches {
+                        controller: ControllerRef::Opponent,
+                    }
+                )));
+            }
+            other => panic!("expected DamageAll opponent+battle, got {other:?}"),
+        }
     }
 
     #[test]

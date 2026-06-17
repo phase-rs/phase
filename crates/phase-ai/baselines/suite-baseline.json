@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "git_sha": "13eed2858498",
+  "git_sha": "854947668198",
   "card_data_hash": "c05036041f01ff8406bef7ff6da1dcaafaac5854",
-  "unix_timestamp_secs": 1781646407,
+  "unix_timestamp_secs": 1781649698,
   "difficulty": "Medium",
   "games_per_matchup": 10,
   "base_seed": 10573729,
@@ -74,9 +74,9 @@
         }
       ],
       "total_turns": 154,
-      "total_duration_ms": 85544,
+      "total_duration_ms": 84657,
       "avg_turns": 15.4,
-      "avg_duration_ms": 8554.4,
+      "avg_duration_ms": 8465.7,
       "status": "Pass",
       "fail_reason": null
     },
@@ -149,9 +149,82 @@
         }
       ],
       "total_turns": 91,
-      "total_duration_ms": 171549,
+      "total_duration_ms": 173320,
       "avg_turns": 9.1,
-      "avg_duration_ms": 17154.9,
+      "avg_duration_ms": 17332.0,
+      "status": "Pass",
+      "fail_reason": null
+    },
+    {
+      "matchup_id": "enchantress-mirror",
+      "exercises": [
+        "Enchantments"
+      ],
+      "p0_label": "Selesnya Enchantress (P0)",
+      "p1_label": "Selesnya Enchantress (P1)",
+      "expected": {
+        "kind": "Mirror",
+        "tolerance": 0.15
+      },
+      "p0_wins": 5,
+      "p1_wins": 5,
+      "draws": 0,
+      "games": [
+        {
+          "seed": 10593729,
+          "winner": 0,
+          "turns": 13
+        },
+        {
+          "seed": 10593730,
+          "winner": 0,
+          "turns": 15
+        },
+        {
+          "seed": 10593731,
+          "winner": 1,
+          "turns": 14
+        },
+        {
+          "seed": 10593732,
+          "winner": 0,
+          "turns": 9
+        },
+        {
+          "seed": 10593733,
+          "winner": 1,
+          "turns": 12
+        },
+        {
+          "seed": 10593734,
+          "winner": 0,
+          "turns": 16
+        },
+        {
+          "seed": 10593735,
+          "winner": 1,
+          "turns": 12
+        },
+        {
+          "seed": 10593736,
+          "winner": 1,
+          "turns": 13
+        },
+        {
+          "seed": 10593737,
+          "winner": 0,
+          "turns": 12
+        },
+        {
+          "seed": 10593738,
+          "winner": 1,
+          "turns": 14
+        }
+      ],
+      "total_turns": 130,
+      "total_duration_ms": 302341,
+      "avg_turns": 13.0,
+      "avg_duration_ms": 30234.1,
       "status": "Pass",
       "fail_reason": null
     }

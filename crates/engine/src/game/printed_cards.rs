@@ -888,6 +888,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
         | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
         // CR 701.26a/b: all tap/untap scopes are leaf effects here.
         | Effect::SetTapState { .. }
         | Effect::RemoveCounter { .. }

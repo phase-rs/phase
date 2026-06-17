@@ -317,6 +317,12 @@ pub struct PolicyPenalties {
     /// decks.
     #[serde(default = "default_lifegain_source_bonus")]
     pub lifegain_source_bonus: f64,
+    /// CR 601.2i / CR 603.6a: Bonus for casting an enchantment in a deck that has
+    /// enchantment payoffs (enchantress / constellation) — each enchantment feeds
+    /// those payoffs. Consumed by `EnchantmentsPayoffPolicy`, which is
+    /// payoff-gated so this never applies to decks with no enchantment payoff.
+    #[serde(default = "default_enchantment_cast_bonus")]
+    pub enchantment_cast_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -361,6 +367,7 @@ impl Default for PolicyPenalties {
             artifact_cost_payoff_bonus: default_artifact_cost_payoff_bonus(),
             deploy_artifact_bonus: default_deploy_artifact_bonus(),
             lifegain_source_bonus: default_lifegain_source_bonus(),
+            enchantment_cast_bonus: default_enchantment_cast_bonus(),
         }
     }
 }
@@ -434,6 +441,9 @@ fn default_deploy_artifact_bonus() -> f64 {
 fn default_lifegain_source_bonus() -> f64 {
     0.4
 }
+fn default_enchantment_cast_bonus() -> f64 {
+    0.4
+}
 
 /// Policy penalty fields present in the active CMA-ES `--group penalties`
 /// vector. Adding a `PolicyPenalties` field requires listing it here or in
@@ -487,6 +497,10 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "deploy_artifact_bonus",
         "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "enchantment_cast_bonus",
+        "new EnchantmentsPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
     (
         "lifegain_source_bonus",
