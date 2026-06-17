@@ -1080,10 +1080,18 @@ pub(super) fn parse_subject_application(
     // TriggeringPlayer branch here to the two player-referencing forms.
     let player_subject = all_consuming(alt((
         value(
+            ("that attacking player", true),
+            tag::<_, _, OracleError<'_>>("that attacking player may"),
+        ),
+        value(
             ("that player", true),
             tag::<_, _, OracleError<'_>>("that player may"),
         ),
         value(("the player", true), tag("the player may")),
+        value(
+            ("that attacking player", false),
+            tag("that attacking player"),
+        ),
         value(("that player", false), tag("that player")),
         value(("the player", false), tag("the player")),
     )))
@@ -1093,7 +1101,10 @@ pub(super) fn parse_subject_application(
         else {
             return None;
         };
-        if matches!(ctx_filter, TargetFilter::TriggeringPlayer) {
+        if matches!(
+            ctx_filter,
+            TargetFilter::TriggeringPlayer | TargetFilter::DefendingPlayer
+        ) {
             // CR 608.2c + CR 109.4 (issue #534): "That player" after a
             // `Choose(Player)`/`Choose(Opponent)` clause binds to the
             // just-chosen player — mirrors the `resolve_they_pronoun`
@@ -3518,7 +3529,9 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, ContinuousModification, Effect, TypeFilter};
+    use crate::types::ability::{
+        AbilityKind, ContinuousModification, ControllerRef, Effect, TypeFilter,
+    };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
 
@@ -4470,6 +4483,56 @@ mod tests {
         let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
+    }
+
+    #[test]
+    fn parse_subject_that_attacking_player_trigger_context_is_triggering_player() {
+        // Issue #1325: "that attacking player" is synonymous with the attack
+        // event's declaring player (CR 506.2 + CR 603.7c).
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Player),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            card_name: Some("Ellie, Brick Master".to_string()),
+            ..ParseContext::default()
+        };
+        let result = parse_subject_application("that attacking player", &mut ctx);
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap().affected,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player must bind to TriggeringPlayer in trigger context"
+        );
+    }
+
+    #[test]
+    fn parse_subject_predicate_that_attacking_player_creates_token() {
+        use crate::parser::oracle_effect::parse_effect_clause;
+        use crate::types::ability::Effect;
+
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Player),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            card_name: Some("Ellie, Brick Master".to_string()),
+            ..ParseContext::default()
+        };
+        let clause = parse_effect_clause(
+            "that attacking player creates a tapped 1/1 black Fungus Zombie creature token named Cordyceps Infected that's attacking that opponent",
+            &mut ctx,
+        );
+        let Effect::Token {
+            owner,
+            name,
+            tapped,
+            enters_attacking,
+            ..
+        } = &clause.effect
+        else {
+            panic!("expected Token effect, got {:?}", clause.effect);
+        };
+        assert_eq!(*owner, TargetFilter::TriggeringPlayer);
+        assert_eq!(name, "Cordyceps Infected");
+        assert!(*tapped);
+        assert!(*enters_attacking);
     }
 
     #[test]
