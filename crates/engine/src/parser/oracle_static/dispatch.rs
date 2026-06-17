@@ -400,12 +400,16 @@ pub(crate) fn parse_static_line_inner(
     // string-equality checks.
     {
         let lower_trim = tp.lower.trim_end_matches('.').trim();
+        // The optional comma after "while voting" is a single `opt` axis rather
+        // than two flat full-sentence permutations (CLAUDE.md: compose
+        // combinators, don't enumerate permutations).
         let res: nom::IResult<&str, (), OracleError<'_>> = nom::combinator::value(
             (),
-            nom::branch::alt((
-                nom::bytes::complete::tag("while voting, you may vote an additional time"),
-                nom::bytes::complete::tag("while voting you may vote an additional time"),
-            )),
+            (
+                nom::bytes::complete::tag("while voting"),
+                nom::combinator::opt(nom::bytes::complete::tag(",")),
+                nom::bytes::complete::tag(" you may vote an additional time"),
+            ),
         )
         .parse(lower_trim);
         if res.is_ok() {
@@ -427,19 +431,18 @@ pub(crate) fn parse_static_line_inner(
     // a coverage/semantic marker, not the scope authority. Reminder text "(They
     // can make the same or different choices.)" is already stripped above by
     // `strip_reminder_text`. Comma/no-comma variants are alt arms, not flat
-    // full-sentence equality, matching the GrantsExtraVote pattern.
+    // The optional comma after "choice" is a single `opt` axis rather than two
+    // flat full-sentence permutations (CLAUDE.md: compose combinators, don't
+    // enumerate permutations).
     {
         let lower_trim = tp.lower.trim_end_matches('.').trim();
         let res: nom::IResult<&str, (), OracleError<'_>> = nom::combinator::value(
             (),
-            nom::branch::alt((
-                nom::bytes::complete::tag(
-                    "if an opponent would face a villainous choice, they face that choice an additional time",
-                ),
-                nom::bytes::complete::tag(
-                    "if an opponent would face a villainous choice they face that choice an additional time",
-                ),
-            )),
+            (
+                nom::bytes::complete::tag("if an opponent would face a villainous choice"),
+                nom::combinator::opt(nom::bytes::complete::tag(",")),
+                nom::bytes::complete::tag(" they face that choice an additional time"),
+            ),
         )
         .parse(lower_trim);
         if res.is_ok() {
