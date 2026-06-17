@@ -13,7 +13,8 @@ interface HandCardProps {
   isSelected: boolean;
   phase: "mulligan" | "bottoming" | "playing" | "cleanup" | string;
   canPlayLand: boolean;
-  availableMana: number;
+  /** Engine-provided set of card ids the human can legally cast this turn. */
+  legalCastIds: number[];
   onAction: (action: CardAction, cardId: number) => void;
   onSelect: (id: number) => void;
 }
@@ -26,12 +27,17 @@ interface ContextMenuEntry {
   color: string;
 }
 
-function getActions(card: PlaytestCard, phase: string, canPlayLand: boolean, availableMana: number): ContextMenuEntry[] {
+function getActions(
+  card: PlaytestCard,
+  phase: string,
+  canPlayLand: boolean,
+  legalCastIds: number[],
+): ContextMenuEntry[] {
   const types = card.face.cardType?.coreTypes ?? [];
   const isLand = isLandType(types);
   const isPerm = isPermanentType(types);
-  const cmc = card.face.manaValue ?? 0;
-  const canAfford = cmc <= availableMana;
+  // Affordability is engine-authoritative: cast ids are provided by the engine.
+  const canAfford = legalCastIds.includes(card.id);
 
   if (phase === "bottoming") {
     return [{ action: "bottom", labelKey: "card.bottom", color: "text-orange-300" }];
@@ -45,17 +51,12 @@ function getActions(card: PlaytestCard, phase: string, canPlayLand: boolean, ava
   if (isLand && canPlayLand) {
     actions.push({ action: "playLand", labelKey: "card.playLand", color: "text-amber-300" });
   }
-  if (!isLand && isPerm) {
+  if (!isLand) {
     actions.push({
       action: "cast",
-      labelKey: canAfford ? "card.cast" : "card.castNoMana",
-      color: canAfford ? "text-blue-300" : "text-slate-500",
-    });
-  }
-  if (!isLand && !isPerm) {
-    actions.push({
-      action: "cast",
-      labelKey: canAfford ? "card.cast" : "card.castNoMana",
+      labelKey: isPerm
+        ? canAfford ? "card.cast" : "card.castNoMana"
+        : canAfford ? "card.cast" : "card.castNoMana",
       color: canAfford ? "text-blue-300" : "text-slate-500",
     });
   }
@@ -104,12 +105,20 @@ function CardContextMenu({
   );
 }
 
-function HandCard({ card, isSelected, phase, canPlayLand, availableMana, onAction, onSelect }: HandCardProps) {
+function HandCard({
+  card,
+  isSelected,
+  phase,
+  canPlayLand,
+  legalCastIds,
+  onAction,
+  onSelect,
+}: HandCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const types = card.face.cardType?.coreTypes ?? [];
   const isLand = isLandType(types);
   const cmc = card.face.manaValue;
-  const actions = getActions(card, phase, canPlayLand, availableMana);
+  const actions = getActions(card, phase, canPlayLand, legalCastIds);
 
   function handleClick() {
     if (phase === "bottoming") {
@@ -185,7 +194,8 @@ interface PlaytestHandProps {
   hand: PlaytestCard[];
   phase: string;
   canPlayLand: boolean;
-  availableMana: number;
+  /** Engine-provided set of card ids the human can legally cast this turn. */
+  legalCastIds: number[];
   selectedCardId: number | null;
   bottomingRequired: number;
   onPlayLand: (id: number) => void;
@@ -199,7 +209,7 @@ export function PlaytestHand({
   hand,
   phase,
   canPlayLand,
-  availableMana,
+  legalCastIds,
   selectedCardId,
   bottomingRequired,
   onPlayLand,
@@ -242,7 +252,7 @@ export function PlaytestHand({
             isSelected={selectedCardId === card.id}
             phase={phase}
             canPlayLand={canPlayLand}
-            availableMana={availableMana}
+            legalCastIds={legalCastIds}
             onAction={handleAction}
             onSelect={(id) => onSelect(id === selectedCardId ? null : id)}
           />

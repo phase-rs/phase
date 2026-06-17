@@ -101,12 +101,12 @@ pub mod phasing;
 pub mod planechase;
 // Tests for `planechase` live in a sibling file (declared here, not in
 // `planechase.rs`, so `planechase.rs` stays implementation-only).
+pub mod goldfish;
 #[cfg(test)]
 #[path = "planechase_tests.rs"]
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
-pub mod playtest_stats;
 pub mod printed_cards;
 pub mod priority;
 pub mod public_state;
@@ -118,7 +118,6 @@ pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;
 pub mod scenario_db;
-pub mod solitaire;
 pub mod specialize;
 pub mod speed;
 pub mod splice;

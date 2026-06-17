@@ -1798,16 +1798,15 @@ mod tests {
 // These functions own a separate `PLAYTEST_STATE` thread-local so the playtest
 // session never conflicts with an in-progress game in `GAME_STATE`.
 
-use engine::game::playtest_stats::{run_simulation, SimulationConfig};
-use engine::game::solitaire::{PlaytestObjectId, PlaytestSession};
+use engine::game::goldfish::{run_simulation, GoldfishGame, SimulationConfig};
 
 thread_local! {
     /// Active playtest session. Kept separate from GAME_STATE so a user can
     /// playtest a deck while an AI game is paused.
-    static PLAYTEST_STATE: Cell<Option<PlaytestSession>> = const { Cell::new(None) };
+    static PLAYTEST_STATE: Cell<Option<GoldfishGame>> = const { Cell::new(None) };
 }
 
-fn with_playtest_mut<R>(f: impl FnOnce(&mut PlaytestSession) -> R) -> Result<R, JsValue> {
+fn with_playtest_mut<R>(f: impl FnOnce(&mut GoldfishGame) -> R) -> Result<R, JsValue> {
     PLAYTEST_STATE.with(|cell| {
         let mut session = cell.take().ok_or_else(|| {
             JsValue::from_str("PLAYTEST_NOT_INITIALIZED: call playtest_start first")
@@ -1818,7 +1817,7 @@ fn with_playtest_mut<R>(f: impl FnOnce(&mut PlaytestSession) -> R) -> Result<R, 
     })
 }
 
-fn with_playtest<R>(f: impl FnOnce(&PlaytestSession) -> R) -> Result<R, JsValue> {
+fn with_playtest<R>(f: impl FnOnce(&GoldfishGame) -> R) -> Result<R, JsValue> {
     PLAYTEST_STATE.with(|cell| {
         let session = cell.take().ok_or_else(|| {
             JsValue::from_str("PLAYTEST_NOT_INITIALIZED: call playtest_start first")
@@ -1860,39 +1859,39 @@ pub fn playtest_start(
             .collect::<Vec<_>>()
     });
 
-    let session = PlaytestSession::new(deck, seed, going_first);
-    let js = to_js(&session);
+    let session = GoldfishGame::new(deck, seed, going_first);
+    let view = session.view();
     PLAYTEST_STATE.with(|cell| cell.set(Some(session)));
-    Ok(js)
+    Ok(to_js(&view))
 }
 
 /// Get the current playtest session state. Returns the serialized
 /// `PlaytestSession` or an error if no session is active.
 #[wasm_bindgen]
 pub fn playtest_get_state() -> Result<JsValue, JsValue> {
-    with_playtest(to_js)
+    with_playtest(|s| to_js(&s.view()))
 }
 
 /// Keep the current opening hand and transition out of mulligan phase.
 /// Returns the updated session state.
 #[wasm_bindgen]
 pub fn playtest_keep_hand() -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.keep_hand().map(|_| to_js(s)))
+    with_playtest_mut(|s| s.keep_hand().map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Take a mulligan. Returns the updated session state including the new hand.
 #[wasm_bindgen]
 pub fn playtest_mulligan() -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.take_mulligan().map(|_| to_js(s)))
+    with_playtest_mut(|s| s.take_mulligan().map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Bottom a card (for London-mulligan bottoming step).
-/// `card_id` is the `PlaytestObjectId` (u32) of the card to place on bottom.
+/// `card_id` is the object id (u32) of the card to place on bottom.
 #[wasm_bindgen]
 pub fn playtest_bottom_card(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.bottom_card(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+    with_playtest_mut(|s| s.bottom_card(card_id).map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
@@ -1901,7 +1900,7 @@ pub fn playtest_bottom_card(card_id: u32) -> Result<JsValue, JsValue> {
 pub fn playtest_draw() -> Result<JsValue, JsValue> {
     with_playtest_mut(|s| {
         s.draw_one();
-        to_js(s)
+        to_js(&s.view())
     })
 }
 
@@ -1910,15 +1909,15 @@ pub fn playtest_draw() -> Result<JsValue, JsValue> {
 pub fn playtest_draw_n(n: u32) -> Result<JsValue, JsValue> {
     with_playtest_mut(|s| {
         s.draw_n(n);
-        to_js(s)
+        to_js(&s.view())
     })
 }
 
 /// Play a land from hand to the battlefield.
-/// `card_id` is the `PlaytestObjectId` (u32) of the land in hand.
+/// `card_id` is the object id (u32) of the land in hand.
 #[wasm_bindgen]
 pub fn playtest_play_land(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.play_land(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+    with_playtest_mut(|s| s.play_land(card_id).map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
@@ -1926,72 +1925,57 @@ pub fn playtest_play_land(card_id: u32) -> Result<JsValue, JsValue> {
 /// Simulates casting without full rules processing.
 #[wasm_bindgen]
 pub fn playtest_cast(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| {
-        s.cast_permanent(PlaytestObjectId(card_id))
-            .map(|_| to_js(s))
-    })
-    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+    with_playtest_mut(|s| s.cast_spell(card_id).map(|_| to_js(&s.view())))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Discard a card from hand to the graveyard.
 #[wasm_bindgen]
 pub fn playtest_discard(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.discard(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+    with_playtest_mut(|s| s.discard_card(card_id).map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Tap a permanent on the battlefield.
 #[wasm_bindgen]
 pub fn playtest_tap(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.tap_permanent(PlaytestObjectId(card_id)).map(|_| to_js(s)))
+    with_playtest_mut(|s| s.tap_permanent(card_id).map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Untap a permanent on the battlefield.
 #[wasm_bindgen]
 pub fn playtest_untap(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| {
-        s.untap_permanent(PlaytestObjectId(card_id))
-            .map(|_| to_js(s))
-    })
-    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+    with_playtest_mut(|s| s.untap_permanent(card_id).map(|_| to_js(&s.view())))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Move a permanent from battlefield to graveyard (destroy/die effect).
 #[wasm_bindgen]
 pub fn playtest_destroy(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| {
-        s.destroy_permanent(PlaytestObjectId(card_id))
-            .map(|_| to_js(s))
-    })
-    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+    with_playtest_mut(|s| s.destroy_permanent(card_id).map(|_| to_js(&s.view())))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Move a permanent from battlefield to exile.
 #[wasm_bindgen]
 pub fn playtest_exile(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| {
-        s.exile_permanent(PlaytestObjectId(card_id))
-            .map(|_| to_js(s))
-    })
-    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+    with_playtest_mut(|s| s.exile_permanent(card_id).map(|_| to_js(&s.view())))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Bounce a permanent from battlefield back to hand.
 #[wasm_bindgen]
 pub fn playtest_bounce(card_id: u32) -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| {
-        s.bounce_permanent(PlaytestObjectId(card_id))
-            .map(|_| to_js(s))
-    })
-    .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
+    with_playtest_mut(|s| s.bounce_permanent(card_id).map(|_| to_js(&s.view())))
+        .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
 /// Advance to the next turn (untap, draw, capture snapshot).
 /// Returns `{ ok: PlaytestSession } | { err: string }` as JSON.
 #[wasm_bindgen]
 pub fn playtest_advance_turn() -> Result<JsValue, JsValue> {
-    with_playtest_mut(|s| s.advance_turn().map(|_| to_js(s)))
+    with_playtest_mut(|s| s.advance_turn().map(|_| to_js(&s.view())))
         .and_then(|r| r.map_err(|e| JsValue::from_str(&e)))
 }
 
@@ -2000,7 +1984,7 @@ pub fn playtest_advance_turn() -> Result<JsValue, JsValue> {
 pub fn playtest_reset() -> Result<JsValue, JsValue> {
     with_playtest_mut(|s| {
         s.reset();
-        to_js(s)
+        to_js(&s.view())
     })
 }
 
@@ -2009,7 +1993,7 @@ pub fn playtest_reset() -> Result<JsValue, JsValue> {
 pub fn playtest_reset_with_seed(seed: f64) -> Result<JsValue, JsValue> {
     with_playtest_mut(|s| {
         s.reset_with_seed(seed as u64);
-        to_js(s)
+        to_js(&s.view())
     })
 }
 

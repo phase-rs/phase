@@ -82,6 +82,12 @@ export interface PlaytestSession {
   bottomingRequired: number;
   history: TurnSnapshot[];
   goingFirst: boolean;
+  /** Engine-computed untapped mana sources available this turn. */
+  availableMana: number;
+  /** ObjectIds of lands in hand that are legally playable this turn. */
+  legalLandIds: number[];
+  /** ObjectIds of non-land cards in hand that are affordable this turn. */
+  legalCastIds: number[];
 }
 
 export interface TurnAggregate {

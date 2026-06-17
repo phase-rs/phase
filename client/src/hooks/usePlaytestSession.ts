@@ -7,7 +7,6 @@
  */
 
 import { usePlaytestStore } from "../stores/playtestStore";
-import { isLandType } from "../services/playtestSession";
 import type { PlaytestCard, PlaytestPermanent, TurnSnapshot } from "../services/playtestSession";
 
 export interface PlaytestSessionHook {
@@ -34,9 +33,13 @@ export interface PlaytestSessionHook {
 
   // ── Derived ───────────────────────────────────────────────────────────────
   landPlayedThisTurn: boolean;
-  /** Number of untapped lands/mana sources on the battlefield. */
+  /** Engine-computed untapped mana sources available this turn. */
   availableMana: number;
-  /** Cards in hand that are playable (non-land CMC ≤ availableMana). */
+  /** Engine-provided ids of non-land cards the human can afford to cast. */
+  legalCastIds: number[];
+  /** Engine-provided ids of lands in hand that are legally playable. */
+  legalLandIds: number[];
+  /** Cards in hand that are affordable to cast (engine-authoritative). */
   playableInHand: PlaytestCard[];
   /** Number of cards to discard for cleanup step. */
   discardNeeded: number;
@@ -64,16 +67,6 @@ export interface PlaytestSessionHook {
   drawOne: () => Promise<void>;
   advanceTurn: () => Promise<void>;
   resetSession: () => Promise<void>;
-}
-
-function countUntappedMana(battlefield: PlaytestPermanent[]): number {
-  return battlefield.filter((p) => {
-    if (p.tapped) return false;
-    const types = p.card.face.cardType?.coreTypes ?? [];
-    if (isLandType(types)) return true;
-    const oracle = (p.card.face.oracleText ?? "").toLowerCase();
-    return oracle.includes("add {") || oracle.startsWith("{t}: add");
-  }).length;
 }
 
 export function usePlaytestSession(): PlaytestSessionHook {
@@ -104,14 +97,13 @@ export function usePlaytestSession(): PlaytestSessionHook {
 
   const hand = session?.hand ?? [];
   const battlefield = session?.battlefield ?? [];
-  const availableMana = countUntappedMana(battlefield);
+  const availableMana = session?.availableMana ?? 0;
+  const legalCastIds = session?.legalCastIds ?? [];
+  const legalLandIds = session?.legalLandIds ?? [];
 
-  const playableInHand = hand.filter((c) => {
-    const types = c.face.cardType?.coreTypes ?? [];
-    if (isLandType(types)) return false;
-    const cmc = c.face.manaValue ?? 0;
-    return cmc <= availableMana;
-  });
+  // Engine-authoritative: a card is playable iff the engine says so.
+  const legalCastSet = new Set(legalCastIds);
+  const playableInHand = hand.filter((c) => legalCastSet.has(c.id));
 
   const discardNeeded = Math.max(0, hand.length - 7);
 
@@ -133,6 +125,8 @@ export function usePlaytestSession(): PlaytestSessionHook {
     bottomingRequired: session?.bottomingRequired ?? 0,
     landPlayedThisTurn: session?.landPlayedThisTurn ?? false,
     availableMana,
+    legalCastIds,
+    legalLandIds,
     playableInHand,
     discardNeeded,
     needsCleanup: discardNeeded > 0,

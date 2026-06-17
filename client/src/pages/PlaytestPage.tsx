@@ -277,7 +277,7 @@ export function PlaytestPage() {
               hand={hand}
               phase={phase}
               canPlayLand={!pt.landPlayedThisTurn}
-              availableMana={pt.availableMana}
+              legalCastIds={pt.legalCastIds}
               selectedCardId={pt.selectedCardId}
               bottomingRequired={pt.bottomingRequired}
               onPlayLand={pt.playLand}
