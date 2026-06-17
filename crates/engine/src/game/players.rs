@@ -180,6 +180,7 @@ pub fn apnap_order_from(
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
             | ControllerRef::ParentTargetController
+            | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
             | ControllerRef::SourceChosenPlayer
             | ControllerRef::ChosenPlayer { .. }

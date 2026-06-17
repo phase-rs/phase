@@ -1301,6 +1301,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: pending.clone(),
+            unavailable_modes: vec![],
         };
         state.pending_cast = Some(pending);
 

@@ -30,7 +30,9 @@
 //!   → [`ContinuousModification::SetPower`] + [`ContinuousModification::SetToughness`]
 //!   plus an `AddType` / `AddSubtype` per word in the type list (CR 707.9b
 //!   + CR 613.1d).
-//! - `it's a(n) {core_type} in addition to its other types`
+//! - `it's a(n) {core_type} in addition to its other types` (and the
+//!   elided-subject form `is a(n) {core_type} in addition to its other types`
+//!   for non-leading bodies in a comma-anded list)
 //!   → [`ContinuousModification::AddType`] (when the type word is a core type)
 //!   or [`ContinuousModification::AddSubtype`] (otherwise).
 //! - `it has {keyword[, keyword, ...]}`
@@ -157,6 +159,8 @@ pub(crate) fn parse_except_clause<'a>(
 ///     (when ctx provides the trigger or activated-ability index)
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
 ///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
+///   - `is a(n) {core_type|subtype} in addition to its other types`
+///     (elided-subject form for non-leading bodies)            → AddType/AddSubtype
 ///   - `it has "<triggered/activated/static ability>"`         → GrantTrigger/GrantAbility/etc.
 ///   - `it has {keyword[, keyword, ...]}`                      → AddKeyword per kw
 pub(crate) fn parse_except_body<'a>(
@@ -168,6 +172,9 @@ pub(crate) fn parse_except_body<'a>(
         return Some((rest, vec![name_mod]));
     }
     if let Some((rest, mods)) = parse_half_pt_override(input) {
+        return Some((rest, mods));
+    }
+    if let Some((rest, mods)) = parse_theyre_pt_and_types(input) {
         return Some((rest, mods));
     }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
@@ -467,6 +474,50 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     Some((rest, mods))
 }
 
+/// CR 707.9b + CR 707.9d: Plural token-copy exception — "they're N/M {types}
+/// creature[s] in addition to their other types" (Astral Dragon / Project Image).
+/// Mirrors [`parse_subject_pt_and_types`] but uses the plural anaphor and
+/// terminates on "creature(s)" rather than a bare type list.
+fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they're "), tag("they are ")))
+        .parse(input)
+        .ok()?;
+
+    let (rest, (power, toughness)) = parse_pt_pair(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
+
+    let (type_text, rest) = split_on_first_of(rest, &["creatures ", "creature "])?;
+    let (rest, suffix) = if let Some((_, rest)) =
+        split_on_first_of(rest, &[" in addition to their other colors and types"])
+    {
+        (rest, AdditiveSuffix::ColorsAndTypes)
+    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other colors"])
+    {
+        (rest, AdditiveSuffix::Colors)
+    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other types"])
+    {
+        (rest, AdditiveSuffix::Types)
+    } else {
+        let (rest, _) = split_at_body_boundary(rest);
+        (rest, AdditiveSuffix::None)
+    };
+
+    let (replace_color, replace_types) = match suffix {
+        AdditiveSuffix::None => (true, true),
+        AdditiveSuffix::Types => (true, false),
+        AdditiveSuffix::Colors => (false, true),
+        AdditiveSuffix::ColorsAndTypes => (false, false),
+    };
+
+    let mut mods = vec![
+        ContinuousModification::SetPower { value: power },
+        ContinuousModification::SetToughness { value: toughness },
+    ];
+    append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
+
+    Some((rest, mods))
+}
+
 /// CR 707.9b + CR 707.9d: append the color and type modifications declared by a
 /// copy exception's type list. `replace_color` selects `SetColor` (no carve-out
 /// for color) vs per-color `AddColor`; `replace_types` selects whether an exact
@@ -582,15 +633,32 @@ fn parse_has_this_ability<'a>(
     ))
 }
 
-/// "it's a(n) {type_word} in addition to its other types"
+/// CR 707.9b + CR 205.1b: "it's a(n) {type_word} in addition to its other
+/// types", plus the elided-subject form "is a(n) {type_word} in addition to
+/// its other types" used for non-leading bodies in a comma-anded copy-except
+/// list (the pronoun "it" is dropped and "'s" decontracts to "is").
 /// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
-/// or anything else → treated as a subtype and canonicalized.
+/// or anything else → treated as a subtype and canonicalized → `AddSubtype`.
 fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it\u{2019}s an "),
         tag("it\u{2019}s a "),
+        // CR 707.9b + CR 205.1b: elided-subject form. In a comma-anded copy-except
+        // list ("it isn't legendary, is an artifact in addition to its other
+        // types, and has myriad") the subject pronoun "it" is dropped and "'s"
+        // decontracts to "is" for non-leading bodies. Auton Soldier (core type
+        // Artifact, BecomeCopy path) and The Apprentice's Folly (subtype Reflection,
+        // CopyTokenOf path) are the canonical cases. Reached only after
+        // `parse_its_a_type_loses_others` (parse_except_body) declines, so the
+        // "and loses all other card types" replacement form is never mis-routed
+        // here for the leading-subject "it's" contraction.
+        // NOTE: the loses-others arm matches only the "it's"-contraction; a future
+        // card using the elided form WITH "and loses all other card types" would
+        // incorrectly land here as an AddType — no such card exists today.
+        tag("is an "),
+        tag("is a "),
     ))
     .parse(input)
     .ok()?;
@@ -1402,6 +1470,81 @@ mod tests {
         );
     }
 
+    /// CR 707.9b + CR 205.1b: elided-subject "is an artifact in addition to its
+    /// other types" (Auton Soldier class). In a comma-anded copy-except list the
+    /// subject pronoun "it" is dropped and "'s" decontracts to "is", so the body
+    /// reads "is an …". The arm must restore `AddType(Artifact)` without
+    /// disturbing the surrounding `isn't legendary` / `has myriad` bodies.
+    /// Auton Soldier's replacement (BecomeCopy) clause is NOT truncated, so the
+    /// trailing `has myriad` is present and must survive.
+    #[test]
+    fn elided_subject_is_an_core_type_in_addition_emits_add_type() {
+        let (_, mods) = parse_except_clause(
+            ", except it isn't legendary, is an artifact in addition to its other types, and has myriad",
+            "Auton Soldier",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Artifact
+                }
+            )),
+            "missing AddType(Artifact) from elided 'is an artifact'; got {mods:?}"
+        );
+        // The elided arm must not disturb the surrounding bodies: the leading
+        // `isn't legendary` and the trailing `has myriad` both still parse.
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Myriad
+            }
+        )));
+    }
+
+    /// CR 707.9b + CR 205.1b: elided-subject "is a Reflection in addition to its
+    /// other types" (The Apprentice's Folly class — the restored modification is
+    /// `AddSubtype`). NOTE: on the shipped card the saga sentence-splitter
+    /// truncates the chapter at ", and ", diverting "has haste" into a separate
+    /// SequentialSibling Unimplemented sub-ability BEFORE the token effect runs.
+    /// So the real text the token-copy except parser receives ends at "...its
+    /// other types" — there is no trailing "and has haste" here. This test uses
+    /// exactly that truncated form. (The dropped-Haste sentence-split is a
+    /// separate latent saga bug, out of scope for this type fix.)
+    #[test]
+    fn elided_subject_is_a_subtype_in_addition_emits_add_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it isn't legendary, is a Reflection in addition to its other types",
+            "The Apprentice's Folly",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Reflection"
+            )),
+            "missing AddSubtype(Reflection) from elided 'is a Reflection'; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "leading 'isn't legendary' must still parse; got {mods:?}"
+        );
+    }
+
     #[test]
     fn missing_leading_comma_except_returns_none() {
         let result = parse_except_clause("her name is ~", "Card", &ParseContext::default());
@@ -1868,5 +2011,42 @@ mod tests {
                 supertype: Supertype::Legendary
             }
         )));
+    }
+
+    /// CR 707.9b: Astral Dragon plural token-copy exception.
+    #[test]
+    fn theyre_pt_and_dragon_creature_types_in_addition() {
+        let (_, mods) = parse_except_clause(
+            ", except they're 3/3 Dragon creatures in addition to their other types, and they have flying",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 3 })),
+            "missing SetPower(3); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 3 })),
+            "missing SetToughness(3); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Dragon"
+            )),
+            "missing AddSubtype(Dragon); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "missing AddType(Creature); got {mods:?}"
+        );
     }
 }

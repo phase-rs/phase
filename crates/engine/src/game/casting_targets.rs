@@ -39,12 +39,17 @@ pub(crate) fn handle_select_modes(
     indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (modal, pending) = match &state.waiting_for {
+    let (modal, pending, unavailable_modes) = match &state.waiting_for {
         WaitingFor::ModeChoice {
             modal,
             pending_cast,
+            unavailable_modes,
             ..
-        } => (modal.clone(), *pending_cast.clone()),
+        } => (
+            modal.clone(),
+            *pending_cast.clone(),
+            unavailable_modes.clone(),
+        ),
         _ => {
             return Err(EngineError::InvalidAction(
                 "Not waiting for mode selection".to_string(),
@@ -52,8 +57,8 @@ pub(crate) fn handle_select_modes(
         }
     };
 
-    // Spells resolve once — no cross-resolution mode constraints apply.
-    validate_modal_indices(&modal, &indices, &[])?;
+    // CR 700.2a-b: Reject unavailable modes (repeat constraints or no legal targets).
+    validate_modal_indices(&modal, &indices, &unavailable_modes)?;
 
     // CR 700.2 + CR 601.2c: Sorted ascending to match the slot order produced by
     // `build_chained_resolved` and `build_target_slots_labelled`. Persisted on

@@ -98,4 +98,29 @@ describe("MenuSelect", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("does not apply content-based minWidth when fitContainer is set", () => {
+    const longLabel = "Option ".repeat(12).trimEnd();
+    const items = [{ value: "option-a", label: longLabel }];
+
+    const { container: fitContainerRoot } = render(
+      <MenuSelect
+        label={longLabel}
+        items={items}
+        onSelect={vi.fn()}
+        fitContainer
+        wrapperClassName="w-full min-w-0"
+      />,
+    );
+
+    const { container: contentSizedRoot } = render(
+      <MenuSelect label={longLabel} items={items} onSelect={vi.fn()} />,
+    );
+
+    const fitWrapper = fitContainerRoot.firstElementChild as HTMLElement;
+    const contentWrapper = contentSizedRoot.firstElementChild as HTMLElement;
+
+    expect(fitWrapper.style.minWidth).toBe("");
+    expect(contentWrapper.style.minWidth).not.toBe("");
+  });
 });

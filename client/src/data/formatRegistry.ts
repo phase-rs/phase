@@ -24,6 +24,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -45,6 +46,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -66,6 +68,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -87,6 +90,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -108,6 +112,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -129,6 +134,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -150,6 +156,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -171,6 +178,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -192,6 +200,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -213,6 +222,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -234,6 +244,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -255,6 +266,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -276,6 +288,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -297,6 +310,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -318,6 +332,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -339,6 +354,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: true,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -360,6 +376,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -381,6 +398,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: false,
       allow_debug_actions: false,
     },
   },
@@ -402,6 +420,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
+      supplies_fixed_deck: true,
       allow_debug_actions: false,
     },
   },
@@ -409,4 +428,17 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
 
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
   return FORMAT_REGISTRY.find((m) => m.format === format);
+}
+
+/**
+ * Whether the format's deck is fixed by the format rules and supplied
+ * automatically by the engine — the player never builds or selects one. This
+ * reads the engine-derived `supplies_fixed_deck` flag from the mirrored format
+ * registry (single source of truth: `GameFormat::supplies_fixed_deck` in the
+ * engine); it must never hardcode format strings. For these formats the
+ * deck-selection gates are bypassed and an empty decklist is submitted, which
+ * `load_and_hydrate_decks` fills with the fixed deck for every seat.
+ */
+export function formatSuppliesDeck(format: GameFormat): boolean {
+  return formatMetadata(format)?.default_config.supplies_fixed_deck ?? false;
 }

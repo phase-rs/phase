@@ -11,8 +11,10 @@ use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::context::PolicyContext;
 use super::copy_value::CopyValuePolicy;
 use super::effect_timing::EffectTimingPolicy;
+use super::enchantments_payoff::EnchantmentsPayoffPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
+use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
@@ -28,6 +30,7 @@ use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
+use super::separate_piles_timing::SeparatePilesTimingPolicy;
 use super::spellslinger_casting::SpellslingerCastingPolicy;
 use super::sweeper_timing::SweeperTimingPolicy;
 use super::tokens_wide::TokensWidePolicy;
@@ -48,8 +51,10 @@ use engine::types::player::PlayerId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyId {
     AntiSelfHarm,
+    ArtifactSynergyTactical,
     BoardDevelopment,
     EtbValue,
+    EnchantmentsPayoff,
     CopyValue,
     Tutor,
     HandDisruption,
@@ -80,6 +85,7 @@ pub enum PolicyId {
     HoldManaUpForInteraction,
     SweeperTiming,
     FreeOutletActivation,
+    FetchLandPatience,
     AristocratsKeepablesMulligan,
     AggroPressure,
     AggroKeepablesMulligan,
@@ -94,6 +100,7 @@ pub enum PolicyId {
     ReactiveSelfProtection,
     ComboLineProgress,
     CedhKeepablesMulligan,
+    FixedDeckKeepMulligan,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,
@@ -105,6 +112,7 @@ pub enum PolicyId {
     MillTargeting,
     ChaliceAvoidance,
     PaymentSelection,
+    SeparatePilesTiming,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -264,8 +272,10 @@ impl Default for PolicyRegistry {
     fn default() -> Self {
         let policies: Vec<Box<dyn TacticalPolicy>> = vec![
             Box::new(AntiSelfHarmPolicy),
+            Box::new(super::artifact_synergy::ArtifactSynergyPolicy),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(EnchantmentsPayoffPolicy),
             Box::new(CopyValuePolicy),
             Box::new(TutorPolicy),
             Box::new(HandDisruptionPolicy),
@@ -292,6 +302,7 @@ impl Default for PolicyRegistry {
             Box::new(HoldManaUpForInteractionPolicy),
             Box::new(SweeperTimingPolicy),
             Box::new(FreeOutletActivationPolicy),
+            Box::new(FetchLandPatiencePolicy),
             Box::new(AggroPressurePolicy),
             Box::new(TokensWidePolicy),
             Box::new(AnthemPriorityPolicy),
@@ -311,6 +322,7 @@ impl Default for PolicyRegistry {
             Box::new(super::mill_targeting::MillTargetingPolicy),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(SeparatePilesTimingPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

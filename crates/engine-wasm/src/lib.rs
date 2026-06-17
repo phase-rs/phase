@@ -593,42 +593,49 @@ pub fn initialize_game(
             let borrow = cell.borrow();
             let db = borrow.as_ref().expect("CARD_DB presence checked above");
 
-            for (seat, deck) in [
-                ("Player".to_string(), &deck_list.player),
-                ("AI opponent".to_string(), &deck_list.opponent),
-            ] {
-                if let Err(reasons) = validate_name_deck_for_format(
-                    db,
-                    &deck.main_deck,
-                    &deck.sideboard,
-                    &deck.commander,
-                    game_format,
-                    Some(state.match_config.match_type),
-                ) {
-                    return Some(
-                        reasons
-                            .into_iter()
-                            .map(|reason| format!("{seat} deck: {reason}"))
-                            .collect(),
-                    );
+            // Fixed-deck formats (Momir's Madness) supply the deck from the
+            // engine for every seat, so the client submits empty decks — there
+            // is nothing client-side to validate. `load_and_hydrate_decks` below
+            // fills each seat's library with the engine-owned fixed deck. Gate on
+            // the engine predicate, never a format literal.
+            if !game_format.supplies_fixed_deck() {
+                for (seat, deck) in [
+                    ("Player".to_string(), &deck_list.player),
+                    ("AI opponent".to_string(), &deck_list.opponent),
+                ] {
+                    if let Err(reasons) = validate_name_deck_for_format(
+                        db,
+                        &deck.main_deck,
+                        &deck.sideboard,
+                        &deck.commander,
+                        game_format,
+                        Some(state.match_config.match_type),
+                    ) {
+                        return Some(
+                            reasons
+                                .into_iter()
+                                .map(|reason| format!("{seat} deck: {reason}"))
+                                .collect(),
+                        );
+                    }
                 }
-            }
-            for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
-                let seat = format!("AI player {}", idx + 2);
-                if let Err(reasons) = validate_name_deck_for_format(
-                    db,
-                    &deck.main_deck,
-                    &deck.sideboard,
-                    &deck.commander,
-                    game_format,
-                    Some(state.match_config.match_type),
-                ) {
-                    return Some(
-                        reasons
-                            .into_iter()
-                            .map(|reason| format!("{seat} deck: {reason}"))
-                            .collect(),
-                    );
+                for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
+                    let seat = format!("AI player {}", idx + 2);
+                    if let Err(reasons) = validate_name_deck_for_format(
+                        db,
+                        &deck.main_deck,
+                        &deck.sideboard,
+                        &deck.commander,
+                        game_format,
+                        Some(state.match_config.match_type),
+                    ) {
+                        return Some(
+                            reasons
+                                .into_iter()
+                                .map(|reason| format!("{seat} deck: {reason}"))
+                                .collect(),
+                        );
+                    }
                 }
             }
 

@@ -106,6 +106,19 @@ pub(crate) struct ParseContext {
     /// `ExileFromTopUntil` referent (Territorial Bruntar) that
     /// `parent_target_available` would otherwise include.
     pub parent_target_is_chosen: bool,
+    /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
+    /// "put those cards / put them onto the battlefield" anaphor (a
+    /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
+    /// publishes its set from a NON-exile zone — e.g.
+    /// `parse_for_each_player_choose_from_zone` derives `Some(Graveyard)` from
+    /// the parsed `ChooseFromZone { zone: Graveyard }` so Breach the
+    /// Multiverse's reanimation reads the chosen cards out of the graveyard
+    /// rather than the impulse-default exile. Consumed by `parse_put_ast` when
+    /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
+    /// no explicit origin; an impulse/cascade producer leaves this `None`, so
+    /// the lowering keeps the exile default. Reset per effect chain in
+    /// `parse_effect_chain_ir`.
+    pub pending_tracked_set_origin: Option<Zone>,
     /// CR 701.42a: The partner card name extracted from a meld instigator's
     /// own/control gate ("if you both own and control [self] and a [type] named
     /// [partner], exile them, then meld them into [result]"). The gate is parsed

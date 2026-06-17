@@ -300,6 +300,11 @@ fn parse_token_description_with_context(
     // Pakal, Thousandth Moon) — accept that as a valid terminator in addition
     // to EOF so the attacking flag is captured even when a variable-X binding
     // trails the clause.
+    // CR 508.4: trailing defender phrases ("that player or a planeswalker they
+    // control", "that opponent", etc. — Adeline, Resplendent Cathar / Myriad
+    // class) must not prevent the inline modifier from matching; accept a word
+    // boundary after "attacking" the same way `parse_battlefield_entry_qualifiers`
+    // does for put-onto-battlefield effects.
     let attacking_clause = |i| -> OracleResult<'_, bool> {
         let (i, _) = alt((
             tag(" that's"),
@@ -313,7 +318,14 @@ fn parse_token_description_with_context(
             value(false, tag(" attacking")),
         ))
         .parse(i)?;
-        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(", where ")),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
         Ok((i, tapped))
     };
     // Nom parses forward; scan byte positions (only those starting with the
@@ -496,9 +508,29 @@ fn parse_token_description_with_context(
     {
         let suffix_lower = suffix.to_lowercase();
         if suffix_lower.contains("for each") && suffix_lower.contains("this way") {
-            count = QuantityExpr::Ref {
-                qty: QuantityRef::TrackedSetSize,
-            };
+            // CR 608.2c + CR 205.2a: route ONLY "card type among cards <verb> this
+            // way" to the cause-filtered distinct-card-types count (Occult
+            // Epiphany #3307); every other "... this way" token keeps
+            // `TrackedSetSize`. The dispatch decision is the nom combinator's
+            // Ok/Err — the post-"for each " clause is extracted with nom
+            // (`take_until` + `tag`), not string-method splitting.
+            let after_for_each = take_until::<_, _, OracleError<'_>>("for each ")
+                .parse(suffix_lower.as_str())
+                .and_then(|(rest, _)| tag("for each ").parse(rest))
+                .map(|(clause, _)| clause.trim_end_matches('.').trim());
+            count = after_for_each
+                .ok()
+                .and_then(|clause| {
+                    crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set(
+                        clause,
+                    )
+                    .ok()
+                    .filter(|(rest, _)| rest.is_empty())
+                    .map(|(_, qty)| QuantityExpr::Ref { qty })
+                })
+                .unwrap_or(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                });
         }
     }
 
@@ -1181,6 +1213,48 @@ mod tests {
     use crate::types::card_type::CoreType;
 
     #[test]
+    fn occult_epiphany_token_counts_distinct_types_of_discarded() {
+        // Occult Epiphany #3307: the token count must be DISTINCT CARD TYPES
+        // among the DISCARDED chain members (cause-filtered), NOT TrackedSetSize.
+        let txt = "Create a 1/1 white Spirit creature token with flying for each card type among cards discarded this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCardTypes {
+                    source: crate::types::ability::CardTypeSetSource::TrackedSet {
+                        caused_by: Some(crate::types::ability::ThisWayCause::Discarded),
+                    },
+                },
+            },
+            "Occult Epiphany must count distinct discarded card types, not TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn bare_for_each_card_discarded_this_way_keeps_tracked_set_size() {
+        // No-regression: a plain "for each card discarded this way" token (member
+        // count, NOT distinct types) must still resolve to TrackedSetSize.
+        let txt = "Create a 1/1 white Spirit creature token with flying for each card discarded this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
+
+    #[test]
     fn copy_x_tokens_of_target_parses_variable_count() {
         // CR 707.2 + CR 107.3: variable X count in copy-token creation.
         let effect = try_parse_token(
@@ -1314,6 +1388,38 @@ mod tests {
             vec![ContinuousModification::AddType {
                 core_type: CoreType::Artifact,
             }]
+        );
+    }
+
+    /// CR 707.9b + CR 205.1b: The Apprentice's Folly — elided-subject "is a
+    /// Reflection in addition to its other types" in a comma-anded token-copy
+    /// except clause must restore `AddSubtype(Reflection)` to
+    /// `CopyTokenOf.additional_modifications`. Uses the TRUNCATED text the saga
+    /// sentence-splitter produces (no "and has haste" — that is diverted upstream
+    /// into a separate Unimplemented sibling, a separate out-of-scope saga bug).
+    /// We assert nothing about `extra_keywords`: on this card path there is no
+    /// surviving keyword in the clause.
+    #[test]
+    fn elided_subtype_token_copy_routes_subtype_to_additional_modifications() {
+        let effect = try_parse_token(
+            "create a token that's a copy of that permanent, except it isn't legendary, is a reflection in addition to its other types",
+            "Create a token that's a copy of that permanent, except it isn't legendary, is a Reflection in addition to its other types",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Reflection"
+            )),
+            "AddSubtype(Reflection) must reach CopyTokenOf.additional_modifications; got {additional_modifications:?}"
         );
     }
 
@@ -2025,6 +2131,30 @@ mod tests {
             tf.type_filters.contains(&TypeFilter::Creature),
             "X must count controlled creatures, got {:?}",
             tf.type_filters
+        );
+    }
+
+    /// CR 508.4 + CR 506.3a: Adeline, Resplendent Cathar — "for each opponent,
+    /// create … token that's tapped and attacking that player or a planeswalker
+    /// they control." The trailing defender phrase must not defeat the inline
+    /// modifier (issue #3303).
+    #[test]
+    fn token_thats_tapped_and_attacking_that_player_suffix_sets_flags() {
+        let text = "create a 1/1 white human creature token that's tapped and attacking that player or a planeswalker they control";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect");
+        };
+        assert!(tapped, "Human token must enter tapped");
+        assert!(
+            enters_attacking,
+            "Human token must enter attacking despite trailing defender phrase"
         );
     }
 

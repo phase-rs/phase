@@ -5,7 +5,8 @@
 //! `effects/mod.rs` (AbilityCondition), and `replacement.rs` (ReplacementCondition).
 
 use crate::game::combat::AttackTarget;
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{AttachTarget, GameObject};
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -173,6 +174,29 @@ pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: Object
 /// battlefield exit (`apply_zone_exit_cleanup`).
 pub(crate) fn eval_source_has_dealt_damage(state: &GameState, source_id: ObjectId) -> bool {
     state.objects_that_dealt_damage.contains(&source_id)
+}
+
+/// CR 301.5 + CR 303.4: True when the source object is attached to a creature
+/// controlled by `controller`. Returns false when the source has no host, when
+/// the host is a player (Curse-style Aura), or when the host is not a creature
+/// at the time of evaluation. Used by ability-resolution gates such as
+/// Springheart Nantuko's optional landfall payment, which only resolves when
+/// the bestowed Aura is currently attached to a creature its controller owns
+/// (so the fallback Insect token branch can still run when the Aura is bare).
+pub(crate) fn eval_source_attached_to_controlled_creature(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    let Some(source) = state.objects.get(&source_id) else {
+        return false;
+    };
+    let Some(AttachTarget::Object(host_id)) = source.attached_to else {
+        return false;
+    };
+    state.objects.get(&host_id).is_some_and(|host| {
+        host.controller == controller && host.card_types.core_types.contains(&CoreType::Creature)
+    })
 }
 
 #[cfg(test)]

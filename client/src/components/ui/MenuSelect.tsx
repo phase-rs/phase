@@ -78,6 +78,12 @@ export interface MenuSelectProps {
    * select — use inside scrollable panels (e.g. deck-builder filters).
    */
   menuLayout?: "auto" | "dropdown";
+  /**
+   * When true, the trigger fills its wrapper and truncates long labels instead
+   * of growing the wrapper to fit the widest option. Use on full-width form
+   * fields; omit in compact toolbars where the trigger should size to content.
+   */
+  fitContainer?: boolean;
   /** Class on the outer relative wrapper (e.g. `max-w-[8rem] shrink-0`). */
   wrapperClassName?: string;
   /** Class on the trigger button. */
@@ -127,6 +133,7 @@ export function MenuSelect({
   ariaLabel,
   selectedValue,
   menuLayout = "auto",
+  fitContainer = false,
   wrapperClassName = "",
   className = "",
 }: MenuSelectProps) {
@@ -154,6 +161,11 @@ export function MenuSelect({
   });
 
   useLayoutEffect(() => {
+    if (fitContainer) {
+      setMinWidthPx(undefined);
+      return;
+    }
+
     const measure = measureRef.current;
     if (!measure) return;
 
@@ -165,7 +177,7 @@ export function MenuSelect({
 
     // px-3 padding + chevron + gap between label and icon.
     setMinWidthPx(Math.min(contentWidth + 48, TRIGGER_MAX_WIDTH_PX));
-  }, [label, allItems]);
+  }, [fitContainer, label, allItems]);
 
   const updatePosition = useCallback(() => {
     if (useBottomSheet) return;
@@ -321,7 +333,9 @@ export function MenuSelect({
         }}
         className={triggerClassName}
       >
-        <span className="truncate">{label}</span>
+        <span className="min-w-0 truncate" title={label}>
+          {label}
+        </span>
         <ChevronDownIcon className="h-4 w-4 shrink-0 text-white/70" />
       </button>
 

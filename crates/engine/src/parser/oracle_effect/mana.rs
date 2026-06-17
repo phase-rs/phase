@@ -1663,9 +1663,16 @@ fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
 /// standard effect-chain parser. Returns `None` for unsupported filters or when
 /// the effect is unparseable, so the clause stays a loud gap.
 pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("when you spend this mana to cast ")
-        .parse(lower.trim())
-        .ok()?;
+    // CR 106.6: Both the active ("when you spend this mana to cast …") and the
+    // passive ("when that mana is spent to cast …") subject phrasings name the
+    // same delayed-trigger-on-spend event. One `alt()` over the two equivalent
+    // openings — parameterize, don't proliferate.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("when you spend this mana to cast "),
+        tag::<_, _, OracleError<'_>>("when that mana is spent to cast "),
+    ))
+    .parse(lower.trim())
+    .ok()?;
     // Split "[filter], [effect]" on the first ", ".
     let (after, filter_part) = terminated(
         take_until::<_, _, OracleError<'_>>(", "),
@@ -1708,6 +1715,27 @@ fn parse_spend_trigger_filter(filter: &str) -> Option<ManaRestriction> {
     // "a spell with mana value N or greater/less" (keeps its article).
     if let Some((comparator, value)) = parse_mana_value_threshold(filter) {
         return Some(ManaRestriction::OnlyForSpellWithManaValue { comparator, value });
+    }
+    // CR 205.3m: "[a|an] creature spell that shares a creature type with your
+    // commander" — a relational filter resolved against live commander state at
+    // the spend site. `all_consuming` rejects any trailing text so the whole
+    // clause stays a loud gap if the phrasing drifts.
+    if all_consuming(value(
+        ManaRestriction::SharesCreatureTypeWithCommander,
+        (
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("a "),
+                tag::<_, _, OracleError<'_>>("an "),
+            ))),
+            tag::<_, _, OracleError<'_>>(
+                "creature spell that shares a creature type with your commander",
+            ),
+        ),
+    ))
+    .parse(filter)
+    .is_ok()
+    {
+        return Some(ManaRestriction::SharesCreatureTypeWithCommander);
     }
     // "[a|an] [subtype] creature spell".
     let (rest, _) = opt(alt((
@@ -2588,6 +2616,58 @@ mod tests {
                 restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
             }]
         );
+    }
+
+    /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's passive-voice
+    /// "when that mana is spent to cast a creature spell that shares a creature
+    /// type with your commander, scry 1" must parse to a `TriggerOnSpend` with the
+    /// relational `SharesCreatureTypeWithCommander` restriction.
+    #[test]
+    fn parses_path_of_ancestry_spend_trigger() {
+        let grant = parse_mana_spend_trigger(
+            "when that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1",
+        )
+        .expect("Path of Ancestry spend trigger must parse");
+        match grant {
+            ManaSpellGrant::TriggerOnSpend {
+                restriction,
+                ability,
+            } => {
+                assert_eq!(
+                    restriction,
+                    Some(ManaRestriction::SharesCreatureTypeWithCommander)
+                );
+                assert!(matches!(*ability.effect, Effect::Scry { .. }));
+            }
+            other => panic!("expected TriggerOnSpend, got {other:?}"),
+        }
+    }
+
+    /// The active-voice subject phrasing parses identically to the passive voice,
+    /// confirming the `alt()` over both openings (parameterize-don't-proliferate).
+    #[test]
+    fn parses_active_voice_shares_commander_spend_trigger() {
+        let grant = parse_mana_spend_trigger(
+            "when you spend this mana to cast a creature spell that shares a creature type with your commander, scry 1",
+        )
+        .expect("active-voice equivalent must parse");
+        assert!(matches!(
+            grant,
+            ManaSpellGrant::TriggerOnSpend {
+                restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
+                ..
+            }
+        ));
+    }
+
+    /// A malformed relational filter must decline so the clause stays a loud gap
+    /// rather than flipping to a wrong-but-supported parse.
+    #[test]
+    fn shares_commander_filter_rejects_trailing_text() {
+        assert!(parse_mana_spend_trigger(
+            "when that mana is spent to cast a creature spell that shares a creature type with your commander or an opponent's commander, scry 1",
+        )
+        .is_none());
     }
 
     /// CR 505.1 + CR 106.4: a subject-led mana clause ("the active player adds

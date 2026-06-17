@@ -466,6 +466,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
+            FilterProp::WasPlayed => parts.push("was played".into()),
             FilterProp::Attacking { defender } => match defender {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),
@@ -480,6 +481,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::BlockingAlone => parts.push("blocking alone".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
+            FilterProp::ProtectorMatches { .. } => parts.push("protector matches".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {
                 parts.push("haste or controlled since turn began".into())
@@ -635,6 +637,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::ScopedPlayer => "that player's",
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
+                    ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
@@ -729,6 +732,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("not {}", fmt_typed_filter(&inner_tf)));
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
@@ -743,6 +747,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
+                ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
                 ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
@@ -811,6 +816,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
+        ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
@@ -1139,6 +1145,22 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             CardTypeSetSource::Objects { filter } => {
                 format!("card types among {}", fmt_target(filter))
             }
+            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+                Some(cause) => {
+                    use crate::types::ability::ThisWayCause;
+                    let verb = match cause {
+                        ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Exiled => "exiled",
+                        ThisWayCause::Milled => "milled",
+                        ThisWayCause::Destroyed => "destroyed",
+                        ThisWayCause::Sacrificed => "sacrificed",
+                        ThisWayCause::Returned => "returned",
+                        ThisWayCause::Bounced => "bounced",
+                    };
+                    format!("card types among cards {verb} this way")
+                }
+                None => "card types among tracked cards".into(),
+            },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ZoneCardCount {
@@ -2066,6 +2088,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 },
             ));
         }
+        Effect::ExchangeLifeTotals { player_a, player_b } => {
+            d.push(("player_a".into(), fmt_target(player_a)));
+            d.push(("player_b".into(), fmt_target(player_b)));
+        }
         Effect::ChangeZone {
             origin,
             destination,
@@ -2321,7 +2347,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            flipper,
         } => {
+            // CR 705.2: surface a non-default flipper ("that player flips a coin").
+            if !matches!(flipper, TargetFilter::Controller) {
+                d.push(("flipper".into(), format!("{flipper:?}")));
+            }
             if win_effect.is_some() {
                 d.push(("win".into(), "yes".into()));
             }
@@ -2333,8 +2364,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             win_effect,
             lose_effect,
+            flipper,
         } => {
             d.push(("count".into(), format!("{count:?}")));
+            if !matches!(flipper, TargetFilter::Controller) {
+                d.push(("flipper".into(), format!("{flipper:?}")));
+            }
             if win_effect.is_some() {
                 d.push(("win".into(), "yes".into()));
             }
@@ -5533,6 +5568,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
         // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
         AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        // CR 301.5 + CR 303.4: Source attached-to-creature check — resolved by
+        // `evaluate_condition` against the source's `attached_to` host.
+        AbilityCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -5859,6 +5897,7 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         }
         | Effect::FlipCoins {
             win_effect,
@@ -10656,6 +10695,10 @@ mod tests {
                 "ZoneChangedThisWay",
             ),
             (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+            (
+                AbilityCondition::SourceAttachedToCreature,
+                "SourceAttachedToCreature",
+            ),
         ];
 
         for (condition, expected_name) in conditions {

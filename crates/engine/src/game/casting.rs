@@ -365,6 +365,7 @@ fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> 
         has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
         cast_variant: crate::types::game_state::CastingVariant::Normal,
+        was_kicked: !spell_obj.kickers_paid.is_empty(),
     }
 }
 
@@ -8481,10 +8482,23 @@ fn continue_with_prepared(
             // "an opponent chooses —"). Target selection still belongs to the
             // controller (CR 115.1) — `pending_cast` keeps the caster.
             let mode_chooser = resolve_modal_chooser(state, &capped, player, prepared.object_id);
+            let mode_abilities = state
+                .objects
+                .get(&prepared.object_id)
+                .map(super::ability_utils::modal_spell_mode_abilities)
+                .unwrap_or_default();
+            let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
+                state,
+                prepared.object_id,
+                player,
+                &capped,
+                &mode_abilities,
+            );
             return Ok(WaitingFor::ModeChoice {
                 player: mode_chooser,
                 modal: capped,
                 pending_cast: Box::new(pending_modal),
+                unavailable_modes,
             });
         }
 
@@ -9138,9 +9152,25 @@ pub fn spell_has_legal_targets(
         });
     }
 
-    // Modal spells defer target checking until after mode selection
-    if obj.modal.is_some() {
-        return true;
+    // CR 700.2a-b: Modal spells are castable only when at least one mode has a
+    // legal targeting assignment (or needs no targets).
+    if let Some(ref modal) = obj.modal {
+        let mode_abilities = super::ability_utils::modal_spell_mode_abilities(obj);
+        let capped = modal_choice_for_player(
+            &simulated,
+            player,
+            obj.id,
+            modal,
+            &crate::types::ability::SpellContext::default(),
+        );
+        let unavailable = super::ability_utils::spell_modal_unavailable_modes(
+            &simulated,
+            obj.id,
+            player,
+            &capped,
+            &mode_abilities,
+        );
+        return unavailable.len() < capped.mode_count;
     }
 
     // Only Spell-kind abilities contribute targets when casting.
@@ -10641,11 +10671,37 @@ fn apply_mana_spell_grants(
             else {
                 continue;
             };
-            if restriction.as_ref().is_some_and(|restriction| {
-                !spell_meta
+            // CR 106.6: Gate the reflexive trigger on the spend filter. Most
+            // restrictions are evaluated purely from `SpellMeta` via
+            // `allows_spell`; the commander-relational filter
+            // (`SharesCreatureTypeWithCommander`) needs game state and is
+            // evaluated here, the single authoritative spend-check site.
+            let passes = match restriction.as_ref() {
+                None => true,
+                Some(crate::types::mana::ManaRestriction::SharesCreatureTypeWithCommander) => {
+                    spell_meta.as_ref().is_some_and(|meta| {
+                        // CR 205.3m + CR 903.3: the spell must be a creature AND
+                        // share at least one creature type with the controller's
+                        // commander(s).
+                        let is_creature = meta
+                            .types
+                            .iter()
+                            .any(|t| t.eq_ignore_ascii_case("Creature"));
+                        if !is_creature {
+                            return false;
+                        }
+                        let commander_types =
+                            super::commander::commander_creature_types(state, caster);
+                        meta.subtypes
+                            .iter()
+                            .any(|s| commander_types.iter().any(|c| c.eq_ignore_ascii_case(s)))
+                    })
+                }
+                Some(restriction) => spell_meta
                     .as_ref()
-                    .is_some_and(|meta| restriction.allows_spell(meta))
-            }) {
+                    .is_some_and(|meta| restriction.allows_spell(meta)),
+            };
+            if !passes {
                 continue;
             }
             let timestamp = state.next_timestamp() as u32;
@@ -12722,6 +12778,7 @@ fn cant_cast_filter_matches(
                 has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
                 from_zone: spell_obj.zone,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: !spell_obj.kickers_paid.is_empty(),
             };
             super::filter::spell_record_matches_filter(
                 &record,
@@ -12774,6 +12831,7 @@ fn is_blocked_by_per_turn_cast_limit(
                     has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
                     from_zone: spell_obj.zone,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: !spell_obj.kickers_paid.is_empty(),
                 };
                 if !super::filter::spell_record_matches_filter(
                     &current_record,
@@ -13347,6 +13405,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantNextSpellAbility {
                 modifier: NextSpellModifier::WithoutPayingManaCost,
+                player: PlayerScope::Controller,
                 spell_filter: None,
             },
             vec![],
@@ -13390,6 +13449,83 @@ mod tests {
         }
         assert_eq!(state.stack.len(), 1);
         assert!(state.pending_next_spell_modifiers.is_empty());
+    }
+
+    /// CR 115.1: a `player: Target` grant (Bigger on the Inside) pushes the
+    /// pending modifier keyed to the TARGETED player, not the controller — so
+    /// "the next spell THEY cast" gains the keyword for the mana recipient.
+    #[test]
+    fn grant_next_spell_target_scope_keys_targeted_player() {
+        use crate::types::ability::ResolvedAbility;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(79),
+            PlayerId(0),
+            "Bigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        // Controller is player 0; the ability targets player 1.
+        let ability = ResolvedAbility::new(
+            Effect::GrantNextSpellAbility {
+                modifier: NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Cascade,
+                },
+                player: PlayerScope::Target,
+                spell_filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.pending_next_spell_modifiers.len(), 1);
+        assert_eq!(
+            state.pending_next_spell_modifiers[0].player,
+            PlayerId(1),
+            "Target-scope grant must key the targeted player, not the controller"
+        );
+    }
+
+    /// CR 109.5: a `player: Controller` grant keys the controller even when the
+    /// ability also has a player target (e.g. a "you cast" grant chained after
+    /// a targeted clause).
+    #[test]
+    fn grant_next_spell_controller_scope_keys_controller() {
+        use crate::types::ability::ResolvedAbility;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Controller Grant Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantNextSpellAbility {
+                modifier: NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Cascade,
+                },
+                player: PlayerScope::Controller,
+                spell_filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.pending_next_spell_modifiers.len(), 1);
+        assert_eq!(
+            state.pending_next_spell_modifiers[0].player,
+            PlayerId(0),
+            "Controller-scope grant must key the controller even with a player target"
+        );
     }
 
     #[test]
@@ -13709,6 +13845,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
     }
@@ -14268,6 +14405,127 @@ mod tests {
             state.deferred_triggers.len(),
             deferred_before + 1,
             "spending on a non-matching spell must not queue another trigger"
+        );
+    }
+
+    /// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's
+    /// `SharesCreatureTypeWithCommander` spend filter fires the reflexive scry
+    /// only when the spell is a creature sharing a creature type with the
+    /// controller's commander. Evaluated at the spend-check site (game-state
+    /// aware), not via `allows_spell`.
+    #[test]
+    fn mana_spend_trigger_shares_creature_type_with_commander() {
+        let mut state = setup_game_at_main_phase();
+        // Elf commander in the command zone for PlayerId(0).
+        let commander = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Elvish Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let c = state.objects.get_mut(&commander).unwrap();
+            c.is_commander = true;
+            c.card_types.core_types.push(CoreType::Creature);
+            c.card_types.subtypes.push("Elf".to_string());
+        }
+
+        let path = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Path of Ancestry".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&path)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // An Elf creature spell (shares a type), a Goblin creature spell (no
+        // shared type), and an Elf-typed noncreature (Tribal instant) spell.
+        let elf_id = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(0),
+            "Elvish Mystic".to_string(),
+            Zone::Stack,
+        );
+        {
+            let e = state.objects.get_mut(&elf_id).unwrap();
+            e.card_types.core_types.push(CoreType::Creature);
+            e.card_types.subtypes.push("Elf".to_string());
+        }
+        let goblin_id = create_object(
+            &mut state,
+            CardId(403),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Stack,
+        );
+        {
+            let g = state.objects.get_mut(&goblin_id).unwrap();
+            g.card_types.core_types.push(CoreType::Creature);
+            g.card_types.subtypes.push("Goblin".to_string());
+        }
+        let elf_instant_id = create_object(
+            &mut state,
+            CardId(404),
+            PlayerId(0),
+            "Elvish Promise".to_string(),
+            Zone::Stack,
+        );
+        {
+            let i = state.objects.get_mut(&elf_instant_id).unwrap();
+            i.card_types.core_types.push(CoreType::Instant);
+            i.card_types.subtypes.push("Elf".to_string());
+        }
+
+        let trigger_ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let unit = ManaUnit {
+            color: ManaType::Green,
+            source_id: path,
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![ManaSpellGrant::TriggerOnSpend {
+                restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
+                ability: Box::new(trigger_ability),
+            }],
+            expiry: None,
+        };
+
+        let base = state.deferred_triggers.len();
+        // Elf creature spell shares the Elf creature type → reflexive scry queued.
+        apply_mana_spell_grants(&mut state, elf_id, std::slice::from_ref(&unit));
+        assert_eq!(
+            state.deferred_triggers.len(),
+            base + 1,
+            "an Elf creature spell shares a type with the Elf commander"
+        );
+        // Goblin creature spell shares no creature type → no trigger.
+        apply_mana_spell_grants(&mut state, goblin_id, std::slice::from_ref(&unit));
+        assert_eq!(
+            state.deferred_triggers.len(),
+            base + 1,
+            "a Goblin creature spell shares no type with the Elf commander"
+        );
+        // Elf-typed noncreature spell is not a creature → no trigger.
+        apply_mana_spell_grants(&mut state, elf_instant_id, &[unit]);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            base + 1,
+            "a noncreature spell never qualifies even when it shares a subtype"
         );
     }
 
@@ -19233,6 +19491,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 crate::types::SpellCastRecord {
                     name: "Opt".to_string(),
@@ -19245,6 +19504,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );
@@ -27588,6 +27848,48 @@ mod tests {
         obj_id
     }
 
+    fn first_kicked_spell_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::WasKicked]))
+    }
+
+    fn install_first_kicked_spell_reducer(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(4_231),
+            player,
+            "Vine Gecko".to_string(),
+            Zone::Battlefield,
+        );
+        let kicked_filter = first_kicked_spell_filter();
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(1),
+                    spell_filter: Some(kicked_filter.clone()),
+                    dynamic_count: None,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: Some(kicked_filter),
+                        },
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+            );
+        source
+    }
+
     #[test]
     fn modal_kicker_declined_caps_modes_before_mode_choice() {
         let mut state = setup_game_at_main_phase();
@@ -27700,6 +28002,106 @@ mod tests {
         assert!(ability.context.additional_cost_paid);
         assert_eq!(ability.context.kickers_paid, vec![KickerVariant::First]);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
+    }
+
+    #[test]
+    fn first_kicked_spell_reducer_recomputes_after_kicker_declared() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+        state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::generic(1);
+        install_first_kicked_spell_reducer(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+        let (pending, cost) = match &state.waiting_for {
+            WaitingFor::OptionalCostChoice {
+                pending_cast, cost, ..
+            } => (*pending_cast.clone(), cost.clone()),
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        };
+        assert_eq!(
+            pending.cost,
+            ManaCost::generic(1),
+            "the spell is not kicked yet, so the reducer must not apply"
+        );
+
+        state.waiting_for = crate::game::engine_casting::handle_optional_cost_choice(
+            &mut state,
+            PlayerId(0),
+            pending,
+            &cost,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        let WaitingFor::ModeChoice { pending_cast, .. } = &state.waiting_for else {
+            panic!("expected ModeChoice, got {:?}", state.waiting_for);
+        };
+        assert_eq!(
+            pending_cast.cost,
+            ManaCost::generic(0),
+            "CR 601.2f + CR 702.33d: once kicker is declared, the first kicked spell reducer applies before mana payment"
+        );
+    }
+
+    #[test]
+    fn second_kicked_spell_not_reduced_after_first_kicked_this_turn() {
+        // CR 702.33d: a "first kicked spell you cast each turn costs {1} less"
+        // reducer is gated on `SpellsCastThisTurn{WasKicked} == 0`. With one kicked
+        // spell already recorded this turn, the gate count is 1, so a second kicked
+        // spell must NOT be reduced even after its kicker is declared. This pins the
+        // once-per-turn semantics that the recompute-after-kicker path rides on.
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+        state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::generic(1);
+        install_first_kicked_spell_reducer(&mut state, PlayerId(0));
+
+        // Seed one kicked spell already cast this turn so the per-turn gate is closed.
+        state
+            .spells_cast_this_turn_by_player
+            .entry(PlayerId(0))
+            .or_default()
+            .push_back(crate::types::game_state::SpellCastRecord {
+                was_kicked: true,
+                ..Default::default()
+            });
+
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+        let (pending, cost) = match &state.waiting_for {
+            WaitingFor::OptionalCostChoice {
+                pending_cast, cost, ..
+            } => (*pending_cast.clone(), cost.clone()),
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        };
+        assert_eq!(pending.cost, ManaCost::generic(1));
+
+        state.waiting_for = crate::game::engine_casting::handle_optional_cost_choice(
+            &mut state,
+            PlayerId(0),
+            pending,
+            &cost,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        let WaitingFor::ModeChoice { pending_cast, .. } = &state.waiting_for else {
+            panic!("expected ModeChoice, got {:?}", state.waiting_for);
+        };
+        assert_eq!(
+            pending_cast.cost,
+            ManaCost::generic(1),
+            "CR 702.33d: a kicked spell cast after the first kicked spell this turn keeps full cost"
+        );
     }
 
     #[test]
@@ -31383,6 +31785,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
 
@@ -31499,6 +31902,7 @@ mod tests {
                 has_x_in_cost: true,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
 
@@ -31570,6 +31974,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]),
         );
 
@@ -43520,6 +43925,7 @@ mod tests {
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
+                was_kicked: false,
             }]
             .into(),
         );

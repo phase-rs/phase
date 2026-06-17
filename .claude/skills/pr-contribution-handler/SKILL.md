@@ -80,6 +80,10 @@ A non-stop fleet exhausts GitHub's **5,000-req/hr REST `core`** bucket long befo
    - `gh pr view <PR> --json number,title,state,author,assignees,headRefName,headRepository,baseRefName,isCrossRepository,mergeStateStatus,reviewDecision,url`
    - `gh pr checks <PR>` if available
 
+## Discovery when no explicit PR/list is given
+
+This skill handles a **single PR or an explicit list**. When invoked *without* one — "handle the open contributor PRs," or as a recurring maintenance loop — the job of **discovering which PRs need attention** (and re-review eligibility, cost control, cadence) belongs to the parent **`pr-review-loop`** skill, which produces the candidate list and delegates each PR into the per-PR pipeline below. Do not reinvent discovery here; invoke `pr-review-loop`.
+
 ## Security and Sanity Pre-Check (per PR — runs first, before anything else)
 
 **The goal of this skill is to MERGE PRs into `main`.** Most "out of place" changes are unintentional and fixable inline. A small subset is malicious or destructive enough that you should stop and flag the maintainer instead of patching forward.

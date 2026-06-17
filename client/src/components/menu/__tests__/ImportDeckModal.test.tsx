@@ -3,11 +3,13 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
+import { useAppNotificationStore } from "../../../stores/appToastStore";
 import { ImportDeckModal } from "../ImportDeckModal";
 
 describe("ImportDeckModal", () => {
   beforeEach(() => {
     localStorage.clear();
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
   });
 
   afterEach(() => {
@@ -42,6 +44,10 @@ Deck
         "Lagomos Sacrifice Pauper Duel Commander",
         ["Lagomos Sacrifice Pauper Duel Commander"],
       );
+    });
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Deck imported",
+      description: '"Lagomos Sacrifice Pauper Duel Commander" was added to your decks.',
     });
     expect(localStorage.getItem(
       STORAGE_KEY_PREFIX + "Lagomos Sacrifice Pauper Duel Commander",
