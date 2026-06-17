@@ -2672,6 +2672,14 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::SourceIsTapped),
             }),
+            // CR 725.1: "if you're not the monarch" / "if an opponent is the monarch".
+            StaticCondition::IsMonarch => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::IsMonarch),
+            }),
+            // CR 725.1: "if there is a monarch" (negated no-monarch check).
+            StaticCondition::NoMonarch => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::NoMonarch),
+            }),
             // CR 103.1: "you weren't the starting player" → Not(WasStartingPlayer).
             StaticCondition::WasStartingPlayer { controller } => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::WasStartingPlayer {
@@ -26038,6 +26046,60 @@ mod tests {
             static_condition_to_trigger_condition(&StaticCondition::IsMonarch),
             Some(TriggerCondition::IsMonarch),
         );
+    }
+
+    #[test]
+    fn bridge_opponent_is_monarch_intervening_if() {
+        let sc = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::IsMonarch),
+                },
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::NoMonarch),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_trigger_condition(&sc),
+            Some(TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::IsMonarch),
+                    },
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::NoMonarch),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn queen_marchesa_upkeep_attaches_opponent_monarch_intervening_if() {
+        let oracle = "At the beginning of your upkeep, if an opponent is the monarch, create a 1/1 black Assassin creature token with haste.";
+        let def = parse_trigger_line(oracle, "Queen Marchesa");
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        let condition = def.condition.as_ref().expect("intervening-if must parse");
+        assert!(matches!(
+            condition,
+            TriggerCondition::And {
+                conditions,
+            } if conditions.len() == 2
+                && matches!(
+                    conditions[0],
+                    TriggerCondition::Not {
+                        condition: ref inner,
+                    } if matches!(inner.as_ref(), TriggerCondition::IsMonarch)
+                )
+                && matches!(
+                    conditions[1],
+                    TriggerCondition::Not {
+                        condition: ref inner,
+                    } if matches!(inner.as_ref(), TriggerCondition::NoMonarch)
+                )
+        ));
     }
 
     #[test]

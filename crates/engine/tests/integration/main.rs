@@ -141,6 +141,7 @@ mod issue_1499_arabella;
 mod issue_1509_sorcery_main_phase_cast;
 mod issue_1524_serpents_soul_jar;
 mod issue_1526_harvest_season;
+mod issue_1539_queen_marchesa;
 mod issue_1549_legend_of_roku_impulse;
 mod issue_1961_joel_token_dies;
 mod issue_1963_lotleth_troll;
