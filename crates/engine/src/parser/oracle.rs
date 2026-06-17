@@ -5354,6 +5354,48 @@ mod tests {
         );
     }
 
+    /// CR 508.1a + CR 603.4 + CR 603.7: target-anaphoric "it [didn't] attack
+    /// this turn" trailing-if must survive the full parse, not get dropped.
+    /// Aggression's end-step trigger destroys only when the enchanted creature
+    /// DIDN'T attack (negated gate); Berserk's delayed end-step trigger destroys
+    /// only when the creature DID attack (positive gate). Before the fix both
+    /// produced a `Destroy { target: ParentTarget }` with `condition: null`.
+    #[test]
+    fn target_attacked_this_turn_trailing_if_survives_full_parse() {
+        let aggression = parse(
+            "Enchant non-Wall creature\nEnchanted creature has first strike and trample.\nAt the beginning of the end step of enchanted creature's controller, destroy that creature if it didn't attack this turn.",
+            "Aggression",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+        let s = format!("{:?}", aggression.triggers);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(!s.contains("Unimplemented"), "no Unimplemented chunk: {s}");
+        assert!(
+            s.contains("AttackedThisTurn"), // allow-noncombinator: Debug-string assertion
+            "Aggression destroy must carry an AttackedThisTurn gate, got {s}"
+        );
+        assert!(
+            s.contains("Not"), // allow-noncombinator: Debug-string assertion
+            "Aggression's 'didn't attack' gate must be Not-wrapped, got {s}"
+        );
+
+        let berserk = parse(
+            "Cast this spell only before the combat damage step.\nTarget creature gains trample and gets +X/+0 until end of turn, where X is its power. At the beginning of the next end step, destroy that creature if it attacked this turn.",
+            "Berserk",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let s = format!("{:?}", berserk.abilities);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(
+            s.contains("AttackedThisTurn"), // allow-noncombinator: Debug-string assertion
+            "Berserk delayed-trigger destroy must carry an AttackedThisTurn gate, got {s}"
+        );
+    }
+
     /// Parse with raw MTGJSON keyword names (for testing keyword extraction).
     fn parse_with_keyword_names(
         text: &str,
