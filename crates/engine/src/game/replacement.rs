@@ -5086,6 +5086,8 @@ enum CommuteClass {
     Multiplicative,
     Additive,
     Subtractive,
+    /// Two `SetTapState::Untap` replacements commute (same outcome).
+    EnterUntap,
 }
 
 impl CommuteClass {
@@ -5252,6 +5254,7 @@ fn candidate_materiality(
         };
     }
     let mut field: Option<EventField> = None;
+    let mut enter_tapped_commute: Option<CommuteClass> = None;
     let mut current = Some(execute);
     while let Some(def) = current {
         match &*def.effect {
@@ -5275,9 +5278,15 @@ fn candidate_materiality(
             // scope is not an ETB modifier and is not matched here.
             Effect::SetTapState {
                 scope: EffectScope::Single,
+                state,
                 ..
             } => {
                 field = Some(EventField::EnterTapped);
+                // CR 616.1f: Duplicate untap state replacements commute (#1340).
+                enter_tapped_commute = Some(match state {
+                    TapStateChange::Tap => CommuteClass::NonCommuting,
+                    TapStateChange::Untap => CommuteClass::EnterUntap,
+                });
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
             // `enter_with_counters`, so they never conflict. `Effect::Choose`
@@ -5295,7 +5304,7 @@ fn candidate_materiality(
     match field {
         Some(field) => CandidateMateriality::Writes {
             field,
-            commute: CommuteClass::NonCommuting,
+            commute: enter_tapped_commute.unwrap_or(CommuteClass::NonCommuting),
         },
         None => CandidateMateriality::Disjoint,
     }
@@ -6263,6 +6272,48 @@ mod tests {
             panic!("expected NeedsChoice for enter_tapped field collision, got {result:?}");
         };
         assert_eq!(player, PlayerId(0));
+    }
+
+    #[test]
+    fn two_identical_untap_replacements_auto_apply_without_choice() {
+        // CR 616.1f: Duplicate "lands enter untapped" replacements commute (#1340).
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::You),
+            ))
+            .destination_zone(Zone::Battlefield);
+        let mut state = test_state_with_object(
+            ObjectId(1),
+            Zone::Battlefield,
+            vec![untap_repl.clone(), untap_repl],
+        );
+        let land_id = ObjectId(10);
+        state.objects.insert(
+            land_id,
+            GameObject::new(
+                land_id,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            ),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(land_id, Zone::Hand, Zone::Battlefield, None);
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "identical untap replacements must auto-apply without ordering prompt, got {result:?}"
+        );
     }
 
     #[test]
