@@ -5,10 +5,10 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter,
-    ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, Comparator, CountScope,
+    DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -16558,6 +16558,191 @@ fn enters_with_dynamic_count_not_matched_as_fixed() {
             def.mode
         );
     }
+}
+
+const THUNDEROUS_TIERED_COUNTER_LINE: &str =
+    "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
+
+fn filter_has_typed(filter: &TargetFilter, pred: impl Fn(&TypedFilter) -> bool + Copy) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => pred(typed),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|filter| filter_has_typed(filter, pred))
+        }
+        _ => false,
+    }
+}
+
+fn filter_has_cmc(filter: &TargetFilter, comparator: Comparator, threshold: u32) -> bool {
+    filter_has_typed(filter, |typed| {
+        typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: parsed_comparator,
+                    value: QuantityExpr::Fixed { value },
+                } if *parsed_comparator == comparator
+                    && u32::try_from(*value).ok() == Some(threshold)
+            )
+        })
+    })
+}
+
+fn has_tiered_plus1_branch(
+    defs: &[StaticDefinition],
+    count: u32,
+    comparator: Comparator,
+    threshold: u32,
+) -> bool {
+    defs.iter().any(|def| {
+        matches!(
+            &def.mode,
+            StaticMode::EntersWithAdditionalCounters {
+                counter_type,
+                count: parsed_count,
+            } if counter_type == &CounterType::Plus1Plus1 && *parsed_count == count
+        ) && def
+            .affected
+            .as_ref()
+            .is_some_and(|filter| filter_has_cmc(filter, comparator, threshold))
+    })
+}
+
+fn filter_has_other_vehicle_you_control(filter: &TargetFilter) -> bool {
+    filter_has_typed(filter, |typed| {
+        typed.controller == Some(ControllerRef::You)
+            && typed.properties.contains(&FilterProp::Another)
+            && typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Vehicle".to_string()))
+    })
+}
+
+fn filter_has_other_creature_you_control(filter: &TargetFilter) -> bool {
+    filter_has_typed(filter, |typed| {
+        typed.controller == Some(ControllerRef::You)
+            && typed.properties.contains(&FilterProp::Another)
+            && typed.type_filters.contains(&TypeFilter::Creature)
+    })
+}
+
+#[test]
+fn continuous_subject_filter_distributes_shared_you_control_suffix() {
+    let filter = parse_continuous_subject_filter("Each other Vehicle and creature you control")
+        .expect("shared-suffix compound subject should parse");
+    assert!(
+        filter_has_other_vehicle_you_control(&filter),
+        "Vehicle branch must preserve Other + controller you, got {filter:?}"
+    );
+    assert!(
+        filter_has_other_creature_you_control(&filter),
+        "creature branch must preserve Other + controller you, got {filter:?}"
+    );
+}
+
+#[test]
+fn tiered_enters_with_additional_counters_static_thunderous_line() {
+    let defs = parse_static_line_multi(THUNDEROUS_TIERED_COUNTER_LINE);
+    assert_eq!(
+        defs.len(),
+        2,
+        "tiered ETB-counter line must emit exactly two statics, got {defs:?}"
+    );
+    assert!(
+        defs.iter().all(|def| def.condition.is_none()),
+        "tiered statics must not carry StaticCondition; CMC belongs in affected filters: {defs:?}"
+    );
+
+    let first = defs
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::EntersWithAdditionalCounters {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                }
+            )
+        })
+        .expect("expected <=4 branch with one +1/+1 counter");
+    let otherwise = defs
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::EntersWithAdditionalCounters {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 3,
+                }
+            )
+        })
+        .expect("expected >4 branch with three +1/+1 counters");
+
+    let first_filter = first.affected.as_ref().expect("first branch affected");
+    let otherwise_filter = otherwise
+        .affected
+        .as_ref()
+        .expect("otherwise branch affected");
+    assert!(
+        filter_has_cmc(first_filter, Comparator::LE, 4),
+        "first branch must carry Cmc <= 4, got {first_filter:?}"
+    );
+    assert!(
+        filter_has_cmc(otherwise_filter, Comparator::GT, 4),
+        "otherwise branch must carry Cmc > 4, got {otherwise_filter:?}"
+    );
+    for filter in [first_filter, otherwise_filter] {
+        assert!(
+            filter_has_other_vehicle_you_control(filter),
+            "affected filter must include other Vehicle you control, got {filter:?}"
+        );
+        assert!(
+            filter_has_other_creature_you_control(filter),
+            "affected filter must include other creature you control, got {filter:?}"
+        );
+    }
+}
+
+#[test]
+fn tiered_enters_with_additional_counters_static_plural_their_mana_value() {
+    let defs = parse_static_line_multi(
+        "Each other Vehicle and creature you control enter with an additional +1/+1 counter on them if their mana value is 4 or less. Otherwise, they enter with three additional +1/+1 counters on them.",
+    );
+
+    assert_eq!(
+        defs.len(),
+        2,
+        "plural tiered ETB-counter line must emit two statics, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 1, Comparator::LE, 4),
+        "plural first branch must parse their mana value as Cmc <= 4, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 3, Comparator::GT, 4),
+        "plural otherwise branch must parse as Cmc > 4, got {defs:?}"
+    );
+}
+
+#[test]
+fn tiered_enters_with_additional_counters_static_one_counter_otherwise_singular() {
+    let defs = parse_static_line_multi(
+        "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with one additional +1/+1 counter on it.",
+    );
+
+    assert_eq!(
+        defs.len(),
+        2,
+        "one-counter otherwise tiered ETB-counter line must emit two statics, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 1, Comparator::LE, 4),
+        "first branch must still parse with one counter and Cmc <= 4, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 1, Comparator::GT, 4),
+        "otherwise branch must accept singular 'counter on' and carry Cmc > 4, got {defs:?}"
+    );
 }
 
 /// CR 205.3 + CR 604.1 + CR 702.18a: "All Slivers have shroud." (Crystalline

@@ -24,7 +24,7 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, Comparator, ContinuousModification,
     CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
     PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
     TargetFilter, TriggerDefinition,
@@ -1872,6 +1872,8 @@ fn detect_condition_if(
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    let stripped =
+        strip_represented_tiered_enters_with_additional_counter_if_pairs(&stripped, parsed);
     // CR 702.170c: "[you may] exile a card. If you do, it becomes plotted." —
     // the "if you do" is the optional-exile linkage, represented by the
     // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
@@ -2058,6 +2060,123 @@ fn strip_cr_implicit_if_phrases(cleaned: &str) -> String {
         out.push('.');
     }
     out
+}
+
+fn strip_represented_tiered_enters_with_additional_counter_if_pairs(
+    cleaned: &str,
+    parsed: &ParsedAbilities,
+) -> String {
+    let mut out = String::with_capacity(cleaned.len());
+    for (line_index, line) in cleaned.lines().enumerate() {
+        if line_index > 0 {
+            out.push('\n');
+        }
+        out.push_str(&strip_represented_tiered_pairs_from_line(line, parsed));
+    }
+    out
+}
+
+fn strip_represented_tiered_pairs_from_line(line: &str, parsed: &ParsedAbilities) -> String {
+    let mut kept = Vec::new();
+    let segments: Vec<&str> = line.split('.').collect();
+    let mut index = 0usize;
+    while index < segments.len() {
+        let current = segments[index].trim();
+        if current.is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some(next_raw) = segments.get(index + 1) {
+            let next = next_raw.trim();
+            if sentence_starts_with_otherwise(next) {
+                let pair = format!("{current}. {next}.");
+                if represented_tiered_counter_pair(&pair, parsed) {
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        kept.push(format!("{current}."));
+        index += 1;
+    }
+    kept.join(" ")
+}
+
+fn sentence_starts_with_otherwise(sentence: &str) -> bool {
+    tag::<_, _, nom::error::Error<_>>("otherwise,")
+        .parse(sentence)
+        .is_ok()
+}
+
+fn represented_tiered_counter_pair(pair: &str, parsed: &ParsedAbilities) -> bool {
+    let Some(pattern) =
+        super::oracle_static::parse_tiered_enters_with_additional_counters_pattern(pair)
+    else {
+        return false;
+    };
+
+    let has_first = parsed.statics.iter().any(|static_def| {
+        static_matches_tiered_counter_branch(
+            static_def,
+            &pattern.counter_type,
+            pattern.first_count,
+            Comparator::LE,
+            pattern.threshold,
+        )
+    });
+    let has_otherwise = parsed.statics.iter().any(|static_def| {
+        static_matches_tiered_counter_branch(
+            static_def,
+            &pattern.counter_type,
+            pattern.otherwise_count,
+            Comparator::GT,
+            pattern.threshold,
+        )
+    });
+
+    has_first && has_otherwise
+}
+
+fn static_matches_tiered_counter_branch(
+    static_def: &StaticDefinition,
+    counter_type: &crate::types::counter::CounterType,
+    count: u32,
+    comparator: Comparator,
+    threshold: u32,
+) -> bool {
+    let StaticMode::EntersWithAdditionalCounters {
+        counter_type: parsed_counter_type,
+        count: parsed_count,
+    } = &static_def.mode
+    else {
+        return false;
+    };
+    if parsed_counter_type != counter_type || *parsed_count != count {
+        return false;
+    }
+    static_def
+        .affected
+        .as_ref()
+        .is_some_and(|filter| target_filter_has_cmc(filter, comparator, threshold))
+}
+
+fn target_filter_has_cmc(filter: &TargetFilter, comparator: Comparator, threshold: u32) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: parsed_comparator,
+                    value: QuantityExpr::Fixed { value },
+                } if *parsed_comparator == comparator
+                    && u32::try_from(*value).ok() == Some(threshold)
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| target_filter_has_cmc(filter, comparator, threshold)),
+        _ => false,
+    }
 }
 
 // ── Detector H: Condition_Unless ────────────────────────────────────────
@@ -2742,7 +2861,10 @@ fn effect_name(effect: &Effect) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{def_tree_has_optional, def_tree_has_unimplemented, trigger_tree_has_optional};
+    use super::{
+        check_swallowed_clauses, def_tree_has_optional, def_tree_has_unimplemented,
+        trigger_tree_has_optional,
+    };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool, TargetFilter};
@@ -3351,6 +3473,56 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    #[test]
+    fn condition_if_accepts_tiered_enters_with_counter_static() {
+        let parsed = parse_named(
+            "Trample\n\
+             Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.\n\
+             Crew 3",
+            "Thunderous Velocipede",
+            &["Artifact"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "represented tiered ETB-counter static must not report Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .filter(|static_def| {
+                    matches!(
+                        static_def.mode,
+                        StaticMode::EntersWithAdditionalCounters { .. }
+                    )
+                })
+                .count()
+                >= 2,
+            "expected tiered ETB-counter statics, got {:?}",
+            parsed.statics
+        );
+    }
+
+    #[test]
+    fn represented_tiered_counter_pair_does_not_hide_unrelated_if() {
+        let tiered_line = "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
+        let parsed = parse_named(tiered_line, "Thunderous Velocipede", &["Artifact"]);
+        let synthetic = format!("{tiered_line}\nDraw a card if the moon is bright.");
+        let mut diagnostics = Vec::new();
+
+        check_swallowed_clauses(&synthetic, &parsed, &mut diagnostics);
+
+        assert!(
+            diagnostics.iter().any(|warning| matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )),
+            "separate unrelated if text must remain visible to Condition_If, got {diagnostics:?}"
+        );
     }
 
     /// CR 608.2c: Mister Negative's "If you lost life this way, draw that many

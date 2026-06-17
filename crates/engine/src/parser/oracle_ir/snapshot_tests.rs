@@ -14,9 +14,20 @@ fn parse_two_layer(
     types: &[&str],
     subtypes: &[&str],
 ) -> (OracleDocIr, ParsedAbilities) {
+    parse_two_layer_with_keywords(oracle_text, card_name, &[], types, subtypes)
+}
+
+fn parse_two_layer_with_keywords(
+    oracle_text: &str,
+    card_name: &str,
+    keywords: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> (OracleDocIr, ParsedAbilities) {
+    let keywords: Vec<String> = keywords.iter().map(|s| s.to_string()).collect();
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-    let ir = parse_oracle_ir(oracle_text, card_name, &[], &types, &subtypes);
+    let ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&ir);
     (ir, lowered)
 }
@@ -259,6 +270,19 @@ fn smugglers_copter() {
     );
     insta::assert_json_snapshot!("smugglers_copter_ir", &ir);
     insta::assert_json_snapshot!("smugglers_copter_lowered", &lowered);
+}
+
+#[test]
+fn thunderous_velocipede() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Trample\nEach other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.\nCrew 3",
+        "Thunderous Velocipede",
+        &["trample", "crew"],
+        &["Artifact"],
+        &["Vehicle"],
+    );
+    insta::assert_json_snapshot!("thunderous_velocipede_ir", &ir);
+    insta::assert_json_snapshot!("thunderous_velocipede_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------

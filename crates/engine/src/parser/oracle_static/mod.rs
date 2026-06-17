@@ -145,6 +145,10 @@ pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
 pub(crate) use shared::GraveyardGrantedKeywordKind;
+pub(crate) use shared::{
+    is_tiered_enters_with_additional_counters_static,
+    parse_tiered_enters_with_additional_counters_pattern,
+};
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
     parse_every_creature_type_static_prefix,

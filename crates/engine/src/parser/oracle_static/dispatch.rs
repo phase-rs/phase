@@ -2473,18 +2473,3 @@ fn parse_enters_with_additional_counters(
         .description(text.to_string()),
     )
 }
-
-/// CR 109.5: True when `filter` is anchored to the source's controller via a
-/// `ControllerRef::You` constraint (directly or within an Or/And composition).
-/// Stricter than `filter_has_source_or_controller_anchor`, which also accepts
-/// `Opponent` — "enters with an additional counter" statics are always
-/// "you control" scoped, so an opponent anchor must NOT match.
-fn filter_is_controller_you(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.controller == Some(ControllerRef::You),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().all(filter_is_controller_you)
-        }
-        _ => false,
-    }
-}
