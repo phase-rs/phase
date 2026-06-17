@@ -1045,6 +1045,8 @@ impl GameObject {
             controller: self.controller,
             owner: self.owner,
             from_zone: from,
+            cast_from_zone: self.cast_from_zone,
+            played_from_zone: self.played_from_zone,
             to_zone: to,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),

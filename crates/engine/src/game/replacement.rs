@@ -1569,6 +1569,69 @@ fn scry_applier(
     }
 }
 
+// --- 4d. Explore (Twists and Turns / Topography Tracker) ---
+
+// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
+// effects can modify the explore action (e.g., add a scry prelude or double explore).
+fn explore_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Explore { .. })
+}
+
+fn explore_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::Explore { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
+    };
+    let Some(execute) = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone())
+    else {
+        return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
+    };
+
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::types::ability::TargetRef;
+
+    let controller = source.controller;
+    let mut current = Some(execute.as_ref());
+    while let Some(def) = current {
+        match &*def.effect {
+            Effect::Scry { .. } => {
+                let ability = build_resolved_from_def(def, rid.source, controller);
+                let _ = crate::game::effects::scry::resolve(state, &ability, events);
+            }
+            Effect::Explore => {
+                let ability = ResolvedAbility::new(
+                    Effect::Explore,
+                    vec![TargetRef::Object(object_id)],
+                    rid.source,
+                    controller,
+                );
+                let _ = crate::game::effects::explore::resolve_explore_effect(
+                    state, &ability, object_id, events,
+                );
+            }
+            _ => {
+                let mut ability = build_resolved_from_def(def, rid.source, controller);
+                ability.targets = vec![TargetRef::Object(object_id)];
+                let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            }
+        }
+        current = def.sub_ability.as_deref();
+    }
+
+    ApplyResult::Prevented
+}
+
 // --- 4c. CoinFlip (Krark's Thumb) ---
 
 // CR 705.1 + CR 614.1a: A coin flip is about to happen. Krark's Thumb replaces
@@ -2666,6 +2729,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         },
     );
     registry.insert(
+        ReplacementEvent::Explore,
+        ReplacementHandlerEntry {
+            matcher: explore_matcher,
+            applier: explore_applier,
+        },
+    );
+    registry.insert(
         ReplacementEvent::CoinFlip,
         ReplacementHandlerEntry {
             matcher: coin_flip_matcher,
@@ -3738,8 +3808,44 @@ pub fn find_applicable_replacements(
                             if !player_ok {
                                 continue;
                             }
-                        } else if repl_def.valid_player.is_some() {
-                            continue;
+                        } else if let Some(valid_player) = &repl_def.valid_player {
+                            // Quantity-modifying counter replacements (Halving Season
+                            // class) may scope by permanent controller; player-counter
+                            // prohibitions with valid_player stay player-only.
+                            if !matches!(
+                                repl_def.quantity_modification,
+                                Some(
+                                    QuantityModification::Double
+                                        | QuantityModification::Half
+                                        | QuantityModification::Plus { .. }
+                                        | QuantityModification::Minus { .. }
+                                )
+                            ) {
+                                continue;
+                            }
+                            // CR 614.1a: Opponent-scoped counter replacements
+                            // (Halving Season) apply to counters on permanents
+                            // controlled by an opponent, not only player counters.
+                            let Some(object_id) = placement.object_id() else {
+                                continue;
+                            };
+                            let Some(affected_controller) =
+                                state.objects.get(&object_id).map(|o| o.controller)
+                            else {
+                                continue;
+                            };
+                            let player_ok = match valid_player {
+                                crate::types::ability::ReplacementPlayerScope::Opponent => {
+                                    affected_controller != obj.controller
+                                }
+                                crate::types::ability::ReplacementPlayerScope::You => {
+                                    affected_controller == obj.controller
+                                }
+                                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
+                            };
+                            if !player_ok {
+                                continue;
+                            }
                         }
                     } else if repl_def.event == ReplacementEvent::AddCounter
                         && repl_def.valid_player.is_some()
@@ -7387,6 +7493,27 @@ mod tests {
             .destination_zone(Zone::Battlefield)
     }
 
+    fn uphill_battle_replacement() -> ReplacementDefinition {
+        use crate::types::ability::{
+            AbilityKind, ControllerRef, FilterProp, TargetFilter, TypedFilter,
+        };
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::WasPlayed]),
+            ))
+            .destination_zone(Zone::Battlefield)
+    }
+
     fn test_token_spec(
         owner_controller: PlayerId,
         core_type: crate::types::card_type::CoreType,
@@ -10389,6 +10516,96 @@ mod tests {
         );
     }
 
+    /// CR 305.1 + CR 601.2a: Uphill Battle WasPlayed filter discriminates cast
+    /// creatures from tokens and from nontokens put onto the battlefield.
+    #[test]
+    fn uphill_battle_was_played_filter_matches_cast_creature_not_token() {
+        use crate::types::card_type::CoreType;
+
+        let uphill_id = ObjectId(10);
+        let mut state = test_state_with_object(
+            uphill_id,
+            Zone::Battlefield,
+            vec![uphill_battle_replacement()],
+        );
+        let registry = build_replacement_registry();
+
+        let cast_creature = ObjectId(20);
+        let mut creature = GameObject::new(
+            cast_creature,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        creature.card_types.core_types.push(CoreType::Creature);
+        creature.cast_from_zone = Some(Zone::Hand);
+        state.objects.insert(cast_creature, creature);
+
+        let cast_event = ProposedEvent::ZoneChange {
+            object_id: cast_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            face_down_profile: None,
+            applied: HashSet::new(),
+        };
+        let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
+        assert!(
+            cast_matches.iter().any(|rid| rid.source == uphill_id),
+            "cast creature must match Uphill Battle WasPlayed filter"
+        );
+
+        let token_event = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            count: 1,
+            spec: Box::new(test_token_spec(PlayerId(1), CoreType::Creature)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            applied: HashSet::new(),
+        };
+        let token_matches = find_applicable_replacements(&state, &token_event, &registry);
+        assert!(
+            !token_matches.iter().any(|rid| rid.source == uphill_id),
+            "tokens put directly onto the battlefield must not match WasPlayed filter"
+        );
+
+        let put_creature = ObjectId(30);
+        let mut put_obj = GameObject::new(
+            put_creature,
+            CardId(3),
+            PlayerId(1),
+            "Runeclaw Bear".to_string(),
+            Zone::Hand,
+        );
+        put_obj.card_types.core_types.push(CoreType::Creature);
+        state.objects.insert(put_creature, put_obj);
+
+        let put_event = ProposedEvent::ZoneChange {
+            object_id: put_creature,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            face_down_profile: None,
+            applied: HashSet::new(),
+        };
+        let put_matches = find_applicable_replacements(&state, &put_event, &registry);
+        assert!(
+            !put_matches.iter().any(|rid| rid.source == uphill_id),
+            "nontoken creatures put onto the battlefield without being cast must not match WasPlayed filter"
+        );
+    }
+
     /// CR 614.1a + CR 111.1: Halving Season halves opponent token batches.
     #[test]
     fn halving_season_halves_opponent_token_creation() {
@@ -10452,6 +10669,199 @@ mod tests {
             panic!("expected CreateToken");
         };
         assert_eq!(count, 2, "five tokens halved (rounded down) → two");
+    }
+
+    /// CR 614.1a: Halving Season halves opponent counter batches on permanents.
+    #[test]
+    fn halving_season_halves_opponent_counter_placement_on_permanents() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+        use crate::types::proposed_event::CounterPlacement;
+
+        let halving_season = ObjectId(10);
+        let opponent_creature = ObjectId(20);
+        let halver_repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Half);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut hs = GameObject::new(
+            halving_season,
+            CardId(1),
+            PlayerId(0),
+            "Halving Season".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![halver_repl].into();
+        state.objects.insert(halving_season, hs);
+        state.battlefield.push_back(halving_season);
+
+        let creature = GameObject::new(
+            opponent_creature,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(opponent_creature, creature);
+        state.battlefield.push_back(opponent_creature);
+
+        let proposed = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(1),
+                object_id: opponent_creature,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 5,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute, got {:?}", result);
+        };
+        let ProposedEvent::AddCounter { count, .. } = primary else {
+            panic!("expected AddCounter");
+        };
+        assert_eq!(count, 2, "five counters halved (rounded down) → two");
+    }
+
+    /// CR 614.1a: Halving Season must not halve counters on permanents you control.
+    #[test]
+    fn halving_season_skips_controller_owned_permanent_counters() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+        use crate::types::proposed_event::CounterPlacement;
+
+        let halving_season = ObjectId(10);
+        let own_creature = ObjectId(20);
+        let halver_repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Half);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut hs = GameObject::new(
+            halving_season,
+            CardId(1),
+            PlayerId(0),
+            "Halving Season".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![halver_repl].into();
+        state.objects.insert(halving_season, hs);
+        state.battlefield.push_back(halving_season);
+
+        let creature = GameObject::new(
+            own_creature,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(own_creature, creature);
+        state.battlefield.push_back(own_creature);
+
+        let proposed = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: own_creature,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 5,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::AddCounter { count, .. }) = result else {
+            panic!("expected Execute, got {:?}", result);
+        };
+        assert_eq!(
+            count, 5,
+            "controller-owned counters must pass through unchanged"
+        );
+    }
+
+    /// CR 614.1a: Bloodletter of Aclazotz doubles opponent life loss on the
+    /// source controller's turn via the LoseLife replacement pipeline.
+    #[test]
+    fn bloodletter_doubles_opponent_life_loss_during_your_turn() {
+        let bloodletter = ObjectId(10);
+        let repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Double);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let mut card = GameObject::new(
+            bloodletter,
+            CardId(1),
+            PlayerId(0),
+            "Bloodletter of Aclazotz".to_string(),
+            Zone::Battlefield,
+        );
+        card.replacement_definitions = vec![repl].into();
+        state.objects.insert(bloodletter, card);
+        state.battlefield.push_back(bloodletter);
+
+        let proposed = ProposedEvent::LifeLoss {
+            player_id: PlayerId(1),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::LifeLoss { amount, .. }) = result else {
+            panic!("expected doubled LifeLoss, got {:?}", result);
+        };
+        assert_eq!(amount, 6);
+    }
+
+    /// CR 614.1a: Bloodletter only doubles during the source controller's turn.
+    #[test]
+    fn bloodletter_does_not_double_on_opponents_turn() {
+        let bloodletter = ObjectId(10);
+        let repl = {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Double);
+            repl.valid_player = Some(ReplacementPlayerScope::Opponent);
+            repl
+        };
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        let mut card = GameObject::new(
+            bloodletter,
+            CardId(1),
+            PlayerId(0),
+            "Bloodletter of Aclazotz".to_string(),
+            Zone::Battlefield,
+        );
+        card.replacement_definitions = vec![repl].into();
+        state.objects.insert(bloodletter, card);
+        state.battlefield.push_back(bloodletter);
+
+        let proposed = ProposedEvent::LifeLoss {
+            player_id: PlayerId(1),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::LifeLoss { amount, .. }) = result else {
+            panic!("expected LifeLoss passthrough, got {:?}", result);
+        };
+        assert_eq!(amount, 3);
     }
 
     /// CR 616.1: Mixed `Double` and `Plus` quantity modifications do NOT commute

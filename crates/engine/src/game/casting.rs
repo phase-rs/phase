@@ -8482,10 +8482,23 @@ fn continue_with_prepared(
             // "an opponent chooses —"). Target selection still belongs to the
             // controller (CR 115.1) — `pending_cast` keeps the caster.
             let mode_chooser = resolve_modal_chooser(state, &capped, player, prepared.object_id);
+            let mode_abilities = state
+                .objects
+                .get(&prepared.object_id)
+                .map(super::ability_utils::modal_spell_mode_abilities)
+                .unwrap_or_default();
+            let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
+                state,
+                prepared.object_id,
+                player,
+                &capped,
+                &mode_abilities,
+            );
             return Ok(WaitingFor::ModeChoice {
                 player: mode_chooser,
                 modal: capped,
                 pending_cast: Box::new(pending_modal),
+                unavailable_modes,
             });
         }
 
@@ -9139,9 +9152,25 @@ pub fn spell_has_legal_targets(
         });
     }
 
-    // Modal spells defer target checking until after mode selection
-    if obj.modal.is_some() {
-        return true;
+    // CR 700.2a-b: Modal spells are castable only when at least one mode has a
+    // legal targeting assignment (or needs no targets).
+    if let Some(ref modal) = obj.modal {
+        let mode_abilities = super::ability_utils::modal_spell_mode_abilities(obj);
+        let capped = modal_choice_for_player(
+            &simulated,
+            player,
+            obj.id,
+            modal,
+            &crate::types::ability::SpellContext::default(),
+        );
+        let unavailable = super::ability_utils::spell_modal_unavailable_modes(
+            &simulated,
+            obj.id,
+            player,
+            &capped,
+            &mode_abilities,
+        );
+        return unavailable.len() < capped.mode_count;
     }
 
     // Only Spell-kind abilities contribute targets when casting.

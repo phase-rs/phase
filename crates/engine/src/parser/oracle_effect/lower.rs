@@ -2457,6 +2457,18 @@ pub(super) fn parse_damage_player_scope(
 /// "each other player" excludes the controller (the only "other" antecedent
 /// available outside trigger context) and reduces to plain `Opponent`.
 pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter> {
+    let (filter, rest) = parse_damage_each_player_scope_with_remainder(text)?;
+    rest.chars()
+        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
+        .then_some(filter)
+}
+
+/// CR 120.2b + CR 120.3 + CR 102.2: leading "each opponent/player/foe/other
+/// opponent/other player" damage scope, returning the matched filter AND the
+/// unconsumed remainder. Unlike `parse_damage_each_player_scope` it is NOT
+/// all-consuming — used only by the multi-target damage CHAIN primary, which
+/// hands the trailing " and M damage to ..." segment back to the loop.
+fn parse_damage_each_player_scope_with_remainder(text: &str) -> Option<(PlayerFilter, &str)> {
     let (rest, filter) = preceded(
         tag("each "),
         alt((
@@ -2473,9 +2485,7 @@ pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter>
     )
     .parse(text)
     .ok()?;
-    rest.chars()
-        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
-        .then_some(filter)
+    Some((filter, rest))
 }
 
 pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
@@ -4350,6 +4360,27 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     player_filter,
                 },
                 "",
+            ));
+        }
+        // CR 120.2b + CR 120.3: multi-target chain whose FIRST segment is an
+        // each-player scope with a repeated-amount continuation (Dagger Caster:
+        // "deals 1 damage to each opponent and 1 damage to each creature your
+        // opponents control"). The all-consuming arm above rejected it because
+        // the continuation isn't punctuation-only; emit DamageEachPlayer for the
+        // player half and hand the continuation back to the chain loop (CR 120.2b
+        // independent events). NOT the " and each " compound (caught upstream by
+        // the compound parser); the chain joins two separately-amounted segments.
+        if let Some((player_filter, rem)) =
+            parse_damage_each_player_scope_with_remainder(after_to_for_classification)
+        {
+            let consumed = after_to_for_classification.len() - rem.len();
+            let rem_full = &after_to[consumed..];
+            return Some((
+                Effect::DamageEachPlayer {
+                    amount,
+                    player_filter,
+                },
+                rem_full,
             ));
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);

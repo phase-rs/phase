@@ -4073,13 +4073,14 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
 /// and an object ("life this turn"). Each verb maps to a QuantityRef, and the result
 /// is `StaticCondition::And { conditions: [lhs >= 1, rhs >= 1] }`.
 ///
-/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1, LifeLostThisTurn >= 1)
+/// "you [verb1] (and|or) [verb2] life this turn" where each verb is gained/lost.
+/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1,
+/// LifeLostThisTurn >= 1); "you gained or lost life this turn" → Or(...) (Star
+/// Charter, Starseer Mentor, Starlit Soothsayer).
 fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
-
-    // Map event verbs to their QuantityRef for the shared "life this turn" object.
-    fn life_verb(v: &str) -> Option<QuantityRef> {
-        let result: nom::IResult<&str, QuantityRef, OracleError<'_>> = alt((
+    // "gained"/"lost" → the matching controller-scoped "life this turn" QuantityRef.
+    fn life_verb(i: &str) -> OracleResult<'_, QuantityRef> {
+        alt((
             value(
                 QuantityRef::LifeGainedThisTurn {
                     player: PlayerScope::Controller,
@@ -4093,34 +4094,25 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
                 tag("lost"),
             ),
         ))
-        .parse(v);
-        let (rest, qty) = result.ok()?;
-        rest.is_empty().then_some(qty)
+        .parse(i)
     }
 
-    // Try "[verb1] and [verb2] life this turn"
-    if let Some(and_pos) = rest.find(" and ") {
-        let verb1 = &rest[..and_pos];
-        let after_and = &rest[and_pos + " and ".len()..];
-        // Find the shared object: " life this turn"
-        if let Some(obj_pos) = after_and.find(" life this turn") {
-            let verb2 = &after_and[..obj_pos];
-            if let (Some(lhs), Some(rhs)) = (life_verb(verb1), life_verb(verb2)) {
-                let remainder = &after_and[obj_pos + " life this turn".len()..];
-                return Ok((
-                    remainder,
-                    StaticCondition::And {
-                        conditions: vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)],
-                    },
-                ));
-            }
-        }
-    }
+    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
+    let (rest, lhs) = life_verb(rest)?;
+    // CR 119: the connective selects the boolean shape — "and" requires both
+    // life changes, "or" requires either — over the shared LifeGained/LifeLost
+    // ThisTurn QuantityRef building blocks.
+    let (rest, is_or) = alt((value(false, tag(" and ")), value(true, tag(" or ")))).parse(rest)?;
+    let (rest, rhs) = life_verb(rest)?;
+    let (rest, _) = tag(" life this turn").parse(rest)?;
 
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    let conditions = vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)];
+    let condition = if is_or {
+        StaticCondition::Or { conditions }
+    } else {
+        StaticCondition::And { conditions }
+    };
+    Ok((rest, condition))
 }
 
 /// Parse "you gained [N or more] life this turn".

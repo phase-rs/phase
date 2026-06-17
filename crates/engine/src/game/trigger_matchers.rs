@@ -3477,10 +3477,11 @@ pub(super) fn matching_you_attack_pairs(
     // CR 603.2c: the player-scope gate (valid_target). No filter ⇒ legacy
     // "attackers controlled by the trigger's source controller" semantics.
     let player_ok = match trigger.valid_target.as_ref() {
-        // Parser legacy for "one or more creatures attack a player": the
-        // attacked-player type is represented as `TargetFilter::Player`, not
-        // as attacking-player scope. The per-attack target filter below handles
-        // it, so keep the attacking-player gate permissive here.
+        // CR 506.2 + CR 303.4e: `valid_target == Player` is purely the permissive
+        // attacking-player pass-through (any attacking player) and carries NO
+        // attack-target narrowing — that lives solely in `attack_target_filter`.
+        // Used by attachment-relation triggers ("enchanted by an Aura you control
+        // attack") whose enchanted/equipped attacker may be opponent-controlled.
         Some(TargetFilter::Player) => true,
         Some(_) => valid_player_matches(trigger, state, attacking_player, source_id),
         None => {
@@ -3506,15 +3507,14 @@ pub(super) fn matching_you_attack_pairs(
                 .iter()
                 .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
                 .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            // CR 508.3a: attacked-target narrowing ("attacks a player/planeswalker/
+            // battle") lives solely in `attack_target_filter`; `valid_target` carries
+            // only attacking-player scope (CR 506.2), mirroring
+            // `matching_you_attack_unblocked_pairs`.
             if trigger
                 .attack_target_filter
                 .as_ref()
                 .is_some_and(|filter| !attack_target_type_matches(target, filter))
-            {
-                return None;
-            }
-            if matches!(trigger.valid_target, Some(TargetFilter::Player))
-                && !matches!(target, crate::game::combat::AttackTarget::Player(_))
             {
                 return None;
             }

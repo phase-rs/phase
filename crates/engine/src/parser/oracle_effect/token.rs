@@ -300,6 +300,11 @@ fn parse_token_description_with_context(
     // Pakal, Thousandth Moon) — accept that as a valid terminator in addition
     // to EOF so the attacking flag is captured even when a variable-X binding
     // trails the clause.
+    // CR 508.4: trailing defender phrases ("that player or a planeswalker they
+    // control", "that opponent", etc. — Adeline, Resplendent Cathar / Myriad
+    // class) must not prevent the inline modifier from matching; accept a word
+    // boundary after "attacking" the same way `parse_battlefield_entry_qualifiers`
+    // does for put-onto-battlefield effects.
     let attacking_clause = |i| -> OracleResult<'_, bool> {
         let (i, _) = alt((
             tag(" that's"),
@@ -313,7 +318,14 @@ fn parse_token_description_with_context(
             value(false, tag(" attacking")),
         ))
         .parse(i)?;
-        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(", where ")),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
         Ok((i, tapped))
     };
     // Nom parses forward; scan byte positions (only those starting with the
@@ -2119,6 +2131,30 @@ mod tests {
             tf.type_filters.contains(&TypeFilter::Creature),
             "X must count controlled creatures, got {:?}",
             tf.type_filters
+        );
+    }
+
+    /// CR 508.4 + CR 506.3a: Adeline, Resplendent Cathar — "for each opponent,
+    /// create … token that's tapped and attacking that player or a planeswalker
+    /// they control." The trailing defender phrase must not defeat the inline
+    /// modifier (issue #3303).
+    #[test]
+    fn token_thats_tapped_and_attacking_that_player_suffix_sets_flags() {
+        let text = "create a 1/1 white human creature token that's tapped and attacking that player or a planeswalker they control";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect");
+        };
+        assert!(tapped, "Human token must enter tapped");
+        assert!(
+            enters_attacking,
+            "Human token must enter attacking despite trailing defender phrase"
         );
     }
 

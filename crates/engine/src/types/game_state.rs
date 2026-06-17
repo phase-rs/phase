@@ -397,6 +397,13 @@ pub struct ZoneChangeRecord {
     /// on the battlefield, emblem creation in the command zone). For normal
     /// zone moves this carries the origin zone.
     pub from_zone: Option<Zone>,
+    /// CR 601.2a: Cast origin as of the zone change — distinct from `from_zone`
+    /// for objects put onto the battlefield without being cast (reanimate, etc.).
+    #[serde(default)]
+    pub cast_from_zone: Option<Zone>,
+    /// CR 305.1: Land-play provenance as of the zone change.
+    #[serde(default)]
+    pub played_from_zone: Option<Zone>,
     pub to_zone: Zone,
     /// CR 603.10a + CR 603.6e: Snapshot of attachments on the object at the moment
     /// of the zone change. Required by look-back triggers of the form
@@ -530,6 +537,8 @@ impl ZoneChangeRecord {
             controller: PlayerId(0),
             owner: PlayerId(0),
             from_zone: from,
+            cast_from_zone: None,
+            played_from_zone: None,
             to_zone: to,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),
@@ -3181,6 +3190,10 @@ pub enum WaitingFor {
         player: PlayerId,
         modal: ModalChoice,
         pending_cast: Box<PendingCast>,
+        /// Mode indices unavailable due to NoRepeat constraints or unsatisfied
+        /// targeting requirements (CR 700.2a-b). Mirrors `AbilityModeChoice`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_modes: Vec<usize>,
     },
     /// Player must choose which cards to discard down to maximum hand size (cleanup step).
     DiscardToHandSize {
@@ -7995,6 +8008,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: dummy_pending(),
+            unavailable_modes: vec![],
         }));
         variants.push(Box::new(WaitingFor::DiscardToHandSize {
             player: PlayerId(0),

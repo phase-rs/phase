@@ -334,7 +334,19 @@ pub(crate) fn install_merge_layer_effect(
 /// its `card_dest`; a token component routes to its `default_dest` (== `dest`).
 /// The override is absent (and every component follows `dest`) for non-token
 /// survivors and whenever no card-scoped redirect diverges from the survivor's
-/// destination. The Commander exemption (CR 903.9b–c) is separately out of scope.
+/// destination.
+///
+/// CR 903.9c (merged commander zone redirect): when a commander component is
+/// part of a merged permanent and the whole pile moves to hand or library (CR
+/// 903.9b destination), `put_component_into_zone` places the commander
+/// component in the destination zone with its `is_commander` flag intact. The
+/// next SBA pass calls `commander::commander_eligible_for_zone_return`, which
+/// covers `Zone::Hand | Zone::Library` (CR 903.9b), and presents
+/// `WaitingFor::CommanderZoneChoice` to the owner. On accept the commander
+/// component is moved to `Zone::Command` via `zones::move_to_zone` — the same
+/// path used for standalone commanders. Non-commander components remain in the
+/// destination zone. This function does not need special-case commander logic;
+/// the SBA path handles it identically to the standalone case.
 ///
 /// CR 730.3a deferred: the owner's arrange-order choice for graveyard/library
 /// destinations is not modeled — components are placed in their stored

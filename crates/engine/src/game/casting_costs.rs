@@ -840,10 +840,23 @@ fn finish_pending_cost_or_cast(
         );
         capped.max_choices = capped.max_choices.min(capped.mode_count);
         pending.target_constraints = target_constraints_from_modal(&capped);
+        let mode_abilities = state
+            .objects
+            .get(&pending.object_id)
+            .map(super::ability_utils::modal_spell_mode_abilities)
+            .unwrap_or_default();
+        let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
+            state,
+            pending.object_id,
+            player,
+            &capped,
+            &mode_abilities,
+        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
             pending_cast: Box::new(pending),
+            unavailable_modes,
         });
     }
 
@@ -2534,10 +2547,23 @@ pub(super) fn begin_modal_additional_cost_declaration(
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
         pending.target_constraints = target_constraints_from_modal(&capped);
+        let mode_abilities = state
+            .objects
+            .get(&object_id)
+            .map(super::ability_utils::modal_spell_mode_abilities)
+            .unwrap_or_default();
+        let unavailable_modes = super::ability_utils::spell_modal_unavailable_modes(
+            state,
+            object_id,
+            player,
+            &capped,
+            &mode_abilities,
+        );
         return Ok(WaitingFor::ModeChoice {
             player,
             modal: capped,
             pending_cast: Box::new(pending),
+            unavailable_modes,
         });
     };
 
