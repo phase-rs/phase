@@ -1681,6 +1681,52 @@ fn coin_flip_applier(
     })
 }
 
+// --- 4c2. Proliferate (Tekuthal, Inquiry Dominus) ---
+
+// CR 701.34a + CR 614.1a: A proliferate action is about to happen. Count-
+// modifying replacements ("proliferate twice instead") substitute the action
+// count before the chooser opens.
+fn proliferate_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Proliferate { count, .. } if *count > 0)
+}
+
+fn proliferate_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::Proliferate {
+        player_id,
+        count,
+        applied,
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+
+    let new_count = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref())
+        .and_then(|execute| match &*execute.effect {
+            Effect::Proliferate if execute.sub_ability.is_none() => execute
+                .repeat_for
+                .as_ref()
+                .and_then(|qty| resolve_event_replacement_quantity(qty, count)),
+            _ => None,
+        })
+        .map(|resolved| resolved.max(0) as u32)
+        .unwrap_or(count);
+
+    ApplyResult::Modified(ProposedEvent::Proliferate {
+        player_id,
+        count: new_count,
+        applied,
+    })
+}
+
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -2742,6 +2788,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: coin_flip_applier,
         },
     );
+    registry.insert(
+        ReplacementEvent::Proliferate,
+        ReplacementHandlerEntry {
+            matcher: proliferate_matcher,
+            applier: proliferate_applier,
+        },
+    );
     registry.insert(ReplacementEvent::DrawCards, stub()); // stays stub (alias for Draw)
     registry.insert(
         ReplacementEvent::GainLife,
@@ -3764,6 +3817,7 @@ pub fn find_applicable_replacements(
                     | ProposedEvent::Draw { player_id, .. }
                     | ProposedEvent::Scry { player_id, .. }
                     | ProposedEvent::Mill { player_id, .. }
+                    | ProposedEvent::Proliferate { player_id, .. }
                     | ProposedEvent::CoinFlip { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
@@ -4601,6 +4655,7 @@ fn apply_single_replacement(
                     (ProposedEvent::Draw { .. }, Effect::Draw { .. })
                         | (ProposedEvent::Scry { .. }, Effect::Draw { .. })
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
+                        | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
                 )
             });
