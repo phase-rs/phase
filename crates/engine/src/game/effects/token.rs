@@ -2388,7 +2388,18 @@ pub(super) fn inject_catalog_token_abilities(
     let Some(rules_text) = preset.rules_text.as_deref().filter(|text| !text.is_empty()) else {
         return;
     };
-    let modifications = crate::parser::oracle_static::classify_quoted_inner(rules_text);
+    // CR 113.3 + CR 707.2a: a token's abilities are derived from its rules text, and
+    // a catalog rules_text can pack independent abilities of different categories on
+    // separate lines (an Equipment token's static buff line + its "Equip {N}" line).
+    // Classifying the whole blob lets the static splitter swallow the trailing equip
+    // line, so classify per line and aggregate. A preset with no newline yields a
+    // single segment — identical to the previous single-blob behavior (no regression).
+    let modifications: Vec<ContinuousModification> = rules_text
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .flat_map(crate::parser::oracle_static::classify_quoted_inner)
+        .collect();
     if modifications.is_empty() {
         return;
     }
@@ -2503,7 +2514,9 @@ pub(super) fn inject_predefined_token_abilities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::ability_utils::{
+        build_resolved_from_def, build_resolved_from_def_with_targets,
+    };
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::actions::GameAction;
@@ -4855,6 +4868,228 @@ mod tests {
         assert!(
             state.objects[&creature_a].attachments.is_empty(),
             "creature A (not chosen) must have no attachments"
+        );
+    }
+
+    // ── Equipment-token catalog injection (#942) ────────────────────────
+
+    /// Helper: the single activated equip ability injected onto a token, if any.
+    fn injected_equip_ability(
+        obj: &crate::game::game_object::GameObject,
+    ) -> Option<&AbilityDefinition> {
+        obj.abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::Attach { .. }))
+    }
+
+    fn build_catalog_token(state: &mut GameState, name: &str, preset_id: &str) -> ObjectId {
+        let preset = crate::game::token_presets::known_token_preset_by_id(preset_id)
+            .unwrap_or_else(|| panic!("preset {name} ({preset_id}) must exist"));
+        let obj_id = create_object(
+            state,
+            CardId(0),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(state, obj_id);
+        obj_id
+    }
+
+    #[test]
+    fn catalog_cragflame_preset_grants_static_and_equip() {
+        // CR 702.6a: Mabel's Cragflame is a two-line catalog rules_text —
+        // a static buff line plus a standalone "Equip {2}" activated-ability
+        // line. Pre-fix the whole-blob classifier swallowed the equip line, so
+        // the token carried the buff but no equip ability. Per-line classify
+        // installs both.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = build_catalog_token(
+            &mut state,
+            "Cragflame",
+            "524e2513-4a49-53bf-a5fa-150dc718c5f1",
+        );
+        let obj = &state.objects[&obj_id];
+
+        // (a) exactly one activated equip ability: Attach SelfRef → creature you
+        // control, {2} mana cost, sorcery-speed (CR 702.6a). This is the
+        // discriminating assertion — empty pre-fix.
+        let equips: Vec<&AbilityDefinition> = obj
+            .abilities
+            .iter()
+            .filter(|a| matches!(*a.effect, Effect::Attach { .. }))
+            .collect();
+        assert_eq!(
+            equips.len(),
+            1,
+            "Cragflame must inject exactly one equip activated ability (was zero pre-fix)"
+        );
+        let equip = equips[0];
+        assert!(matches!(
+            *equip.effect,
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                &equip.cost,
+                Some(AbilityCost::Mana { cost }) if cost == &ManaCost::generic(2)
+            ),
+            "equip cost must be {{2}}, got {:?}",
+            equip.cost
+        );
+        assert!(
+            equip
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "equip ability must be sorcery-speed (CR 702.6a)"
+        );
+
+        // (b) regression guard: the static buff line is still installed as a
+        // static definition affecting the equipped creature.
+        assert!(
+            !obj.static_definitions.is_empty(),
+            "Cragflame must still install its '+1/+1 and has vigilance/trample/haste' static buff"
+        );
+    }
+
+    #[test]
+    fn catalog_cragflame_equip_attaches_and_buffs_creature() {
+        // CR 702.6a: activating the injected equip ability attaches Cragflame to
+        // a creature you control; the static buff then grants +1/+1 and the
+        // keywords once layers re-derive.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let cragflame = build_catalog_token(
+            &mut state,
+            "Cragflame",
+            "524e2513-4a49-53bf-a5fa-150dc718c5f1",
+        );
+
+        let bear = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+
+        let equip_def = injected_equip_ability(&state.objects[&cragflame])
+            .expect("Cragflame must have an injected equip ability")
+            .clone();
+        let ability = build_resolved_from_def_with_targets(
+            &equip_def,
+            cragflame,
+            PlayerId(0),
+            vec![TargetRef::Object(bear)],
+        );
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("equip ability should resolve");
+
+        assert_eq!(
+            state.objects[&cragflame].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(bear)),
+            "Cragflame must be attached to the bear after equip resolves"
+        );
+        assert!(state.objects[&bear].attachments.contains(&cragflame));
+
+        crate::game::layers::evaluate_layers(&mut state);
+        let buffed = &state.objects[&bear];
+        assert_eq!(
+            buffed.power,
+            Some(3),
+            "equipped creature gets +1/+1 (power)"
+        );
+        assert_eq!(
+            buffed.toughness,
+            Some(3),
+            "equipped creature gets +1/+1 (toughness)"
+        );
+        for kw in [Keyword::Vigilance, Keyword::Trample, Keyword::Haste] {
+            assert!(
+                crate::game::keywords::has_keyword(buffed, &kw),
+                "equipped creature must gain {kw:?} from Cragflame"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_toggo_rock_preset_grants_equip() {
+        // CR 702.6a class coverage: Toggo's Rock is another two-line Equipment
+        // catalog token ("Equipped creature has \"...\"" + "Equip {1}"). Per-line
+        // classify must install its equip ability too — build for the class of
+        // all 8 catalog equip tokens, not Cragflame alone.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id =
+            build_catalog_token(&mut state, "Rock", "1657233e-c9e1-54ff-aa5a-6e2e2846be42");
+        let equip = injected_equip_ability(&state.objects[&obj_id])
+            .expect("Toggo's Rock must inject an equip activated ability");
+        assert!(matches!(
+            *equip.effect,
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&equip.cost, Some(AbilityCost::Mana { cost }) if cost == &ManaCost::generic(1)),
+            "Toggo's Rock equip cost must be {{1}}, got {:?}",
+            equip.cost
+        );
+        assert!(equip
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    #[test]
+    fn classify_quoted_inner_equip_line_is_activated_ability_static_line_unchanged() {
+        use crate::parser::oracle_static::classify_quoted_inner;
+
+        // A standalone "Equip {N}" line classifies as a GrantAbility wrapping the
+        // Effect::Attach activated ability (CR 702.6a) — not an inert AddKeyword.
+        let equip = classify_quoted_inner("Equip {2}");
+        assert_eq!(equip.len(), 1);
+        match &equip[0] {
+            ContinuousModification::GrantAbility { definition } => {
+                assert!(matches!(*definition.effect, Effect::Attach { .. }));
+                assert!(matches!(
+                    &definition.cost,
+                    Some(AbilityCost::Mana { cost }) if cost == &ManaCost::generic(2)
+                ));
+                assert!(definition
+                    .activation_restrictions
+                    .contains(&ActivationRestriction::AsSorcery));
+            }
+            other => panic!("expected GrantAbility for 'Equip {{2}}', got {other:?}"),
+        }
+
+        // The static buff line is unchanged: it must NOT classify as an equip
+        // ability, preserving the no-regression contract for single-line presets.
+        let buff = classify_quoted_inner("Equipped creature gets +1/+1.");
+        assert!(
+            !buff
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+            "static buff line must not be misclassified as an activated equip ability"
+        );
+        assert!(
+            !buff.is_empty(),
+            "static buff line must classify to something"
         );
     }
 }

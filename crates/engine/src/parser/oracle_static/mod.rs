@@ -66,7 +66,7 @@ mod prelude {
 }
 
 pub(super) use super::{
-    oracle_effect, oracle_keyword, oracle_nom, oracle_quantity, oracle_trigger,
+    oracle, oracle_effect, oracle_keyword, oracle_nom, oracle_quantity, oracle_trigger,
 };
 
 mod anthem;

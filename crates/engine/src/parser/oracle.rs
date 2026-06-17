@@ -3846,7 +3846,7 @@ pub fn parse_oracle_text(
 /// "Equipment you control have equip {0}" (Puresteel Paladin granted-equip
 /// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
 /// remainder ("ment you control...") as a malformed activated ability cost.
-fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     let (activation_line, cost_reduction) = split_trailing_self_cost_reduction(line);
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
