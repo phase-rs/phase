@@ -571,7 +571,12 @@ impl GoldfishGame {
             0
         } else {
             let t = self.state.turn_number;
-            (if self.going_first { (t + 1) / 2 } else { t / 2 }).max(1)
+            (if self.going_first {
+                t.div_ceil(2)
+            } else {
+                t / 2
+            })
+            .max(1)
         };
 
         GoldfishView {
@@ -968,7 +973,7 @@ pub fn run_simulation(deck: &[CardFace], config: &SimulationConfig) -> Simulatio
                     })
                     .map(|c| (c.id, c.face.mana_cost.mana_value()))
                     .collect();
-                candidates.sort_by(|a, b| b.1.cmp(&a.1));
+                candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
                 for (id, _) in candidates.into_iter().take(to_bottom) {
                     let _ = game.bottom_card(id);
                 }
@@ -1003,7 +1008,7 @@ pub fn run_simulation(deck: &[CardFace], config: &SimulationConfig) -> Simulatio
                         .filter(|c| !is_land(&c.face))
                         .map(|c| (c.id, c.face.mana_cost.mana_value()))
                         .collect();
-                    spells.sort_by(|a, b| b.1.cmp(&a.1));
+                    spells.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (id, _) in spells.into_iter().take(excess) {
                         let _ = game.discard_card(id);
                     }
