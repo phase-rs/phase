@@ -13294,7 +13294,13 @@ pub enum ReplacementCondition {
     /// OR-combined. Covers Don't Blink's "if one or more creatures would enter
     /// from exile or after being cast from exile" in a single leaf.
     EnteredFromZone {
-        origin_constraint: OriginConstraint,
+        /// Physical "would enter from <zone>" half. `None` when the clause has
+        /// only a cast-origin half ("...or after being cast from <zone>") — in
+        /// that case the physical path must NOT match, so this is an
+        /// `Option` rather than collapsing to `OriginConstraint::Any` (which
+        /// would make the OR-combined physical half true for every entry).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_constraint: Option<OriginConstraint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_origin: Option<Zone>,
     },

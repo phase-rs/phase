@@ -1109,14 +1109,22 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
     }
     let (input, _) = tag::<_, _, OracleError<'_>>(", ").parse(input).ok()?;
     let (input, destination) = parse_redirect_to_library(input).ok()?;
-    // Trailing " instead" / "." are optional residue.
-    let _ = input;
+    // CR 614.1a: the redirect clause ends with an optional " instead" and a
+    // trailing period. Be all-consuming — reject (fall through) if any other
+    // effect text trails the library-shuffle phrase, so an unrelated tail is
+    // never silently swallowed into a typed replacement.
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" instead"))
+        .parse(input)
+        .ok()?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(input).ok()?;
+    if !input.trim().is_empty() {
+        return None;
+    }
 
     // CR 614.1d: physical-from constraint via the reused `OriginConstraint`.
-    let origin_constraint = match physical_zone {
-        Some(zone) => OriginConstraint::Equals(zone),
-        None => OriginConstraint::Any,
-    };
+    // `None` when only the cast-origin half is present, so the evaluator's
+    // physical path stays inert rather than matching every entry.
+    let origin_constraint = physical_zone.map(OriginConstraint::Equals);
     let condition = ReplacementCondition::EnteredFromZone {
         origin_constraint,
         cast_origin,
@@ -50411,7 +50419,7 @@ mod tests {
         assert_eq!(
             replacement.condition,
             Some(ReplacementCondition::EnteredFromZone {
-                origin_constraint: OriginConstraint::Equals(Zone::Exile),
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Exile)),
                 cast_origin: Some(Zone::Exile),
             })
         );
@@ -50455,7 +50463,7 @@ mod tests {
         assert_eq!(
             replacement.condition,
             Some(ReplacementCondition::EnteredFromZone {
-                origin_constraint: OriginConstraint::Equals(Zone::Graveyard),
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Graveyard)),
                 cast_origin: None,
             })
         );
@@ -50479,7 +50487,7 @@ mod tests {
         assert_eq!(
             replacement.condition,
             Some(ReplacementCondition::EnteredFromZone {
-                origin_constraint: OriginConstraint::Equals(Zone::Exile),
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Exile)),
                 cast_origin: Some(Zone::Exile),
             })
         );
@@ -50499,6 +50507,29 @@ mod tests {
             )
             .is_none(),
             "entry with no exile/cast origin half must not match"
+        );
+    }
+
+    /// All-consuming guard (blocker, PR #3419): the redirect combinator must
+    /// reject a clause that trails additional effect text after the
+    /// library-shuffle phrase rather than silently swallowing it. Pre-fix the
+    /// parser ignored all remaining input and still returned a typed
+    /// replacement, dropping the trailing effect.
+    #[test]
+    fn trailing_effect_text_after_redirect_is_not_swallowed() {
+        assert!(
+            parse_enter_from_zone_redirect_replacement(
+                "if a creature would enter from exile, shuffle it into its owner's library and you draw a card instead"
+            )
+            .is_none(),
+            "an extra effect after the shuffle phrase must fall through, not be swallowed"
+        );
+        assert!(
+            parse_enter_from_zone_redirect_replacement(
+                "if a creature would enter from exile, shuffle it into its owner's library instead, then you lose 1 life"
+            )
+            .is_none(),
+            "a trailing clause after ' instead' must fall through, not be swallowed"
         );
     }
 

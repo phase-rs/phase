@@ -3255,10 +3255,16 @@ fn evaluate_replacement_condition(
             origin_constraint,
             cast_origin,
         } => {
+            // CR 614.1d: the physical half matches only when a physical origin
+            // constraint is present. A cast-origin-only clause leaves
+            // `origin_constraint` `None`, so the physical path is inert and the
+            // condition can fire solely via the cast half below.
             let physical = matches!(
                 event,
                 ProposedEvent::ZoneChange { from, .. }
-                    if origin_constraint.matches_from(&Some(*from))
+                    if origin_constraint
+                        .as_ref()
+                        .is_some_and(|c| c.matches_from(&Some(*from)))
             );
             let cast = cast_origin.is_some_and(|cz| {
                 affected_object_id
@@ -12119,7 +12125,37 @@ mod tests {
                 },
             ))
             .condition(ReplacementCondition::EnteredFromZone {
-                origin_constraint: OriginConstraint::Equals(Zone::Exile),
+                origin_constraint: Some(OriginConstraint::Equals(Zone::Exile)),
+                cast_origin: Some(Zone::Exile),
+            })
+    }
+
+    /// A cast-origin-ONLY redirect: the clause carried no physical "would enter
+    /// from <zone>" half, so `origin_constraint` is `None`. Mirrors
+    /// `dont_blink_global_replacement` but isolates the cast half — used to
+    /// prove the physical path stays inert when there is no physical constraint.
+    fn cast_origin_only_global_replacement() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                },
+            ))
+            .condition(ReplacementCondition::EnteredFromZone {
+                origin_constraint: None,
                 cast_origin: Some(Zone::Exile),
             })
     }
@@ -12201,6 +12237,53 @@ mod tests {
                 index: 0
             }],
             "creature cast from exile (entering from stack) must match via the cast half"
+        );
+    }
+
+    #[test]
+    fn cast_origin_only_rejects_ordinary_exile_entry_without_cast_from_zone() {
+        // CR 614.1d (blocker guard, PR #3419): a cast-origin-ONLY clause
+        // (`origin_constraint: None`) must NOT match an ordinary creature
+        // entering from exile that was not cast from exile. Pre-fix the absent
+        // physical half collapsed to `OriginConstraint::Any`, so the OR-combined
+        // physical path matched EVERY entry — this entry would have wrongly
+        // matched. With the physical half modelled as `None`, only the cast half
+        // is live, and this object has no `cast_from_zone`.
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Exile, None);
+        state
+            .pending_damage_replacements
+            .push(cast_origin_only_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Exile, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert!(
+            candidates.is_empty(),
+            "cast-origin-only condition must NOT match an ordinary exile entry \
+             with no cast_from_zone (pre-fix this matched via the Any physical \
+             half); got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn cast_origin_only_matches_creature_cast_from_exile() {
+        // CR 601: the live half of a cast-origin-only clause — a creature cast
+        // from exile (entering from the stack) matches via `cast_from_zone`,
+        // confirming the condition is not inert after the physical half became
+        // optional.
+        let registry = build_replacement_registry();
+        let mut state = state_with_entering_creature(ObjectId(20), Zone::Stack, Some(Zone::Exile));
+        state
+            .pending_damage_replacements
+            .push(cast_origin_only_global_replacement());
+        let event = ProposedEvent::zone_change(ObjectId(20), Zone::Stack, Zone::Battlefield, None);
+        let candidates = find_applicable_replacements(&state, &event, &registry);
+        assert_eq!(
+            candidates,
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "cast-origin-only condition must still match a creature cast from exile"
         );
     }
 
