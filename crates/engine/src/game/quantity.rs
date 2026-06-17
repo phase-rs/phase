@@ -291,6 +291,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount
         | QuantityRef::LifeLostThisTurn { .. }
@@ -468,6 +469,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount
         | QuantityRef::LifeLostThisTurn { .. }
@@ -1775,6 +1777,42 @@ fn resolve_ref(
                 })
                 .count();
             usize_to_i32_saturating(count)
+        }
+        // CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+        // over the most recent chain tracked set. Mirrors `FilteredTrackedSetSize`'s set
+        // selection (highest id = the set the preceding chain effect published)
+        // but aggregates a per-member value instead of counting. The members are
+        // addressed by identity, so cards the producer moved to exile are read in
+        // place (mirrors the `Aggregate` extract: live object first, LKI cache
+        // fallback). Drives "deals damage equal to the total mana value of those
+        // exiled cards" (Ensnared by the Mara).
+        QuantityRef::TrackedSetAggregate { function, property } => {
+            let Some((_, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
+                return 0;
+            };
+            let extract = |id: ObjectId| -> Option<i32> {
+                let live = state.objects.get(&id).and_then(|obj| match property {
+                    ObjectProperty::Power => obj.power,
+                    ObjectProperty::Toughness => obj.toughness,
+                    // CR 202.3e: include X when on the stack (cost_x_paid).
+                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )),
+                });
+                live.or_else(|| {
+                    state.lki_cache.get(&id).and_then(|lki| match property {
+                        ObjectProperty::Power => lki.power,
+                        ObjectProperty::Toughness => lki.toughness,
+                        ObjectProperty::ManaValue => Some(u32_to_i32_saturating(lki.mana_value)),
+                    })
+                })
+            };
+            let values = ids.iter().filter_map(|&id| extract(id));
+            match function {
+                AggregateFunction::Max => values.max().unwrap_or(0),
+                AggregateFunction::Min => values.min().unwrap_or(0),
+                AggregateFunction::Sum => values.sum(),
+            }
         }
         // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
         // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card

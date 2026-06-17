@@ -50861,17 +50861,17 @@ mod tests {
         }
     }
 
-    /// CR 120.1 + CR 202.3 (cluster 32, Class C — Ensnared by the Mara): the
-    /// branch-1 damage amount "the total mana value of those exiled cards" is an
-    /// exiled-this-resolution aggregate the typed quantity parsers don't yet
-    /// model. It must NOT degrade to a verbatim `QuantityRef::Variable` carrying
-    /// raw Oracle text — that would silently resolve to 0 damage at runtime
-    /// (only `Variable{name:"X"}` / named choices resolve). Instead the
-    /// `DealDamage` step must strict-fail to `Effect::Unimplemented` so coverage
-    /// honestly flags the gap. The `ExileTop` branch head still parses, keeping
-    /// the two-branch `ChooseOneOf` intact.
+    /// CR 120.1 + CR 202.3 + CR 609.3 (cluster 32, Class C — Ensnared by the
+    /// Mara): the branch-1 damage amount "the total mana value of those exiled
+    /// cards" is an aggregate over the most recent chain tracked set — the cards
+    /// the branch-head `ExileTop` published. It parses to
+    /// `QuantityRef::TrackedSetAggregate { Sum, ManaValue }` (NOT a verbatim
+    /// `QuantityRef::Variable`, which would silently resolve to 0 damage). Because
+    /// the `DealDamage` is `ExileTop`'s sub-ability, the chain processor publishes
+    /// ExileTop's affected set before the damage step reads it (see
+    /// `exile_top_then_deal_damage_sums_mana_value_of_those_exiled_cards`).
     #[test]
-    fn ensnared_by_the_mara_unresolvable_damage_amount_strict_fails_not_verbatim_variable() {
+    fn ensnared_by_the_mara_damage_amount_is_tracked_set_aggregate() {
         let ability = parse_effect_chain(
             "Each opponent faces a villainous choice — They exile cards from the top of their library until they exile a nonland card, then you may cast that card without paying its mana cost, or that player exiles the top four cards of their library and ~ deals damage equal to the total mana value of those exiled cards to that player.",
             AbilityKind::Spell,
@@ -50883,8 +50883,8 @@ mod tests {
         assert_eq!(*chooser, PlayerFilter::Opponent);
         assert_eq!(branches.len(), 2);
 
-        // Branch 1 head exiles four cards (still parses); the chained damage
-        // step strict-fails rather than emitting a verbatim Variable.
+        // Branch 1 head exiles four cards; its chained sub-ability deals damage
+        // equal to the total mana value of that exiled (tracked) set.
         let branch1 = &branches[1];
         assert!(
             matches!(&*branch1.effect, Effect::ExileTop { .. }),
@@ -50895,17 +50895,28 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("branch 1 must retain its chained damage step");
+        let Effect::DealDamage { amount, .. } = &*damage.effect else {
+            panic!(
+                "branch 1 damage step must be DealDamage, got {:?}",
+                damage.effect
+            );
+        };
         assert!(
-            matches!(&*damage.effect, Effect::Unimplemented { .. }),
-            "branch 1 damage step must strict-fail to Unimplemented (unresolvable exiled-cards aggregate), got {:?}",
-            damage.effect
+            matches!(
+                amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::ManaValue,
+                    }
+                }
+            ),
+            "branch 1 damage amount must be TrackedSetAggregate(Sum, ManaValue), got {amount:?}"
         );
 
-        // Belt-and-braces: no node anywhere in the parsed ability stores the raw
-        // Oracle aggregate phrase as a `QuantityRef::Variable` name (the
-        // prohibited verbatim-text-in-parser smell). The phrase legitimately
-        // survives in human-readable `description`/Unimplemented-trace fields —
-        // only its appearance as a resolvable `Variable` payload is the defect.
+        // The verbatim Oracle aggregate phrase must never be stored as a
+        // resolvable `QuantityRef::Variable` name (the prohibited
+        // verbatim-text-in-parser smell).
         let json = serde_json::to_string(&ability).expect("serialize ability");
         assert!(
             !json.contains(r#""Variable","name":"the total mana value"#),

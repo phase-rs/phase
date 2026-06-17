@@ -267,6 +267,26 @@ pub(crate) fn parse_quantity_ref_with_context(
     ))
     .parse(trimmed)
     {
+        // CR 608.2c + CR 609.3 + CR 107.3e: "the total <property> of those exiled
+        // cards" is an aggregate over the most recent chain tracked set, not over live
+        // battlefield objects — the anaphor "those exiled cards" refers to the set
+        // the preceding effect published (e.g. Ensnared by the Mara's `ExileTop`).
+        // Matched before `parse_type_phrase_with_ctx` so the exile anaphor isn't
+        // mis-read as a type phrase. Reuses the established exile-anaphor pair from
+        // `oracle_effect::mod` (`those exiled cards` / `the exiled cards`).
+        if let Ok((anaphor_rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("those exiled cards"),
+            tag("the exiled cards"),
+        ))
+        .parse(rest)
+        {
+            if anaphor_rest.trim().is_empty() {
+                return Some(QuantityRef::TrackedSetAggregate {
+                    function: func,
+                    property: prop,
+                });
+            }
+        }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 608.2h: present-tense aggregate. Accept a bare empty remainder
         // (existing no-snapshot behavior) or a trailing cast/activation-time
@@ -4063,6 +4083,43 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn cda_quantity_total_mana_value_of_those_exiled_cards_is_tracked_set_aggregate() {
+        // CR 609.3 + CR 202.3: the plural anaphor "those exiled cards" aggregates
+        // over the most recent chain tracked set (the set the preceding effect
+        // published), NOT over live battlefield/exile objects via a type filter.
+        // Drives Ensnared by the Mara's "deals damage equal to the total mana
+        // value of those exiled cards".
+        let qty = parse_cda_quantity("the total mana value of those exiled cards").unwrap();
+        assert!(
+            matches!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::ManaValue,
+                    }
+                }
+            ),
+            "expected TrackedSetAggregate(Sum, ManaValue), got {qty:?}"
+        );
+
+        // The "the exiled cards" anaphor variant maps to the same set.
+        let qty2 = parse_cda_quantity("the total mana value of the exiled cards").unwrap();
+        assert!(
+            matches!(
+                qty2,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::ManaValue,
+                    }
+                }
+            ),
+            "expected TrackedSetAggregate(Sum, ManaValue) for 'the exiled cards', got {qty2:?}"
+        );
     }
 
     #[test]

@@ -3735,6 +3735,19 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
+    /// CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+    /// over the most recent chain tracked set (sum/max/min), reading the same set as
+    /// [`QuantityRef::FilteredTrackedSetSize`] but aggregating a per-member value
+    /// instead of counting members. The set is selected by highest id (the set
+    /// the immediately-preceding chain effect published) and is zone-independent —
+    /// its members are addressed by identity, so cards the producer moved to exile
+    /// are read in place. Used by "deals damage equal to the total mana value of
+    /// those exiled cards" (Ensnared by the Mara — `Sum` over `ManaValue` of the
+    /// set the preceding `ExileTop` published).
+    TrackedSetAggregate {
+        function: AggregateFunction,
+        property: ObjectProperty,
+    },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
     /// "draws a card for each card exiled from their hand this way." The counter

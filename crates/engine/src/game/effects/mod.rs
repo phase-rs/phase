@@ -2732,6 +2732,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
                 qty,
                 QuantityRef::TrackedSetSize
                     | QuantityRef::FilteredTrackedSetSize { .. }
+                    | QuantityRef::TrackedSetAggregate { .. }
                     | QuantityRef::DistinctCardTypes {
                         source: CardTypeSetSource::TrackedSet { .. }
                     }
