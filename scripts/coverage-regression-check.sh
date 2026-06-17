@@ -212,6 +212,17 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
     # surfaced) vs "real_regress" (parse_details changed — true semantic
     # regression). Honesty-only emissions count toward the "REGRESSED
     # (coverage honesty)" bucket and do NOT fail the ratchet.
+    #
+    # Cards that were NOT supported in the baseline are excluded from the
+    # newly-affected set entirely — mirroring the support-delta guard above
+    # ("Cards absent from the baseline are skipped"). A diagnostic emitted by a
+    # card that was already unsupported (or absent — e.g. a brand-new preview-set
+    # card during heavy MTGJSON churn) cannot be a *regression*: there is no
+    # supported baseline to regress from. Without this guard, a new card whose
+    # total-count delta is masked by churn (cards swapped, total flat) gets a
+    # null baseline parse_details, reads as "changed", and is miscounted as a
+    # real regression. The genuine "supported -> unsupported" case is still
+    # caught here (was_supported true) and by the engine bucket above.
     jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
       def cards_emitting($cat):
         [.cards[]? | select(tostring | contains($cat)) | .card_name];
@@ -219,6 +230,7 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
       ($curr[0]) as $c |
       ($b.cards // [] | map({key: .card_name, value: .parse_details}) | from_entries) as $bpd |
       ($c.cards // [] | map({key: .card_name, value: .parse_details}) | from_entries) as $cpd |
+      ($b.cards // [] | map({key: .card_name, value: (.supported == true)}) | from_entries) as $bsup |
       [
         ($c.diagnostics // {} | keys[]) as $cat |
         ($c.diagnostics[$cat] // 0) as $cc |
@@ -226,7 +238,9 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
         select($cc > $bc) |
         ($b | cards_emitting($cat)) as $base_cards |
         ($c | cards_emitting($cat)) as $curr_cards |
-        (($curr_cards - $base_cards) | unique) as $newly |
+        # Only cards supported in the baseline can regress (see comment above):
+        # absent / already-unsupported cards are skipped, not counted.
+        (($curr_cards - $base_cards) | unique | map(select($bsup[.] // false))) as $newly |
         {
           category: $cat,
           newly_affected: [
