@@ -216,9 +216,6 @@ fn compute_options(
             .filter(|id| !already_chosen.contains(id))
             .map(|id| id.0.to_string())
             .collect(),
-        // Object choices (e.g., "choose a commander") are resolved via the filter
-        // system — the option list is provided by the frontend based on the filter.
-        ChoiceType::Object => Vec::new(),
         ChoiceType::TwoColors => two_color_options(),
         ChoiceType::Word | ChoiceType::Artist => Vec::new(),
         // CR 608.2d: "Choose an ability the target has, then remove it" —

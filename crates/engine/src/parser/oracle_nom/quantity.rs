@@ -491,9 +491,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // Group mana-value aggregate parsers to reduce alt arity
         alt((
             parse_linked_exile_mana_value_ref,
-            // Register greatest first (more specific), then chosen
             parse_greatest_commander_mana_value_ref,
-            parse_chosen_commander_mana_value_ref,
         )),
         parse_distinct_card_types_in_zone,
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
@@ -665,39 +663,6 @@ fn parse_commander_zone_disjunction(input: &str) -> OracleResult<'_, TargetFilte
                 },
             ],
         }),
-    ))
-}
-
-/// Parse "the mana value of a commander you own on the battlefield or in the command zone".
-///
-/// CR 608.2d: Resolution-time object choice — player selects which commander.
-/// CR 903.3d: Commander references by zone.
-/// CR 202.3: Mana value.
-///
-/// Used for Stinging Study's "where X is the mana value of a commander you own
-/// on the battlefield or in the command zone".
-///
-/// Maps to `QuantityRef::ChosenObject` to prompt for commander choice at runtime.
-fn parse_chosen_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the ").parse(input)?;
-    let (rest, property) = parse_mana_value_phrase(rest)?;
-    let (rest, _) = tag(" of a commander ").parse(rest)?;
-    let (rest, owner) = parse_commander_owner_phrase(rest)?;
-    let (rest, mut zone_filter) = parse_commander_zone_disjunction(rest)?;
-
-    // Add ownership to the zone filter
-    if let TargetFilter::Typed(ref mut tf) = zone_filter {
-        tf.properties.push(FilterProp::Owned {
-            controller: owner.clone(),
-        });
-    }
-
-    Ok((
-        rest,
-        QuantityRef::ChosenObject {
-            property,
-            selection_filter: zone_filter,
-        },
     ))
 }
 
@@ -6406,61 +6371,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_chosen_commander_mana_value_ref() {
-        // Test the non-greatest pattern (CR 608.2d choice)
-        let phrase =
-            "the mana value of a commander you own on the battlefield or in the command zone";
-        let (rest, q) = parse_chosen_commander_mana_value_ref(phrase).unwrap();
-        assert_eq!(rest, "", "phrase should be fully consumed");
-
-        // Verify it produces ChosenObject for resolution-time choice
-        let QuantityRef::ChosenObject {
-            property,
-            selection_filter,
-        } = q
-        else {
-            panic!("Expected ChosenObject, got {q:?}");
-        };
-
-        assert_eq!(property, ObjectProperty::ManaValue);
-
-        // Verify the filter uses InAnyZone for multi-zone disjunction
-        let TargetFilter::Typed(tf) = selection_filter else {
-            panic!("Expected Typed filter, got {selection_filter:?}");
-        };
-
-        assert!(
-            tf.properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::IsCommander)),
-            "Filter should have IsCommander"
-        );
-        assert!(
-            tf.properties.iter().any(|p| matches!(
-                p,
-                FilterProp::Owned {
-                    controller: ControllerRef::You
-                }
-            )),
-            "Filter should have Owned{{You}}"
-        );
-
-        // Verify InAnyZone with both zones
-        let in_any_zone = tf.properties.iter().find_map(|p| match p {
-            FilterProp::InAnyZone { zones } => Some(zones),
-            _ => None,
-        });
-        assert!(in_any_zone.is_some(), "Filter should have InAnyZone");
-        let zones = in_any_zone.unwrap();
-        assert_eq!(zones.len(), 2, "Should have exactly 2 zones");
-        assert!(
-            zones.contains(&Zone::Battlefield),
-            "Should include Battlefield"
-        );
-        assert!(zones.contains(&Zone::Command), "Should include Command");
-    }
-
-    #[test]
     fn test_parse_greatest_commander_mana_value_ref() {
         // Test the greatest pattern (CR 202.3 aggregate-max)
         let phrase = "the greatest mana value of a commander you own on the battlefield or in the command zone";
@@ -6497,65 +6407,6 @@ mod tests {
         );
 
         // Verify InAnyZone with both zones
-        let in_any_zone = tf.properties.iter().find_map(|p| match p {
-            FilterProp::InAnyZone { zones } => Some(zones),
-            _ => None,
-        });
-        assert!(in_any_zone.is_some(), "Filter should have InAnyZone");
-        let zones = in_any_zone.unwrap();
-        assert_eq!(zones.len(), 2, "Should have exactly 2 zones");
-        assert!(
-            zones.contains(&Zone::Battlefield),
-            "Should include Battlefield"
-        );
-        assert!(zones.contains(&Zone::Command), "Should include Command");
-    }
-
-    #[test]
-    fn test_parse_commander_mana_value_ref_converted_mana_cost() {
-        // Test "converted mana cost" synonym for both patterns
-        let phrase_chosen = "the converted mana cost of a commander you own on the battlefield or in the command zone";
-        let (rest, q) = parse_quantity_ref(phrase_chosen).unwrap();
-        assert_eq!(rest, "");
-        assert!(matches!(q, QuantityRef::ChosenObject { .. }));
-
-        let phrase_greatest = "the greatest converted mana cost of a commander you own on the battlefield or in the command zone";
-        let (rest, q) = parse_quantity_ref(phrase_greatest).unwrap();
-        assert_eq!(rest, "");
-        assert!(matches!(q, QuantityRef::Aggregate { .. }));
-    }
-
-    #[test]
-    fn test_parse_commander_mana_value_ref_per_player() {
-        // Test per-player "they own" variant - should bind to ScopedPlayer
-        let phrase =
-            "the mana value of a commander they own on the battlefield or in the command zone";
-        let (rest, q) = parse_quantity_ref(phrase).unwrap();
-        assert_eq!(rest, "");
-
-        // Verify it produces ChosenObject with ScopedPlayer controller
-        let QuantityRef::ChosenObject {
-            selection_filter, ..
-        } = q
-        else {
-            panic!("Expected ChosenObject, got {q:?}");
-        };
-
-        // Verify the filter uses InAnyZone with Owned{ScopedPlayer}
-        let TargetFilter::Typed(tf) = selection_filter else {
-            panic!("Expected Typed filter, got {selection_filter:?}");
-        };
-
-        assert!(
-            tf.properties.iter().any(|p| matches!(
-                p,
-                FilterProp::Owned {
-                    controller: ControllerRef::ScopedPlayer
-                }
-            )),
-            "Filter should have Owned{{ScopedPlayer}}"
-        );
-
         let in_any_zone = tf.properties.iter().find_map(|p| match p {
             FilterProp::InAnyZone { zones } => Some(zones),
             _ => None,

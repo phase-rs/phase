@@ -3989,18 +3989,6 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
-    #[test]
-    fn dynamic_qty_accepts_chosen_commander_mana_value_pattern() {
-        let parsed = parse(
-            "You draw X cards and you lose X life, where X is the mana value of a commander you own on the battlefield or in the command zone.",
-            &["Sorcery"],
-        );
-
-        // The "mana value of a commander" pattern (non-greatest) also parses correctly
-        // as ChosenObject, so DynamicQty should NOT be flagged.
-        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
-    }
-
     /// CR 608.2c: "investigate twice instead" — the doubled count is carried
     /// by `AbilityDefinition.repeat_for`, a legitimate QuantityExpr home. The
     /// "twice" word must not flag DynamicQty.

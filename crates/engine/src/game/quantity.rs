@@ -308,7 +308,6 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::ChosenObject { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -485,7 +484,6 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::ChosenObject { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -2150,35 +2148,6 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 608.2d: Property of an object chosen during resolution.
-        // Reads the chosen object ID from ChosenAttribute::Object, then returns
-        // the requested property of that object.
-        QuantityRef::ChosenObject {
-            property,
-            selection_filter: _,
-        } => {
-            // Get the chosen object ID from the source object's chosen_attributes
-            let chosen_id = state
-                .objects
-                .get(&source_id)
-                .and_then(|obj| {
-                    obj.chosen_attributes.iter().find_map(|a| match a {
-                        crate::types::ability::ChosenAttribute::Object(id) => Some(*id),
-                        _ => None,
-                    })
-                })
-                .unwrap_or(ObjectId(0));
-
-            // Return the requested property of the chosen object
-            match property {
-                crate::types::ability::ObjectProperty::ManaValue => state
-                    .objects
-                    .get(&chosen_id)
-                    .map(|obj| obj.mana_cost.mana_value() as i32)
-                    .unwrap_or(0),
-                _ => 0, // TODO: Add support for other properties as needed
-            }
-        }
         // CR 508.1a: Count creatures that attacked this turn. Declaration-time
         // records are the authority for every scoped form so attackers that
         // left the battlefield still count.
