@@ -1710,6 +1710,8 @@ fn zone_change_record_from_spec(
         controller: spec.controller,
         owner: spec.controller,
         from_zone: None,
+        cast_from_zone: None,
+        played_from_zone: None,
         to_zone: Zone::Battlefield,
         attachments: Vec::new(),
         linked_exile_snapshot: Vec::new(),

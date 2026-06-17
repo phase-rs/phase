@@ -299,6 +299,17 @@ pub struct PolicyPenalties {
     /// value clears the loss), so this demotes rather than vetoes.
     #[serde(default = "default_opponent_chalice_counter_penalty")]
     pub opponent_chalice_counter_penalty: f64,
+    /// CR 702.41a / CR 702.126a: Bonus for casting an affinity-for-artifacts or
+    /// improvise spell in an artifacts-matter deck — the cost payoff gets
+    /// cheaper/easier the wider the artifact board. Consumed by
+    /// `ArtifactSynergyPolicy`.
+    #[serde(default = "default_artifact_cost_payoff_bonus")]
+    pub artifact_cost_payoff_bonus: f64,
+    /// CR 301.1: Nudge for deploying an artifact in an artifacts-matter deck,
+    /// growing the count that affinity/improvise/metalcraft payoffs scale on.
+    /// Consumed by `ArtifactSynergyPolicy`.
+    #[serde(default = "default_deploy_artifact_bonus")]
+    pub deploy_artifact_bonus: f64,
     /// CR 119.3 / CR 702.15a: Bonus for casting a lifegain *source* (lifelink or
     /// "you gain N life") in a deck that has lifegain payoffs — each life-gain
     /// event feeds those payoffs. Consumed by `LifegainPayoffPolicy`, which is
@@ -347,6 +358,8 @@ impl Default for PolicyPenalties {
             combo_progress_next_turn_bonus: default_combo_progress_next_turn_bonus(),
             own_chalice_counter_penalty: default_own_chalice_counter_penalty(),
             opponent_chalice_counter_penalty: default_opponent_chalice_counter_penalty(),
+            artifact_cost_payoff_bonus: default_artifact_cost_payoff_bonus(),
+            deploy_artifact_bonus: default_deploy_artifact_bonus(),
             lifegain_source_bonus: default_lifegain_source_bonus(),
         }
     }
@@ -412,6 +425,12 @@ fn default_own_chalice_counter_penalty() -> f64 {
 fn default_opponent_chalice_counter_penalty() -> f64 {
     -4.0
 }
+fn default_artifact_cost_payoff_bonus() -> f64 {
+    0.5
+}
+fn default_deploy_artifact_bonus() -> f64 {
+    0.2
+}
 fn default_lifegain_source_bonus() -> f64 {
     0.4
 }
@@ -460,10 +479,20 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
-pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[(
-    "lifegain_source_bonus",
-    "new LifegainPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
-)];
+pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "artifact_cost_payoff_bonus",
+        "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "deploy_artifact_bonus",
+        "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "lifegain_source_bonus",
+        "new LifegainPayoffPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+];
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
 #[derive(Debug, Clone)]

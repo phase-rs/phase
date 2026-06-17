@@ -2,7 +2,7 @@
 //! and gate any change that adds/renames matchups or features.
 
 use super::snapshots::{load_snapshot_at, snapshot_path};
-use super::{all_matchups, find_matchup, DeckRef, FeatureKind};
+use super::{all_matchups, find_matchup, resolve_deck_ref, DeckRef, FeatureKind};
 
 #[test]
 fn every_feature_kind_is_exercised() {
@@ -20,15 +20,15 @@ fn every_feature_kind_is_exercised() {
 }
 
 /// Cross-check against `DeckFeatures` — the struct in `crate::features::mod`
-/// has exactly 9 per-axis fields (landfall, mana_ramp, tribal, control,
-/// aristocrats, aggro_pressure, tokens_wide, plus_one_counters,
+/// has exactly 10 per-axis fields (landfall, mana_ramp, tribal, control,
+/// aristocrats, artifacts, aggro_pressure, tokens_wide, plus_one_counters,
 /// spellslinger_prowess). When a new axis is added there, this assertion
 /// fails until `FeatureKind::ALL` is updated to match.
 #[test]
 fn feature_kind_matches_deck_features_field_count() {
     assert_eq!(
         FeatureKind::ALL.len(),
-        9,
+        10,
         "FeatureKind::ALL is out of sync with DeckFeatures — add the new variant."
     );
 }
@@ -107,6 +107,68 @@ fn matchup_ids_preserved() {
             "legacy matchup id `{id}` no longer resolves via find_matchup"
         );
     }
+}
+
+/// Guards the deck-pool gap that `ArtifactSynergyPolicy`'s merge gate depends
+/// on: the `affinity-mirror` matchup is tagged `FeatureKind::Artifacts`, which
+/// is only honest if the deck actually clears `artifacts::COMMITMENT_FLOOR`
+/// (otherwise `ArtifactSynergyPolicy::activation` returns `None` and the gate
+/// runs the policy dormant — the exact failure mode flagged in review). This
+/// resolves the real snapshot through the card database and asserts the
+/// artifacts feature both detects payoffs and crosses the activation floor, so
+/// the gate's artifacts coverage cannot silently regress to a non-artifact deck.
+///
+/// `#[ignore]` because it needs the full `card-data.json` export, which the
+/// other suite invariants intentionally avoid. Run with the card data present:
+///   `cargo test -p phase-ai -- --ignored affinity_mirror_deck_activates_artifact_synergy`
+/// honoring `PHASE_CARDS_PATH` (defaults to the workspace `data/` directory).
+#[test]
+#[ignore = "needs full card-data.json export; run with --ignored"]
+fn affinity_mirror_deck_activates_artifact_synergy() {
+    use crate::features::artifacts::{detect, COMMITMENT_FLOOR};
+    use engine::database::CardDatabase;
+    use engine::game::{resolve_player_deck_list, PlayerDeckList};
+    use std::path::PathBuf;
+
+    let data_root = std::env::var("PHASE_CARDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")));
+    let db_path = data_root.join("card-data.json");
+    let db = CardDatabase::from_export(&db_path)
+        .unwrap_or_else(|e| panic!("failed to load card database from {db_path:?}: {e}"));
+
+    let spec = find_matchup("affinity-mirror").expect("affinity-mirror matchup must resolve");
+    assert!(
+        spec.exercises.contains(&FeatureKind::Artifacts),
+        "affinity-mirror must claim to exercise FeatureKind::Artifacts"
+    );
+
+    let names = resolve_deck_ref(&spec.p0).expect("affinity-mirror p0 snapshot must resolve");
+    let payload = resolve_player_deck_list(
+        &db,
+        &PlayerDeckList {
+            main_deck: names,
+            ..Default::default()
+        },
+    );
+    let feature = detect(&payload.main_deck);
+
+    assert!(
+        feature.payoff_count >= 1,
+        "affinity deck must contain at least one artifact-cost payoff (affinity/improvise/count), \
+         got payoff_count={} artifact_count={}",
+        feature.payoff_count,
+        feature.artifact_count
+    );
+    assert!(
+        feature.commitment >= COMMITMENT_FLOOR,
+        "affinity deck must clear COMMITMENT_FLOOR ({COMMITMENT_FLOOR}) so ArtifactSynergyPolicy \
+         activates during the gate; got commitment={} (payoff={}, enabler={}, artifacts={})",
+        feature.commitment,
+        feature.payoff_count,
+        feature.enabler_count,
+        feature.artifact_count
+    );
 }
 
 #[test]

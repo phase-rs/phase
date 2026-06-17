@@ -150,7 +150,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    // --- "[Type] your opponents control enter tapped" (external replacement) ---
+    // --- "[Type] enter tapped" / "[Type] played by your opponents enter tapped" ---
     if let Some(def) = parse_external_enters_tapped(&norm_lower, &text) {
         return Some(def);
     }
@@ -287,8 +287,30 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    // --- "If you would draw a card, {effect}" ---
-    if nom_primitives::scan_contains(&lower, "you would draw") {
+    // --- Explore replacement: "If a creature you control would explore, instead …"
+    // (Twists and Turns / Topography Tracker class).
+    if nom_primitives::scan_contains(&lower, "would explore") {
+        if let Some(def) = parse_explore_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
+    // --- "If [player] would draw [a card | one or more cards], {effect}" ---
+    // CR 614.1a: Widened from "you would draw" to handle opponent/player
+    // scope (Notion Thief, Hullbreacher, Chains of Mephistopheles) mirroring
+    // the gain-life widening below.
+    let mentions_draw = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("would draw a card"),
+                tag("would draw one or more cards"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if mentions_draw {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::Draw).description(text.to_string());
@@ -307,6 +329,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             }
             def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
         }
+        // CR 614.1a: Player scope for draw replacements.
+        apply_draw_player_scope(&lower, &mut def);
         // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
         // "except the first one [you|they] draw in each of [your|their] draw
         // steps" exception clause and gate the replacement so it does NOT
@@ -873,6 +897,10 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
                 },
                 win_effect: None,
                 lose_effect: None,
+                // CR 614.1a + CR 705.2: the replacement re-flips for the same
+                // flipper the original event named (the replacement applier rebinds
+                // the acting controller), so `Controller` reads that flipper.
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
         ))
         .description(text.to_string());
@@ -2977,40 +3005,130 @@ fn parse_replacement_ability_word_condition(text: &str) -> Option<ReplacementCon
     .map(|(condition, _)| condition)
 }
 
-fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalEntryKind {
+    Plain {
+        enters_tapped: bool,
+    },
+    /// CR 614.1d: Uphill Battle class — cast/played entry only, not tokens.
+    PlayedByOpponents {
+        enters_tapped: bool,
+    },
+}
+
+/// CR 614.1d: Peel external entry-tapped suffixes from a normalized clause.
+/// Played-by-opponents variants are checked before plain enter-tapped suffixes
+/// so "creatures played by your opponents enter tapped" does not fall through
+/// to the Authority-of-the-Consuls control-based shape.
+fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKind)> {
     stripped
-        .strip_suffix(" enter tapped")
-        .map(|subject| (subject, true))
-        .or_else(|| {
-            stripped
-                .strip_suffix(" enters tapped")
-                .map(|subject| (subject, true))
+        .strip_suffix(" played by your opponents enter the battlefield tapped") // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+        .map(|subject| {
+            (
+                subject,
+                ExternalEntryKind::PlayedByOpponents {
+                    enters_tapped: true,
+                },
+            )
         })
         .or_else(|| {
             stripped
-                .strip_suffix(" enter untapped")
-                .map(|subject| (subject, false))
+                .strip_suffix(" played by your opponents enter tapped") // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+                .map(|subject| {
+                    (
+                        subject,
+                        ExternalEntryKind::PlayedByOpponents {
+                            enters_tapped: true,
+                        },
+                    )
+                })
         })
         .or_else(|| {
-            stripped
-                .strip_suffix(" enters untapped")
-                .map(|subject| (subject, false))
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enter tapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: true,
+                    },
+                )
+            })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enters tapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: true,
+                    },
+                )
+            })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enter untapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: false,
+                    },
+                )
+            })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enters untapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: false,
+                    },
+                )
+            })
         })
 }
 
 fn build_external_entry_replacement(
     subject: &str,
     original_text: &str,
-    enters_tapped: bool,
+    kind: ExternalEntryKind,
 ) -> Option<ReplacementDefinition> {
     if subject.contains('~') {
         return None;
     }
 
+    let enters_tapped = match kind {
+        ExternalEntryKind::Plain { enters_tapped }
+        | ExternalEntryKind::PlayedByOpponents { enters_tapped } => enters_tapped,
+    };
+
     let (filter, rest) = parse_type_phrase(subject);
     if !rest.trim().is_empty() {
         return None;
     }
+
+    let valid_card = match kind {
+        ExternalEntryKind::PlayedByOpponents { .. } => match filter {
+            TargetFilter::Typed(mut tf) => {
+                tf.controller = Some(ControllerRef::Opponent);
+                tf.properties.push(FilterProp::WasPlayed);
+                TargetFilter::Typed(tf)
+            }
+            TargetFilter::Or { filters } if filters.len() == 1 => {
+                match filters.into_iter().next()? {
+                    TargetFilter::Typed(mut tf) => {
+                        tf.controller = Some(ControllerRef::Opponent);
+                        tf.properties.push(FilterProp::WasPlayed);
+                        TargetFilter::Typed(tf)
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        },
+        ExternalEntryKind::Plain { .. } => filter,
+    };
 
     let effect = if enters_tapped {
         Effect::SetTapState {
@@ -3029,7 +3147,7 @@ fn build_external_entry_replacement(
     Some(
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
-            .valid_card(filter)
+            .valid_card(valid_card)
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
@@ -3048,8 +3166,8 @@ fn parse_source_state_external_entry(
     let condition = replacement_condition_from_static(condition)?;
     let rest_lower = rest.to_lowercase();
     let stripped = rest_lower.trim_end_matches('.');
-    let (entry_subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
-    let mut def = build_external_entry_replacement(entry_subject, original_text, enters_tapped)?;
+    let (entry_subject, kind) = parse_external_entry_suffix(stripped)?;
+    let mut def = build_external_entry_replacement(entry_subject, original_text, kind)?;
     def.condition = Some(condition);
     Some(def)
 }
@@ -3060,26 +3178,35 @@ fn parse_external_enters_untapped(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let stripped = norm_lower.trim_end_matches('.');
-    let (subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
-    if enters_tapped {
+    let (subject, kind) = parse_external_entry_suffix(stripped)?;
+    let ExternalEntryKind::Plain {
+        enters_tapped: false,
+    } = kind
+    else {
         return None;
-    }
-    build_external_entry_replacement(subject, original_text, false)
+    };
+    build_external_entry_replacement(subject, original_text, kind)
 }
 
 /// Parse "[Type] enter tapped" / "[Type] enters tapped" — external replacement effects.
 /// E.g., "Creatures your opponents control enter tapped." (Authority of the Consuls)
 /// E.g., "Artifacts and creatures your opponents control enter tapped." (Blind Obedience)
+/// E.g., "Creatures played by your opponents enter tapped." (Uphill Battle)
 fn parse_external_enters_tapped(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let stripped = norm_lower.trim_end_matches('.');
-    let (subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
-    if !enters_tapped {
-        return None;
+    let (subject, kind) = parse_external_entry_suffix(stripped)?;
+    match kind {
+        ExternalEntryKind::Plain {
+            enters_tapped: true,
+        }
+        | ExternalEntryKind::PlayedByOpponents {
+            enters_tapped: true,
+        } => build_external_entry_replacement(subject, original_text, kind),
+        _ => None,
     }
-    build_external_entry_replacement(subject, original_text, true)
 }
 
 /// CR 614.1a: Parse "If [filter] would die, …instead…" replacement effects.
@@ -4463,6 +4590,19 @@ fn apply_gain_life_player_scope(lower: &str, def: &mut ReplacementDefinition) {
     // else: "you would gain life" → valid_player stays None (controller-only).
 }
 
+/// CR 614.1a: Apply `valid_player` scope to draw replacements from the
+/// antecedent subject ("an opponent", "a player", or default controller-only).
+fn apply_draw_player_scope(lower: &str, def: &mut ReplacementDefinition) {
+    if nom_primitives::scan_contains(lower, "an opponent would draw")
+        || nom_primitives::scan_contains(lower, "opponent would draw")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    } else if nom_primitives::scan_contains(lower, "a player would draw") {
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    }
+    // else: "you would draw" → valid_player stays None (controller-only).
+}
+
 fn parse_color_word(word: &str) -> Option<ManaColor> {
     match word {
         "white" => Some(ManaColor::White),
@@ -4618,6 +4758,26 @@ fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<Repl
     Some(
         ReplacementDefinition::new(ReplacementEvent::Scry)
             .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 701.44 + CR 614.1a: Parse explore replacement effects such as Twists and
+/// Turns ("instead you scry 1, then that creature explores") and Topography
+/// Tracker ("instead it explores, then it explores again").
+fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "if a creature you control would explore") {
+        return None;
+    }
+    let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
+    let execute_text = execute_text.trim().trim_end_matches('.');
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Explore)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
             .description(original_text.to_string()),
     )
 }
@@ -4877,6 +5037,9 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
         TokenReplacementShape::Double => {
             def = def.quantity_modification(QuantityModification::Double);
         }
+        TokenReplacementShape::Half => {
+            def = def.quantity_modification(QuantityModification::Half);
+        }
         TokenReplacementShape::PlusSpec { spec } => {
             def = def.additional_token_spec(*spec);
         }
@@ -4886,6 +5049,12 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
     if nom_primitives::scan_contains(lower, "under your control") {
         def = def.token_owner_scope(ControllerRef::You);
     }
+    // Halving Season class: "If an opponent would create …"
+    if nom_primitives::scan_contains(lower, "an opponent would create")
+        || nom_primitives::scan_contains(lower, "opponent would create")
+    {
+        def = def.token_owner_scope(ControllerRef::Opponent);
+    }
 
     Some(def)
 }
@@ -4893,6 +5062,8 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
 enum TokenReplacementShape {
     /// "twice that many tokens … are created instead" (Doubling Season).
     Double,
+    /// "half that many … tokens … instead, rounded down" (Halving Season).
+    Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
         spec: Box<crate::types::proposed_event::TokenSpec>,
@@ -4903,6 +5074,11 @@ enum TokenReplacementShape {
 /// `nom_on_lower` for case-preserving parsing and delegates token-spec
 /// extraction to the existing `parse_token_description` building block.
 fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
+    // "half that many" → Halving Season token-halving pattern.
+    if nom_primitives::scan_contains(lower, "half that many") {
+        return Some(TokenReplacementShape::Half);
+    }
+
     // "twice that many" → Doubling Season pattern.
     if nom_on_lower(lower, lower, |i| {
         let (i, _) = take_until::<_, _, OracleError<'_>>("twice that many").parse(i)?;
@@ -9760,6 +9936,54 @@ mod tests {
     }
 
     #[test]
+    fn uphill_battle_played_by_opponents_enter_tapped() {
+        let text = "Creatures played by your opponents enter the battlefield tapped.";
+        assert!(
+            parse_external_enters_tapped(&text.to_lowercase(), text).is_some(),
+            "external entry parser must match Uphill Battle"
+        );
+        let def =
+            parse_replacement_line(text, "Uphill Battle").expect("Uphill Battle played-by entry");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                assert!(tf.properties.contains(&FilterProp::WasPlayed));
+            }
+            other => panic!("Expected Typed filter with WasPlayed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn played_by_opponents_entry_covers_creature_and_land() {
+        for (text, card, type_filter) in [
+            (
+                "Creatures played by your opponents enter the battlefield tapped.",
+                "Uphill Battle",
+                TypeFilter::Creature,
+            ),
+            (
+                "Lands played by your opponents enter tapped.",
+                "Contamination",
+                TypeFilter::Land,
+            ),
+        ] {
+            let def = parse_replacement_line(text, card)
+                .unwrap_or_else(|| panic!("failed to parse {text}"));
+            assert_eq!(def.event, ReplacementEvent::ChangeZone);
+            match &def.valid_card {
+                Some(TargetFilter::Typed(tf)) => {
+                    assert!(tf.type_filters.contains(&type_filter));
+                    assert!(tf.properties.contains(&FilterProp::WasPlayed));
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn blind_obedience_compound_or_filter() {
         let def = parse_replacement_line(
             "Artifacts and creatures your opponents control enter tapped.",
@@ -11190,7 +11414,8 @@ mod tests {
         // CR 614.6 + CR 122.1: "<type> can't have counters put on them" lowers to
         // the AddCounter+Prevent replacement scoped to that permanent type. The
         // single combinator covers every permanent type, so creatures (#3450),
-        // planeswalkers (#3453), and artifacts (#3455) are all handled by one arm.
+        // planeswalkers (#3453), artifacts (#3455, #3502), and lands are all
+        // handled by one arm — no per-type parallel tests needed.
         for (oracle_type, expected) in [
             ("Creatures", TypeFilter::Creature),
             ("Planeswalkers", TypeFilter::Planeswalker),
@@ -11968,6 +12193,61 @@ mod tests {
         ));
     }
 
+    /// CR 614.1a + CR 121.1: Opponent draw replacements with the shared
+    /// except-first-draw-in-draw-step clause (Notion Thief / Hullbreacher class).
+    #[test]
+    fn parses_opponent_draw_replacement_except_first_draw_in_step() {
+        let notion_thief = parse_replacement_line(
+            "If an opponent would draw a card except the first one they draw in each of their draw steps, instead that player skips that draw and you draw a card.",
+            "Notion Thief",
+        )
+        .expect("Notion Thief draw replacement");
+        assert_eq!(notion_thief.event, ReplacementEvent::Draw);
+        assert_eq!(
+            notion_thief.valid_player,
+            Some(ReplacementPlayerScope::Opponent)
+        );
+        assert_eq!(
+            notion_thief.condition,
+            Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+        assert!(
+            notion_thief.execute.is_some(),
+            "replacement execute chain must be present"
+        );
+
+        let hullbreacher = parse_replacement_line(
+            "If an opponent would draw a card except the first one they draw in each of their draw steps, instead you create a Treasure token.",
+            "Hullbreacher",
+        )
+        .expect("Hullbreacher draw replacement");
+        assert_eq!(hullbreacher.event, ReplacementEvent::Draw);
+        assert_eq!(
+            hullbreacher.valid_player,
+            Some(ReplacementPlayerScope::Opponent)
+        );
+        assert_eq!(
+            hullbreacher.condition,
+            Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+    }
+
+    /// CR 614.1a: Global-player draw replacement (Chains of Mephistopheles class).
+    #[test]
+    fn parses_any_player_draw_replacement_except_first_draw_in_step() {
+        let def = parse_replacement_line(
+            "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead.",
+            "Chains of Mephistopheles",
+        )
+        .expect("Chains draw replacement antecedent");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+    }
+
     #[test]
     fn parses_opponent_mill_replacement_with_multiplier() {
         let text =
@@ -12355,6 +12635,46 @@ mod tests {
         .expect("halving season");
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+    }
+
+    #[test]
+    fn parses_explore_replacement_scry_prelude() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead you scry 1, then that creature explores.",
+            "Twists and Turns",
+        )
+        .expect("Twists and Turns explore replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters == vec![TypeFilter::Creature]
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn parses_explore_replacement_double_explore() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead it explores, then it explores again.",
+            "Topography Tracker",
+        )
+        .expect("Topography Tracker explore replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn parses_halving_season_opponent_token_replacement() {
+        let def = parse_replacement_line(
+            "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.",
+            "Halving Season",
+        )
+        .expect("Halving Season token halving must parse");
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::Opponent));
     }
 }
 

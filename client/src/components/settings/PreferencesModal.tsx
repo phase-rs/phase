@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -39,7 +39,7 @@ import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
-import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
@@ -122,6 +122,9 @@ const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   },
 ];
 
+const SETTINGS_MENU_CLASS =
+  "min-h-[44px] rounded-[14px] py-2 text-base sm:min-h-0 sm:text-sm";
+
 export function PreferencesModal({
   onClose,
   initialTab = "gameplay",
@@ -200,6 +203,42 @@ export function PreferencesModal({
   const [themeImportUrl, setThemeImportUrl] = useState("");
   const [themeImportStatus, setThemeImportStatus] = useState<"idle" | "loading" | "error">("idle");
   const [themeImportError, setThemeImportError] = useState("");
+
+  const boardBackgroundMenuGroups = useMemo(
+    () =>
+      BOARD_BACKGROUND_GROUPS.map((group) => ({
+        label: t(group.labelKey),
+        items: group.options.map((bg) => ({
+          value: bg.value,
+          label: bg.labelKey ? t(bg.labelKey) : (bg.label ?? bg.value),
+        })),
+      })),
+    [t],
+  );
+  const selectedBoardBackgroundLabel = useMemo(() => {
+    for (const group of boardBackgroundMenuGroups) {
+      const match = group.items.find((item) => item.value === boardBackground);
+      if (match) return match.label;
+    }
+    return boardBackground;
+  }, [boardBackground, boardBackgroundMenuGroups]);
+  const audioThemeItems = useMemo(
+    () => [
+      ...Object.values(BUILT_IN_THEMES).map((theme) => ({
+        value: theme.id,
+        label: theme.name,
+      })),
+      ...customThemeUrls.map((theme) => ({
+        value: theme.id,
+        label: theme.id,
+      })),
+    ],
+    [customThemeUrls],
+  );
+  const selectedAudioThemeLabel = useMemo(
+    () => audioThemeItems.find((item) => item.value === audioThemeId)?.label ?? audioThemeId,
+    [audioThemeId, audioThemeItems],
+  );
 
   const handleThemeChange = useCallback(async (id: string) => {
     setAudioThemeId(id);
@@ -352,22 +391,16 @@ export function PreferencesModal({
                     }`}
                   >
                     <SettingGroup label={t("gameplay.boardBackground")}>
-                      <SelectField
+                      <MenuSelect
+                        ariaLabel={t("gameplay.boardBackground")}
+                        label={selectedBoardBackgroundLabel}
+                        selectedValue={boardBackground}
+                        groups={boardBackgroundMenuGroups}
+                        onSelect={setBoardBackground}
+                        menuLayout="dropdown"
                         wrapperClassName="w-full"
-                        value={boardBackground}
-                        onChange={(e) => setBoardBackground(e.target.value)}
-                        className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
-                      >
-                        {BOARD_BACKGROUND_GROUPS.map((group) => (
-                          <optgroup key={group.labelKey} label={t(group.labelKey)}>
-                            {group.options.map((bg) => (
-                              <option key={bg.value} value={bg.value}>
-                                {bg.labelKey ? t(bg.labelKey) : bg.label}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </SelectField>
+                        className={SETTINGS_MENU_CLASS}
+                      />
                       {boardBackground === "custom" && (
                         <input
                           type="url"
@@ -571,19 +604,16 @@ export function PreferencesModal({
 
                 <SettingsSection title={t("audioTheme.title")}>
                   <SettingGroup label={t("audioTheme.theme")}>
-                    <SelectField
+                    <MenuSelect
+                      ariaLabel={t("audioTheme.theme")}
+                      label={selectedAudioThemeLabel}
+                      selectedValue={audioThemeId}
+                      items={audioThemeItems}
+                      onSelect={handleThemeChange}
+                      menuLayout="dropdown"
                       wrapperClassName="w-full"
-                      value={audioThemeId}
-                      onChange={(e) => handleThemeChange(e.target.value)}
-                      className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
-                    >
-                      {Object.values(BUILT_IN_THEMES).map((t) => (
-                        <option key={t.id} value={t.id}>{t.name}</option>
-                      ))}
-                      {customThemeUrls.map((t) => (
-                        <option key={t.id} value={t.id}>{t.id}</option>
-                      ))}
-                    </SelectField>
+                      className={SETTINGS_MENU_CLASS}
+                    />
                   </SettingGroup>
 
                   <SettingGroup label={t("audioTheme.importTheme")}>

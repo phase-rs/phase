@@ -174,6 +174,9 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, mods)) = parse_half_pt_override(input) {
         return Some((rest, mods));
     }
+    if let Some((rest, mods)) = parse_theyre_pt_and_types(input) {
+        return Some((rest, mods));
+    }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
         return Some((rest, mods));
     }
@@ -466,6 +469,50 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
         ContinuousModification::SetToughness { value: toughness },
     ];
 
+    append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
+
+    Some((rest, mods))
+}
+
+/// CR 707.9b + CR 707.9d: Plural token-copy exception — "they're N/M {types}
+/// creature[s] in addition to their other types" (Astral Dragon / Project Image).
+/// Mirrors [`parse_subject_pt_and_types`] but uses the plural anaphor and
+/// terminates on "creature(s)" rather than a bare type list.
+fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they're "), tag("they are ")))
+        .parse(input)
+        .ok()?;
+
+    let (rest, (power, toughness)) = parse_pt_pair(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
+
+    let (type_text, rest) = split_on_first_of(rest, &["creatures ", "creature "])?;
+    let (rest, suffix) = if let Some((_, rest)) =
+        split_on_first_of(rest, &[" in addition to their other colors and types"])
+    {
+        (rest, AdditiveSuffix::ColorsAndTypes)
+    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other colors"])
+    {
+        (rest, AdditiveSuffix::Colors)
+    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other types"])
+    {
+        (rest, AdditiveSuffix::Types)
+    } else {
+        let (rest, _) = split_at_body_boundary(rest);
+        (rest, AdditiveSuffix::None)
+    };
+
+    let (replace_color, replace_types) = match suffix {
+        AdditiveSuffix::None => (true, true),
+        AdditiveSuffix::Types => (true, false),
+        AdditiveSuffix::Colors => (false, true),
+        AdditiveSuffix::ColorsAndTypes => (false, false),
+    };
+
+    let mut mods = vec![
+        ContinuousModification::SetPower { value: power },
+        ContinuousModification::SetToughness { value: toughness },
+    ];
     append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
 
     Some((rest, mods))
@@ -1964,5 +2011,42 @@ mod tests {
                 supertype: Supertype::Legendary
             }
         )));
+    }
+
+    /// CR 707.9b: Astral Dragon plural token-copy exception.
+    #[test]
+    fn theyre_pt_and_dragon_creature_types_in_addition() {
+        let (_, mods) = parse_except_clause(
+            ", except they're 3/3 Dragon creatures in addition to their other types, and they have flying",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 3 })),
+            "missing SetPower(3); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 3 })),
+            "missing SetToughness(3); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Dragon"
+            )),
+            "missing AddSubtype(Dragon); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "missing AddType(Creature); got {mods:?}"
+        );
     }
 }

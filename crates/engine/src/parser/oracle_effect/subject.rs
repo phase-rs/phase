@@ -3415,6 +3415,13 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "exile",
     "explore",
     "fight",
+    // CR 705.1: Coin flips — "you flip a coin" / "that player flips a coin" /
+    // "each player flips a coin". The self/player subject is stripped here so the
+    // deconjugated predicate ("flip a coin") re-dispatches through the imperative
+    // path to `Effect::FlipCoin`. The flip arm in `imperative.rs` requires the
+    // literal "a coin", so the Kamigawa "flip <permanent>" flip-card mechanic
+    // ("flip ~" / "flip it", CR 710.4) is never mis-routed to a coin flip.
+    "flip",
     "gain",
     "get",
     "have",

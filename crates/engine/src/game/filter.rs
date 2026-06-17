@@ -146,6 +146,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ColorCount { .. }
         | FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -347,6 +348,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ColorCount { .. }
         | FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -1220,6 +1222,8 @@ pub fn matches_target_filter_on_lki_snapshot(
         controller: lki.controller,
         owner: lki.owner,
         from_zone: None,
+        cast_from_zone: None,
+        played_from_zone: None,
         to_zone: Zone::Battlefield,
         attachments: vec![],
         linked_exile_snapshot: vec![],
@@ -2580,6 +2584,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
+        FilterProp::WasPlayed => true,
         FilterProp::InZone { zone: required } => record.from_zone == *required,
         // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
         // from_zone (populated when the spell was put on the stack from where it
@@ -2888,6 +2893,8 @@ fn matches_filter_prop(
         FilterProp::Token => obj.is_token,
         // CR 111.1: Nontoken identity of the matched object or event-time snapshot.
         FilterProp::NonToken => !obj.is_token,
+        // CR 305.1 + CR 601.2a: "played by" entry replacements (Uphill Battle).
+        FilterProp::WasPlayed => obj.played_from_zone.is_some() || obj.cast_from_zone.is_some(),
         // CR 508.1b: Attacking creatures may be scoped by defending player
         // relation ("attacking", "attacking you", "attacking your opponents").
         FilterProp::Attacking { defender } => state.combat.as_ref().is_some_and(|combat| {
@@ -3630,6 +3637,11 @@ fn zone_change_record_matches_property(
         FilterProp::Token => record.is_token,
         // CR 111.1 + CR 603.6a: Nontoken identity as of the zone change.
         FilterProp::NonToken => !record.is_token,
+        // CR 305.1 + CR 601.2a: zone-change snapshots carry cast/play provenance
+        // when the object was cast or played — not mere zone moves (reanimate).
+        FilterProp::WasPlayed => {
+            record.played_from_zone.is_some() || record.cast_from_zone.is_some()
+        }
 
         // -------- Group 2: source/event relational --------
         // CR 109.1 "another": same-object check against the triggering source.
@@ -4616,6 +4628,110 @@ mod tests {
         assert!(
             matches_target_filter(&state, x_creature, &mana_value_four_or_more, source),
             "the same X object on the stack must include the announced X value"
+        );
+    }
+
+    /// CR 112.1 + CR 113.3b/113.3c: the bare-spell leg emitted by the
+    /// stack-object combinator — `Typed { [Card], InZone{Stack} }` — must be
+    /// runtime-equivalent to `StackSpell` for legality: it matches a spell
+    /// stack entry (a card object registered in `state.objects`) but NOT an
+    /// ability stack entry (whose entry id is never inserted as an object).
+    /// This locks the representation change in
+    /// `parse_ability_spell_disjunction`'s bare-spell leg.
+    #[test]
+    fn bare_spell_stack_leg_matches_spell_not_ability() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Stack,
+        );
+
+        // A spell stack entry: a card object placed on the stack, with a
+        // matching `StackEntry { id == card object id, kind: Spell }`.
+        let spell_card_id = CardId(state.next_object_id);
+        let spell_obj = create_object(
+            &mut state,
+            spell_card_id,
+            PlayerId(0),
+            "Some Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_obj,
+            source_id: spell_obj,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: spell_card_id,
+                ability: None,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // An ability stack entry: a fresh entry id that is NOT inserted into
+        // `state.objects` (mirrors the real trigger-push path, which allocates
+        // the entry id from `next_object_id` without creating an object).
+        let ability_entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: ability_entry_id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+
+        // The bare-spell leg as emitted by the combinator.
+        let bare_spell_leg = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            controller: None,
+            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
+        });
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert!(
+            matches_stack_target_filter(&state, spell_obj, &bare_spell_leg, &ctx),
+            "the bare-spell leg must match a spell stack entry (a card object on the stack)"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, ability_entry_id, &bare_spell_leg, &ctx),
+            "the bare-spell leg must NOT match an ability stack entry (no card object exists for it)"
+        );
+        // And the StackAbility leg has the complementary behavior — it matches
+        // the ability but not the spell, so the Or covers both disjointly.
+        let ability_leg = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+        };
+        assert!(
+            matches_stack_target_filter(&state, ability_entry_id, &ability_leg, &ctx),
+            "the StackAbility leg must match the ability stack entry"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, spell_obj, &ability_leg, &ctx),
+            "the StackAbility leg must NOT match the spell stack entry"
         );
     }
 
@@ -8937,6 +9053,8 @@ mod tests {
             controller: PlayerId(0),
             owner: PlayerId(0),
             from_zone: Some(Zone::Battlefield),
+            cast_from_zone: None,
+            played_from_zone: None,
             to_zone: Zone::Graveyard,
             attachments: vec![],
             linked_exile_snapshot: vec![],

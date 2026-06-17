@@ -16179,6 +16179,41 @@ mod tests {
     }
 
     #[test]
+    fn trigger_if_gained_or_lost_life_compound() {
+        // CR 119: "you gained or lost life this turn" (Star Charter, Starseer
+        // Mentor, Starlit Soothsayer) is the disjunctive sibling of the "and"
+        // compound — either life change satisfies it.
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained or lost life this turn, surveil 1.",
+            "Starlit Soothsayer",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) if conditions.len() == 2 => {
+                assert!(conditions.iter().any(|c| matches!(
+                    c,
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeGainedThisTurn { .. }
+                        },
+                        ..
+                    }
+                )));
+                assert!(conditions.iter().any(|c| matches!(
+                    c,
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. }
+                        },
+                        ..
+                    }
+                )));
+            }
+            other => panic!("Expected Or with LifeGained+LifeLost conditions, got {other:?}"),
+        }
+        assert!(def.execute.is_some(), "surveil effect must not be dropped");
+    }
+
+    #[test]
     fn shared_animosity_attack_pump_for_each_other_attacker_sharing_type() {
         let def = parse_trigger_line(
             "Whenever a creature you control attacks, it gets +1/+0 until end of turn for each other attacking creature that shares a creature type with it.",

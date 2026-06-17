@@ -466,6 +466,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
+            FilterProp::WasPlayed => parts.push("was played".into()),
             FilterProp::Attacking { defender } => match defender {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),
@@ -2341,7 +2342,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            flipper,
         } => {
+            // CR 705.2: surface a non-default flipper ("that player flips a coin").
+            if !matches!(flipper, TargetFilter::Controller) {
+                d.push(("flipper".into(), format!("{flipper:?}")));
+            }
             if win_effect.is_some() {
                 d.push(("win".into(), "yes".into()));
             }
@@ -2353,8 +2359,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             win_effect,
             lose_effect,
+            flipper,
         } => {
             d.push(("count".into(), format!("{count:?}")));
+            if !matches!(flipper, TargetFilter::Controller) {
+                d.push(("flipper".into(), format!("{flipper:?}")));
+            }
             if win_effect.is_some() {
                 d.push(("win".into(), "yes".into()));
             }
@@ -5553,6 +5563,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
         // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
         AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        // CR 301.5 + CR 303.4: Source attached-to-creature check — resolved by
+        // `evaluate_condition` against the source's `attached_to` host.
+        AbilityCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -5879,6 +5892,7 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         }
         | Effect::FlipCoins {
             win_effect,
@@ -10676,6 +10690,10 @@ mod tests {
                 "ZoneChangedThisWay",
             ),
             (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+            (
+                AbilityCondition::SourceAttachedToCreature,
+                "SourceAttachedToCreature",
+            ),
         ];
 
         for (condition, expected_name) in conditions {

@@ -245,7 +245,17 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p1_label: "Affinity (P1)",
         p0: snap("modern", "affinity.json"),
         p1: snap("modern", "affinity.json"),
-        exercises: &[FeatureKind::PlusOneCounters, FeatureKind::AggroPressure],
+        // Modern Affinity is the canonical artifacts-matter list: an artifact-dense
+        // board (Mox Opal, Arcbound Ravager, Mishra's Bauble, …) feeding
+        // affinity-for-artifacts / improvise payoffs (Kappa Cannoneer, Metallic
+        // Rebuke). It clears `artifacts::COMMITMENT_FLOOR`, so this matchup is the
+        // gate's exercise of `ArtifactSynergyPolicy` (verified by
+        // `affinity_mirror_deck_activates_artifact_synergy` below).
+        exercises: &[
+            FeatureKind::Artifacts,
+            FeatureKind::PlusOneCounters,
+            FeatureKind::AggroPressure,
+        ],
         expected: Expected::Mirror {
             tolerance: MIRROR_TOLERANCE,
         },

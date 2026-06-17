@@ -162,6 +162,9 @@ pub struct SuiteOptions {
     pub games_per_matchup: usize,
     pub base_seed: u64,
     pub output_path: PathBuf,
+    /// Comma-separated list of id substrings; a matchup is run if its id
+    /// contains *any* of them (e.g. `"red-mirror,affinity-mirror"` runs both).
+    /// `None` runs every matchup. A single substring keeps the legacy behavior.
     pub filter: Option<String>,
     pub attribution: AttributionMode,
     pub git_sha: Option<String>,
@@ -212,6 +215,20 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
     finalize_report(options, results)
 }
 
+/// True if a matchup `id` should run under `filter`. The filter is a
+/// comma-separated list of id substrings — the matchup runs if its id contains
+/// *any* of them. `None` runs every matchup; a single substring keeps the
+/// legacy `contains` behavior. Empty/whitespace-only parts are ignored.
+fn matchup_selected(id: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|filter| {
+        filter
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .any(|part| id.contains(part))
+    })
+}
+
 fn run_all_matchups(
     db: &CardDatabase,
     options: &SuiteOptions,
@@ -225,12 +242,7 @@ fn run_all_matchups(
     let selected: Vec<(usize, &MatchupSpec)> = matchups
         .iter()
         .enumerate()
-        .filter(|(_, spec)| {
-            options
-                .filter
-                .as_ref()
-                .is_none_or(|filter| spec.id.contains(filter))
-        })
+        .filter(|(_, spec)| matchup_selected(spec.id, options.filter.as_deref()))
         .collect();
 
     // Attribution drains a process-global tracing subscriber between matchups,
@@ -666,6 +678,36 @@ pub fn resolve_matchup(
 mod tests {
     use super::*;
     use crate::duel_suite::{Expected, FeatureKind};
+
+    #[test]
+    fn filter_none_runs_every_matchup() {
+        assert!(matchup_selected("red-mirror", None));
+        assert!(matchup_selected("affinity-mirror", None));
+    }
+
+    #[test]
+    fn filter_single_substring_is_legacy_contains() {
+        assert!(matchup_selected("red-mirror", Some("red-mirror")));
+        assert!(matchup_selected("red-mirror", Some("mirror")));
+        assert!(!matchup_selected("affinity-mirror", Some("red-mirror")));
+    }
+
+    #[test]
+    fn filter_comma_list_matches_any_part() {
+        let f = Some("red-mirror,affinity-mirror");
+        assert!(matchup_selected("red-mirror", f));
+        assert!(matchup_selected("affinity-mirror", f));
+        assert!(!matchup_selected("green-mirror", f));
+        // The quick-gate set is exactly red-mirror + affinity-mirror: no other
+        // mirror leaks in (guards against an accidental bare "mirror" part).
+        assert!(!matchup_selected("blue-mirror", f));
+    }
+
+    #[test]
+    fn filter_ignores_blank_and_whitespace_parts() {
+        assert!(matchup_selected("red-mirror", Some(" red-mirror , ")));
+        assert!(!matchup_selected("red-mirror", Some(",,")));
+    }
 
     fn report_with_timing(timestamp: i64, duration_ms: u128) -> SuiteReport {
         SuiteReport {

@@ -1066,6 +1066,72 @@ mod tests {
     }
 
     #[test]
+    fn search_fail_to_find_no_ops_top_of_library_put() {
+        // CR 701.23b: A top-of-library tutor (Search -> Shuffle ->
+        // PutAtLibraryPosition, e.g. Mystical/Vampiric/Worldly Tutor) that finds
+        // nothing must shuffle and place no card — not error. The search returns
+        // early without a SearchChoice, so the `PutAtLibraryPosition { target: Any }`
+        // resolves with no forwarded card and must no-op rather than raise
+        // "requires a target".
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{Effect, LibraryPosition, TypeFilter};
+
+        let mut state = GameState::new_two_player(42);
+        // Library holds only a Forest; the search wants an Island -> fail to find.
+        let forest = add_library_land_with_subtype(&mut state, 1, PlayerId(0), "Forest", "Forest");
+
+        let put_step = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let shuffle_step = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_step);
+        let search_step = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(
+                    TypedFilter::land().with_type(TypeFilter::Subtype("Island".to_string())),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: true,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle_step);
+
+        let mut events = Vec::new();
+        let result = resolve_ability_chain(&mut state, &search_step, &mut events, 0);
+        assert!(
+            result.is_ok(),
+            "fail-to-find tutor must no-op PutAtLibraryPosition, got {result:?}"
+        );
+        // No card was found, so no choice is pending and the Forest stays put.
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice { .. }
+        ));
+        assert_eq!(state.objects[&forest].zone, Zone::Library);
+    }
+
+    #[test]
     fn beseech_unbargained_search_exiles_then_moves_uncast_card_to_hand() {
         use crate::game::ability_utils::build_resolved_from_def;
         use crate::game::effects::resolve_ability_chain;

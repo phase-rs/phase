@@ -1747,6 +1747,68 @@ mod tests {
         assert_eq!(state.objects[&recipient].damage_marked, 3);
     }
 
+    /// #699 (one-sided fight — full Ambuscade-class shape). The boosted creature
+    /// is `targets[0]` (power 5), the opponent's creature is `targets[1]`
+    /// (power 2). With `damage_source: Some(Target)` + `amount: Power{Target}`
+    /// the boosted creature deals damage equal to ITS OWN power (5, read from
+    /// targets[0], NOT the recipient's 2) to the recipient. Asserts: recipient
+    /// (targets[1]) takes 5, boosted creature (targets[0]) takes 0. Proves the
+    /// amount reads the boosted creature (Target == targets[0]) and the recipient
+    /// is targets[1] — the exact slot ordering the #699 parser fix relies on.
+    /// CR 120.1: the boosted creature is the damage source.
+    #[test]
+    fn one_sided_fight_amount_reads_boosted_creature_recipient_takes_damage() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Boosted Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source).unwrap();
+            s.card_types.core_types.push(CoreType::Creature);
+            s.power = Some(5);
+            s.base_power = Some(5);
+        }
+        {
+            let r = state.objects.get_mut(&recipient).unwrap();
+            r.card_types.core_types.push(CoreType::Creature);
+            r.power = Some(2);
+            r.base_power = Some(2);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source), TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Boosted creature deals its power (5), not the recipient's (2);
+        // recipient (targets[1]) receives it, boosted (targets[0]) is unscathed.
+        assert_eq!(state.objects[&source].damage_marked, 0);
+        assert_eq!(state.objects[&recipient].damage_marked, 5);
+    }
+
     #[test]
     fn deal_damage_to_player() {
         let mut state = GameState::new_two_player(42);
