@@ -8684,11 +8684,25 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
             continue;
         }
 
+        let has_attachment_clause = attachment_prop.is_some();
         let filter = apply_attachment_prop(filter, attachment_prop);
 
         let mut def = make_base();
         def.mode = TriggerMode::YouAttack;
+        // CR 508.3a: a lexical "attack a player" restriction narrows the attacked
+        // target through the purpose-built attack_target_filter channel, not the
+        // valid_target overload.
         if attacks_player {
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
+        }
+        // CR 303.4e + CR 506.2: an attachment-relation subject ("enchanted by an
+        // Aura / equipped by an Equipment you control") binds "you control" to the
+        // attachment, not the attacker — the enchanted/equipped creature may be
+        // controlled by an opponent. Set the attacking-player gate to pass-through
+        // (any attacking player) WITHOUT an attack-target restriction, so the trigger
+        // fires regardless of whether the attack targets a player, planeswalker, or
+        // battle (Killian, Decisive Mentor; #3314).
+        if has_attachment_clause {
             def.valid_target = Some(TargetFilter::Player);
         }
         if min_count > 1 {
@@ -18242,6 +18256,21 @@ mod tests {
             "Killian, Decisive Mentor",
         );
         assert_eq!(def.mode, TriggerMode::YouAttack);
+        // CR 303.4e + CR 506.2: the attachment-relation clause ("enchanted by an
+        // Aura you control") makes the attacking-player gate pass-through
+        // (`valid_target == Player`) — the enchanted attacker may be
+        // opponent-controlled — WITHOUT any attacked-target narrowing
+        // (`attack_target_filter == None`), since this text has no "attack a
+        // player" restriction. (#3314)
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Player),
+            "attachment-relation subject ⇒ permissive attacking-player pass-through"
+        );
+        assert_eq!(
+            def.attack_target_filter, None,
+            "no \"attack a player\" clause ⇒ no attacked-target narrowing"
+        );
         let filter = def.valid_card.as_ref().expect("valid_card set");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -24545,7 +24574,20 @@ mod tests {
                 count: 2,
             })
         );
-        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        // CR 508.3a: the lexical "attack a player" restriction is an
+        // attacked-target narrowing carried by `attack_target_filter`, NOT the
+        // `valid_target` overload. With no attachment-relation clause, the
+        // attacking-player gate stays at the controller-scoped default
+        // (`valid_target == None`).
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::Player),
+            "\"attack a player\" sets the purpose-built attack_target_filter"
+        );
+        assert_eq!(
+            def.valid_target, None,
+            "no attachment clause ⇒ controller-scoped default, not the Player overload"
+        );
         assert!(def.execute.is_some());
     }
 
