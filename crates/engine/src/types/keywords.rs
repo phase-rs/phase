@@ -1376,6 +1376,25 @@ impl Keyword {
     pub fn sums_across_instances(&self) -> bool {
         matches!(self, Keyword::Toxic(_))
     }
+
+    /// CR 613.7: When multiple effects grant the same single-authoritative-value
+    /// keyword (one whose payload is the *current* effective value, not an
+    /// accumulating count), the most recently applied grant must replace any
+    /// earlier instance of the same kind rather than coexist with it — otherwise
+    /// readers that pick "the first match" (e.g. `find_map`) can read a stale
+    /// value while a different one is intended to be authoritative. Crew/Saddle
+    /// (CR 702.122/702.171, vehicle/mount crew-power) and Enchant (CR 702.5a,
+    /// an Aura's current legal-attachment filter, reachable via
+    /// `AddKeyword{Enchant(_)}` from `install_aura_continuous_effect`) are the
+    /// currently known members. Contrast `sums_across_instances` (Toxic, which
+    /// accumulates) and the default (Protection/Ward/Annihilator, which coexist
+    /// as separate instances per CR 702.16g).
+    pub fn overrides_same_kind_on_grant(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Crew { .. } | Keyword::Enchant(_) | Keyword::Saddle(_)
+        )
+    }
 }
 
 /// Capitalize the first character of a string (for type name normalization).
