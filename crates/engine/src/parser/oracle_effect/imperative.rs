@@ -2859,6 +2859,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
             filter,
             chooser,
             up_to,
+            selection,
         } => Some(ChooseImperativeAst::FromZone {
             count,
             zones,
@@ -2866,6 +2867,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
             filter,
             chooser,
             up_to,
+            selection,
         }),
         _ => None,
     }
