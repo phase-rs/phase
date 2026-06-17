@@ -12,9 +12,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
     ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, FilterProp,
-    ManaProduction, ModalChoice, ParsedCondition, QuantityExpr, QuantityRef, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypedFilter,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -956,10 +956,12 @@ fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSub
         Effect::Choose {
             choice_type: ChoiceType::CreatureType,
             persist: true,
+            ..
         } => Some(ChosenSubtypeKind::CreatureType),
         Effect::Choose {
             choice_type: ChoiceType::BasicLandType,
             persist: true,
+            ..
         } => Some(ChosenSubtypeKind::BasicLandType),
         _ => def
             .sub_ability
@@ -2974,6 +2976,7 @@ pub(crate) fn parse_oracle_ir(
                 Effect::Choose {
                     choice_type: ChoiceType::color(),
                     persist: true,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -3751,6 +3754,11 @@ fn parse_activated_ability_definition(
     if !constraints.restrictions.is_empty() {
         def.activation_restrictions = constraints.restrictions;
     }
+    def.activator_filter = constraints.activator_filter.or_else(|| {
+        constraints
+            .any_player_may_activate
+            .then_some(PlayerFilter::All)
+    });
     extract_cost_reduction_from_chain(&mut def);
     extract_mana_spend_trigger_from_chain(&mut def);
     (def, effect_text)
@@ -3846,7 +3854,7 @@ pub fn parse_oracle_text(
 /// "Equipment you control have equip {0}" (Puresteel Paladin granted-equip
 /// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
 /// remainder ("ment you control...") as a malformed activated ability cost.
-fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     let (activation_line, cost_reduction) = split_trailing_self_cost_reduction(line);
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
@@ -4392,6 +4400,39 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                 }
                 continue;
             }
+        }
+
+        // CR 602.2a + CR 602.5: "Only your opponents may activate this ability and only
+        // <restriction>" — mirror the any-player composition: record the opponent
+        // permission and delegate the timing axis to `parse_activation_timing_restriction`.
+        if let Some((before, restriction)) =
+            tp.rsplit_around("only your opponents may activate this ability and only ")
+        {
+            if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
+                constraints.activator_filter = Some(PlayerFilter::Opponent);
+                constraints.restrictions.extend(parsed);
+                remaining = before
+                    .original
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                if remaining.trim().is_empty() {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        const OPPONENTS_ACTIVATE_SUFFIX: &str = "only your opponents may activate this ability";
+        if lower.ends_with(OPPONENTS_ACTIVATE_SUFFIX) {
+            let end = remaining.len() - OPPONENTS_ACTIVATE_SUFFIX.len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.activator_filter = Some(PlayerFilter::Opponent);
+            if remaining.is_empty() {
+                break 'parse_constraints;
+            }
+            continue 'parse_constraints;
         }
 
         // CR 602.2: "Any player may activate this ability." — strip as a recognized
@@ -4998,6 +5039,94 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::CountScope;
 
+    /// Issue #69 (Banewhip Punisher): "Destroy target creature that has a -1/-1
+    /// counter on it" — the relative-clause counter restriction was dropped, so
+    /// the activated ability destroyed ANY creature. The target filter must now
+    /// carry `FilterProp::Counters{OfType(Minus1Minus1), GE, 1}`. CR 122.1 /
+    /// CR 122.1a.
+    #[test]
+    fn banewhip_punisher_destroy_creature_with_minus_counter() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        let r = parse(
+            "{B}, Sacrifice this creature: Destroy target creature that has a -1/-1 counter on it.",
+            "Banewhip Punisher",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "{r:#?}");
+        let Effect::Destroy { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected Destroy effect, got {:?}", r.abilities[0].effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties.contains(&FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Minus1Minus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            "counter restriction must survive, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Issue #69 (Triad of Fates): "Exile target creature that has a fate counter
+    /// on it, then return it to the battlefield…" — the exile target ChangeZone
+    /// filter must carry the fate-counter restriction, and the "then return it"
+    /// tail must still fully parse (the ability stays supported, not
+    /// Unimplemented). CR 122.1.
+    #[test]
+    fn triad_of_fates_exile_creature_with_fate_counter() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        let r = parse(
+            "{W}, {T}: Exile target creature that has a fate counter on it, then return it to the battlefield under its owner's control.",
+            "Triad of Fates",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "{r:#?}");
+        let ability = &r.abilities[0];
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*ability.effect
+        else {
+            panic!(
+                "expected ChangeZone (exile) effect, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(*destination, Zone::Exile);
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed exile target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties.contains(&FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("fate".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            "fate-counter restriction must survive, got {:?}",
+            tf.properties
+        );
+        // The "then return it…" tail must parse as the return sub-ability, so the
+        // card stays supported (no Unimplemented effect anywhere).
+        assert!(
+            ability.sub_ability.is_some(),
+            "the return-to-battlefield tail must parse as a sub-ability"
+        );
+        assert!(
+            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "ability must not be Unimplemented"
+        );
+    }
+
     /// Test helper: pull the graveyard-exile sub-cost count out of a compound
     /// `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{count,...}]))`.
     /// Asserts exactly one `Exile` sub-cost is present and returns its count.
@@ -5166,6 +5295,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::Keyword { options },
                     persist: true,
+                    ..
                 } if options.as_slice()
                     == [Keyword::Hexproof, Keyword::Indestructible]
             )),
@@ -5354,6 +5484,48 @@ mod tests {
         );
     }
 
+    /// CR 508.1a + CR 603.4 + CR 603.7: target-anaphoric "it [didn't] attack
+    /// this turn" trailing-if must survive the full parse, not get dropped.
+    /// Aggression's end-step trigger destroys only when the enchanted creature
+    /// DIDN'T attack (negated gate); Berserk's delayed end-step trigger destroys
+    /// only when the creature DID attack (positive gate). Before the fix both
+    /// produced a `Destroy { target: ParentTarget }` with `condition: null`.
+    #[test]
+    fn target_attacked_this_turn_trailing_if_survives_full_parse() {
+        let aggression = parse(
+            "Enchant non-Wall creature\nEnchanted creature has first strike and trample.\nAt the beginning of the end step of enchanted creature's controller, destroy that creature if it didn't attack this turn.",
+            "Aggression",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+        let s = format!("{:?}", aggression.triggers);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(!s.contains("Unimplemented"), "no Unimplemented chunk: {s}");
+        assert!(
+            s.contains("AttackedThisTurn"), // allow-noncombinator: Debug-string assertion
+            "Aggression destroy must carry an AttackedThisTurn gate, got {s}"
+        );
+        assert!(
+            s.contains("Not"), // allow-noncombinator: Debug-string assertion
+            "Aggression's 'didn't attack' gate must be Not-wrapped, got {s}"
+        );
+
+        let berserk = parse(
+            "Cast this spell only before the combat damage step.\nTarget creature gains trample and gets +X/+0 until end of turn, where X is its power. At the beginning of the next end step, destroy that creature if it attacked this turn.",
+            "Berserk",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let s = format!("{:?}", berserk.abilities);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(
+            s.contains("AttackedThisTurn"), // allow-noncombinator: Debug-string assertion
+            "Berserk delayed-trigger destroy must carry an AttackedThisTurn gate, got {s}"
+        );
+    }
+
     /// Parse with raw MTGJSON keyword names (for testing keyword extraction).
     fn parse_with_keyword_names(
         text: &str,
@@ -5491,6 +5663,38 @@ mod tests {
         assert_eq!(r.abilities.len(), 1, "expected one spell ability");
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
         assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
+    /// CR 701.55c (cluster 32, Class D — The Valeyard): "If an opponent would
+    /// face a villainous choice, they face that choice an additional time." leads
+    /// with "if …" and contains "would ", so without the classifier redirect it
+    /// is classified as a replacement and falls through to an
+    /// `Unimplemented{name:"replacement_structure"}`. The
+    /// `is_static_compound_pattern` gate must route it to Priority 7 static
+    /// dispatch, which lowers it to `StaticMode::GrantsExtraVillainousChoice`.
+    /// Tests the classifier+dispatch building blocks, asserting NO Unimplemented.
+    #[test]
+    fn valeyard_grants_extra_villainous_choice_static() {
+        let r = parse(
+            "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)",
+            "The Valeyard",
+            &[],
+            &["Legendary", "Creature"],
+            &[],
+        );
+
+        assert_eq!(
+            r.statics.len(),
+            1,
+            "expected one extra-villainous-choice static, got {r:#?}"
+        );
+        assert_eq!(r.statics[0].mode, StaticMode::GrantsExtraVillainousChoice);
+        assert!(
+            r.abilities
+                .iter()
+                .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })),
+            "the Valeyard line must not produce an Unimplemented effect, got {r:#?}"
+        );
     }
 
     #[test]
@@ -7943,16 +8147,23 @@ mod tests {
             &[],
         );
         assert!(!r.abilities.is_empty());
+        // CR 508.1d + CR 608.2c + CR 611.2c: the targeted creature must be bound —
+        // `target` carries the creature slot and the embedded static's `affected`
+        // resolves to `ParentTarget` so the MustAttack requirement attaches to the
+        // chosen creature (not silently dropped). On reverted main both are None.
         assert!(
             matches!(
                 &*r.abilities[0].effect,
                 crate::types::ability::Effect::GenericEffect {
                     static_abilities,
+                    target: Some(crate::types::ability::TargetFilter::Typed(_)),
                     ..
                 } if !static_abilities.is_empty()
                     && static_abilities[0].mode == crate::types::statics::StaticMode::MustAttack
+                    && static_abilities[0].affected
+                        == Some(crate::types::ability::TargetFilter::ParentTarget)
             ),
-            "Expected GenericEffect with MustAttack, got {:?}",
+            "Expected GenericEffect with MustAttack bound to ParentTarget + Typed(Creature) target, got {:?}",
             r.abilities[0].effect
         );
     }
@@ -9323,6 +9534,46 @@ mod tests {
             )),
             "expected source-on-stack condition, got {:?}",
             restrictions
+        );
+    }
+
+    /// CR 602.2a + CR 602.5: opponent permission must compose with the same timing
+    /// combinator as the any-player path — not a single hardcoded suffix.
+    #[test]
+    fn opponents_may_activate_but_only_records_timing_restriction() {
+        let activation_for = |text: &str, name: &str| {
+            let parsed = parse(text, name, &[], &["Creature"], &[]);
+            parsed
+                .abilities
+                .into_iter()
+                .find(|ability| ability.activator_filter.is_some())
+                .expect("expected an activated ability with activator_filter")
+        };
+
+        let sorcery = activation_for(
+            "{1}: Draw a card. Only your opponents may activate this ability and only as a sorcery.",
+            "Test Opponent Sorcery",
+        );
+        assert_eq!(sorcery.activator_filter, Some(PlayerFilter::Opponent));
+        assert!(
+            sorcery
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "expected AsSorcery, got {:?}",
+            sorcery.activation_restrictions
+        );
+
+        let during_turn = activation_for(
+            "{1}: Draw a card. Only your opponents may activate this ability and only during your turn.",
+            "Test Opponent Turn",
+        );
+        assert_eq!(during_turn.activator_filter, Some(PlayerFilter::Opponent));
+        assert!(
+            during_turn
+                .activation_restrictions
+                .contains(&ActivationRestriction::DuringYourTurn),
+            "expected DuringYourTurn, got {:?}",
+            during_turn.activation_restrictions
         );
     }
 
@@ -12977,6 +13228,106 @@ mod tests {
         }
     }
 
+    /// CR 119.3 + CR 603.2c: "for each 1 life you gained/lost" on a
+    /// `Whenever you gain/lose life` trigger binds the per-1 multiplier to the
+    /// triggering `LifeChanged` amount via `EventContextAmount`. Regression gate
+    /// for Cradle of Vitality / Transcendence / Lich's Tomb: previously the
+    /// for-each parse failed and the count stayed `Fixed{1}` (or `Fixed{2}`).
+    #[test]
+    fn parse_for_each_one_life_changed_full_cards() {
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+
+        // Walk an ability-definition chain (effect + sub_ability) collecting the
+        // first matching effect predicate hit.
+        fn find_effect<'a>(
+            def: &'a AbilityDefinition,
+            pred: &dyn Fn(&Effect) -> bool,
+        ) -> Option<&'a Effect> {
+            if pred(def.effect.as_ref()) {
+                return Some(def.effect.as_ref());
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                if let Some(found) = find_effect(sub, pred) {
+                    return Some(found);
+                }
+            }
+            def.else_ability
+                .as_deref()
+                .and_then(|else_def| find_effect(else_def, pred))
+        }
+
+        fn execute_effect<'a>(
+            r: &'a ParsedAbilities,
+            pred: &dyn Fn(&Effect) -> bool,
+        ) -> &'a Effect {
+            r.triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .find_map(|exec| find_effect(exec, pred))
+                .expect("expected matching effect in a trigger execute chain")
+        }
+
+        let event_amount = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+
+        // Cradle of Vitality — reflexive PutCounter for each 1 life gained.
+        let cradle = parse(
+            "Whenever you gain life, you may pay {1}{W}. If you do, put a +1/+1 \
+             counter on target creature for each 1 life you gained.",
+            "Cradle of Vitality",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let put = execute_effect(&cradle, &|e| matches!(e, Effect::PutCounter { .. }));
+        let Effect::PutCounter { count, .. } = put else {
+            unreachable!()
+        };
+        assert_eq!(
+            count, &event_amount,
+            "Cradle of Vitality PutCounter.count must be the life-gained amount, not Fixed{{1}}"
+        );
+
+        // Transcendence — gain 2 life for each 1 life lost ⇒ Multiply{2, amount}.
+        let transcendence = parse(
+            "Whenever you lose life, you gain 2 life for each 1 life you lost.",
+            "Transcendence",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let gain = execute_effect(&transcendence, &|e| matches!(e, Effect::GainLife { .. }));
+        let Effect::GainLife { amount, .. } = gain else {
+            unreachable!()
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(event_amount.clone()),
+            },
+            "Transcendence GainLife.amount must be 2 × life-lost, not Fixed{{2}}"
+        );
+
+        // Lich's Tomb — sacrifice a permanent for each 1 life lost.
+        let lichs_tomb = parse(
+            "Whenever you lose life, sacrifice a permanent for each 1 life you lost.",
+            "Lich's Tomb",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let sac = execute_effect(&lichs_tomb, &|e| matches!(e, Effect::Sacrifice { .. }));
+        let Effect::Sacrifice { count, .. } = sac else {
+            unreachable!()
+        };
+        assert_eq!(
+            count, &event_amount,
+            "Lich's Tomb Sacrifice.count must be the life-lost amount, not Fixed{{1}}"
+        );
+    }
+
     #[test]
     fn parse_harmonize_wild_ride() {
         // Harmonize with lower cost
@@ -15216,6 +15567,74 @@ mod tests {
         );
     }
 
+    /// Walk every parsed ability (and its `sub_ability` chain) looking for the
+    /// first `Effect::GenericEffect` whose `static_abilities` contains a
+    /// `CantUntap` static, and return that static's `affected` filter. Used to
+    /// assert the spell-form "that [type] doesn't untap" anaphor binds to the
+    /// single tapped object (`ParentTarget`) rather than broadcasting `Typed`.
+    fn first_cant_untap_affected(r: &ParsedAbilities) -> Option<TargetFilter> {
+        for ability in &r.abilities {
+            let mut cursor = Some(ability);
+            while let Some(def) = cursor {
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = def.effect.as_ref()
+                {
+                    if let Some(static_def) = static_abilities
+                        .iter()
+                        .find(|s| s.mode == crate::types::statics::StaticMode::CantUntap)
+                    {
+                        return static_def.affected.clone();
+                    }
+                }
+                cursor = def.sub_ability.as_deref();
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn spell_form_that_type_doesnt_untap_binds_parent_target() {
+        // CR 608.2c: spell-form "Tap target X. That X doesn't untap" is an
+        // anaphor to the single tapped object — the CantUntap static's
+        // `affected` must be `ParentTarget`, NOT a broadcast `Typed(...)` that
+        // would lock every matching permanent. Revert-discriminating: without
+        // `|| inherits_parent` in `static_affected_for_application`, `affected`
+        // is `Typed(Land)` / `Typed(Creature)` and these asserts fail.
+
+        // Chandra's Revolution: damage clause has its own target; the tap+lock
+        // clause binds the tapped LAND, not the damaged creature.
+        let chandra = parse(
+            "Chandra's Revolution deals 4 damage to target creature. Tap target land. That land doesn't untap during its controller's next untap step.",
+            "Chandra's Revolution",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            first_cant_untap_affected(&chandra),
+            Some(TargetFilter::ParentTarget),
+            "Chandra's Revolution CantUntap static must bind ParentTarget, got {:?}",
+            first_cant_untap_affected(&chandra)
+        );
+
+        // Glacial Grasp: "Tap target creature. Its controller mills two cards.
+        // That creature doesn't untap…" → ParentTarget, not Typed(Creature).
+        let glacial = parse(
+            "Tap target creature. Its controller mills two cards. That creature doesn't untap during its controller's next untap step. Draw a card.",
+            "Glacial Grasp",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(
+            first_cant_untap_affected(&glacial),
+            Some(TargetFilter::ParentTarget),
+            "Glacial Grasp CantUntap static must bind ParentTarget, got {:?}",
+            first_cant_untap_affected(&glacial)
+        );
+    }
+
     #[test]
     fn spell_counter_tap_plus_doesnt_untap() {
         let r = parse(
@@ -16673,6 +17092,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::CardName,
                     persist: true,
+                    ..
                 }
             ),
             "expected Choose{{CardName, persist:true}}, got {:?}",
@@ -18367,6 +18787,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
                 persist: true,
+                ..
             }
         ));
         let counter = execute

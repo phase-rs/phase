@@ -25,12 +25,13 @@ use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
-    Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
-    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TypeFilter,
-    TypedFilter, ZoneOwner,
+    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
+    CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, Duration, Effect, EffectScope, FaceDownProfile, FilterProp,
+    LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount,
+    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint,
+    StaticDefinition, TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1307,7 +1308,21 @@ pub(super) fn parse_targeted_action_ast(
         // chains, etc. The count is a game-state integer reference, not the
         // CR 609.3 "do as much as possible" rule.
         let after_discard_lower = after_discard.to_ascii_lowercase();
-        if let Some(count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+        if let Some(mut count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+            // CR 608.2c: "If you do, discard that many cards" anaphorizes the
+            // count from the preceding draw (Hordewing Skaab). EventContextAmount
+            // incorrectly prefers the combat-damage trigger's match count and
+            // can discard the entire hand (issue #3296).
+            if matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }
+            ) {
+                count = QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                };
+            }
             let filter = parse_discard_card_filter(after_discard);
             return Some(TargetedImperativeAst::Discard {
                 count,
@@ -2662,7 +2677,17 @@ pub(super) fn parse_choose_ast(
     }
 
     if let Some(choice_type) = super::try_parse_named_choice(lower) {
-        return Some(ChooseImperativeAst::NamedChoice { choice_type });
+        // CR 608.2d (override) + CR 701.9b (analogous): "choose a player at
+        // random" (Strax) — the game selects the referent, not the controller.
+        let selection = if nom_primitives::scan_contains(lower, "at random") {
+            TargetSelectionMode::Random
+        } else {
+            TargetSelectionMode::Chosen
+        };
+        return Some(ChooseImperativeAst::NamedChoice {
+            choice_type,
+            selection,
+        });
     }
 
     if nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input)).is_some()
@@ -2681,8 +2706,12 @@ pub(super) fn parse_choose_ast(
     // "choose N of them/those [cards]" / "you choose N of those cards" /
     // "an opponent chooses N of them" — anaphoric reference to a previously
     // revealed/exiled set, producing ChooseFromZone.
-    if let Some((count, chooser)) = parse_choose_anaphoric(lower) {
-        return Some(ChooseImperativeAst::FromTrackedSet { count, chooser });
+    if let Some((count, chooser, selection)) = parse_choose_anaphoric(lower) {
+        return Some(ChooseImperativeAst::FromTrackedSet {
+            count,
+            chooser,
+            selection,
+        });
     }
 
     None
@@ -2727,6 +2756,8 @@ fn try_parse_choose_owned_by_voter(
         filter,
         chooser: Chooser::Controller,
         up_to: false,
+        // CR 608.2d: per-ballot voter choice is controller-directed, never random.
+        selection: crate::types::ability::CardSelectionMode::Chosen,
     })
 }
 
@@ -2740,9 +2771,24 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
     .parse(lower)
     .ok()?;
 
-    if nom_primitives::scan_contains(choice_text, "at random") {
-        return None;
-    }
+    // CR 608.2d (override) + CR 701.9b (analogous): "choose ... at random" — the
+    // game selects the card(s), not the controller. Captured as a typed
+    // `CardSelectionMode` (was previously a bail-out that dropped the qualifier).
+    let selection = if nom_primitives::scan_contains(choice_text, "at random") {
+        crate::types::ability::CardSelectionMode::Random
+    } else {
+        crate::types::ability::CardSelectionMode::Chosen
+    };
+
+    // The "at random" qualifier is now captured in `selection`; strip it so it
+    // does not leak into the downstream zone/filter parse. Otherwise a pre-zone
+    // qualifier ("a creature card at random from target opponent's graveyard")
+    // lands in the search-filter prefix, which `parse_search_filter` can't
+    // classify, emitting a spurious "search-filter-suffix unmatched"
+    // TargetFallback (Tariel, Reckoner of Souls; Deadbridge Chant; Higure).
+    // allow-noncombinator: strip a captured free-floating qualifier before sub-parse
+    let choice_text_owned = choice_text.replace(" at random", "");
+    let choice_text = choice_text_owned.as_str();
 
     let (filter_prefix, (zone_owner, zones), zone_suffix) =
         nom_primitives::scan_preceded(choice_text, parse_choose_zone_connector)?;
@@ -2787,6 +2833,7 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
         filter,
         chooser: Chooser::Controller,
         up_to: false,
+        selection,
     })
 }
 
@@ -2823,6 +2870,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
             filter,
             chooser,
             up_to,
+            selection,
         } => Some(ChooseImperativeAst::FromZone {
             count,
             zones,
@@ -2830,6 +2878,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
             filter,
             chooser,
             up_to,
+            selection,
         }),
         _ => None,
     }
@@ -2973,7 +3022,7 @@ fn try_parse_two_targets(rest: &str) -> Option<ChooseImperativeAst> {
 
 /// Parse anaphoric "choose N of them/those [cards]" patterns using nom combinators.
 /// Returns (count, chooser) if the pattern matches.
-fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser)> {
+fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser, CardSelectionMode)> {
     type E<'a> = OracleError<'a>;
 
     // Determine chooser from prefix: "an opponent chooses" / "target opponent chooses" → Opponent,
@@ -3004,11 +3053,23 @@ fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser)> {
     let (rest, count) = nom_primitives::parse_number.parse(rest).ok()?;
 
     // Must be followed by " of them" or " of those" (optionally with trailing type noun).
-    let _ = alt((tag::<_, _, E>(" of them"), tag(" of those")))
-        .parse(rest)
-        .ok()?;
+    let (after_anaphor, ()) = alt((
+        value((), tag::<_, _, E>(" of them")),
+        value((), tag(" of those")),
+    ))
+    .parse(rest)
+    .ok()?;
 
-    Some((count, chooser))
+    // CR 608.2d (override) + CR 701.9b (analogous): "choose one of them at
+    // random" (River Song's Diary) — the game picks, not the chooser. Scan the
+    // remainder after the anaphor for the qualifier.
+    let selection = if nom_primitives::scan_contains(after_anaphor, "at random") {
+        CardSelectionMode::Random
+    } else {
+        CardSelectionMode::Chosen
+    };
+
+    Some((count, chooser, selection))
 }
 
 /// Public entry for Tragic Arrogance-style patterns where the chooser_scope is ControllerForAll.
@@ -3225,7 +3286,11 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     match ast {
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
-        ChooseImperativeAst::NamedChoice { choice_type } => Effect::Choose {
+        ChooseImperativeAst::NamedChoice {
+            choice_type,
+            selection,
+        } => Effect::Choose {
+            selection,
             // CR 201.3 / CR 113.6 / CR 205.2a / CR 614.12c: A chosen attribute
             // must persist on the source whenever a later clause refers back to
             // it. CardName choices persist for "with the chosen name" filters
@@ -3263,7 +3328,11 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         },
         // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).
-        ChooseImperativeAst::FromTrackedSet { count, chooser } => Effect::ChooseFromZone {
+        ChooseImperativeAst::FromTrackedSet {
+            count,
+            chooser,
+            selection,
+        } => Effect::ChooseFromZone {
             count,
             zone: Zone::Exile,
             additional_zones: Vec::new(),
@@ -3271,6 +3340,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             filter: None,
             chooser,
             up_to: false,
+            selection,
             constraint: None,
         },
         ChooseImperativeAst::FromZone {
@@ -3280,6 +3350,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             filter,
             chooser,
             up_to,
+            selection,
         } => {
             let mut zones = zones.into_iter();
             let zone = zones.next().unwrap_or(Zone::Hand);
@@ -3291,6 +3362,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 filter: Some(filter),
                 chooser,
                 up_to,
+                selection,
                 constraint: None,
             }
         }
@@ -4079,6 +4151,61 @@ pub(super) fn parse_put_ast(
                 .unwrap_or(1);
             return Some(PutImperativeAst::Mill { count });
         }
+
+        // CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+        // library onto the battlefield face down [under your control]" is the
+        // put-clause surface form of manifest (Cybership). It carries a count
+        // (top-N), a library-owner binding ("that player's library"), an optional
+        // face-down profile seed, and an optional controller override — none of
+        // which the generic `try_parse_put_zone_change_parts` ChangeZone path
+        // preserves. Intercept it here, before that fallback.
+        let (rem, count) = match nom_primitives::parse_number.parse(after) {
+            Ok((rem, n)) => (rem, QuantityExpr::Fixed { value: n as i32 }),
+            Err(_) => match tag::<_, _, OracleError<'_>>("x").parse(after) {
+                Ok((rem, _)) => (
+                    rem,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                ),
+                Err(_) => (after, QuantityExpr::Fixed { value: 1 }),
+            },
+        };
+        // CR 701.40a: This is the manifest surface form, so the dispatch
+        // condition is "<library-owner suffix> onto the battlefield face down".
+        // The library-owner suffix must match AND the tail must continue with
+        // "onto the battlefield face down" — `face down` is part of the dispatch
+        // because a put-onto-battlefield that is NOT face down is a regular
+        // ChangeZone, not a manifest. Forms that fail any of these fall through
+        // to the non-battlefield ("on top/bottom") and generic ChangeZone paths.
+        if let Some((tail, target)) = parse_library_player_suffix(rem.trim_start(), ctx) {
+            let battlefield_face_down = (
+                tag::<_, _, OracleError<'_>>("onto the battlefield"),
+                space1,
+                tag("face down"),
+            )
+                .parse(tail.trim_start())
+                .is_ok();
+            if battlefield_face_down {
+                // CR 110.2a: presence-flag detection of "under your control" —
+                // mirrors the accepted Dig presence-flag detection; the dispatch
+                // decision itself is the combinators above, not this flag.
+                let enters_under = nom_primitives::scan_contains(lower, "under your control")
+                    .then_some(ControllerRef::You);
+                // CR 708.2a: seed the vanilla 2/2 profile (the manifest default)
+                // so a trailing "They're 2/2 Cyberman artifact creatures." spec
+                // has a profile to refine in the back-walk patcher.
+                let profile = Some(FaceDownProfile::vanilla_2_2());
+                return Some(PutImperativeAst::Manifest {
+                    target,
+                    count,
+                    profile,
+                    enters_under,
+                });
+            }
+        }
     }
 
     let has_mass_zone_origin = (nom_primitives::scan_contains(lower, "all")
@@ -4341,6 +4468,21 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             },
             target: TargetFilter::Controller,
             destination: Zone::Hand,
+        },
+        // CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+        // library onto the battlefield face down [under your control]" lowers 1:1
+        // onto `Effect::Manifest`, preserving the count, the library-owner
+        // binding, the face-down profile seed, and the controller override.
+        PutImperativeAst::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
+        } => Effect::Manifest {
+            target,
+            count,
+            profile,
+            enters_under,
         },
     }
 }
@@ -5151,6 +5293,56 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
     inner(rest_lower).is_ok()
 }
 
+/// CR 400.12 + CR 115.1: Match a "[card|cards] of [a player]'s library" suffix
+/// and return the matched-suffix tail plus the resolved library-owner filter.
+///
+/// This is the player-binding half of the twelve top-of-library suffix patterns
+/// shared by the exile and put-onto-battlefield (manifest) paths. It maps each
+/// possessive form to its canonical `TargetFilter`:
+/// - "your library" → `Controller`
+/// - "that player's" / "their" library → the relative player from `ctx`
+///   (`TriggeringPlayer` for DamageDone triggers via `that_player_library_filter`)
+/// - "target opponent's library" → `Typed{controller: Opponent}`
+/// - "target player's library" → `Player`
+/// - "each player's library" → `ScopedPlayer`
+///
+/// The helper performs only the player-suffix match; callers own any trailing
+/// face-down / where-X / destination parsing (the exile and manifest epilogues
+/// differ).
+pub(super) fn parse_library_player_suffix<'a>(
+    remainder: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, TargetFilter)> {
+    let that_player = that_player_library_filter(ctx);
+    let target_opponent_filter =
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+    for (pattern, player) in [
+        ("card of your library", TargetFilter::Controller),
+        ("cards of your library", TargetFilter::Controller),
+        ("card of that player's library", that_player.clone()),
+        ("cards of that player's library", that_player.clone()),
+        ("card of their library", that_player.clone()),
+        ("cards of their library", that_player.clone()),
+        (
+            "card of target opponent's library",
+            target_opponent_filter.clone(),
+        ),
+        (
+            "cards of target opponent's library",
+            target_opponent_filter.clone(),
+        ),
+        ("card of target player's library", TargetFilter::Player),
+        ("cards of target player's library", TargetFilter::Player),
+        ("card of each player's library", TargetFilter::ScopedPlayer),
+        ("cards of each player's library", TargetFilter::ScopedPlayer),
+    ] {
+        if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
+            return Some((tail, player));
+        }
+    }
+    None
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
@@ -5172,65 +5364,33 @@ pub(super) fn parse_exile_ast(
             } else {
                 (QuantityExpr::Fixed { value: 1 }, rest)
             };
-        let that_player = that_player_library_filter(ctx);
-        // CR 608.2: "their library" inside an outer "each player" / "each opponent"
-        // player_scope iteration binds to the iterating player. The chunk_ctx
-        // surfaces this via `relative_player_scope = ScopedPlayer`, which
-        // `that_player_library_filter` already maps to `TargetFilter::ScopedPlayer`.
-        // For the third-person "each player's library" alternate phrasing,
-        // return `ScopedPlayer`; effect-chain lowering lifts that sentinel into
-        // `player_scope: All` so the existing scoped resolver exiles from each
-        // player's own library without target selection.
-        // CR 400.12 + CR 115.1: "target opponent's library" / "target player's
-        // library" are zone-as-operand phrases on a *chosen* player. They
-        // reuse the canonical leaves produced by `parse_target` for the
-        // bare phrases ("target opponent" → Typed{controller: Opponent},
-        // "target player" → TargetFilter::Player) so the runtime selector
-        // applies the same legality/targeting machinery used elsewhere
-        // (Maralen, Fae Ascendant ETB; Court of Locthwain ETB).
-        let target_opponent_filter =
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
-        for (pattern, player) in [
-            ("card of your library", TargetFilter::Controller),
-            ("cards of your library", TargetFilter::Controller),
-            ("card of that player's library", that_player.clone()),
-            ("cards of that player's library", that_player.clone()),
-            ("card of their library", that_player.clone()),
-            ("cards of their library", that_player.clone()),
-            (
-                "card of target opponent's library",
-                target_opponent_filter.clone(),
-            ),
-            (
-                "cards of target opponent's library",
-                target_opponent_filter.clone(),
-            ),
-            ("card of target player's library", TargetFilter::Player),
-            ("cards of target player's library", TargetFilter::Player),
-            ("card of each player's library", TargetFilter::ScopedPlayer),
-            ("cards of each player's library", TargetFilter::ScopedPlayer),
-        ] {
-            if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
-                // CR 406.3: Detect the "face down" suffix Oracle text uses to
-                // mark hidden-information exiles (Necropotence / Bomat Courier
-                // / Asmodeus the Archfiend / Knowledge Vault class). The
-                // resolver propagates this to the moved object's `face_down`
-                // flag so `visibility.rs` redacts the card for non-owners.
-                let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
-                // CR 107.3i: Optional ", where x is <quantity expr>" suffix
-                // overrides the leading `Variable { "X" }` binding with the
-                // dynamic quantity expression. Mirrors the
-                // try_parse_token_enters_with_counters / put-counters-on-token
-                // followup patterns. Without this, the trigger has no chosen X
-                // (it's an ETB-triggered ability, not a cast), and the count
-                // would default to 0 at resolution time.
-                let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
-                return Some(ZoneCounterImperativeAst::ExileTop {
-                    player,
-                    count,
-                    face_down,
-                });
-            }
+        // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
+        // library" suffix and resolve the library owner via the shared
+        // `parse_library_player_suffix` helper (also used by the manifest
+        // put-onto-battlefield path). It maps "your" → Controller, "that
+        // player's"/"their" → the relative player (`TriggeringPlayer` for
+        // DamageDone), "target opponent's" → Typed{Opponent}, "target player's"
+        // → Player, "each player's" → ScopedPlayer.
+        if let Some((after_lib, player)) = parse_library_player_suffix(remainder, ctx) {
+            // CR 406.3: Detect the "face down" suffix Oracle text uses to
+            // mark hidden-information exiles (Necropotence / Bomat Courier
+            // / Asmodeus the Archfiend / Knowledge Vault class). The
+            // resolver propagates this to the moved object's `face_down`
+            // flag so `visibility.rs` redacts the card for non-owners.
+            let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
+            // CR 107.3i: Optional ", where x is <quantity expr>" suffix
+            // overrides the leading `Variable { "X" }` binding with the
+            // dynamic quantity expression. Mirrors the
+            // try_parse_token_enters_with_counters / put-counters-on-token
+            // followup patterns. Without this, the trigger has no chosen X
+            // (it's an ETB-triggered ability, not a cast), and the count
+            // would default to 0 at resolution time.
+            let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
+            return Some(ZoneCounterImperativeAst::ExileTop {
+                player,
+                count,
+                face_down,
+            });
         }
 
         // CR 701.13: Exile — "exile the top card[s]" with NO "of <player>'s
@@ -6086,6 +6246,32 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
     }
 
+    // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
+    // of Mortality). The subject ("two target players") precedes the verb, so
+    // `first_word` is "two"/"target"/"have" rather than a verb keyword —
+    // intercept it as an anchored whole-phrase production before the first-word
+    // dispatch. Accept three optional leading wrinkles:
+    //   - "have " — the causative construction from "you may have <players>
+    //     exchange ..." (Axis of Mortality), which keeps its full surface form.
+    //   - "two " — the cardinality quantifier, which may already be stripped
+    //     upstream by `strip_any_number_quantifier`.
+    // Both players are `Player` targets.
+    if all_consuming(terminated(
+        preceded(
+            (opt(tag::<_, _, OracleError<'_>>("have ")), opt(tag("two "))),
+            tag("target players exchange life totals"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::ExchangeLifeTotals {
+            player_a: TargetFilter::Player,
+            player_b: TargetFilter::Player,
+        });
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -6736,6 +6922,12 @@ pub(super) fn parse_imperative_family_ast(
         // Both shapes lower to ExchangeControl { target_a, target_b }; in the
         // quantified case both filters are identical.
         "exchange" => {
+            // CR 701.12a: player-to-player "exchange life totals" (Soul Conduit,
+            // Axis of Mortality, Magus of the Mirror, Mirror Universe) — checked
+            // before the life-with-stat shape since both begin "exchange life".
+            if let Some((player_a, player_b)) = try_parse_exchange_life_totals(lower) {
+                return Some(ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b });
+            }
             // CR 701.12a: "exchange <player>'s life total with ~'s power/toughness"
             // (Tree of Perdition, Tree of Redemption, Evra) — checked before
             // "exchange control of" since the two shapes share only the verb.
@@ -7010,6 +7202,33 @@ fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
     ))
     .parse(input)
     .ok()
+}
+
+/// CR 701.12a: Player-to-player "exchange life totals", verb-initial shape:
+/// "exchange life totals with target opponent" / "... target player" — the
+/// controller (`Controller`) exchanges with that opponent/player (Magus of the
+/// Mirror, Mirror Universe). The subject-initial "two target players exchange
+/// life totals" shape (Soul Conduit, Axis of Mortality) is intercepted earlier
+/// in `parse_imperative_family_ast` because its first word is not a verb.
+/// Returns `(player_a, player_b)` or `None` for unrecognised shapes.
+fn try_parse_exchange_life_totals(lower: &str) -> Option<(TargetFilter, TargetFilter)> {
+    // "exchange life totals with <target opponent | target player>".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exchange life totals with ").parse(lower) {
+        let (rest, other) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag::<_, _, OracleError<'_>>("target opponent"),
+            ),
+            value(TargetFilter::Player, tag("target player")),
+        ))
+        .parse(rest)
+        .ok()?;
+        if rest.trim().trim_end_matches(['.', ';']).trim().is_empty() {
+            return Some((TargetFilter::Controller, other));
+        }
+    }
+
+    None
 }
 
 /// CR 701.12a: Extract the two per-slot target filters from the "<...>" body of
@@ -7870,6 +8089,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ExchangeLifeWithStat { player, stat } => {
             Effect::ExchangeLifeWithStat { player, stat }
         }
+        // CR 701.12a: Two players exchange life totals. The two player filters
+        // come from the parser; resolution reads ability.targets in declaration
+        // order for any non-context-ref slots.
+        ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
+            Effect::ExchangeLifeTotals { player_a, player_b }
+        }
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.
@@ -7889,7 +8114,16 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
-        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
+        // CR 701.40a: The plain "manifest the top N cards" surface form carries
+        // neither an effect-specified face-down profile nor a controller
+        // override — those are only set by the "put ... onto the battlefield face
+        // down [under your control]" path (see `lower_put_ast`).
+        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest {
+            target,
+            count,
+            profile: None,
+            enters_under: None,
+        },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward {2}).
         ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
@@ -8442,7 +8676,7 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
 /// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
 /// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
 /// "you" to the resolving ability controller and grants `MustAttackPlayer`.
-fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
+pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
@@ -8532,7 +8766,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
 /// must be carried by an explicit `AddStaticMode` modification to actually reach
 /// the layer system and `combat.rs` enforcement. Mirrors the block path's
 /// `ImperativeFamilyAst::MustBeBlocked` lowering.
-fn must_attack_static_definition() -> StaticDefinition {
+pub(super) fn must_attack_static_definition() -> StaticDefinition {
     use crate::types::statics::StaticMode;
     StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
         ContinuousModification::AddStaticMode {
@@ -11288,7 +11522,7 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
-            Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
                 assert_eq!(chooser, Chooser::Controller);
             }
@@ -11302,7 +11536,7 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
-            Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 2);
                 assert_eq!(chooser, Chooser::Controller);
             }
@@ -11316,7 +11550,7 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
-            Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
                 assert_eq!(chooser, Chooser::Opponent);
             }
@@ -11330,7 +11564,7 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
-            Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
                 assert_eq!(chooser, Chooser::Controller);
             }
@@ -11344,7 +11578,7 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
-            Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 2);
                 assert_eq!(chooser, Chooser::Controller);
             }
@@ -11464,14 +11698,97 @@ mod tests {
     }
 
     #[test]
-    fn parse_choose_random_card_in_graveyard_is_not_direct_choice() {
+    fn parse_choose_random_card_in_graveyard_records_random_selection() {
+        // CR 608.2d (override): "choose a card at random in your graveyard" is a
+        // ChooseFromZone, but the "at random" qualifier is now captured as a
+        // typed `CardSelectionMode::Random` (previously the parser bailed out and
+        // dropped the random axis, treating it as a deliberate player choice).
         let text = "choose a card at random in your graveyard";
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone { selection, .. }) => {
+                assert_eq!(selection, CardSelectionMode::Random);
+            }
+            other => panic!("expected random FromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_one_of_them_at_random_records_random_selection() {
+        // CR 608.2d (override): "choose one of them at random" (River Song's
+        // Diary) → anaphoric FromTrackedSet with CardSelectionMode::Random.
+        let text = "choose one of them at random";
+        let lower = text.to_lowercase();
+        match parse_choose_ast(text, &lower, &mut ParseContext::default()) {
+            Some(ChooseImperativeAst::FromTrackedSet {
+                count, selection, ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(selection, CardSelectionMode::Random);
+            }
+            other => panic!("expected random FromTrackedSet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_a_player_at_random_records_random_selection() {
+        // CR 608.2d (override): "choose a player at random" (Strax) → NamedChoice
+        // with TargetSelectionMode::Random.
+        let text = "choose a player at random";
+        let lower = text.to_lowercase();
+        match parse_choose_ast(text, &lower, &mut ParseContext::default()) {
+            Some(ChooseImperativeAst::NamedChoice { selection, .. }) => {
+                assert_eq!(selection, TargetSelectionMode::Random);
+            }
+            other => panic!("expected random NamedChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_from_zone_at_random_strips_qualifier_no_target_fallback() {
+        // CR 608.2d (override): "choose a creature card at random from target
+        // opponent's graveyard" (Tariel, Reckoner of Souls) → FromZone with
+        // selection=Random and zone_owner=TargetedPlayer. The captured "at
+        // random" must be stripped before the filter parse so it does NOT leak
+        // into the search-filter prefix and emit a spurious
+        // "search-filter-suffix unmatched" TargetFallback (pre-fix regression).
+        let text = "choose a creature card at random from target opponent's graveyard";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        match parse_choose_ast(text, &lower, &mut ctx) {
+            Some(ChooseImperativeAst::FromZone {
+                selection,
+                zone_owner,
+                ..
+            }) => {
+                assert_eq!(selection, CardSelectionMode::Random);
+                assert_eq!(zone_owner, ZoneOwner::TargetedPlayer);
+            }
+            other => panic!("expected random FromZone, got {other:?}"),
+        }
+        // The clean parse emits no target-fallback at all; pre-fix the leaked
+        // "at random" produced a "search-filter-suffix unmatched" TargetFallback.
         assert!(
-            !matches!(result, Some(ChooseImperativeAst::FromZone { .. })),
-            "random choices must not become player-directed ChooseFromZone prompts"
+            !ctx.diagnostics
+                .iter()
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. })),
+            "the stripped 'at random' qualifier must not leak a target-fallback: {:?}",
+            ctx.diagnostics
         );
+    }
+
+    #[test]
+    fn parse_choose_anaphoric_non_random_defaults_to_chosen() {
+        // Building-block regression: the ordinary anaphoric path stays Chosen.
+        let text = "choose one of them";
+        match parse_choose_anaphoric(&text.to_lowercase()) {
+            Some((count, _chooser, selection)) => {
+                assert_eq!(count, 1);
+                assert_eq!(selection, CardSelectionMode::Chosen);
+            }
+            other => panic!("expected anaphoric tuple, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11776,6 +12093,7 @@ mod tests {
         let ast = ChooseImperativeAst::FromTrackedSet {
             count: 3,
             chooser: Chooser::Opponent,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         };
         let effect = lower_choose_ast(ast);
         match effect {
@@ -11788,6 +12106,7 @@ mod tests {
                 chooser,
                 up_to,
                 constraint,
+                ..
             } => {
                 assert_eq!(count, 3);
                 assert_eq!(zone, Zone::Exile);
@@ -13549,5 +13868,78 @@ mod tests {
             !def.optional,
             "expected optional: false for 'then planeswalk'"
         );
+    }
+
+    /// CR 701.12a: Soul Conduit / Axis of Mortality body — "two target players
+    /// exchange life totals" lowers to ExchangeLifeTotals{Player, Player}.
+    #[test]
+    fn two_target_players_exchange_life_totals_parses() {
+        let def = super::super::parse_effect_chain(
+            "Two target players exchange life totals.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Player);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: Axis of Mortality causative body — "have two target players
+    /// exchange life totals" (from "you may have …") lowers to
+    /// ExchangeLifeTotals{Player, Player}.
+    #[test]
+    fn have_two_target_players_exchange_life_totals_parses() {
+        let def = super::super::parse_effect_chain(
+            "Have two target players exchange life totals.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Player);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: Magus of the Mirror / Mirror Universe body — "exchange life
+    /// totals with target opponent" lowers to ExchangeLifeTotals{Controller,
+    /// Typed(Opponent)}.
+    #[test]
+    fn exchange_life_totals_with_target_opponent_parses() {
+        let def = super::super::parse_effect_chain(
+            "Exchange life totals with target opponent.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Controller);
+                assert_eq!(
+                    *player_b,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+                );
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
+    }
+
+    /// CR 701.12a: "exchange life totals with target player" form lowers to
+    /// ExchangeLifeTotals{Controller, Player}.
+    #[test]
+    fn exchange_life_totals_with_target_player_parses() {
+        let def = super::super::parse_effect_chain(
+            "Exchange life totals with target player.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::ExchangeLifeTotals { player_a, player_b } => {
+                assert_eq!(*player_a, TargetFilter::Controller);
+                assert_eq!(*player_b, TargetFilter::Player);
+            }
+            other => panic!("expected ExchangeLifeTotals, got {other:?}"),
+        }
     }
 }

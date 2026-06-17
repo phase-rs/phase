@@ -193,7 +193,8 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::GiftDelivery { .. }
         | Effect::Suspect { .. }
         | Effect::GivePlayerCounter { .. }
-        | Effect::ExchangeControl { .. } => EffectPolarity::Contextual,
+        | Effect::ExchangeControl { .. }
+        | Effect::ExchangeLifeTotals { .. } => EffectPolarity::Contextual,
         _ => EffectPolarity::Contextual,
     }
 }

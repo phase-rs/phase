@@ -692,6 +692,19 @@ pub enum StaticMode {
     /// layer 7 — there is no continuous P/T or keyword grant; the static is a
     /// pure "session-start +1 votes" signal.
     GrantsExtraVote,
+    /// CR 701.55c: A replacement effect causes an opponent who would face a
+    /// villainous choice to face that choice some number of additional times
+    /// (The Valeyard — "If an opponent would face a villainous choice, they face
+    /// that choice an additional time."). Each active source controlled by an
+    /// opponent of the facing player adds +1 additional villainous-choice
+    /// instance for that player; the whole CR 701.55a process is then performed
+    /// that many additional times, one at a time (CR 701.55c). Parallel to
+    /// `GrantsExtraVote` (CR 701.38d), but counts a different keyword action read
+    /// by a different resolver (`choose_one_of`), so the two are not unifiable
+    /// (categorical-boundary rule: CR 701.55 vs CR 701.38 are separate sections).
+    /// Like `GrantsExtraVote`, it does not feed into layer 7 — there is no
+    /// continuous P/T or keyword grant.
+    GrantsExtraVillainousChoice,
     /// CR 702.51a: Grants a keyword to spells during casting.
     /// Generalized version of CastWithFlash — the `spell_filter` on the StaticDefinition
     /// determines which spells are affected (e.g., "Creature spells you cast have convoke").
@@ -988,6 +1001,29 @@ pub enum StaticMode {
     /// support is via `is_data_carrying_static()` (mirrors the cast-permission
     /// cluster, which is also runtime-by-direct-match, not registry-keyed).
     LinkedCollectionCounterPlayPermission,
+    /// CR 122.2 + CR 113.6b: Override the default rule that counters cease to
+    /// exist when an object changes zones. This source's counters *remain* as
+    /// it moves to any zone NOT listed in `excluded_zones`; moves into an
+    /// excluded zone follow the normal CR 122.2 clear.
+    ///
+    /// Class members (verbatim "Counters remain on [self] as it moves to any
+    /// zone other than a player's hand or library"): Me, the Immortal and
+    /// Skullbriar, the Walking Grave. Both encode
+    /// `excluded_zones = [Hand, Library]` — counters persist into the
+    /// battlefield, graveyard, exile, and command zone, but are cleared into a
+    /// hand or library (CR 122.2 still applies there).
+    ///
+    /// CR 113.6b: This ability states the zones it functions from implicitly —
+    /// per Me's official ruling ("only works if it has that ability in the zone
+    /// it's moving from"), the persistence is read from the object's state in
+    /// the *from*-zone at the moment of the move, not the destination.
+    CountersPersistAcrossZones {
+        /// CR 122.2: Destination zones where counters still cease to exist
+        /// (the "any zone other than" exclusions). `[Hand, Library]` for both
+        /// current class members. Typed `Vec<Zone>` so future "other than
+        /// [zones]" variants compose without a new variant.
+        excluded_zones: Vec<Zone>,
+    },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -1507,6 +1543,11 @@ impl Hash for StaticMode {
                 timing.hash(state);
                 cost.hash(state);
             }
+            // CR 122.2: Zone derives Hash; hash the excluded-zone list so
+            // [Hand, Library] does not collide with other zone sets.
+            StaticMode::CountersPersistAcrossZones { excluded_zones } => {
+                excluded_zones.hash(state);
+            }
             StaticMode::SkipStep { step } => step.hash(state),
             StaticMode::DoubleTriggers { cause } => cause.hash(state),
             // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
@@ -1571,6 +1612,7 @@ impl StaticMode {
             | StaticMode::CantCauseSacrificeOrExile { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
+            | StaticMode::GrantsExtraVillainousChoice
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::AlternativeKeywordCost { .. }
@@ -1597,6 +1639,7 @@ impl StaticMode {
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::ExileCastPermission { .. }
+            | StaticMode::CountersPersistAcrossZones { .. }
             | StaticMode::CantBeCountered
             | StaticMode::CantBeCopied
             | StaticMode::CantEnterBattlefieldFrom
@@ -1681,6 +1724,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CastWithFlash => write!(f, "CastWithFlash"),
             StaticMode::GrantsExtraVote => write!(f, "GrantsExtraVote"),
+            StaticMode::GrantsExtraVillainousChoice => {
+                write!(f, "GrantsExtraVillainousChoice")
+            }
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
@@ -1787,6 +1833,11 @@ impl fmt::Display for StaticMode {
                     write!(f, ",timing={timing}")?;
                 }
                 write!(f, ")")
+            }
+            // CR 122.2: Diagnostic Display lists the excluded destination zones.
+            StaticMode::CountersPersistAcrossZones { excluded_zones } => {
+                let zones: Vec<String> = excluded_zones.iter().map(|z| format!("{z:?}")).collect();
+                write!(f, "CountersPersistAcrossZones({})", zones.join("+"))
             }
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
@@ -2276,6 +2327,9 @@ impl FromStr for StaticMode {
             }
             // CR 701.38d: "While voting, you may vote an additional time."
             "GrantsExtraVote" => StaticMode::GrantsExtraVote,
+            // CR 701.55c: "If an opponent would face a villainous choice, they
+            // face that choice an additional time." (The Valeyard)
+            "GrantsExtraVillainousChoice" => StaticMode::GrantsExtraVillainousChoice,
             // Parameterized
             other => {
                 if let Some(inner) = other
@@ -2650,6 +2704,17 @@ mod tests {
         assert_eq!(
             StaticMode::from_str("IgnoreHexproof").unwrap(),
             StaticMode::IgnoreHexproof
+        );
+        // CR 701.55c: GrantsExtraVillainousChoice (The Valeyard) must round-trip
+        // through Display/FromStr so card data persists the variant across the
+        // WASM serde boundary, mirroring its CR 701.38d twin GrantsExtraVote.
+        assert_eq!(
+            StaticMode::from_str("GrantsExtraVillainousChoice").unwrap(),
+            StaticMode::GrantsExtraVillainousChoice
+        );
+        assert_eq!(
+            StaticMode::GrantsExtraVillainousChoice.to_string(),
+            "GrantsExtraVillainousChoice"
         );
     }
 

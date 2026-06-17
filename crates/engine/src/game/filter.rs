@@ -76,6 +76,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -156,6 +157,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
+        | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
@@ -266,6 +268,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -358,6 +361,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
+        | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
@@ -1623,6 +1627,17 @@ fn filter_inner_for_object(
                 .iter()
                 .any(|entry| entry.exiled_id == object_id)
         }
+        // CR 607.2a: References a specific card exiled by the source, indexed by order.
+        // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
+        // "the second card exiled this way". ENGINE INVARIANT: The ordering is
+        // guaranteed by Vec::push in push_exiled_with_source_this_turn.
+        TargetFilter::ExiledCardByIndex { index } => {
+            // Look up the source's exile list and check if object_id matches the indexed position
+            let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);
+            exiled_cards
+                .and_then(|cards| cards.get(*index as usize))
+                .is_some_and(|&card_id| card_id == object_id)
+        }
         // CR 603.7c: Event-context references resolve to players, not objects.
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -1865,6 +1880,7 @@ fn zone_change_filter_inner(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -2096,6 +2112,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -2336,6 +2353,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -2607,6 +2625,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
         | FilterProp::IsSaddled
+        | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Counters { .. }
@@ -2935,6 +2954,21 @@ fn matches_filter_prop(
         FilterProp::Tapped => obj.tapped,
         // CR 702.171b: Matches permanents with the saddled designation.
         FilterProp::IsSaddled => obj.is_saddled,
+        // CR 310.8a: "each battle they protect" — protector is an opponent of
+        // the source controller (Joyful Stormsculptor class).
+        FilterProp::ProtectorMatches { controller } => {
+            if !obj.card_types.core_types.contains(&CoreType::Battle) {
+                return false;
+            }
+            let Some(protector) = obj.protector() else {
+                return false;
+            };
+            match controller {
+                ControllerRef::Opponent => source.controller.is_some_and(|sc| sc != protector),
+                ControllerRef::You => source.controller == Some(protector),
+                _ => false,
+            }
+        }
         // CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
         FilterProp::Untapped => !obj.tapped,
         // CR 302.6 + CR 702.10b + CR 702.154a: Enlist may tap a creature only
@@ -3807,6 +3841,7 @@ fn zone_change_record_matches_property(
         }),
         FilterProp::Tapped
         | FilterProp::IsSaddled
+        | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::AttackedThisTurn

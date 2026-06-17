@@ -85,6 +85,13 @@ pub(crate) fn push_with_kind(
 /// exiled cards to feed `StaticMode::ExileCastPermission` should call this
 /// helper alongside the link push.
 ///
+/// CR 607.2a: The ordering of cards in `cards_exiled_with_source_this_turn[source_id]`
+/// is guaranteed to match the order they were exiled (via `Vec::push`). This is
+/// an ENGINE INVARIANT, not a CR rule — the Vec::push convention ensures
+/// first-in-first-out ordering for indexed access. This is critical for effects
+/// like The Mimeoplasm that distinguish "the first card exiled this way" from
+/// "the second card exiled this way" using indexed access.
+///
 /// Idempotent: a duplicate `(source_id, exiled_id)` pair is dropped, mirroring
 /// `push_tracked_by_source`.
 pub(crate) fn push_exiled_with_source_this_turn(

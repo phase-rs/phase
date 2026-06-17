@@ -1,3 +1,5 @@
+use rand::seq::IndexedRandom; // rand 0.9: `choose_multiple` on `[T]` lives here.
+
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
@@ -94,6 +96,75 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2d (override) + CR 701.9b (analogous): Resolve a random
+/// `Effect::ChooseFromZone` in place ("choose one of them at random" — River
+/// Song's Diary). Picks `count` distinct cards uniformly via the seeded RNG and
+/// sets them as the resolving ability's `targets`, so the chain propagates them
+/// to the sub-ability (`CastFromZone { target: ParentTarget }`) via
+/// `apply_parent_chain_context` exactly as the interactive answer handler sets
+/// `cont.chain.targets`. No interactive `WaitingFor::ChooseFromZoneChoice` is
+/// raised. Returns `true` when this was a random `ChooseFromZone` (and was
+/// resolved, including the do-nothing empty-pool case per CR 609.3); `false`
+/// otherwise. Emits `EffectResolved` itself when it resolves.
+pub(crate) fn resolve_random_in_chain(
+    state: &mut GameState,
+    ability: &mut ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let (count, zone, additional_zones, zone_owner, filter) = match &ability.effect {
+        Effect::ChooseFromZone {
+            count,
+            zone,
+            additional_zones,
+            zone_owner,
+            filter,
+            selection,
+            ..
+        } if selection.is_random() => (
+            *count as usize,
+            *zone,
+            additional_zones.clone(),
+            *zone_owner,
+            filter.clone(),
+        ),
+        _ => return false,
+    };
+
+    let cards = resolve_candidate_cards(
+        state,
+        ability,
+        zone,
+        &additional_zones,
+        zone_owner,
+        filter.as_ref(),
+    )
+    .unwrap_or_default();
+
+    // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
+    // any continuation that depends on the missing pick.
+    if cards.is_empty() || count == 0 {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ChooseFromZone,
+            source_id: ability.source_id,
+        });
+        return true;
+    }
+
+    // CR 608.2d (override): the game selects `count` distinct cards at random.
+    let clamped = count.min(cards.len());
+    let picked: Vec<ObjectId> = cards
+        .choose_multiple(&mut state.rng, clamped)
+        .copied()
+        .collect();
+    ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChooseFromZone,
+        source_id: ability.source_id,
+    });
+    true
 }
 
 /// CR 101.4 + CR 608.2c: Park the next eligible player's `ChooseFromZoneChoice`
@@ -562,6 +633,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -616,6 +688,7 @@ mod tests {
                 chooser: Chooser::Opponent,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -661,6 +734,7 @@ mod tests {
                 chooser: Chooser::Opponent,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -696,6 +770,7 @@ mod tests {
                 chooser: Chooser::Opponent,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -739,6 +814,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -794,6 +870,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -847,6 +924,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -886,6 +964,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -1071,6 +1150,7 @@ mod tests {
                     chooser: Chooser::Controller,
                     up_to: true,
                     constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
                 },
                 vec![],
                 source,
@@ -1114,5 +1194,90 @@ mod tests {
                 other
             ),
         }
+    }
+
+    /// CR 608.2d (override): a random `ChooseFromZone` picks the card(s) itself
+    /// (no interactive prompt) and writes them onto the ability's `targets` so
+    /// the chain forwards them to the sub-ability. Deterministic under seed.
+    #[test]
+    fn resolve_random_in_chain_picks_without_prompting() {
+        let mut state = GameState::new_two_player(42);
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Exile,
+        );
+        let card2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Exile,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![card1, card2]);
+        state.next_tracked_set_id = 2;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Random,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let handled = resolve_random_in_chain(&mut state, &mut ability, &mut events);
+        assert!(handled, "random ChooseFromZone must be handled inline");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "random selection must not raise an interactive prompt"
+        );
+        assert_eq!(ability.targets.len(), 1, "exactly one card picked");
+        match &ability.targets[0] {
+            TargetRef::Object(id) => assert!(*id == card1 || *id == card2),
+            other => panic!("expected an object target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_random_in_chain_ignores_non_random() {
+        // Building-block regression: a Chosen ChooseFromZone is left to the
+        // interactive `resolve` path (returns false, raises nothing here).
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        assert!(!resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
     }
 }

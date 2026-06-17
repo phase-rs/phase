@@ -452,6 +452,14 @@ pub(crate) enum ImperativeFamilyAst {
         player: TargetFilter,
         stat: PtStat,
     },
+    /// CR 701.12a: Two players exchange life totals (Soul Conduit, Axis of
+    /// Mortality, Magus of the Mirror, Mirror Universe). `player_a`/`player_b`
+    /// select each player (`Controller` for "you", an opponent filter for "target
+    /// opponent", `Player` for "target player").
+    ExchangeLifeTotals {
+        player_a: TargetFilter,
+        player_b: TargetFilter,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
@@ -1013,6 +1021,8 @@ pub(crate) enum ChooseImperativeAst {
     },
     NamedChoice {
         choice_type: crate::types::ability::ChoiceType,
+        /// CR 608.2d (override): `Random` for "choose a player at random".
+        selection: crate::types::ability::TargetSelectionMode,
     },
     RevealHandFilter {
         card_filter: TargetFilter,
@@ -1023,6 +1033,8 @@ pub(crate) enum ChooseImperativeAst {
     FromTrackedSet {
         count: u32,
         chooser: crate::types::ability::Chooser,
+        /// CR 608.2d (override): `Random` for "choose one of them at random".
+        selection: crate::types::ability::CardSelectionMode,
     },
     /// "choose a [filter] card in/from [player's] [zone]" — direct selection
     /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.
@@ -1033,6 +1045,8 @@ pub(crate) enum ChooseImperativeAst {
         filter: crate::types::ability::TargetFilter,
         chooser: crate::types::ability::Chooser,
         up_to: bool,
+        /// CR 608.2d (override): `Random` for "choose ... at random".
+        selection: crate::types::ability::CardSelectionMode,
     },
     /// "choose from among the permanents ... an artifact, a creature, ..." —
     /// multi-category selection where each player keeps one per type, then sacrifices the rest.
@@ -1124,6 +1138,22 @@ pub(crate) enum PutImperativeAst {
     /// CR 121.5: "put that many cards from the top of your library into your
     /// hand" moves library cards without drawing them (Scroll Rack).
     PutTopCardsIntoHandMatchingExileCount,
+    /// CR 701.40a + CR 708.2a + CR 110.2a: "put the top N cards of [a player]'s
+    /// library onto the battlefield face down [under your control]." This is the
+    /// put-clause surface form of manifest (CR 701.40a): the cards are turned
+    /// face down before entry (CR 708.3) and become 2/2 creatures by default.
+    /// `target` selects whose library is the source. `count` is N. `profile`
+    /// seeds the effect-specified face-down characteristics (CR 708.2a) — set to
+    /// `Some(vanilla_2_2())` when "face down" is present so a trailing "They're
+    /// 2/2 Cyberman artifact creatures." continuation has a profile to refine.
+    /// `enters_under` carries the CR 110.2a controller override ("under your
+    /// control"). Lowered 1:1 onto `Effect::Manifest`.
+    Manifest {
+        target: TargetFilter,
+        count: QuantityExpr,
+        profile: Option<FaceDownProfile>,
+        enters_under: Option<ControllerRef>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1429,6 +1459,10 @@ pub(crate) struct ModalHeaderAst {
     /// CR 700.2e: The player who chooses the mode(s). `Controller` (CR 700.2a)
     /// for standard `Choose one —` headers and the `you choose —` alias.
     pub(crate) chooser: PlayerFilter,
+    /// CR 700.2b (override) + CR 701.9b (analogous): `Random` for "choose one at
+    /// random" headers (Cult of Skaro) — the game selects the mode(s), not the
+    /// chooser. `Chosen` for all standard modal headers.
+    pub(crate) selection: crate::types::ability::TargetSelectionMode,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---
@@ -1436,8 +1470,9 @@ pub(crate) struct ModalHeaderAst {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct ActivatedConstraintAst {
     pub(crate) restrictions: Vec<ActivationRestriction>,
+    /// CR 602.2a: Who may begin to activate this ability.
+    pub(crate) activator_filter: Option<PlayerFilter>,
     /// CR 602.2: "Any player may activate this ability." — annotation recognized
-    /// during parsing. Runtime enforcement is a future item; currently stripped
-    /// so the sentence does not produce an `Unimplemented` fallback.
+    /// during parsing. Lowered to `activator_filter = All` on `AbilityDefinition`.
     pub(crate) any_player_may_activate: bool,
 }

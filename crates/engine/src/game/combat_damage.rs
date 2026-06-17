@@ -1902,6 +1902,32 @@ mod tests {
         assert_eq!(state.players[1].poison_counters, 2);
     }
 
+    /// CR 702.164b + CR 702.164c (issue #955): a creature with a printed Toxic 1
+    /// plus a granted Toxic 1 has total toxic value 2, so combat damage to a
+    /// player gives 2 poison counters. This is the end-to-end combat consequence
+    /// of the layer-6 summing fix; pre-fix the granted Toxic was deduped away and
+    /// the player received only 1 poison counter.
+    #[test]
+    fn printed_plus_granted_toxic_gives_two_poison_in_combat() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Toxic", 3, 3);
+        let obj = state.objects.get_mut(&attacker).unwrap();
+        // Two distinct Toxic(1) instances (printed + granted) coexisting on the
+        // keyword list — exactly the state the layer-6 summing fix produces.
+        obj.keywords.push(Keyword::Toxic(1));
+        obj.keywords.push(Keyword::Toxic(1));
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.players[1].life, 17, "3 combat damage still dealt");
+        assert_eq!(
+            state.players[1].poison_counters, 2,
+            "CR 702.164c: total toxic value (1+1) yields 2 poison counters"
+        );
+    }
+
     #[test]
     fn toxic_to_creature_does_not_add_poison() {
         let mut state = setup();

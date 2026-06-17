@@ -563,6 +563,21 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::IsMonarch,
             alt((tag("you're the monarch"), tag("you are the monarch"))),
         ),
+        // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
+        // is not the controller. Distinct from `Not(IsMonarch)` (also true when
+        // no monarch exists) and from `NoMonarch` (true only when vacant).
+        map(tag("an opponent is the monarch"), |_| {
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsMonarch),
+                    },
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::NoMonarch),
+                    },
+                ],
+            }
+        }),
         // CR 726.3: Initiative status
         value(
             StaticCondition::IsInitiative,
@@ -2283,6 +2298,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
+        // CR 508.1: "a creature is attacking you" → IsPresent(creature attacking you)
+        parse_creature_attacking_you,
         // "you don't control a/an [type]" → Not(IsPresent)
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
@@ -2474,6 +2491,25 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
 /// not just hardcoded creature/artifact/enchantment/planeswalker.
 /// "another" is handled by passing "another [type]" to `parse_type_phrase`,
 /// which recognizes "another" and adds `FilterProp::Another`.
+/// CR 508.1: "a creature is attacking you" — presence check for an attacker
+/// whose defending player is the controller. Gates Confront the Assault's
+/// casting restriction and the Swat Away / Heroic Return cost reductions.
+/// Lowers to `IsPresent` over a creature filter carrying `FilterProp::Attacking
+/// { defender: You }` — the same filter "for each creature attacking you" uses.
+fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a creature is attacking you").parse(input)?;
+    let mut filter = TypedFilter::creature();
+    filter.properties.push(FilterProp::Attacking {
+        defender: Some(ControllerRef::You),
+    });
+    Ok((
+        rest,
+        StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(filter)),
+        },
+    ))
+}
+
 fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // Strip "you control " prefix, then pass the rest (including a/an/another) to parse_type_phrase.
     // parse_type_phrase handles "a ", "an ", and "another " as article/modifier prefixes.
@@ -6661,11 +6697,85 @@ mod tests {
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
     }
 
+    /// CR 508.1: "a creature is attacking you" presence condition (Confront the
+    /// Assault, Swat Away, Heroic Return).
+    #[test]
+    fn test_a_creature_is_attacking_you() {
+        let (rest, c) = parse_inner_condition("a creature is attacking you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                )),
+                "filter should carry Attacking {{ defender: You }}, got {tf:?}"
+            ),
+            other => panic!("expected IsPresent with attacking filter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_you_control_an_artifact() {
         let (rest, c) = parse_inner_condition("you control an artifact").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// The "Villain" creature subtype (Marvel set) must be recognized so that
+    /// "you control a Villain" conditions parse — e.g. the conditional self
+    /// cost-reduction on Visions of Villainy / Venom's Hunger.
+    #[test]
+    fn test_you_control_a_villain_subtype() {
+        let (rest, c) = parse_inner_condition("you control a villain").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// Recent Universe Beyond / Standard creature subtypes (Hero, Spy,
+    /// Scientist, Cyborg, Sorcerer) must be recognized so their oracle-text
+    /// references ("you control a <type>", typed tokens, etc.) parse.
+    #[test]
+    fn test_you_control_recent_subtypes() {
+        for w in ["hero", "spy", "scientist", "cyborg", "sorcerer"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
+    /// Universe Beyond creature subtypes (Marvel: Gamma/Symbiote/Kree/Inhuman/
+    /// Skrull; Transformers: Autobot; DC: Brainiac) must be recognized.
+    #[test]
+    fn test_you_control_universe_beyond_subtypes() {
+        for w in [
+            "gamma", "symbiote", "kree", "inhuman", "skrull", "autobot", "brainiac",
+        ] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
+    /// "Glimmer" (Duskmourn enchantment-creature subtype) and "Mammoth" must be
+    /// recognized so their oracle-text references parse.
+    #[test]
+    fn test_you_control_glimmer_mammoth_subtypes() {
+        for w in ["glimmer", "mammoth"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
     }
 
     #[test]
@@ -8496,6 +8606,25 @@ mod tests {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_an_opponent_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("an opponent is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsMonarch),
+                    },
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::NoMonarch),
+                    },
+                ],
+            }
+        );
     }
 
     #[test]

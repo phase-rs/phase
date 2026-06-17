@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, LibraryPosition,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, LibraryPosition, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -2441,6 +2441,7 @@ pub(super) fn handle_resolution_choice(
                 track_exiled_by_source,
                 face_down_profile,
                 count_param,
+                is_cost_payment,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -2594,7 +2595,16 @@ pub(super) fn handle_resolution_choice(
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
                         ) {
-                            effects::change_zone::ZoneMoveResult::Done => {}
+                            effects::change_zone::ZoneMoveResult::Done => {
+                                // CR 118.3: When this is a cost-payment exile (e.g., Mimeoplasm),
+                                // populate the exile-link index map so the continuation can
+                                // reference exiled cards by position (ExiledCardByIndex, ExiledCardPower).
+                                if is_cost_payment && dest_zone == Zone::Exile {
+                                    super::exile_links::push_exiled_with_source_this_turn(
+                                        state, *card_id, source_id,
+                                    );
+                                }
+                            }
                             effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
@@ -2789,6 +2799,129 @@ pub(super) fn handle_resolution_choice(
                         ));
                     }
                 }
+                // CR 118.3: Cost-payment exile (e.g., Mimeoplasm) uses the same
+                // zone-move logic as ChangeZone, but with is_cost_payment always true.
+                EffectKind::PayCost => {
+                    let dest_zone = destination.ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "EffectZoneChoice missing destination for cost payment".to_string(),
+                        )
+                    })?;
+                    let ctx = effects::change_zone::ChangeZoneIterationCtx {
+                        source_id,
+                        controller: player,
+                        origin: Some(zone),
+                        destination: dest_zone,
+                        enter_transformed,
+                        enter_tapped,
+                        enters_under_player,
+                        enters_attacking,
+                        enter_with_counters: vec![],
+                        duration: None,
+                        track_exiled_by_source,
+                        face_down_profile: face_down_profile.clone(),
+                        library_placement: None,
+                    };
+                    let events_before_effect = events.len();
+                    let chosen_ids: Vec<_> = chosen.to_vec();
+                    for (i, card_id) in chosen_ids.iter().enumerate() {
+                        match effects::change_zone::process_one_zone_move(
+                            state, &ctx, *card_id, events,
+                        ) {
+                            effects::change_zone::ZoneMoveResult::Done => {
+                                // CR 118.3: Populate the exile-link index map for cost-payment exile
+                                if dest_zone == Zone::Exile {
+                                    super::exile_links::push_exiled_with_source_this_turn(
+                                        state, *card_id, source_id,
+                                    );
+                                }
+                            }
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                state.pending_change_zone_iteration =
+                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        source_id: ctx.source_id,
+                                        controller: ctx.controller,
+                                        origin: ctx.origin,
+                                        destination: ctx.destination,
+                                        enter_transformed: ctx.enter_transformed,
+                                        enter_tapped: ctx.enter_tapped,
+                                        enters_under_player: ctx.enters_under_player,
+                                        enters_attacking: ctx.enters_attacking,
+                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        duration: ctx.duration.clone(),
+                                        track_exiled_by_source: ctx.track_exiled_by_source,
+                                        moved_count: None,
+                                        face_down_profile: ctx.face_down_profile.clone(),
+                                        library_placement: ctx.library_placement.clone(),
+                                        effect_kind,
+                                    });
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        player, state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                state.pending_change_zone_iteration =
+                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        source_id: ctx.source_id,
+                                        controller: ctx.controller,
+                                        origin: ctx.origin,
+                                        destination: ctx.destination,
+                                        enter_transformed: ctx.enter_transformed,
+                                        enter_tapped: ctx.enter_tapped,
+                                        enters_under_player: ctx.enters_under_player,
+                                        enters_attacking: ctx.enters_attacking,
+                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        duration: ctx.duration.clone(),
+                                        track_exiled_by_source: ctx.track_exiled_by_source,
+                                        moved_count: None,
+                                        face_down_profile: ctx.face_down_profile.clone(),
+                                        library_placement: ctx.library_placement.clone(),
+                                        effect_kind,
+                                    });
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    let events_after_move = events.len();
+                    // CR 614.12a: this `EffectZoneChoice` was the interactive payment of an
+                    // optional `MayCost` replacement's accept (e.g. Mimeoplasm's
+                    // "exile two creature cards from graveyards"). The cost is
+                    // now paid, so resume the parked replacement with the accept index —
+                    // `continue_replacement` sees `may_cost_paid: true`, pays any
+                    // `may_cost_remaining`, and finishes entering the permanent.
+                    if state
+                        .pending_replacement
+                        .as_ref()
+                        .is_some_and(|pending| pending.may_cost_paid)
+                    {
+                        let waiting_for =
+                            super::engine_replacement::handle_replacement_choice(state, 0, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before_effect,
+                            events_after_move,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+                    }
+                }
                 other => {
                     return Err(EngineError::InvalidAction(format!(
                         "EffectZoneChoice unsupported for {other:?}"
@@ -2940,38 +3073,12 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            if let Some(obj_id) = source_id {
-                if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), &choice) {
-                    if let Some(obj) = state.objects.get_mut(&obj_id) {
-                        obj.chosen_attributes.push(attr);
-                        // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card
-                        // name, creature type, card type, color, etc.) can gate
-                        // source-dependent continuous or rule effects. Layer
-                        // evaluation may have run before the choice was made
-                        // (Morophon buffs, Pithing Needle prohibitions, Serra's
-                        // Emissary protection, …) — re-run.
-                        if matches!(
-                            choice_type,
-                            ChoiceType::CardName
-                                | ChoiceType::CreatureType
-                                | ChoiceType::CardType
-                                | ChoiceType::BasicLandType
-                                | ChoiceType::Color { .. }
-                                | ChoiceType::Keyword { .. }
-                                // CR 613.1: a persisted "choose a player" gates
-                                // CDA P/T that count the chosen player's objects
-                                // or zones (Sewer Nemesis, Skyshroud War Beast) —
-                                // recompute layers immediately.
-                                | ChoiceType::Player
-                                | ChoiceType::Opponent { .. }
-                        ) {
-                            crate::game::layers::mark_layers_full(state);
-                        }
-                    }
-                }
-            }
-
-            state.last_named_choice = ChoiceValue::from_choice(&choice_type, &choice);
+            // CR 607.2d + CR 613.1: Persist the chosen attribute on the source
+            // (Morophon buffs, Pithing Needle prohibitions, Serra's Emissary
+            // protection, Sewer Nemesis CDA, …), recompute layers for the
+            // layer-affecting choice kinds, and record `last_named_choice`.
+            // Single authority shared with the random `Effect::Choose` resolver.
+            effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
 
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the

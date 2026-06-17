@@ -170,22 +170,29 @@ fn choosing_players(
 
     let apnap = players::apnap_order(state);
 
-    // CR 608.2c + CR 108.3 + CR 109.4: Two chooser filters are anchored to
+    // CR 608.2c + CR 108.3 + CR 109.4: Three chooser filters are anchored to
     // resolution-scoped state that `matches_player_scope` cannot see (it carries
     // no `ResolvedAbility`): `ChosenPlayer` reads the player chosen earlier this
-    // resolution from `ability.chosen_players`, and `ParentObjectTargetOwner`
-    // reads the owner of the ability's first object target. Resolve them here —
-    // this is the one caller that has the ability in scope — and order the
-    // result in APNAP (CR 701.55d). Both filter out eliminated players (CR
-    // 104.3a — a player who loses leaves the game and can no longer be a
-    // chooser) and yield a single chooser, which is correct for the
-    // villainous-choice patterns these power (The Master, This Is How It Ends).
+    // resolution from `ability.chosen_players`; `ParentObjectTargetOwner` reads
+    // the owner of the ability's first object target (CR 108.3); and
+    // `ParentObjectTargetController` reads its controller (CR 109.4) — the chooser
+    // for "that creature's controller faces a villainous choice" (Hunted by The
+    // Family), where the targeted creature's controller (not owner) makes the
+    // choice and the two differ for a stolen creature. Resolve them here — this
+    // is the one caller that has the ability in scope — and order the result in
+    // APNAP (CR 701.55d). All filter out eliminated players (CR 104.3a — a player
+    // who loses leaves the game and can no longer be a chooser) and yield a
+    // single chooser, which is correct for the villainous-choice patterns these
+    // power (The Master, This Is How It Ends, Hunted by The Family).
     let anchored: Option<PlayerId> = match chooser {
         PlayerFilter::ChosenPlayer { index } => {
             ability.chosen_players.get(*index as usize).copied()
         }
         PlayerFilter::ParentObjectTargetOwner => {
             crate::game::ability_utils::parent_target_owner(ability, state)
+        }
+        PlayerFilter::ParentObjectTargetController => {
+            crate::game::ability_utils::parent_target_controller(ability, state)
         }
         _ => None,
     };
@@ -194,7 +201,8 @@ fn choosing_players(
             .players
             .iter()
             .any(|p| p.id == player && !p.is_eliminated);
-        return if alive { vec![player] } else { Vec::new() };
+        let players = if alive { vec![player] } else { Vec::new() };
+        return expand_extra_villainous_instances(state, players);
     }
 
     let targeted: Vec<PlayerId> = ability
@@ -216,13 +224,14 @@ fn choosing_players(
         .collect();
 
     if !targeted.is_empty() {
-        return apnap
+        let players = apnap
             .into_iter()
             .filter(|player| targeted.contains(player))
             .collect();
+        return expand_extra_villainous_instances(state, players);
     }
 
-    apnap
+    let players = apnap
         .into_iter()
         .filter(|player| {
             super::matches_player_scope(
@@ -233,7 +242,57 @@ fn choosing_players(
                 ability.source_id,
             )
         })
-        .collect()
+        .collect();
+    expand_extra_villainous_instances(state, players)
+}
+
+/// CR 701.55c: Count the number of ADDITIONAL villainous-choice instances a
+/// `facing` player must perform — one per active `GrantsExtraVillainousChoice`
+/// static on a battlefield permanent controlled by an OPPONENT of that player
+/// (The Valeyard — "If an opponent would face a villainous choice, they face
+/// that choice an additional time."). Returns the additional count (default 0),
+/// not `1 + count`: the base instance is already represented by the player's
+/// single occurrence in the facing-player list.
+///
+/// This is the controller-inverted mirror of `vote::votes_per_session_for`
+/// (CR 701.38d), where the source is controlled by the voting player themselves;
+/// here the source (the Valeyard) is controlled by the facing player's opponent.
+fn villainous_extra_instances_for(state: &GameState, facing: PlayerId) -> u32 {
+    use crate::game::functioning_abilities::active_static_definitions;
+    use crate::types::statics::StaticMode;
+
+    let mut extras: u32 = 0;
+    for &src_id in state.battlefield.iter() {
+        let Some(obj) = state.objects.get(&src_id) else {
+            continue;
+        };
+        if !players::is_opponent(state, facing, obj.controller) {
+            continue;
+        }
+        for s in active_static_definitions(state, obj) {
+            if matches!(s.mode, StaticMode::GrantsExtraVillainousChoice) {
+                extras = extras.saturating_add(1);
+            }
+        }
+    }
+    extras
+}
+
+/// CR 701.55c + CR 701.55d: Expand a facing-player list so each player appears
+/// once per total instance of the villainous choice they must face — their base
+/// occurrence plus `villainous_extra_instances_for` additional copies, inserted
+/// consecutively so APNAP order (CR 701.55d) across distinct players is
+/// preserved while each player resolves all of their instances one at a time
+/// (CR 701.55c).
+fn expand_extra_villainous_instances(state: &GameState, players: Vec<PlayerId>) -> Vec<PlayerId> {
+    let mut expanded = Vec::with_capacity(players.len());
+    for p in players {
+        expanded.push(p);
+        for _ in 0..villainous_extra_instances_for(state, p) {
+            expanded.push(p);
+        }
+    }
+    expanded
 }
 
 fn branch_descriptions(branches: &[AbilityDefinition]) -> Vec<String> {
@@ -480,6 +539,175 @@ mod tests {
             } => {
                 assert_eq!(*player, PlayerId(1));
                 assert!(remaining_players.is_empty());
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
+    }
+
+    /// CR 701.55c (cluster 32, Class D — The Valeyard): A
+    /// `GrantsExtraVillainousChoice` static on a battlefield permanent
+    /// controlled by an OPPONENT of the facing player makes that player face the
+    /// choice one additional time. The facing-player list expands so the player
+    /// appears twice consecutively (base + 1 extra); without the static they
+    /// appear exactly once. Tests the building block
+    /// (`expand_extra_villainous_instances`) via the live resolver, not a card.
+    #[test]
+    fn villainous_choice_doubled_when_opponent_controls_extra_instance_static() {
+        // Player 1 faces the choice; player 0 controls a Valeyard-like source.
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        // Sanity baseline: with no extra-instance source, player 1 faces the
+        // choice exactly once (no remaining players queued for a re-face).
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::ParentObjectTargetOwner,
+                branches: vec![branch.clone()],
+            },
+            vec![TargetRef::Object(ObjectId(99))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Bind the parent target to an object owned by player 1.
+        let obj_id = ObjectId(99);
+        let target_obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            crate::types::identifiers::CardId(0),
+            PlayerId(1),
+            "Faced Creature".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.insert(obj_id, target_obj);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                remaining_players,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(
+                    remaining_players.is_empty(),
+                    "without an extra-instance static the facing player faces the choice once"
+                );
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
+
+        // Now add a Valeyard-like permanent controlled by player 0 (an opponent
+        // of the facing player 1) carrying GrantsExtraVillainousChoice.
+        let valeyard_id = ObjectId(50);
+        let mut valeyard = crate::game::game_object::GameObject::new(
+            valeyard_id,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "The Valeyard".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        valeyard.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::GrantsExtraVillainousChoice,
+            )
+            .affected(TargetFilter::Player),
+        );
+        state.objects.insert(valeyard_id, valeyard);
+        state.battlefield.push_back(valeyard_id);
+
+        let mut events2 = Vec::new();
+        resolve(&mut state, &ability, &mut events2).unwrap();
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                remaining_players,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                // CR 701.55c: the same player faces the choice one more time,
+                // queued consecutively right after their first instance.
+                assert_eq!(
+                    remaining_players.as_slice(),
+                    &[PlayerId(1)],
+                    "the facing player must face the choice twice (base + 1 extra)"
+                );
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
+    }
+
+    /// CR 701.55c (cluster 32, Class D): an extra-instance source controlled by
+    /// the FACING player themselves (not an opponent) grants no extra instance —
+    /// the static reads "if an OPPONENT would face a villainous choice". Guards
+    /// the controller-inversion in `villainous_extra_instances_for`.
+    #[test]
+    fn villainous_choice_not_doubled_by_self_controlled_static() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let obj_id = ObjectId(99);
+        let target_obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            crate::types::identifiers::CardId(0),
+            PlayerId(1),
+            "Faced Creature".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.insert(obj_id, target_obj);
+
+        // Source controlled by player 1 (the facing player) — must NOT count.
+        let src_id = ObjectId(50);
+        let mut src = crate::game::game_object::GameObject::new(
+            src_id,
+            crate::types::identifiers::CardId(1),
+            PlayerId(1),
+            "Self Valeyard".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        src.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::GrantsExtraVillainousChoice,
+            )
+            .affected(TargetFilter::Player),
+        );
+        state.objects.insert(src_id, src);
+        state.battlefield.push_back(src_id);
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::ParentObjectTargetOwner,
+                branches: vec![branch],
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                remaining_players,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(
+                    remaining_players.is_empty(),
+                    "a self-controlled extra-instance static must not double the choice"
+                );
             }
             other => panic!("expected ChooseOneOfBranch, got {other:?}"),
         }

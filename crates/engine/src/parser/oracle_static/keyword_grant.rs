@@ -1033,6 +1033,23 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
             .collect();
     }
 
+    // CR 702.6a: a standalone "Equip {N}" line is the equip activated ability —
+    // detect it BEFORE keyword extraction. An MTGJSON keyword name can match the
+    // printed equip cost, so parse_keyword_from_oracle("equip {2}") would otherwise
+    // land an inert AddKeyword{Equip}; but equip is an activated ability that needs
+    // its Effect::Attach body. Mirrors oracle.rs's "Pre-keyword activated ability"
+    // ordering. `try_parse_equip` assumes its caller has already confirmed the
+    // "equip" prefix (it strips the first 5 bytes unconditionally), so the
+    // `starts_with` guard is required — without it any quoted line would be
+    // mis-parsed as equip.
+    if nom_tag_lower(&lower, &lower, "equip").is_some() {
+        if let Some(ability) = super::oracle::try_parse_equip(ability_text) {
+            return vec![ContinuousModification::GrantAbility {
+                definition: Box::new(ability),
+            }];
+        }
+    }
+
     // CR 702: Quoted text that is a keyword (e.g. "Ward—Pay 2 life") should be
     // granted as AddKeyword, not wrapped in an AbilityDefinition.
     if let Some(keyword) = super::oracle_keyword::parse_keyword_from_oracle(&lower) {

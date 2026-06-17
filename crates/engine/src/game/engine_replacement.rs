@@ -287,6 +287,14 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.37a: Explore accepted after replacement choice — the
                 // explore resolver handles the actual explore logic; this is a no-op here.
                 ProposedEvent::Explore { .. } => {}
+                // CR 701.34a: Proliferate accepted after replacement choice.
+                proliferate @ ProposedEvent::Proliferate { .. } => {
+                    crate::game::effects::proliferate::apply_proliferate_after_replacement(
+                        state,
+                        proliferate,
+                        events,
+                    );
+                }
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.
@@ -914,12 +922,28 @@ pub(super) fn apply_post_replacement_effect(
         if valid_targets.is_empty() {
             return None;
         }
-        return Some(WaitingFor::CopyTargetChoice {
-            player: controller,
-            source_id,
-            valid_targets,
-            max_mana_value,
-        });
+        // CR 607.2a: For ExiledCardByIndex (The Mimeoplasm), the target is already
+        // determined by the index - no choice prompt needed. Directly resolve the copy.
+        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) {
+            let targets = valid_targets
+                .into_iter()
+                .map(TargetRef::Object)
+                .collect::<Vec<_>>();
+            let resolved =
+                build_resolved_from_def_with_targets(real_work, source_id, controller, targets);
+            let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
+            return match &state.waiting_for {
+                WaitingFor::Priority { .. } => None,
+                wf => Some(wf.clone()),
+            };
+        } else {
+            return Some(WaitingFor::CopyTargetChoice {
+                player: controller,
+                source_id,
+                valid_targets,
+                max_mana_value,
+            });
+        }
     }
 
     // CR 614.1c: The injected `Object(source)` target is the source-as-SelfRef
@@ -1299,6 +1323,25 @@ fn find_copy_targets(
     controller: PlayerId,
     max_mana_value: Option<u32>,
 ) -> Vec<ObjectId> {
+    // CR 607.2a: Special handling for ExiledCardByIndex (The Mimeoplasm).
+    // This filter resolves to a specific card exiled by the source, indexed by order.
+    // We resolve it directly rather than scanning a zone.
+    if let TargetFilter::ExiledCardByIndex { index } = filter {
+        let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);
+        if let Some(&card_id) = exiled_cards.and_then(|cards| cards.get(*index as usize)) {
+            // Check mana value constraint if present
+            if let Some(max) = max_mana_value {
+                if let Some(obj) = state.objects.get(&card_id) {
+                    if obj.mana_cost.mana_value() > max {
+                        return vec![];
+                    }
+                }
+            }
+            return vec![card_id];
+        }
+        return vec![];
+    }
+
     // CR 400.1 + CR 707.9: Clone replacements default to scanning the battlefield,
     // but extensions like Superior Spider-Man's Mind Swap (CR 707.9b) copy a card
     // from any graveyard. The filter carries the source zone via `FilterProp::InZone`;

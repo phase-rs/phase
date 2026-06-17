@@ -96,6 +96,7 @@ pub mod exchange_control;
 // `intensify.rs`, so `intensify.rs` stays implementation-only).
 pub mod cloak;
 pub mod exchange_life;
+pub mod exchange_life_totals;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -1161,6 +1162,28 @@ fn try_begin_reflexive_target_selection(
     if !reflexive.targets.is_empty() {
         return Ok(false);
     }
+
+    // CR 608.2c + CR 109.4: Propagate the parent's resolution-scoped
+    // `chosen_players` onto the reflexive ability BEFORE its target slots are
+    // built, so a `ControllerRef::ChosenPlayer`-scoped target filter (Strax's
+    // "fights another target creature THAT PLAYER controls" after a random
+    // "choose a player") enumerates against the game-selected player. The
+    // interactive path achieves this via the answer handler appending to the
+    // stashed continuation chain; the inline (e.g. random-`Choose`) path has no
+    // such stash, so the slot builder would otherwise see an empty
+    // `chosen_players`. Only clones when the parent actually carries choices the
+    // reflexive lacks, preserving the borrow for every ordinary reflexive.
+    let reflexive_owned;
+    let reflexive = if parent.is_some_and(|p| {
+        !p.chosen_players.is_empty() && p.chosen_players.len() > reflexive.chosen_players.len()
+    }) {
+        let mut owned = reflexive.clone();
+        owned.set_chosen_players_recursive(&parent.unwrap().chosen_players);
+        reflexive_owned = owned;
+        &reflexive_owned
+    } else {
+        reflexive
+    };
 
     // CR 700.2b + CR 603.3c: A reflexive MODAL trigger (Caesar, Legion's
     // Emperor) chooses its mode(s) when it is put on the stack — after the
@@ -2510,6 +2533,7 @@ pub fn resolve_effect(
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
+        Effect::ExchangeLifeTotals { .. } => exchange_life_totals::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())
@@ -2708,6 +2732,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
                 qty,
                 QuantityRef::TrackedSetSize
                     | QuantityRef::FilteredTrackedSetSize { .. }
+                    | QuantityRef::TrackedSetAggregate { .. }
                     | QuantityRef::DistinctCardTypes {
                         source: CardTypeSetSource::TrackedSet { .. }
                     }
@@ -3128,6 +3153,20 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                     action: PlayerActionKind::SearchedLibrary,
                     ..
                 }
+            )
+        }),
+        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
+        // gates the rider on whether control actually changed (Kain, Traitorous
+        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
+        // recipient differs from the object's current controller,
+        // `ControllerChanged`.
+        Effect::GiveControl { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::GiveControl,
+                    ..
+                } | GameEvent::ControllerChanged { .. }
             )
         }),
         _ => true,
@@ -3755,6 +3794,25 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             }
         }
     }
+
+    // CR 503.1a + CR 608.2d (issue #1535): per-player upkeep optional effects
+    // ("that player may put a card from their hand ...") route the prompt to
+    // the scoped player, not the ability's controller (Braids, Conjurer Adept).
+    if let Some(scoped) = ability.scoped_player {
+        if let Effect::ChangeZone { target, .. } = &ability.effect {
+            if filter_uses_relative_controller_scoped(target) {
+                return scoped;
+            }
+        }
+        if ability
+            .effect
+            .target_filter()
+            .is_some_and(filter_uses_relative_controller_scoped)
+        {
+            return scoped;
+        }
+    }
+
     ability.controller
 }
 
@@ -3812,10 +3870,41 @@ fn hydrate_event_context_targets<'a>(
     Cow::Owned(resolved)
 }
 
+/// CR 603.2: Filters that auto-resolve from `state.current_trigger_event` during
+/// hydration / unless-pay payer resolution (issue #2361, Kain #1335).
+fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::StackSpell
+    )
+}
+
 /// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
 fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 110.2 + CR 603.7c: `GiveControl` carries both an object `target` and a
+    // `recipient`. Kain ("that player gains control of Kain") binds the recipient
+    // to `TriggeringPlayer` while the object is `SelfRef` — only the recipient
+    // is an event-context player ref and must be hydrated into `ability.targets`
+    // when empty (issue #1335).
+    if let Effect::GiveControl { target, recipient } = effect {
+        if hydratable_event_context_filter(recipient) {
+            return Some(recipient);
+        }
+        if hydratable_event_context_filter(target) {
+            return Some(target);
+        }
+        return None;
+    }
+
     let filter = match effect {
         Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
@@ -3874,7 +3963,6 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::SkipNextStep { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::AdditionalPhase { target, .. }
-        | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
         // CR 701.26a/b + CR 603.7c: only the single-permanent tap/untap exposes
@@ -3908,17 +3996,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         _ => return None,
     };
 
-    if matches!(
-        filter,
-        TargetFilter::TriggeringSpellController
-            | TargetFilter::TriggeringSpellOwner
-            | TargetFilter::TriggeringPlayer
-            | TargetFilter::TriggeringSource
-            | TargetFilter::DefendingPlayer
-            | TargetFilter::ParentTargetController
-            | TargetFilter::ParentTarget
-            | TargetFilter::StackSpell
-    ) {
+    if hydratable_event_context_filter(filter) {
         Some(filter)
     } else {
         None
@@ -4243,6 +4321,38 @@ fn resolve_chain_body(
         Cow::Borrowed(ability)
     };
     let ability = ability.as_ref();
+
+    // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: A random
+    // `Effect::Choose` ("choose a player at random") or `Effect::ChooseFromZone`
+    // ("choose one of them at random") is resolved here, at the chain resolution
+    // point where a mutable ability is available, so the game-selected value
+    // lands on `chosen_players` / `targets` BEFORE the chain descends to a
+    // dependent sub (Strax's reflexive Fight scoped to the chosen player; River
+    // Song's Diary's `CastFromZone { target: ParentTarget }`). No interactive
+    // `WaitingFor::NamedChoice` / `ChooseFromZoneChoice` is raised. This mirrors
+    // the resolution-point handling of `TargetSelectionMode::Random` for targets.
+    let random_choice_owned;
+    let random_is_choose = matches!(
+        &ability.effect,
+        Effect::Choose { selection, .. }
+            if matches!(selection, crate::types::ability::TargetSelectionMode::Random)
+    );
+    let random_is_choose_from_zone = matches!(
+        &ability.effect,
+        Effect::ChooseFromZone { selection, .. } if selection.is_random()
+    );
+    let (ability, random_choice_resolved) = if random_is_choose || random_is_choose_from_zone {
+        let mut owned = ability.clone();
+        if random_is_choose {
+            choose::resolve_random_in_chain(state, &mut owned, events);
+        } else {
+            choose_from_zone::resolve_random_in_chain(state, &mut owned, events);
+        }
+        random_choice_owned = owned;
+        (&random_choice_owned, true)
+    } else {
+        (ability, false)
+    };
 
     if effect_depends_on_missing_chosen_player(ability) {
         state.cost_payment_failed_flag = true;
@@ -4923,11 +5033,14 @@ fn resolve_chain_body(
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
 
-    // Skip no-op unimplemented/runtime-handled effects
-    if !matches!(
-        ability.effect,
-        Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
-    ) {
+    // Skip no-op unimplemented/runtime-handled effects, and a random
+    // `Effect::Choose` already resolved above by `resolve_random_in_chain`.
+    if !random_choice_resolved
+        && !matches!(
+            ability.effect,
+            Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
+        )
+    {
         let hydrated = hydrate_event_context_targets(state, ability);
         let effective = hydrated.as_ref();
 
@@ -5261,6 +5374,21 @@ fn resolve_chain_body(
     // links via `TargetFilter::ExiledBySource`. Either way, skip the outer
     // chain to avoid double-execution.
     if matches!(ability.effect, Effect::ExileFromTopUntil { .. }) {
+        return Ok(());
+    }
+
+    // CR 701.44d: `ExploreAll` is the single authority for its own sub_ability
+    // chain. `explore::resolve_single_explorer` carries `ability.sub_ability`
+    // onto the terminal explorer (and synthesizes the per-explorer `TrackedSet`
+    // continuation between explorers). If the generic chain walker ALSO
+    // processed the sub here, a paused explore (the nonland `DigChoice`) would
+    // re-prepend the sub onto `pending_continuation` a SECOND time. For a
+    // synthesized `ExploreAll { TrackedSet }` continuation that second prepend
+    // chains it to itself, producing a self-renewing loop that re-explores the
+    // same permanent every time the choice resolves — Hakbal of the Surging
+    // Soul accrued unbounded +1/+1 counters this way. Mirror the
+    // `ExileFromTopUntil` guard above and skip the outer chain.
+    if matches!(ability.effect, Effect::ExploreAll { .. }) {
         return Ok(());
     }
 
@@ -7580,6 +7708,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         crate::game::engine::apply(
@@ -8350,6 +8479,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Keyword { options: vec![] },
                 persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -8419,6 +8549,7 @@ mod tests {
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
             },
             vec![],
             ObjectId(100),
@@ -8557,6 +8688,8 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::ParentTargetController,
                 count: QuantityExpr::Fixed { value: 1 },
+                profile: None,
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -11721,6 +11854,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -11757,6 +11891,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_profile: None,
                 count_param: 0,
+                is_cost_payment: false,
             },
             GameAction::SelectCards {
                 cards: vec![second],
@@ -17610,6 +17745,34 @@ mod tests {
         assert!(
             !mandatory_parent_effect_performed(&copy, &not_made),
             "a CopySpell that made no copy is NOT 'performed' — the draw rider must run"
+        );
+    }
+
+    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
+    /// Kain. If they do, …" gates the rider on whether control actually
+    /// transferred. `GiveControl` counts as performed only when
+    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    #[test]
+    fn give_control_performed_tracks_controller_changed_event() {
+        let give = Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::TriggeringPlayer,
+        };
+
+        let transferred = [GameEvent::ControllerChanged {
+            object_id: ObjectId(1),
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+        }];
+        assert!(
+            mandatory_parent_effect_performed(&give, &transferred),
+            "GiveControl that changed controllers is 'performed'"
+        );
+
+        let not_transferred: [GameEvent; 0] = [];
+        assert!(
+            !mandatory_parent_effect_performed(&give, &not_transferred),
+            "GiveControl that failed must not seed the if-they-do rider"
         );
     }
 

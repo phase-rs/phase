@@ -97,6 +97,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- The Mimeoplasm: "As ~ enters, you may exile N cards from graveyards. If you do, ..." ---
+    // Check before other "as enters" patterns to ensure it matches correctly
+    if let Some(def) = parse_as_enters_exile_from_graveyards(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
+
     // --- "~ enters prepared." ---
     // CR 722.3a: "enters prepared" gives the entering permanent the prepared
     // designation as part of the entry event, not through a triggered ability.
@@ -284,6 +290,28 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     if let Some(def) = parse_mill_count_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_proliferate_count_replacement(&lower, &text) {
+        return Some(def);
+    }
+
+    // --- "If [player] would proliferate, {effect}" ---
+    // CR 701.34a + CR 614.1a: Generic proliferate replacement (Tekuthal class).
+    if nom_primitives::scan_contains(&lower, "would proliferate") {
+        let effect_text = extract_replacement_effect(&normalized);
+        let mut def =
+            ReplacementDefinition::new(ReplacementEvent::Proliferate).description(text.to_string());
+        {
+            let e = effect_text?;
+            let (optional_modal_present, effect_after_modal) = strip_optional_instead_lead_in(&e);
+            if optional_modal_present {
+                def = def.mode(ReplacementMode::Optional { decline: None });
+            }
+            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+        }
+        apply_proliferate_player_scope(&lower, &mut def);
         return Some(def);
     }
 
@@ -805,6 +833,110 @@ fn parse_self_enters_pay_cost_replacement(
     )
 }
 
+/// CR 614.1a + CR 614.12: The Mimeoplasm — "As ~ enters, you may exile N cards
+/// from graveyards. If you do, it enters as a copy of one of those cards with a
+/// number of additional +1/+1 counters on it equal to the power of the other card."
+///
+/// Emits a `ReplacementMode::MayCost` on the `Moved` event: the accept-cost is
+/// the parsed `AbilityCost::Exile` from graveyards; the "If you do" continuation
+/// is the copy + counter placement effect chain. No decline branch — the permanent
+/// enters normally (no exile, no copy, no counters) if declined.
+fn parse_as_enters_exile_from_graveyards(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Prefix: "as ~ enters, you may exile "
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            preceded(
+                tag("as "),
+                alt((
+                    tag("~ enters, you may exile "),
+                    tag("this creature enters, you may exile "),
+                )),
+            ),
+        )
+        .parse(i)
+    })?;
+
+    // Isolate the cost body from the "If you do" continuation
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (cost_body, _tail) =
+        split_once_on_lower(after_prefix, &after_prefix_lower, ". if you do, ")?;
+
+    // Parse the exile cost manually to handle "from graveyards" (plural)
+    // Pattern: "[count] [type] card(s) from graveyards"
+    let cost_body_lower = cost_body.trim().to_lowercase();
+    let (count, filter_text) =
+        parse_number(&cost_body_lower).unwrap_or((1, cost_body_lower.trim()));
+
+    // Strip the "from graveyards" suffix to extract the type filter.
+    // filter_text is already lowercase (slice of cost_body_lower).
+    // Use take_until + alt to consume up to and including the zone suffix.
+    let parsed: nom::IResult<&str, (&str, &str)> = pair(
+        take_until(" from graveyard"),
+        alt((tag(" from graveyards"), tag(" from graveyard"))),
+    )
+    .parse(filter_text);
+    let Ok(("", (filter_text, _))) = parsed else {
+        return None;
+    };
+
+    // Parse the type filter (e.g., "creature")
+    let (filter, remainder) = parse_type_phrase(filter_text.trim());
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let cost = AbilityCost::Exile {
+        count,
+        zone: Some(Zone::Graveyard),
+        filter: Some(filter),
+    };
+
+    // CR 607.2a: Manually construct the continuation for Mimeoplasm-style effects.
+    // The continuation text "it enters as a copy of one of those cards, except it has
+    // the other card's power and toughness as +1/+1 counters" must be lowered to:
+    // - BecomeCopy targeting the first exiled card (ExiledCardByIndex { index: 0 })
+    // - PutCounter with count = second exiled card's power (ExiledCardPower { index: 1 })
+    // This cannot use parse_effect_chain because the generic parser lowers this
+    // pattern to CopySpell (which copies spells on the stack, not exiled cards).
+    let continuation = crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::BecomeCopy {
+            target: crate::types::ability::TargetFilter::ExiledCardByIndex { index: 0 },
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: vec![],
+        },
+    )
+    .sub_ability(crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::ExiledCardPower { index: 1 },
+            },
+            target: crate::types::ability::TargetFilter::SelfRef,
+        },
+    ));
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: None, // No decline branch — enters normally if declined
+            })
+            .execute(continuation)
+            .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
@@ -1297,6 +1429,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
             Effect::Choose {
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )
     });
@@ -1307,6 +1440,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
             Effect::Choose {
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )
         .sub_ability(tap_self)
@@ -1366,6 +1500,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         Effect::Choose {
             choice_type,
             persist: true,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
     );
 
@@ -4735,6 +4870,94 @@ fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
     .parse(input)
 }
 
+/// CR 614.1a: Apply `valid_player` scope to proliferate replacements from the
+/// antecedent subject ("an opponent", "a player", or default controller-only).
+fn apply_proliferate_player_scope(lower: &str, def: &mut ReplacementDefinition) {
+    if nom_primitives::scan_contains(lower, "an opponent would proliferate")
+        || nom_primitives::scan_contains(lower, "opponent would proliferate")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    } else if nom_primitives::scan_contains(lower, "a player would proliferate") {
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    } else if nom_primitives::scan_contains(lower, "you would proliferate") {
+        def.valid_player = Some(ReplacementPlayerScope::You);
+    }
+}
+
+fn parse_proliferate_replacement_count(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        value(
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            tag("twice that many"),
+        ),
+        nom::combinator::map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+            value: value as i32,
+        }),
+        // CR 616.1: "proliferate twice" is a *multiplicative* replacement, not a
+        // set-to-2. Modeling it as `Multiply` (double the in-flight count) instead
+        // of `Fixed { value: 2 }` lets two doublers compound through the
+        // replacement pipeline's re-evaluation: two Tekuthal, Inquiry Dominus
+        // proliferate 1 -> 2 -> 4 times (per the MOM ruling), not a flat 2. The
+        // single-doubler case is unchanged (1 * 2 == 2).
+        value(
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            tag("twice"),
+        ),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.34a + CR 614.1a: Parse count-modifying proliferate replacements such
+/// as Tekuthal, Inquiry Dominus ("proliferate twice instead").
+fn parse_proliferate_count_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (count, rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if you would proliferate, proliferate ").parse(input)?;
+        let (input, count) = parse_proliferate_replacement_count.parse(input)?;
+        let (input, _) = alt((tag(" instead"), tag(" times instead"))).parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, count))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let repeat_for = match count {
+        QuantityExpr::Fixed { value: 1 } => None,
+        other => Some(other),
+    };
+    let mut execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Proliferate);
+    if let Some(repeat) = repeat_for {
+        execute.repeat_for = Some(repeat);
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Proliferate)
+        .execute(execute)
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
+}
+
 fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     let ((effect_kind, count), rest) = nom_on_lower(lower, lower, |input| {
         let (input, _) = tag("if you would scry ").parse(input)?;
@@ -7047,6 +7270,37 @@ mod tests {
         }
     }
 
+    /// CR 614.1a + CR 614.12: The Mimeoplasm — "As ~ enters, you may exile two
+    /// creature cards from graveyards. If you do, it enters as a copy of one of
+    /// those cards with a number of additional +1/+1 counters on it equal to the
+    /// power of the other card."
+    #[test]
+    fn mimeoplasm_exile_from_graveyards_replacement() {
+        let def = parse_replacement_line(
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, \
+             it enters as a copy of one of those cards with a number of additional +1/+1 \
+             counters on it equal to the power of the other card.",
+            "The Mimeoplasm",
+        )
+        .expect("The Mimeoplasm should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        match &def.mode {
+            ReplacementMode::MayCost { cost, decline } => {
+                assert!(
+                    matches!(cost, AbilityCost::Exile { count, zone, filter } if *count == 2 && *zone == Some(Zone::Graveyard) && filter.is_some()),
+                    "expected Exile count 2 from Graveyard, got {cost:?}"
+                );
+                assert!(decline.is_none(), "The Mimeoplasm has no decline branch");
+            }
+            other => panic!("expected MayCost, got {other:?}"),
+        }
+        // Verify the continuation effect is present in execute
+        let execute = def.execute.as_ref().expect("execute must be present");
+        // The continuation should be the copy + counter placement effect
+        assert!(!matches!(&*execute.effect, Effect::Unimplemented { .. }));
+    }
+
     #[test]
     fn rewrite_parent_target_controller_flips_top_level_draw_target() {
         let mut def = AbilityDefinition::new(
@@ -8498,6 +8752,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Color { ref excluded },
                 persist: true,
+                ..
             } if excluded.is_empty()
         ));
     }
@@ -8540,6 +8795,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::Color { ref excluded },
                     persist: true,
+                    ..
                 } if excluded == &vec![ManaColor::Green]
             ),
             "sub-ability must be Choose color (excluding Green), got {:?}",
@@ -8563,6 +8819,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Color { ref excluded },
                 persist: true,
+                ..
             } if excluded == &vec![ManaColor::White]
         ));
     }
@@ -8580,6 +8837,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::TwoColors,
                 persist: true,
+                ..
             }
         ));
     }
@@ -8597,6 +8855,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
                 persist: true,
+                ..
             }
         ));
     }
@@ -12275,6 +12534,34 @@ mod tests {
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
         ));
+    }
+
+    #[test]
+    fn tekuthal_proliferate_replacement_parses() {
+        let def = parse_replacement_line(
+            "If you would proliferate, proliferate twice instead.",
+            "Tekuthal, Inquiry Dominus",
+        )
+        .expect("Tekuthal proliferate replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Proliferate);
+        assert_eq!(
+            def.valid_player,
+            Some(ReplacementPlayerScope::You),
+            "controller-scoped proliferate replacement"
+        );
+        let execute = def.execute.expect("execute ability");
+        assert!(matches!(*execute.effect, Effect::Proliferate));
+        assert_eq!(
+            execute.repeat_for,
+            Some(QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            }),
+            "proliferate twice instead → repeat_for Multiply(2 × event count) so stacked doublers compound"
+        );
     }
 
     #[test]

@@ -1302,6 +1302,13 @@ fn add_stack_spells(
     targets: &mut Vec<TargetRef>,
 ) {
     for entry in &state.stack {
+        // CR 601.2c: A spell choosing stack targets during its own cast cannot
+        // select itself — targeting the counterspell removes only the counter
+        // from the stack and leaves the intended opponent spell to resolve
+        // (issue #3300).
+        if entry.id == source_id {
+            continue;
+        }
         if !stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx) {
             continue;
         }
@@ -2575,6 +2582,41 @@ mod tests {
         let filter = TargetFilter::Typed(TypedFilter::card());
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
+    }
+
+    #[test]
+    fn find_legal_stack_spell_targets_exclude_casting_spell_itself() {
+        let mut state = GameState::new_two_player(42);
+        let counter = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Stack,
+        );
+        let opponent_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Spell".to_string(),
+            Zone::Stack,
+        );
+        for (id, controller) in [(counter, PlayerId(0)), (opponent_spell, PlayerId(1))] {
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id,
+                source_id: id,
+                controller,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(0),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+        let targets = find_legal_targets(&state, &TargetFilter::StackSpell, PlayerId(0), counter);
+        assert!(targets.contains(&TargetRef::Object(opponent_spell)));
+        assert!(!targets.contains(&TargetRef::Object(counter)));
     }
 
     #[test]

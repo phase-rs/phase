@@ -3641,12 +3641,15 @@ fn pay_additional_cost_with_source(
             let cost = prepend_deferred_required_cost(cost, &mut pending);
             pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
             state.pending_cast = Some(Box::new(pending.clone()));
+            let x_cost_previews =
+                super::casting::build_choose_x_cost_previews(state, player, &pending, min, max);
             return Ok(WaitingFor::ChooseXValue {
                 player,
                 min,
                 max,
                 pending_cast: Box::new(pending),
                 convoke_mode: None,
+                x_cost_previews,
             });
         }
     }
@@ -6973,12 +6976,20 @@ pub fn enter_payment_step(
                 )));
             }
             let pending_cast = pending.clone();
+            let x_cost_previews = super::casting::build_choose_x_cost_previews(
+                state,
+                player,
+                &pending_cast,
+                min,
+                max,
+            );
             return Ok(WaitingFor::ChooseXValue {
                 player,
                 min,
                 max,
                 pending_cast,
                 convoke_mode,
+                x_cost_previews,
             });
         }
 

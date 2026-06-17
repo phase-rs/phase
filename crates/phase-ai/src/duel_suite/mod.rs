@@ -36,10 +36,14 @@ pub enum FeatureKind {
     Control,
     Aristocrats,
     Artifacts,
+    Enchantments,
     AggroPressure,
     TokensWide,
     PlusOneCounters,
     SpellslingerProwess,
+    Reanimator,
+    Equipment,
+    Blink,
 }
 
 impl FeatureKind {
@@ -52,10 +56,14 @@ impl FeatureKind {
         FeatureKind::Control,
         FeatureKind::Aristocrats,
         FeatureKind::Artifacts,
+        FeatureKind::Enchantments,
         FeatureKind::AggroPressure,
         FeatureKind::TokensWide,
         FeatureKind::PlusOneCounters,
         FeatureKind::SpellslingerProwess,
+        FeatureKind::Reanimator,
+        FeatureKind::Equipment,
+        FeatureKind::Blink,
     ];
 }
 

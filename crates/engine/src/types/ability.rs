@@ -2259,6 +2259,11 @@ pub enum FilterProp {
     Untapped,
     /// CR 702.171b: Matches permanents with the saddled designation.
     IsSaddled,
+    /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
+    /// `controller` relative to the ability source ("each battle they protect").
+    ProtectorMatches {
+        controller: ControllerRef,
+    },
     /// CR 302.6 + CR 702.10b + CR 702.154a: Matches creatures that either have
     /// haste or have been under their controller's control continuously since
     /// that player's most recent turn began. Used by Enlist's tap eligibility.
@@ -2796,6 +2801,13 @@ impl TargetSelectionMode {
     pub fn is_chosen(&self) -> bool {
         matches!(self, TargetSelectionMode::Chosen)
     }
+
+    /// CR 700.2b (override) + CR 701.9b (analogous): The game selects uniformly
+    /// at random instead of the controller choosing (Cult of Skaro "choose one
+    /// at random").
+    pub fn is_random(&self) -> bool {
+        matches!(self, TargetSelectionMode::Random)
+    }
 }
 
 /// CR 701.9a: How cards are selected from a zone during an effect or cost.
@@ -3135,9 +3147,17 @@ pub enum TargetFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
-    /// CR 610.3: Cards exiled by a specific source via "exile until ~ leaves" links.
+    /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
+    /// CR 607.2b: References a specific card exiled by the source, indexed by order.
+    /// Used by The Mimeoplasm to distinguish "the first card exiled this way" from
+    /// "the second card exiled this way". The index is 0-based and corresponds to
+    /// the order in `state.cards_exiled_with_source_this_turn[source_id]`.
+    /// ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
+    ExiledCardByIndex {
+        index: u32,
+    },
     /// CR 603.7c: Resolves to the controller of the spell/ability that triggered this.
     TriggeringSpellController,
     /// CR 603.7c: Resolves to the owner of the spell/ability that triggered this.
@@ -3676,6 +3696,9 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
+    /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
+    ExiledCardPower { index: u32 },
     /// CR 604.3: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
     /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller
@@ -3711,6 +3734,19 @@ pub enum QuantityRef {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+    },
+    /// CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+    /// over the most recent chain tracked set (sum/max/min), reading the same set as
+    /// [`QuantityRef::FilteredTrackedSetSize`] but aggregating a per-member value
+    /// instead of counting members. The set is selected by highest id (the set
+    /// the immediately-preceding chain effect published) and is zone-independent —
+    /// its members are addressed by identity, so cards the producer moved to exile
+    /// are read in place. Used by "deals damage equal to the total mana value of
+    /// those exiled cards" (Ensnared by the Mara — `Sum` over `ManaValue` of the
+    /// set the preceding `ExileTop` published).
+    TrackedSetAggregate {
+        function: AggregateFunction,
+        property: ObjectProperty,
     },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
@@ -8047,6 +8083,13 @@ pub enum Effect {
         /// Used for ETB choices that other abilities reference ("the chosen type/color").
         #[serde(default)]
         persist: bool,
+        /// CR 608.2d (override) + CR 701.9b (analogous): When `Random`, the game
+        /// selects the value uniformly at random (Strax "choose a player at
+        /// random") instead of `chooser`/controller announcing the choice per
+        /// CR 608.2d. Default `Chosen` preserves controller-choice. Serialized
+        /// as a type-tagged enum (omitted when `Chosen`).
+        #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+        selection: TargetSelectionMode,
     },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
@@ -8572,6 +8615,20 @@ pub enum Effect {
         /// CR 609.3: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,
+        /// CR 608.2d (override): When `Random`, the game selects the card(s)
+        /// uniformly at random (River Song's Diary "choose one of them at
+        /// random") rather than `chooser` announcing the choice per CR 608.2d.
+        /// CR 701.9b (analogous): same random-selection idiom the engine already
+        /// uses for random discard. Orthogonal to `chooser` (who would otherwise
+        /// pick). Serialized as a bare `random` bool to match the
+        /// Discard/RevealHand card-data shape.
+        #[serde(
+            default,
+            with = "card_selection_bool_compat",
+            rename = "random",
+            skip_serializing_if = "CardSelectionMode::is_chosen"
+        )]
+        selection: CardSelectionMode,
         /// Additional validation rules for the chosen subset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
@@ -8819,6 +8876,20 @@ pub enum Effect {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 708.2a: Effect-specified face-down characteristics override
+        /// ("They're 2/2 Cyberman artifact creatures."). `None` = the vanilla
+        /// 2/2 manifest default (CR 701.40a). The put-clause seeds
+        /// `Some(vanilla_2_2())` when the surface form is "put the top N cards
+        /// ... onto the battlefield face down", and a trailing
+        /// `FaceDownProfileSpec` continuation refines it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<FaceDownProfile>,
+        /// CR 110.2a: Controller override on entry ("under your control"). `None`
+        /// leaves each manifested card under the library owner's control (the
+        /// CR 701.40a default). Cybership routes the damaged player's cards under
+        /// the Cybership controller via `ControllerRef::You`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 701.62a: Manifest dread — look at top 2 cards of library, manifest one,
     /// put the rest into graveyard. Uses interactive WaitingFor::ManifestDreadChoice.
@@ -9026,6 +9097,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         player: TargetFilter,
         stat: PtStat,
+    },
+    /// CR 701.12a: Two players exchange life totals. player_a/player_b each select a
+    /// player (Controller for "you", Opponent filter for "target opponent", Player
+    /// for "target player"). Both swap simultaneously, all-or-nothing.
+    ExchangeLifeTotals {
+        #[serde(default = "default_target_filter_any")]
+        player_a: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        player_b: TargetFilter,
     },
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
@@ -10023,6 +10103,9 @@ impl Effect {
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
+            // CR 701.12a: player targets (player_a/player_b) are surfaced as
+            // dual target slots by ability_utils, not by `target_filter()`.
+            | Effect::ExchangeLifeTotals { .. }
             // CR 601.2a: candidates gathered by `filter`/`zones` at resolution,
             // no player-selectable target slot.
             | Effect::FreeCastFromZones { .. }
@@ -10267,6 +10350,7 @@ impl Effect {
             | Effect::Endure { .. }
             | Effect::ExchangeControl { .. }
             | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::FlipCoin { .. }
@@ -10468,6 +10552,7 @@ impl Effect {
             | Effect::Endure { .. }
             | Effect::ExchangeControl { .. }
             | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::FlipCoin { .. }
@@ -10697,6 +10782,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Seek { .. } => "Seek",
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
         Effect::ExchangeLifeWithStat { .. } => "ExchangeLifeWithStat",
+        Effect::ExchangeLifeTotals { .. } => "ExchangeLifeTotals",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
@@ -10896,6 +10982,7 @@ pub enum EffectKind {
     Seek,
     SetLifeTotal,
     ExchangeLifeWithStat,
+    ExchangeLifeTotals,
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
@@ -11110,6 +11197,7 @@ impl From<&Effect> for EffectKind {
             Effect::Seek { .. } => EffectKind::Seek,
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
             Effect::ExchangeLifeWithStat { .. } => EffectKind::ExchangeLifeWithStat,
+            Effect::ExchangeLifeTotals { .. } => EffectKind::ExchangeLifeTotals,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
@@ -11181,6 +11269,12 @@ pub struct ModalChoice {
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]
     pub chooser: PlayerFilter,
+    /// CR 700.2b (override) + CR 701.9b (analogous): When `Random`, the game
+    /// selects the mode(s) uniformly at random (Cult of Skaro "choose one at
+    /// random") instead of `chooser` choosing per CR 700.2a/700.2b. Default
+    /// `Chosen` preserves controller-choice; omitted from card-data when default.
+    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+    pub selection: TargetSelectionMode,
 }
 
 /// Selection constraints attached to a modal choice header.
@@ -11459,6 +11553,10 @@ pub struct AbilityDefinition {
     /// single authority for sorcery-speed timing. The legacy `sorcery_speed`
     /// JSON field is migrated into this `Vec` by the hand-written `Deserialize`.
     pub activation_restrictions: Vec<ActivationRestriction>,
+    /// CR 602.2a: Who may begin to activate this ability. `None` = only the
+    /// permanent's controller. `Some(All)` = any player. `Some(Opponent)` =
+    /// only opponents of the permanent's controller.
+    pub activator_filter: Option<PlayerFilter>,
     /// CR 602.1: Zone from which this ability can be activated.
     /// `None` = battlefield (default). `Some(Zone::Hand)` for Channel, Cycling, etc.
     pub activation_zone: Option<Zone>,
@@ -11579,6 +11677,8 @@ struct AbilityDefinitionRepr<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     activation_restrictions: &'a Vec<ActivationRestriction>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    activator_filter: &'a Option<PlayerFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     activation_zone: &'a Option<Zone>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ability_tag: &'a Option<AbilityTag>,
@@ -11641,6 +11741,7 @@ impl Serialize for AbilityDefinition {
             description,
             target_prompt,
             activation_restrictions,
+            activator_filter,
             activation_zone,
             ability_tag,
             condition,
@@ -11678,6 +11779,7 @@ impl Serialize for AbilityDefinition {
             description,
             target_prompt,
             activation_restrictions,
+            activator_filter,
             activation_zone,
             ability_tag,
             condition,
@@ -11758,6 +11860,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     activation_restrictions: Vec<ActivationRestriction>,
     #[serde(default)]
+    activator_filter: Option<PlayerFilter>,
+    #[serde(default)]
     activation_zone: Option<Zone>,
     #[serde(default)]
     ability_tag: Option<AbilityTag>,
@@ -11829,6 +11933,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             description: de.description,
             target_prompt: de.target_prompt,
             activation_restrictions,
+            activator_filter: de.activator_filter,
             activation_zone: de.activation_zone,
             ability_tag: de.ability_tag,
             condition: de.condition,
@@ -11963,6 +12068,7 @@ impl AbilityDefinition {
             description: None,
             target_prompt: None,
             activation_restrictions: Vec::new(),
+            activator_filter: None,
             activation_zone: None,
             ability_tag: None,
             condition: None,
@@ -13251,6 +13357,37 @@ pub enum ReplacementCondition {
     /// "enters with an indestructible counter on it if you cast it from your
     /// hand"). Evaluated against `GameObject.cast_from_zone`.
     CastFromZone { zone: Zone },
+    /// CR 614.1d + CR 601: Gates a replacement on how the *entering* object
+    /// (the event's `affected_object_id`) arrived — NOT the replacement source.
+    /// Both halves reference the entering object, which distinguishes this from
+    /// `CastFromZone` (which reads the replacement's `source_id`; for a global
+    /// floating install that source is the sentinel `ObjectId(0)`, so
+    /// `CastFromZone` cannot express entering-object origin).
+    ///
+    /// `origin_constraint` reuses the engine's canonical from-zone primitive
+    /// (`OriginConstraint`) to test the event's `from` field — the "would enter
+    /// from <zone>" half (CR 614.1d). Because `ProposedEvent::ZoneChange.from`
+    /// is a non-optional `Zone`, the evaluator wraps it as `Some(from)` before
+    /// delegating to `OriginConstraint::matches_from`.
+    ///
+    /// `cast_origin`, when `Some(zone)`, additionally matches when the entering
+    /// object was cast from `zone` (`GameObject.cast_from_zone == Some(zone)`)
+    /// and thus physically enters from the Stack — the "or after being cast from
+    /// <zone>" half (CR 601) that `OriginConstraint` cannot express because it
+    /// only inspects `from`, never `cast_from_zone`. The two halves are
+    /// OR-combined. Covers Don't Blink's "if one or more creatures would enter
+    /// from exile or after being cast from exile" in a single leaf.
+    EnteredFromZone {
+        /// Physical "would enter from <zone>" half. `None` when the clause has
+        /// only a cast-origin half ("...or after being cast from <zone>") — in
+        /// that case the physical path must NOT match, so this is an
+        /// `Option` rather than collapsing to `OriginConstraint::Any` (which
+        /// would make the OR-combined physical half true for every entry).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_constraint: Option<OriginConstraint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_origin: Option<Zone>,
+    },
     /// CR 207.2c (Raid ability word) + CR 614.1c: "if you attacked this turn"
     /// — replacement applies only when the controller attacked with a
     /// creature earlier this turn. Evaluated against
@@ -13429,6 +13566,21 @@ impl OriginConstraint {
     /// compact for the common no-restriction case.
     pub fn is_any(&self) -> bool {
         matches!(self, OriginConstraint::Any)
+    }
+
+    /// CR 111.1 + CR 400.1: Does an object that moved from `from` satisfy this
+    /// source-zone constraint? `from = None` (CR 111.1 direct creation / token
+    /// entry, where the object had no prior zone) matches only `Any`; any
+    /// constraint naming a specific source zone cannot match a `None` origin.
+    /// Single authority shared by the zone-change trigger matcher and the
+    /// `ReplacementCondition::EnteredFromZone` physical-entry half.
+    pub fn matches_from(&self, from: &Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => from == &Some(*z),
+            OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
+            OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
     }
 }
 
@@ -15363,6 +15515,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 111.1 + CR 400.1: the shared `OriginConstraint::matches_from` predicate
+    /// (used by both the zone-change trigger matcher and the `EnteredFromZone`
+    /// replacement condition's physical half). Verifies the `None` origin case
+    /// (CR 111.1 direct/token creation) the `Some()` wrap protects against, plus
+    /// every variant axis.
+    #[test]
+    fn origin_constraint_matches_from_predicate() {
+        use crate::types::zones::Zone;
+        // Equals: exact source-zone match; None never matches a specific zone.
+        let eq = OriginConstraint::Equals(Zone::Exile);
+        assert!(eq.matches_from(&Some(Zone::Exile)));
+        assert!(!eq.matches_from(&Some(Zone::Hand)));
+        assert!(!eq.matches_from(&None));
+        // NotEquals: any named source except this; None does not match.
+        let ne = OriginConstraint::NotEquals(Zone::Battlefield);
+        assert!(ne.matches_from(&Some(Zone::Exile)));
+        assert!(!ne.matches_from(&Some(Zone::Battlefield)));
+        assert!(!ne.matches_from(&None));
+        // OneOf: membership only.
+        let one_of = OriginConstraint::OneOf(vec![Zone::Graveyard, Zone::Library]);
+        assert!(one_of.matches_from(&Some(Zone::Graveyard)));
+        assert!(one_of.matches_from(&Some(Zone::Library)));
+        assert!(!one_of.matches_from(&Some(Zone::Exile)));
+        assert!(!one_of.matches_from(&None));
+        // Any: matches everything, including the None direct-creation origin.
+        assert!(OriginConstraint::Any.matches_from(&None));
+        assert!(OriginConstraint::Any.matches_from(&Some(Zone::Battlefield)));
+    }
 
     /// CR 101.4 + CR 608.2c (issue #3302): `ZoneOwner::EachPlayer` is a shared
     /// serialized engine type (card-data export, WASM/IPC transport). A

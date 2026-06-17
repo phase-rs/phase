@@ -11,8 +11,8 @@ use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{parse_counter_type, CounterType};
@@ -223,6 +223,22 @@ fn static_condition_to_restriction_condition(
             .map(|condition| ParsedCondition::Not {
                 condition: Box::new(condition),
             }),
+        // CR 601.3 + CR 602.5: a presence check ("a creature is attacking you",
+        // "you control a [type]") is equivalent to "the count of matching
+        // objects is at least one". `ParsedCondition` has no `IsPresent`
+        // variant, so reuse its generic `QuantityComparison` over an
+        // `ObjectCount` of the same filter — letting cast/activation
+        // restrictions ("Cast this spell only if a creature is attacking you" —
+        // Confront the Assault) reuse the full presence-condition vocabulary.
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        } => Some(ParsedCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
         // CR 102.1: "it's your turn" — the active player is the scoped player.
         // The `Not` recursion arm above yields `Not(IsYourTurn)` for
         // "it's not your turn".
@@ -1219,6 +1235,31 @@ fn capitalize_condition_word(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::ability::{CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter};
+
+    /// CR 508.1 + CR 601.3: a presence-style restriction condition ("Cast this
+    /// spell only if a creature is attacking you" — Confront the Assault)
+    /// bridges StaticCondition::IsPresent into ParsedCondition::QuantityComparison
+    /// over an ObjectCount of the same filter.
+    #[test]
+    fn restriction_presence_condition_bridges_to_object_count() {
+        match parse_restriction_condition("a creature is attacking you") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => assert!(
+                matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking { defender: Some(ControllerRef::You) }
+                ))),
+                "filter should be a creature attacking you, got {filter:?}"
+            ),
+            other => panic!("expected QuantityComparison(ObjectCount >= 1), got {other:?}"),
+        }
+    }
 
     #[test]
     fn parses_source_conditions() {

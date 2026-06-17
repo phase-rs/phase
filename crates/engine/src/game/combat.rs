@@ -2849,6 +2849,7 @@ pub fn get_valid_block_targets(state: &GameState) -> HashMap<ObjectId, Vec<Objec
             .attackers
             .iter()
             .filter(|a| a.defending_player == blocker_controller)
+            .filter(|a| is_attacker_in_play(state, a.object_id))
             .filter(|a| can_block_pair(state, blocker_id, a.object_id))
             .map(|a| a.object_id)
             .collect();
@@ -3127,6 +3128,42 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     }
 
     targets
+}
+
+/// CR 506.4: A creature stops being an attacker when it leaves the battlefield
+/// or phases out. Attackers that left during the declare-attackers step may
+/// remain listed until pruned.
+pub fn is_attacker_in_play(state: &GameState, attacker_id: ObjectId) -> bool {
+    state.objects.get(&attacker_id).is_some_and(|obj| {
+        obj.zone == Zone::Battlefield
+            && !obj.is_phased_out()
+            && obj.card_types.core_types.contains(&CoreType::Creature)
+    })
+}
+
+/// CR 508.8: True when at least one declared attacker is still on the battlefield.
+pub fn has_attackers_in_play(state: &GameState) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat
+            .attackers
+            .iter()
+            .any(|attacker| is_attacker_in_play(state, attacker.object_id))
+    })
+}
+
+/// CR 506.4: Drop attackers that are no longer on the battlefield.
+pub fn prune_attackers_not_in_play(state: &mut GameState) {
+    if let Some(combat) = state.combat.as_ref() {
+        let stale: Vec<ObjectId> = combat
+            .attackers
+            .iter()
+            .filter(|attacker| !is_attacker_in_play(state, attacker.object_id))
+            .map(|attacker| attacker.object_id)
+            .collect();
+        for attacker_id in stale {
+            super::effects::remove_from_combat::remove_object_from_combat(state, attacker_id);
+        }
+    }
 }
 
 /// Check if the active player controls any creatures that could legally attack.
@@ -4367,6 +4404,26 @@ mod tests {
     fn has_potential_attackers_false_when_no_creatures() {
         let state = setup();
         assert!(!has_potential_attackers(&state));
+    }
+
+    #[test]
+    fn has_attackers_in_play_false_when_attacker_left_battlefield() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(has_attackers_in_play(&state));
+
+        state.objects.get_mut(&attacker).unwrap().zone = Zone::Graveyard;
+        assert!(
+            !has_attackers_in_play(&state),
+            "attackers in the graveyard must not count as in play (#1555)"
+        );
+
+        prune_attackers_not_in_play(&mut state);
+        assert!(state.combat.as_ref().unwrap().attackers.is_empty());
     }
 
     #[test]

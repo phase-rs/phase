@@ -1,0 +1,22 @@
+{
+  "name": "Mono-White Equipment",
+  "format": "modern",
+  "frozen_date": "2026-06-17",
+  "source": "https://www.mtggoldfish.com/metagame/modern",
+  "main": [
+    { "name": "Bonesplitter", "count": 3 },
+    { "name": "Vulshok Morningstar", "count": 3 },
+    { "name": "Trusty Machete", "count": 2 },
+    { "name": "Captain's Claws", "count": 2 },
+    { "name": "Sai of the Shinobi", "count": 2 },
+    { "name": "Armory of Iroas", "count": 2 },
+    { "name": "Stoneforge Mystic", "count": 4 },
+    { "name": "Puresteel Paladin", "count": 4 },
+    { "name": "Sram, Senior Edificer", "count": 3 },
+    { "name": "Kor Outfitter", "count": 3 },
+    { "name": "Steelshaper's Gift", "count": 2 },
+    { "name": "Savannah Lions", "count": 4 },
+    { "name": "Kor Duelist", "count": 4 },
+    { "name": "Plains", "count": 22 }
+  ]
+}

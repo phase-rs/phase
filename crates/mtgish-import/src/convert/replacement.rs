@@ -27,7 +27,7 @@ use crate::convert::quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::convert::static_effect;
 use crate::schema::types::{
-    Condition, CopyEffect, CopyEffects, CounterType, DamageRecipientsList, Expiration,
+    CardInExile, Condition, CopyEffect, CopyEffects, CounterType, DamageRecipientsList, Expiration,
     FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
     ReplacableEventWouldDealDamage, ReplacableEventWouldDraw, ReplacableEventWouldEnter,
     ReplacableEventWouldGainLife, ReplacableEventWouldPutCounters,
@@ -1405,6 +1405,85 @@ fn convert_enter_cost(cost: &ReplacementActionWouldEnterCost) -> ConvResult<Abil
         ReplacementActionWouldEnterCost::PayLife(amount) => AbilityCost::PayLife {
             amount: quantity::convert(amount)?,
         },
+        ReplacementActionWouldEnterCost::ExileTwoCardsFromAmongPlayersGraveyards(
+            cards,
+            players,
+        ) => {
+            let controller = players_to_controller(players)?;
+            // Convert CardsInGraveyard to a basic filter - for now, just use creature cards
+            let card_filter = match cards {
+                crate::schema::types::CardsInGraveyard::IsCardtype(
+                    crate::schema::types::CardType::Creature,
+                ) => TargetFilter::Typed(TypedFilter::creature()),
+                _ => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "AbilityCost",
+                        needed_variant: format!("CardsInGraveyard variant: {cards:?}"),
+                    });
+                }
+            };
+            // Combine the card filter with the controller constraint from Players
+            let filter = match controller {
+                ControllerRef::You => {
+                    // "from among players' graveyards" when Players = You means "your graveyard"
+                    Some(TargetFilter::And {
+                        filters: vec![
+                            card_filter,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .controller(ControllerRef::You)
+                                    .properties(vec![FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    }]),
+                            ),
+                        ],
+                    })
+                }
+                ControllerRef::Opponent => {
+                    // "from among players' graveyards" when Players = Opponent means "opponents' graveyards"
+                    Some(TargetFilter::And {
+                        filters: vec![
+                            card_filter,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .controller(ControllerRef::Opponent)
+                                    .properties(vec![FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    }]),
+                            ),
+                        ],
+                    })
+                }
+                ControllerRef::TargetPlayer => {
+                    // Targeted player scope - defer to interactive selection
+                    Some(TargetFilter::And {
+                        filters: vec![
+                            card_filter,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .controller(ControllerRef::TargetPlayer)
+                                    .properties(vec![FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    }]),
+                            ),
+                        ],
+                    })
+                }
+                _ => {
+                    // Other scopes (ScopedPlayer, ParentTargetController, etc.) not expected for this cost
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "ExileTwoCardsFromAmongPlayersGraveyards",
+                        path: String::new(),
+                        detail: format!("Unsupported Players axis: {controller:?}"),
+                    });
+                }
+            };
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter,
+            }
+        }
         other => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "AbilityCost",
@@ -1693,22 +1772,27 @@ fn build_replacement_exec(
         A::ChooseACreatureType => Effect::Choose {
             choice_type: ChoiceType::CreatureType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseAColor(choice) => Effect::Choose {
             choice_type: choice_type_for_choosable_color(choice),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardName(_) => Effect::Choose {
             choice_type: ChoiceType::CardName,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardtype => Effect::Choose {
             choice_type: ChoiceType::CardType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseABasicLandType => Effect::Choose {
             choice_type: ChoiceType::BasicLandType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 305.7: "land type" includes basic + nonbasic. Both
         // unparameterized (ChooseALandType) and parameterized
@@ -1718,6 +1802,7 @@ fn build_replacement_exec(
         A::ChooseALandType | A::ChooseLandType(_) => Effect::Choose {
             choice_type: ChoiceType::LandType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 800.4a: opponent-scoped player choice when the schema
         // filter narrows to opponents; broader player choice
@@ -1732,6 +1817,7 @@ fn build_replacement_exec(
             Effect::Choose {
                 choice_type,
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 614.12a: "Choose a number between X and Y" — engine's
@@ -1757,15 +1843,18 @@ fn build_replacement_exec(
                     max: max_u8,
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseEvenOrOdd => Effect::Choose {
             choice_type: ChoiceType::OddOrEven,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseTwoColors => Effect::Choose {
             choice_type: ChoiceType::TwoColors,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 614.12a + CR 701.x voting: enumerated option lists become
         // `ChoiceType::Labeled`. Each variant supplies its own option
@@ -1775,6 +1864,7 @@ fn build_replacement_exec(
                 options: vec!["Left".to_string(), "Right".to_string()],
             },
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACreatureTypeFromList(opts) => {
             if opts.is_empty() {
@@ -1788,6 +1878,7 @@ fn build_replacement_exec(
                     options: opts.iter().map(|c| format!("{c:?}")).collect(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseACardtypeFromList(opts) => {
@@ -1802,6 +1893,7 @@ fn build_replacement_exec(
                     options: opts.iter().map(|c| format!("{c:?}")).collect(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseWord(opts) => {
@@ -1816,6 +1908,7 @@ fn build_replacement_exec(
                     options: opts.clone(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 614.12a strict-fails — each gets its own refined tag so
@@ -1946,12 +2039,23 @@ fn build_replacement_exec(
         // `Unless` and `MayActions` are handled by the early-return guards above.
         A::Unless(_, _) => unreachable!("Unless handled by early-return guard"),
         A::MayActions(_) => unreachable!("MayActions handled by early-return guard"),
+        // CR 707.2: Enter as a copy of a specific card exiled by the source.
+        // Used by The Mimeoplasm to copy the first exiled card.
+        A::EnterAsCopyOfExiled(card_in_exile, copy_effects) => {
+            let target = convert_card_in_exile_to_target_filter(card_in_exile)?;
+            let additional_modifications = convert_copy_effects(copy_effects)?;
+            Effect::BecomeCopy {
+                target,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications,
+            }
+        }
         // CR 707.x / CR 614.12: Remaining copy-source zones plus face-down /
         // transformed / attached / attacking / blocking modifier shapes need
         // dedicated engine primitives or converter-side source filters.
         A::EnterAsACopyOfACardInAPlayersGraveyard(_, _, _)
         | A::EnterAsACopyOfACardInExile(_, _)
-        | A::EnterAsCopyOfExiled(_, _)
         | A::EntersAsFaceDownArtifactCreature(_, _)
         | A::EntersAsFaceDownCreatureWithAbilitiesAndNotedName(_, _, _)
         | A::EntersAsFaceDownLand(_)
@@ -2009,6 +2113,17 @@ fn build_replacement_exec(
 /// `Effect::BecomeCopy.additional_modifications` channel. Unsupported
 /// "keep original characteristic" shapes strict-fail because they need a
 /// source-relative override primitive, not a no-op.
+fn convert_card_in_exile_to_target_filter(card: &CardInExile) -> ConvResult<TargetFilter> {
+    match card {
+        CardInExile::TheFirstCardExiledThisWay => Ok(TargetFilter::ExiledCardByIndex { index: 0 }),
+        CardInExile::TheSecondCardExiledThisWay => Ok(TargetFilter::ExiledCardByIndex { index: 1 }),
+        _ => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "TargetFilter",
+            needed_variant: format!("CardInExile variant: {card:?}"),
+        }),
+    }
+}
+
 fn convert_copy_effects(effects: &CopyEffects) -> ConvResult<Vec<ContinuousModification>> {
     let list = match effects {
         CopyEffects::NoCopyEffects => return Ok(Vec::new()),
@@ -3123,9 +3238,10 @@ mod tests {
 
     use super::*;
     use crate::schema::types::{
-        CardType, Condition, CopyEffect, CopyEffects, FutureReplacableEventWouldDealDamage,
-        GameNumber, Permanent, Permanents, ReplacementActionWouldDealDamage,
-        ReplacementActionWouldEnter, Rule, SingleDamageSource, SuperType,
+        CardInExile, CardType, Condition, CopyEffect, CopyEffects,
+        FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
+        ReplacementActionWouldDealDamage, ReplacementActionWouldEnter, Rule, SingleDamageSource,
+        SuperType,
     };
 
     #[test]
@@ -3564,5 +3680,58 @@ mod tests {
                     controller: ControllerRef::Opponent,
                 })
         )));
+    }
+
+    #[test]
+    fn exile_two_cards_from_graveyards_cost_converts_to_exile_cost() {
+        use crate::schema::types::{CardType, CardsInGraveyard, Player, Players};
+
+        let cost = ReplacementActionWouldEnterCost::ExileTwoCardsFromAmongPlayersGraveyards(
+            CardsInGraveyard::IsCardtype(CardType::Creature),
+            Box::new(Players::SinglePlayer(Box::new(Player::You))),
+        );
+        let result = convert_enter_cost(&cost);
+        assert!(result.is_ok());
+        let ability_cost = result.unwrap();
+        assert!(matches!(
+            ability_cost,
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter: Some(_),
+            }
+        ));
+    }
+
+    #[test]
+    fn enter_as_copy_of_exiled_converts_to_become_copy_with_indexed_filter() {
+        use crate::schema::types::CopyEffects;
+
+        let action = ReplacementActionWouldEnter::EnterAsCopyOfExiled(
+            CardInExile::TheFirstCardExiledThisWay,
+            CopyEffects::NoCopyEffects,
+        );
+        let def = build_replacement_exec(&action, &TargetFilter::SelfRef)
+            .unwrap()
+            .2;
+        assert!(matches!(
+            &*def.effect,
+            Effect::BecomeCopy {
+                target: TargetFilter::ExiledCardByIndex { index: 0 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn card_in_exile_to_target_filter_maps_indices_correctly() {
+        assert!(matches!(
+            convert_card_in_exile_to_target_filter(&CardInExile::TheFirstCardExiledThisWay),
+            Ok(TargetFilter::ExiledCardByIndex { index: 0 })
+        ));
+        assert!(matches!(
+            convert_card_in_exile_to_target_filter(&CardInExile::TheSecondCardExiledThisWay),
+            Ok(TargetFilter::ExiledCardByIndex { index: 1 })
+        ));
     }
 }

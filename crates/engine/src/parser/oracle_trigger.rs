@@ -504,6 +504,22 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         return results;
     }
 
+    // CR 603.1 + CR 603.2: Disjunctive zone-change triggers ("whenever [A], or [B],
+    // or [C]") must stay a single `TriggerDefinition` with `zone_change_clauses`.
+    // `split_cross_subject_event_compound` mis-splits Syr Konrad's "another creature
+    // dies, or a creature card is put into a graveyard..." at the first ", or "
+    // because the second clause begins with "a creature card". That produces two
+    // separate triggers that can both fire on the same zone-change event, doubling
+    // the damage (issue #3299).
+    if parse_disjunctive_zone_change_condition(&condition).is_some() {
+        return vec![parse_trigger_line_with_index_ir(
+            text,
+            card_name,
+            base_trigger_index,
+            ctx,
+        )];
+    }
+
     // Pattern 2: disjunctive shared-subject event list — "whenever ~ A, B, or C"
     // (N-way serial) or "whenever ~ A or B" (2-way). CR 603.1: each listed event
     // is its own trigger condition, all sharing the one subject.
@@ -2655,6 +2671,14 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             // CR 110.5b: Not(SourceIsTapped) → source is untapped.
             StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::SourceIsTapped),
+            }),
+            // CR 725.1: "if you're not the monarch" / "if an opponent is the monarch".
+            StaticCondition::IsMonarch => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::IsMonarch),
+            }),
+            // CR 725.1: "if there is a monarch" (negated no-monarch check).
+            StaticCondition::NoMonarch => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::NoMonarch),
             }),
             // CR 103.1: "you weren't the starting player" → Not(WasStartingPlayer).
             StaticCondition::WasStartingPlayer { controller } => Some(TriggerCondition::Not {
@@ -6064,15 +6088,21 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
 /// the discard-remainder convenience wrapper for call sites that don't read the
 /// tail.
 ///
-/// Recognizes only the *player* recipient axis — "a player", "an opponent",
-/// "you", "a player or planeswalker". The object-recipient axis (a
-/// creature/permanent/planeswalker that took the damage) is deliberately NOT
-/// matched here: it is reachable only through
-/// [`parse_object_recipient_pt_gate`], which requires the trailing "equal to
-/// that <recipient>'s toughness/power" qualifier. Folding the object axis in
-/// unconditionally would silently change the `valid_target` of every existing
-/// DamageDone trigger that names an object recipient (e.g. Questing Beast's
-/// "deals combat damage to a planeswalker"), so the object axis stays gated.
+/// Recognizes the *player* recipient axis only ("a player", "an opponent",
+/// "you", "a player or planeswalker"). The object recipient axis ("a creature",
+/// "a permanent", typed object) is handled separately by the guarded
+/// [`parse_object_recipient_filter`], which the call sites try BEFORE this
+/// player-axis parser. Keeping the object arm out of this parser is what lets a
+/// mixed "to a creature or player" / "to a creature or opponent" recipient
+/// (Crovax, Flesh Reaver) decline both parsers and leave `valid_target = None`
+/// (any recipient fires) rather than being mis-scoped to `Typed([Creature])`
+/// with its player leg dropped.
+///
+/// The Taii-Wakeen equal-to-P/T shape is the sole province of
+/// [`parse_object_recipient_pt_gate`] (which additionally yields the
+/// recipient-relative `QuantityRef`); a bare object recipient ("to a creature"
+/// with no P/T tail, Strax's class) is the sole province of
+/// [`parse_object_recipient_filter`].
 fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
@@ -8684,11 +8714,25 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
             continue;
         }
 
+        let has_attachment_clause = attachment_prop.is_some();
         let filter = apply_attachment_prop(filter, attachment_prop);
 
         let mut def = make_base();
         def.mode = TriggerMode::YouAttack;
+        // CR 508.3a: a lexical "attack a player" restriction narrows the attacked
+        // target through the purpose-built attack_target_filter channel, not the
+        // valid_target overload.
         if attacks_player {
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
+        }
+        // CR 303.4e + CR 506.2: an attachment-relation subject ("enchanted by an
+        // Aura / equipped by an Equipment you control") binds "you control" to the
+        // attachment, not the attacker — the enchanted/equipped creature may be
+        // controlled by an opponent. Set the attacking-player gate to pass-through
+        // (any attacking player) WITHOUT an attack-target restriction, so the trigger
+        // fires regardless of whether the attack targets a player, planeswalker, or
+        // battle (Killian, Decisive Mentor; #3314).
+        if has_attachment_clause {
             def.valid_target = Some(TargetFilter::Player);
         }
         if min_count > 1 {
@@ -12433,6 +12477,66 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{CastFrequency, StaticMode};
 
+    // --- Fix B: damage-recipient qualifier (player axis preserved + object axis added) ---
+
+    #[test]
+    fn parse_damage_to_qualifier_preserves_player_recipients() {
+        // CR 120.3 + CR 102.2: player-recipient phrasings must keep their
+        // existing player-scope filters after the object arm was added.
+        assert_eq!(
+            parse_damage_to_qualifier("to a player"),
+            Some(TargetFilter::Player)
+        );
+        assert_eq!(
+            parse_damage_to_qualifier("to you"),
+            Some(TargetFilter::Controller)
+        );
+        // "to an opponent" → controller-only Typed (the player-scope convention).
+        match parse_damage_to_qualifier("to an opponent") {
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            })) => {
+                assert!(type_filters.is_empty(), "opponent filter is player-scope");
+                assert!(properties.is_empty());
+            }
+            other => panic!("expected opponent player-scope filter, got {other:?}"),
+        }
+        // "to a player or planeswalker" stays an Or naming a player slot.
+        match parse_damage_to_qualifier("to a player or planeswalker") {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+            }
+            other => panic!("expected Or {{ Player, Planeswalker }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn glory_of_battle_trigger_gates_on_creature_recipient() {
+        // CR 120.3: "Whenever ~ deals damage to a creature, put a +1/+1 counter
+        // on ~" (Strax, Sontaran Nurse — Glory of Battle) must set a typed
+        // creature `valid_target` so the trigger fires only on creature damage.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Strax deals damage to a creature, put a +1/+1 counter on Strax.",
+            "Strax, Sontaran Nurse",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger");
+        match &trigger.valid_target {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature-scoped valid_target, got {other:?}"),
+        }
+    }
+
     fn blocking_source_beyond_first_expr() -> QuantityExpr {
         let count_minus_one = QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref {
@@ -12669,6 +12773,32 @@ mod tests {
         assert_eq!(clause.destination, Some(Zone::Battlefield));
         assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
+    }
+
+    /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
+    /// Syr Konrad's disjunctive zone-change condition into separate triggers.
+    #[test]
+    fn parse_syr_konrad_trigger_lines_stays_single_disjunctive_trigger() {
+        const ORACLE: &str = "Whenever another creature dies, or a creature card \
+            is put into a graveyard from anywhere other than the battlefield, or a \
+            creature card leaves your graveyard, Syr Konrad, the Grim deals 1 damage \
+            to each opponent.";
+        let defs = parse_trigger_lines(ORACLE, "Syr Konrad, the Grim");
+        assert_eq!(
+            defs.len(),
+            1,
+            "expected one disjunctive trigger, got {} triggers: {:?}",
+            defs.len(),
+            defs.iter()
+                .map(|d| d.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            defs[0].zone_change_clauses.len(),
+            3,
+            "expected 3 zone_change_clauses, got {:?}",
+            defs[0].zone_change_clauses
+        );
     }
 
     // SHAPE TEST — issue #411: Syr Konrad's three-way disjunctive zone-change
@@ -13453,6 +13583,32 @@ mod tests {
     }
 
     #[test]
+    fn impostor_syndrome_copy_it_binds_to_damage_source() {
+        let def = parse_trigger_line(
+            "Whenever a nontoken creature you control deals combat damage to a player, \
+             create a token that's a copy of it, except it isn't legendary.",
+            "Impostor Syndrome",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        match def.execute.as_ref().unwrap().effect.as_ref() {
+            Effect::CopyTokenOf {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+                assert!(additional_modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::RemoveSupertype {
+                        supertype: crate::types::card_type::Supertype::Legendary
+                    }
+                )));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn renowned_creature_damage_subject_keeps_designation_filter() {
         let def = parse_trigger_line(
             "Whenever a renowned creature you control deals combat damage to a player, double the number of +1/+1 counters on it.",
@@ -13737,7 +13893,8 @@ mod tests {
                 *sub.effect,
                 Effect::Manifest {
                     target: TargetFilter::TriggeringPlayer,
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
@@ -18277,6 +18434,21 @@ mod tests {
             "Killian, Decisive Mentor",
         );
         assert_eq!(def.mode, TriggerMode::YouAttack);
+        // CR 303.4e + CR 506.2: the attachment-relation clause ("enchanted by an
+        // Aura you control") makes the attacking-player gate pass-through
+        // (`valid_target == Player`) — the enchanted attacker may be
+        // opponent-controlled — WITHOUT any attacked-target narrowing
+        // (`attack_target_filter == None`), since this text has no "attack a
+        // player" restriction. (#3314)
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Player),
+            "attachment-relation subject ⇒ permissive attacking-player pass-through"
+        );
+        assert_eq!(
+            def.attack_target_filter, None,
+            "no \"attack a player\" clause ⇒ no attacked-target narrowing"
+        );
         let filter = def.valid_card.as_ref().expect("valid_card set");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -22197,6 +22369,55 @@ mod tests {
         }
     }
 
+    /// Issue #1307: Moseo, Vein's New Dean's Infusion ability — an end-step
+    /// trigger gated by an intervening-if condition whose effect's
+    /// `ChangeZone` target filter bears a `Cmc` bound defined by a trailing
+    /// "where X is …" clause. `apply_where_x_effect_expression` previously had
+    /// no `Effect::ChangeZone` arm, so the filter's bound stayed an unresolved
+    /// bare `Variable("X")` (resolves to 0 at runtime via
+    /// `QuantityRef::Variable`), making the reanimation target only mana value
+    /// 0 or less and the ability appear to never fire for any real graveyard
+    /// card. The fix threads the where-X rewrite into `ChangeZone`'s target
+    /// filter the same way `SearchLibrary`/`Seek` already do.
+    #[test]
+    fn moseo_infusion_end_step_reanimate_binds_cmc_to_life_gained_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained life this turn, return up to one target creature card with mana value X or less from your graveyard to the battlefield, where X is the amount of life you gained this turn.",
+            "Moseo, Vein's New Dean",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target,
+                ..
+            } => match target {
+                TargetFilter::Typed(typed) => {
+                    assert!(
+                        typed.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Ref {
+                                    qty: QuantityRef::LifeGainedThisTurn {
+                                        player: PlayerScope::Controller
+                                    }
+                                },
+                            }
+                        )),
+                        "expected Cmc{{LE, LifeGainedThisTurn{{Controller}}}} bound, got {:?}",
+                        typed.properties
+                    );
+                }
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected ChangeZone effect, got {other:?}"),
+        }
+    }
+
     #[test]
     fn phase_trigger_combat_on_your_turn() {
         let def = parse_trigger_line(
@@ -24580,7 +24801,20 @@ mod tests {
                 count: 2,
             })
         );
-        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        // CR 508.3a: the lexical "attack a player" restriction is an
+        // attacked-target narrowing carried by `attack_target_filter`, NOT the
+        // `valid_target` overload. With no attachment-relation clause, the
+        // attacking-player gate stays at the controller-scoped default
+        // (`valid_target == None`).
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::Player),
+            "\"attack a player\" sets the purpose-built attack_target_filter"
+        );
+        assert_eq!(
+            def.valid_target, None,
+            "no attachment clause ⇒ controller-scoped default, not the Player overload"
+        );
         assert!(def.execute.is_some());
     }
 
@@ -25815,6 +26049,60 @@ mod tests {
     }
 
     #[test]
+    fn bridge_opponent_is_monarch_intervening_if() {
+        let sc = StaticCondition::And {
+            conditions: vec![
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::IsMonarch),
+                },
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::NoMonarch),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_trigger_condition(&sc),
+            Some(TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::IsMonarch),
+                    },
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::NoMonarch),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn queen_marchesa_upkeep_attaches_opponent_monarch_intervening_if() {
+        let oracle = "At the beginning of your upkeep, if an opponent is the monarch, create a 1/1 black Assassin creature token with haste.";
+        let def = parse_trigger_line(oracle, "Queen Marchesa");
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        let condition = def.condition.as_ref().expect("intervening-if must parse");
+        assert!(matches!(
+            condition,
+            TriggerCondition::And {
+                conditions,
+            } if conditions.len() == 2
+                && matches!(
+                    conditions[0],
+                    TriggerCondition::Not {
+                        condition: ref inner,
+                    } if matches!(inner.as_ref(), TriggerCondition::IsMonarch)
+                )
+                && matches!(
+                    conditions[1],
+                    TriggerCondition::Not {
+                        condition: ref inner,
+                    } if matches!(inner.as_ref(), TriggerCondition::NoMonarch)
+                )
+        ));
+    }
+
+    #[test]
     fn bridge_initiative() {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::IsInitiative),
@@ -26034,6 +26322,72 @@ mod tests {
                 "Breena must gate on defending player life exceeding another opponent, got {other:?}"
             ),
         }
+        let execute = def.execute.as_deref().expect("Breena must have execute");
+        let Effect::Draw { target, .. } = execute.effect.as_ref() else {
+            panic!(
+                "Breena draw clause must lower to Draw, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player draws must bind to TriggeringPlayer"
+        );
+    }
+
+    #[test]
+    fn ellie_brick_master_attack_token_trigger() {
+        // Issue #1325: attack trigger creates Cordyceps Infected for the attacking player.
+        let def = parse_trigger_line(
+            "Whenever a player attacks one of your opponents, that attacking player creates a tapped 1/1 black Fungus Zombie creature token named Cordyceps Infected that's attacking that opponent.",
+            "Ellie, Brick Master",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_source, Some(TargetFilter::Player));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let execute = def.execute.as_deref().expect("Ellie must have execute");
+        let Effect::Token {
+            owner,
+            name,
+            tapped,
+            enters_attacking,
+            types,
+            colors,
+            power,
+            toughness,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("Ellie must lower to Token, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *owner,
+            TargetFilter::TriggeringPlayer,
+            "that attacking player creates must bind token owner to TriggeringPlayer"
+        );
+        assert_eq!(name, "Cordyceps Infected");
+        assert!(*tapped, "Cordyceps Infected must enter tapped");
+        assert!(
+            *enters_attacking,
+            "Cordyceps Infected must enter attacking that opponent"
+        );
+        assert!(
+            types.iter().any(|t| t.eq_ignore_ascii_case("Fungus"))
+                && types.iter().any(|t| t.eq_ignore_ascii_case("Zombie")),
+            "Cordyceps Infected must be Fungus Zombie, got {types:?}"
+        );
+        assert!(
+            colors.contains(&crate::types::mana::ManaColor::Black),
+            "Cordyceps Infected must be black"
+        );
+        assert_eq!(power, &crate::types::ability::PtValue::Fixed(1));
+        assert_eq!(toughness, &crate::types::ability::PtValue::Fixed(1));
     }
 
     #[test]
@@ -29208,6 +29562,7 @@ mod tests {
                 Effect::Choose {
                     choice_type,
                     persist,
+                    ..
                 } => Some((choice_type.clone(), *persist)),
                 _ => None,
             })

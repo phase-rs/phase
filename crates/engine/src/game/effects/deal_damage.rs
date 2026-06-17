@@ -1370,8 +1370,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter,
+        ChosenAttribute, ContinuousModification, ControllerRef, Duration, FilterProp, ObjectScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -2809,6 +2809,69 @@ mod tests {
         // CR 120.3c: Damage to planeswalker removes loyalty, not damage_marked.
         assert_eq!(state.objects[&pw_id].loyalty, Some(2));
         assert_eq!(state.objects[&pw_id].damage_marked, 0);
+    }
+
+    /// Issue #3293: Joyful Stormsculptor — opponent+battle compound damage must
+    /// not hit opponent-controlled creatures.
+    #[test]
+    fn resolve_all_opponent_and_battle_they_protect_skips_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let creature_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.toughness = Some(3);
+            obj.base_toughness = Some(3);
+        }
+        let battle_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Protected Siege".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battle_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.defense = Some(3);
+            obj.base_defense = Some(3);
+            obj.counters.insert(CounterType::Defense, 3);
+            obj.chosen_attributes
+                .push(ChosenAttribute::Player(PlayerId(1)));
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle).properties(vec![
+                    FilterProp::ProtectorMatches {
+                        controller: ControllerRef::Opponent,
+                    },
+                ])),
+                player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        let p1_life_before = state.players[1].life;
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&creature_id].damage_marked, 0,
+            "opponent creatures must not be damaged"
+        );
+        assert_eq!(state.objects[&battle_id].defense, Some(2));
+        assert_eq!(state.players[1].life, p1_life_before - 1);
     }
 
     #[test]

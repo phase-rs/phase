@@ -418,6 +418,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
+        return true;
+    }
+
     if STATIC_CONTAINS_PATTERNS
         .iter()
         .any(|pattern| scan_contains(lower, pattern))
@@ -518,6 +522,16 @@ fn is_static_compound_pattern(lower: &str) -> bool {
         && scan_contains(lower, "spells")
         && scan_contains(lower, "each turn")
     {
+        return true;
+    }
+    // CR 701.55c: "If an opponent would face a villainous choice, they face that
+    // choice an additional time." (The Valeyard) leads with "if …" and contains
+    // "would ", so it is otherwise classified as a replacement and never reaches
+    // the static parser. It is in fact an extra-instance rule-modifying static
+    // (`StaticMode::GrantsExtraVillainousChoice`, the CR 701.55c twin of
+    // `GrantsExtraVote`). Route it to Priority 7 static dispatch — which runs
+    // before the Priority 8 replacement gate — so it lowers to the static.
+    if scan_contains(lower, "face a villainous choice") && scan_contains(lower, "additional time") {
         return true;
     }
     false
@@ -815,5 +829,12 @@ mod tests {
         assert!(!is_cast_spells_alternative_cost_pattern(
             "you may pay {0} rather than pay the mana cost for zombie creature spells you cast."
         ));
+    }
+
+    #[test]
+    fn classifies_tiered_enters_with_additional_counters_static() {
+        let lower = "each other vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. otherwise, it enters with three additional +1/+1 counters on it.";
+        assert!(is_static_pattern(lower));
+        assert!(is_replacement_pattern(lower));
     }
 }

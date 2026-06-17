@@ -21,7 +21,8 @@ use engine::game::scenario::P0;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    ChooseFromZoneConstraint, Chooser, Effect, ResolvedAbility, TargetFilter, ZoneOwner,
+    CardSelectionMode, ChooseFromZoneConstraint, Chooser, Effect, ResolvedAbility, TargetFilter,
+    ZoneOwner,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -163,6 +164,7 @@ fn atraxa_etb_choice_offers_revealed_library_not_graveyard() {
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
+                selection: CardSelectionMode::Chosen,
                 constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
             },
             vec![],

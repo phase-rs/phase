@@ -1,0 +1,156 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "PreLoweredStatic": {
+        "mode": {
+          "EntersWithAdditionalCounters": {
+            "counter_type": "P1P1",
+            "count": 1
+          }
+        },
+        "affected": {
+          "type": "And",
+          "filters": [
+            {
+              "type": "Typed",
+              "type_filters": [],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "Cmc",
+                  "comparator": "LE",
+                  "value": {
+                    "type": "Fixed",
+                    "value": 4
+                  }
+                }
+              ]
+            },
+            {
+              "type": "Or",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Artifact",
+                    {
+                      "Subtype": "Vehicle"
+                    }
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "Another"
+                    }
+                  ]
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "Another"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "modifications": [],
+        "condition": null,
+        "affected_zone": null,
+        "effect_zone": null,
+        "active_zones": [],
+        "characteristic_defining": false,
+        "description": "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it."
+      }
+    },
+    {
+      "PreLoweredStatic": {
+        "mode": {
+          "EntersWithAdditionalCounters": {
+            "counter_type": "P1P1",
+            "count": 3
+          }
+        },
+        "affected": {
+          "type": "And",
+          "filters": [
+            {
+              "type": "Typed",
+              "type_filters": [],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "Cmc",
+                  "comparator": "GT",
+                  "value": {
+                    "type": "Fixed",
+                    "value": 4
+                  }
+                }
+              ]
+            },
+            {
+              "type": "Or",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Artifact",
+                    {
+                      "Subtype": "Vehicle"
+                    }
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "Another"
+                    }
+                  ]
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "Another"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "modifications": [],
+        "condition": null,
+        "affected_zone": null,
+        "effect_zone": null,
+        "active_zones": [],
+        "characteristic_defining": false,
+        "description": "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it."
+      }
+    },
+    {
+      "Keyword": {
+        "Crew": {
+          "power": 3,
+          "once_per_turn": null
+        }
+      }
+    }
+  ],
+  "source_text": "Trample\nEach other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.\nCrew 3",
+  "card_name": "Thunderous Velocipede"
+}

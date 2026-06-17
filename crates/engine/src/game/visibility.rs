@@ -526,6 +526,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         track_exiled_by_source,
         ref face_down_profile,
         count_param,
+        is_cost_payment: _,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) && zone == Zone::Hand {
@@ -549,6 +550,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
                 count_param,
+                is_cost_payment: false,
             };
         }
     }
@@ -1254,6 +1256,7 @@ mod tests {
             max: 5,
             pending_cast: pending.clone(),
             convoke_mode: None,
+            x_cost_previews: vec![],
         };
         state.pending_cast = Some(pending);
 

@@ -73,6 +73,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // gates the per-card `CastingPermission::PlayFromExile` on a live
             // source. Not registry-keyed (mirrors the cast-permission cluster).
             | StaticMode::LinkedCollectionCounterPlayPermission
+            // CR 122.2 + CR 113.6b: CountersPersistAcrossZones carries the
+            // excluded-zone list. Runtime enforcement is the from-zone counter
+            // guard zones.rs::counters_persist_on_move (called from
+            // apply_zone_exit_cleanup) (Me, the Immortal; Skullbriar).
+            | StaticMode::CountersPersistAcrossZones { .. }
             | StaticMode::CastWithKeyword { .. }
             // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
@@ -394,6 +399,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
+        TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
         TargetFilter::StackAbility {
             controller: None,
@@ -481,6 +487,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::BlockingAlone => parts.push("blocking alone".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),
+            FilterProp::ProtectorMatches { .. } => parts.push("protector matches".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {
                 parts.push("haste or controlled since turn began".into())
@@ -1162,6 +1169,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
@@ -1205,6 +1213,19 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
+        }
+        QuantityRef::TrackedSetAggregate { function, property } => {
+            let func = match function {
+                AggregateFunction::Max => "max",
+                AggregateFunction::Min => "min",
+                AggregateFunction::Sum => "total",
+            };
+            let prop = match property {
+                ObjectProperty::Power => "power",
+                ObjectProperty::Toughness => "toughness",
+                ObjectProperty::ManaValue => "mana value",
+            };
+            format!("{func} {prop} of those cards")
         }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
         QuantityRef::LifeLostThisTurn { player } => {
@@ -2087,6 +2108,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 },
             ));
         }
+        Effect::ExchangeLifeTotals { player_a, player_b } => {
+            d.push(("player_a".into(), fmt_target(player_a)));
+            d.push(("player_b".into(), fmt_target(player_b)));
+        }
         Effect::ChangeZone {
             origin,
             destination,
@@ -2189,6 +2214,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Choose {
             choice_type,
             persist,
+            ..
         } => {
             d.push(("choice".into(), fmt_choice_type(choice_type)));
             if *persist {
@@ -5686,6 +5712,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
         QuantityRef::DistinctColorsAmongPermanents { .. } => {
@@ -5696,6 +5723,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
+        QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),

@@ -343,6 +343,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
@@ -438,6 +439,7 @@ mod tests {
             mode_costs: Vec::new(),
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         };
         let pending = PendingTrigger {
             source_id,

@@ -3,7 +3,7 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, CardPlayMode, CastTimingPermission, CastingPermission, ChoiceType,
     ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
     Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
-    PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
+    PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
     RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
@@ -4343,6 +4343,32 @@ pub(super) fn concrete_cost_for_x(
     apply_cost_floor(state, player, object_id, &mut cost);
     apply_cost_floor_with_selected_targets(state, player, object_id, ability, &mut cost);
     cost
+}
+
+/// CR 601.2f + CR 702.41a: Build per-X total cost previews for the Choose-X UI.
+/// Each entry is `(x, concrete_cost)` after Affinity/reductions/floors. Empty
+/// when `base_cost` is unavailable or the legal range exceeds 100 values.
+pub(super) fn build_choose_x_cost_previews(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    min: u32,
+    max: u32,
+) -> Vec<(u32, ManaCost)> {
+    let Some(base) = pending.base_cost.as_ref() else {
+        return Vec::new();
+    };
+    if min > max || max.saturating_sub(min) > 100 {
+        return Vec::new();
+    }
+    (min..=max)
+        .map(|x| {
+            (
+                x,
+                concrete_cost_for_x(state, player, pending.object_id, &pending.ability, base, x),
+            )
+        })
+        .collect()
 }
 
 /// CR 601.2f + CR 107.3g: Re-derive a pending `{X}` spell's full concrete cost
@@ -11317,6 +11343,25 @@ fn can_pay_ability_cost_now(
     )
 }
 
+/// CR 602.2a: Whether `player` may begin to activate an activated ability on
+/// a permanent controlled by `source_controller`.
+fn player_may_begin_activating(
+    state: &GameState,
+    player: PlayerId,
+    source_controller: PlayerId,
+    activator_filter: Option<&PlayerFilter>,
+) -> bool {
+    match activator_filter {
+        None | Some(PlayerFilter::Controller) => player == source_controller,
+        Some(PlayerFilter::All) => true,
+        Some(PlayerFilter::Opponent) => {
+            super::players::is_opponent(state, source_controller, player)
+        }
+        // Activator permission is only modeled for controller / all / opponent today.
+        Some(_) => player == source_controller,
+    }
+}
+
 pub fn can_activate_ability_now(
     state: &GameState,
     player: PlayerId,
@@ -11326,13 +11371,18 @@ pub fn can_activate_ability_now(
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
     };
-    if obj.controller != player {
-        return false;
-    }
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
     else {
         return false;
     };
+    if !player_may_begin_activating(
+        state,
+        player,
+        obj.controller,
+        ability_def.activator_filter.as_ref(),
+    ) {
+        return false;
+    }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't activate abilities that aren't mana abilities.
@@ -11561,16 +11611,21 @@ pub fn handle_activate_ability(
         .get(&source_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
-    // CR 602.2: Only an object's controller can activate its activated ability.
-    if obj.controller != player {
-        return Err(EngineError::NotYourPriority);
-    }
+    // CR 602.2a: Only players permitted by `activator_filter` may begin activation.
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
     else {
         return Err(EngineError::InvalidAction(
             "Invalid ability index".to_string(),
         ));
     };
+    if !player_may_begin_activating(
+        state,
+        player,
+        obj.controller,
+        ability_def.activator_filter.as_ref(),
+    ) {
+        return Err(EngineError::NotYourPriority);
+    }
     // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {
@@ -20437,6 +20492,37 @@ mod tests {
         // affordable X effectively costs 1 less mana — max X is 3 higher.
         let (mut affinity_state, affinity_spell) = build_state(3);
         let affinity_max = choose_max(&mut affinity_state, affinity_spell);
+
+        match &affinity_state.waiting_for {
+            WaitingFor::ChooseXValue {
+                x_cost_previews,
+                min,
+                max,
+                ..
+            } => {
+                assert_eq!(*min, 0);
+                assert_eq!(*max, affinity_max);
+                assert_eq!(
+                    x_cost_previews.len(),
+                    (max - min + 1) as usize,
+                    "Choose-X UI must receive per-X cost previews"
+                );
+                let cost_at_3 = x_cost_previews
+                    .iter()
+                    .find(|(x, _)| *x == 3)
+                    .map(|(_, cost)| cost.clone())
+                    .expect("preview for X=3");
+                assert_eq!(
+                    cost_at_3,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                        generic: 0,
+                    },
+                    "3 creature Affinity on {{X}}{{B}}{{B}} at X=3 must preview as two black mana"
+                );
+            }
+            other => panic!("expected ChooseXValue with previews, got {other:?}"),
+        }
 
         assert_eq!(
             affinity_max,

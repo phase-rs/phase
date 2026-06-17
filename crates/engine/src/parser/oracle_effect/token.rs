@@ -19,7 +19,7 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
 };
@@ -74,7 +74,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
-            parse_target(target_text)
+            parse_target_with_ctx(target_text, ctx)
         };
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
@@ -2290,4 +2290,38 @@ mod tests {
             assert_eq!(types, expected);
         }
     }
+}
+
+#[test]
+fn copy_token_non_saga_token_you_control_issue_3294() {
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+
+    let effect = try_parse_token(
+        "create a token that's a copy of a non-saga token you control",
+        "Create a token that's a copy of a non-Saga token you control.",
+        &mut ParseContext::default(),
+    )
+    .expect("expected CopyTokenOf");
+    let Effect::CopyTokenOf {
+        target,
+        source_filter,
+        ..
+    } = effect
+    else {
+        panic!("expected CopyTokenOf, got {effect:?}");
+    };
+    assert!(source_filter.is_none());
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected Typed copy source, got {target:?}");
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Saga".to_string()
+            )))),
+        "expected Non(Saga), got {:?}",
+        tf.type_filters
+    );
+    assert!(tf.properties.contains(&FilterProp::Token));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
 }

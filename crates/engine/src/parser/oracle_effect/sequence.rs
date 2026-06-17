@@ -515,6 +515,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     // ("get +2/+0 and gain haste ... and attack this turn if able") are body
     // delimiters owned by `try_parse_compound_subject_each`, not clause splits.
     let mut compound_subject_each_sticky = false;
+    // CR 701.55a + CR 701.55d: once a villainous-choice head ("[subject] face(s)
+    // a villainous choice — ") is detected, keep the WHOLE choice block intact
+    // for the rest of the current sentence. Everything after the em-dash is one
+    // indivisible instruction whose internal "," / " then " / " and " / " or "
+    // are branch delimiters owned by `try_parse_choose_one_of_inline`, not clause
+    // splits. Without this latch the chunker bisects a branch body (e.g. Ensnared
+    // by the Mara: "... until they exile a nonland card, then you may cast that
+    // card ...") and the lead-in is severed into a failing `Unimplemented{face}`.
+    let mut villainous_choice_sticky = false;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -548,6 +557,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     }
                 }
             }
+            ',' if paren_depth == 0
+                && !in_single_quote
+                && !in_double_quote
+                // CR 701.55a: inside a latched villainous-choice block, "," is a
+                // branch delimiter (", then" / ", or"), not a clause boundary.
+                && villainous_choice_sticky =>
+            {
+                current.push(ch);
+            }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
                 if let Some((boundary, chars_to_skip)) =
@@ -563,16 +581,41 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     current.push(ch);
                 }
             }
-            '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
+            // A sentence-ending period closes the clause (text-structure rule;
+            // no governing CR). Real quoted ability text in Oracle text always
+            // uses DOUBLE quotes, so a dangling single-quote here can only have
+            // been opened by a possessive/contraction apostrophe (e.g. "~'s
+            // power gains skulk until end of turn. Goad it." — The Master,
+            // Mesmerist). Such a "quote" must not swallow a sentence boundary:
+            // split here and reset the phantom single-quote state.
+            // `in_double_quote` (a genuine quoted ability) still suppresses the
+            // split.
+            '.' if paren_depth == 0 && !in_double_quote => {
+                in_single_quote = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
+                // CR 701.55a: a true sentence boundary ends the choice block.
+                villainous_choice_sticky = false;
                 while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
                     chars.next();
                 }
             }
             _ => {
                 current.push(ch);
+                // CR 701.55a: latch the villainous-choice block once the chunk
+                // accumulated so far contains the choice opener "a villainous
+                // choice — " (em-dash + trailing space). Anchored on the full
+                // opener so it covers "face"/"faces" and any chooser prefix
+                // ("that creature's controller faces a villainous choice — ").
+                if !villainous_choice_sticky
+                    && nom_primitives::scan_contains(
+                        &current.to_ascii_lowercase(),
+                        "a villainous choice \u{2014} ",
+                    )
+                {
+                    villainous_choice_sticky = true;
+                }
                 // Detect bare " and " at word boundary followed by an imperative verb.
                 // Handles patterns like "you lose 1 life and create a Treasure token".
                 // Uses a restricted verb list to avoid false positives on noun phrases
@@ -782,6 +825,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || choice_partition_remainder
                         || compound_subject_each
                         || compound_subject_each_sticky // CR 109.5 + CR 115.1: keep the whole compound-subject body intact
+                        || villainous_choice_sticky // CR 701.55a: keep the whole villainous-choice block intact
                         || inside_otherwise_body
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
@@ -1470,6 +1514,33 @@ fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
     .parse(rest)
 }
 
+/// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
+/// player" clause joined by a bare " and " is a fresh player-scoped clause start
+/// (Slitherwisp "you draw a card and each opponent loses 1 life"; Curry Favor;
+/// Disinformation Campaign; Bad Deal; Clockwork Fox). Without this arm the
+/// conjunct is swallowed by the first effect and the player-scoped half is
+/// dropped. The discriminator is a conjugated player-action verb immediately
+/// after the "each opponent "/"each player " subject — a bare-noun continuation
+/// (Goblin Chainwhirler's "... and each creature you control") has no such verb
+/// and is left un-split, preserving the single DamageAll. Player-scope sibling of
+/// `starts_target_continuous_clause_lower`.
+fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((tag("each opponent "), tag("each player "))).parse(s)?;
+    value(
+        (),
+        alt((
+            tag("loses "),
+            tag("gains "),
+            tag("draws "),
+            tag("discards "),
+            tag("mills "),
+            tag("sacrifices "),
+            tag("exiles "),
+        )),
+    )
+    .parse(rest)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -1704,6 +1775,13 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_they_continuous_clause_lower` helper) rather than a new tuple
     // element so the enclosing `alt(...)` cluster stays under nom's 21-arm limit.
     .or(value((), starts_target_continuous_clause_lower))
+    // CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a fresh "each opponent"/"each
+    // player" conjunct + conjugated player-action verb is a player-scoped clause
+    // start (Slitherwisp, Curry Favor, Disinformation Campaign, Bad Deal,
+    // Clockwork Fox). Trailing `.or()` arm (mirroring
+    // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
+    // under nom's 21-arm limit.
+    .or(value((), starts_each_player_predicate_clause_lower))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -2504,6 +2582,14 @@ pub(super) fn apply_clause_continuation(
                     | Effect::ChangeZone {
                         face_down_profile: fdp @ Some(_),
                         ..
+                    }
+                    // CR 708.2a: "put the top N ... onto the battlefield face
+                    // down" lowers to `Effect::Manifest` (Cybership). Overwrite
+                    // the seeded vanilla 2/2 profile with the spec's
+                    // characteristics ("2/2 Cyberman artifact creatures").
+                    | Effect::Manifest {
+                        profile: fdp @ Some(_),
+                        ..
                     } => {
                         *fdp = Some(profile);
                         break;
@@ -2523,6 +2609,7 @@ pub(super) fn apply_clause_continuation(
                     filter: None,
                     chooser,
                     up_to: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
                     constraint: None,
                 },
             ));
@@ -3975,6 +4062,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Seek { .. }
         | Effect::SetLifeTotal { .. }
         | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
@@ -4515,7 +4603,14 @@ pub(super) fn parse_followup_continuation_ast(
         // preceding Mill/ChangeZone/ChangeZoneAll carries `face_down_profile`).
         // Refines the face-down profile with the specified characteristics. Placed
         // BEFORE the broad Mill/Dig from-among arm so it claims the spec sentence.
-        Effect::Mill { .. } | Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+        Effect::Mill { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        // CR 701.40a + CR 708.2a: "put the top N ... onto the battlefield face
+        // down" lowers to `Effect::Manifest` (Cybership), seeded with a
+        // `Some(_)` profile by the put-clause. The trailing "They're 2/2 Cyberman
+        // artifact creatures." spec refines that seed via the back-walk patcher.
+        | Effect::Manifest { profile: Some(_), .. }
             if face_down_profile_spec.is_some() =>
         {
             let profile = face_down_profile_spec.clone()?;
@@ -7011,6 +7106,69 @@ mod tests {
         assert_eq!(face_down_profile, Some(FaceDownProfile::vanilla_2_2()));
     }
 
+    /// CR 701.40a + CR 708.2a + CR 110.2a: Cybership's two-sentence body —
+    /// "put the top two cards of [a player]'s library onto the battlefield face
+    /// down under your control. They're 2/2 Cyberman artifact creatures." — must
+    /// assemble into an `Effect::Manifest` whose `profile` is refined from the
+    /// seeded vanilla 2/2 to the Cyberman characteristics by the back-walk
+    /// patcher, and whose `enters_under` carries the controller override.
+    #[test]
+    fn cybership_put_top_face_down_manifest_profile_chain() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Put the top two cards of your library onto the battlefield face down under your control. They're 2/2 Cyberman artifact creatures.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        // No Unimplemented{they're} anywhere in the chain.
+        for d in &effects {
+            assert!(
+                !matches!(&*d.effect, Effect::Unimplemented { name, .. } if name == "they're"),
+                "the 'They're ...' clause must not produce Unimplemented, got {:?}",
+                d.effect
+            );
+        }
+
+        let manifest = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::Manifest { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a Manifest effect, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+
+        let Effect::Manifest {
+            count,
+            profile,
+            enters_under,
+            ..
+        } = &*manifest.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 }, "top TWO cards");
+        assert_eq!(
+            *enters_under,
+            Some(ControllerRef::You),
+            "under your control"
+        );
+        let profile = profile.as_ref().expect("manifest profile must be set");
+        assert_eq!(profile.power, Some(2));
+        assert_eq!(profile.toughness, Some(2));
+        assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
+    }
+
     /// Parser AST-shape test (issue #420). Birthing Ritual's full triggered-
     /// ability effect text must assemble into a `Dig` → `Sacrifice` chain where
     /// the "if you do, you may put a creature card ... onto the battlefield"
@@ -7149,6 +7307,7 @@ mod tests {
             chooser: Chooser::Opponent,
             up_to: false,
             constraint: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         };
         let result = parse_followup_continuation_ast(
             "Put the chosen cards into your graveyard and the rest into your hand.",
@@ -7175,6 +7334,7 @@ mod tests {
             chooser: Chooser::Opponent,
             up_to: false,
             constraint: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         };
         let result = parse_followup_continuation_ast(
             "Shuffle the chosen cards into your library and put the rest into your hand.",
@@ -7699,6 +7859,57 @@ mod tests {
         assert!(!starts_bare_and_clause("target creature you control"));
     }
 
+    /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: A second "each opponent"/"each
+    /// player" conjunct joined by a bare " and " is a fresh player-scoped clause
+    /// start when followed by a conjugated player-action verb. Slitherwisp ("you
+    /// draw a card and each opponent loses 1 life"), Curry Favor, Disinformation
+    /// Campaign, Bad Deal, Clockwork Fox. The conjugated verb immediately after
+    /// the subject is the discriminator; a bare-noun continuation (Goblin
+    /// Chainwhirler's "and each creature you control") has no such verb.
+    #[test]
+    fn bare_and_clause_starts_on_each_player_predicate_subject() {
+        // Verb-axis coverage for "each opponent".
+        assert!(starts_bare_and_clause("each opponent loses 1 life"));
+        assert!(starts_bare_and_clause("each opponent discards a card"));
+        assert!(starts_bare_and_clause("each opponent discards two cards"));
+        assert!(starts_bare_and_clause("each opponent draws a card"));
+        assert!(starts_bare_and_clause("each opponent loses x life"));
+        // "each player" subject.
+        assert!(starts_bare_and_clause("each player loses 2 life"));
+        // NO-REGRESSION negatives:
+        // Bare-noun continuation — no conjugated player-action verb.
+        assert!(!starts_bare_and_clause("each creature you control"));
+        // Goblin Chainwhirler — "each opponent" with no verb before "and each
+        // creature ...": immediate-tag cannot match a downstream verb.
+        assert!(!starts_bare_and_clause(
+            "each opponent and each creature you control"
+        ));
+        // Possessive noun phrase — not a predicate clause.
+        assert!(!starts_bare_and_clause("each opponent's creatures"));
+    }
+
+    /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each
+    /// opponent <verb> ..." compound must split into TWO chunks (previously the
+    /// player-scoped conjunct was swallowed by the first effect and dropped).
+    /// Goblin Chainwhirler's bare-noun "and each creature you control" must stay
+    /// ONE chunk (no conjugated verb → no split).
+    #[test]
+    fn bare_and_splits_each_player_predicate_conjunct() {
+        assert_eq!(
+            clause_texts("you draw a card and each opponent loses 1 life"),
+            vec!["you draw a card", "each opponent loses 1 life"]
+        );
+        assert_eq!(
+            clause_texts("you draw two cards and each opponent discards two cards"),
+            vec!["you draw two cards", "each opponent discards two cards"]
+        );
+        // No-regression: Goblin Chainwhirler stays a single DamageAll chunk.
+        assert_eq!(
+            clause_texts("deals 1 damage to each opponent and each creature you control"),
+            vec!["deals 1 damage to each opponent and each creature you control"]
+        );
+    }
+
     /// CR 602.5 + CR 611.2c: Skulduggery — symmetric dual-target pump. The
     /// bare `" and "` between the two `"target creature ... gets +/-"` conjuncts
     /// must split so BOTH Pumps survive; previously the second (opponent-debuff)
@@ -7758,6 +7969,127 @@ mod tests {
             Some(ControllerRef::Opponent),
             "conjunct 2 must target an opponent's creature"
         );
+    }
+
+    /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: full-card discriminating gate
+    /// for the bare-and "each opponent/player <verb>" split. Slitherwisp ("you
+    /// draw a card and each opponent loses 1 life"), Curry Favor (where-X bound to
+    /// BOTH conjuncts), Bad Deal (each-opponent discards two). Before the fix the
+    /// second conjunct was swallowed by the first effect and the player-scoped
+    /// half (life loss / discard) was dropped entirely.
+    #[test]
+    fn each_player_predicate_conjunct_parses_end_to_end() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::PlayerFilter;
+
+        // --- Slitherwisp: Draw (controller) + LoseLife (opponent, amount 1). ---
+        let def = parse_effect_chain(
+            "You draw a card and each opponent loses 1 life.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let has_draw = nodes
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Draw { .. }));
+        assert!(
+            has_draw,
+            "Slitherwisp must keep the controller Draw: {nodes:?}"
+        );
+        let lose = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::LoseLife { .. }))
+            .expect("Slitherwisp's each-opponent LoseLife conjunct was dropped before the fix");
+        assert_eq!(
+            lose.player_scope,
+            Some(PlayerFilter::Opponent),
+            "life loss is scoped to each opponent"
+        );
+        let Effect::LoseLife { amount, .. } = &*lose.effect else {
+            unreachable!()
+        };
+        assert_eq!(*amount, QuantityExpr::Fixed { value: 1 });
+
+        // --- Curry Favor: GainLife{Knights} + LoseLife{opponent, X=Knights}. ---
+        let def = parse_effect_chain(
+            "You gain X life and each opponent loses X life, where X is the number of Knights you control.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let gain = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::GainLife { .. }))
+            .expect("Curry Favor must keep the controller GainLife conjunct");
+        let lose = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::LoseLife { .. }))
+            .expect("Curry Favor's each-opponent LoseLife conjunct was dropped before the fix");
+        assert_eq!(
+            lose.player_scope,
+            Some(PlayerFilter::Opponent),
+            "life loss is scoped to each opponent"
+        );
+        // where-X binds to BOTH conjuncts: neither amount is a bare Fixed(0).
+        let Effect::GainLife {
+            amount: gain_amt, ..
+        } = &*gain.effect
+        else {
+            unreachable!()
+        };
+        let Effect::LoseLife {
+            amount: lose_amt, ..
+        } = &*lose.effect
+        else {
+            unreachable!()
+        };
+        assert_ne!(
+            *gain_amt,
+            QuantityExpr::Fixed { value: 0 },
+            "X must bind on the gain conjunct (got {gain_amt:?})"
+        );
+        assert_ne!(
+            *lose_amt,
+            QuantityExpr::Fixed { value: 0 },
+            "X must bind on the loss conjunct (got {lose_amt:?})"
+        );
+        assert_eq!(
+            gain_amt, lose_amt,
+            "both conjuncts share the same where-X quantity"
+        );
+
+        // --- Bad Deal: each-opponent Discard (count 2, opponent scope) present. ---
+        let def = parse_effect_chain(
+            "You draw two cards and each opponent discards two cards. You lose 2 life and each opponent loses 4 life.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let discard = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::Discard { .. }))
+            .expect("Bad Deal's each-opponent Discard conjunct was dropped before the fix");
+        assert_eq!(
+            discard.player_scope,
+            Some(PlayerFilter::Opponent),
+            "discard is scoped to each opponent"
+        );
+        let Effect::Discard { count, .. } = &*discard.effect else {
+            unreachable!()
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
     }
 
     /// CR 611.2c: No-regression guard for the shared-target rider shape. A

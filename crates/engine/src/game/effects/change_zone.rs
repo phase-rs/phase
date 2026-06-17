@@ -58,7 +58,11 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
     (!zones.is_empty()).then_some(zones)
 }
 
-fn resolve_enters_under_player(
+/// CR 110.2a: Resolve the optional `enters_under` controller override to a
+/// concrete `PlayerId` for any battlefield-entry effect. Shared by `ChangeZone`,
+/// `ChangeZoneAll`, and `Manifest` so every entry path resolves the reference
+/// through the single canonical `ControllerRef` authority (`controller_ref_player`).
+pub(crate) fn resolve_enters_under_player(
     state: &GameState,
     ability: &ResolvedAbility,
     effect_name: &str,
@@ -551,6 +555,7 @@ pub fn resolve(
             // resolves the choice.
             face_down_profile: face_down_profile.clone(),
             count_param: 0,
+            is_cost_payment: false,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -6517,6 +6522,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let _ = apply_as_current(

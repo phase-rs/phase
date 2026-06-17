@@ -2457,6 +2457,18 @@ pub(super) fn parse_damage_player_scope(
 /// "each other player" excludes the controller (the only "other" antecedent
 /// available outside trigger context) and reduces to plain `Opponent`.
 pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter> {
+    let (filter, rest) = parse_damage_each_player_scope_with_remainder(text)?;
+    rest.chars()
+        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
+        .then_some(filter)
+}
+
+/// CR 120.2b + CR 120.3 + CR 102.2: leading "each opponent/player/foe/other
+/// opponent/other player" damage scope, returning the matched filter AND the
+/// unconsumed remainder. Unlike `parse_damage_each_player_scope` it is NOT
+/// all-consuming — used only by the multi-target damage CHAIN primary, which
+/// hands the trailing " and M damage to ..." segment back to the loop.
+fn parse_damage_each_player_scope_with_remainder(text: &str) -> Option<(PlayerFilter, &str)> {
     let (rest, filter) = preceded(
         tag("each "),
         alt((
@@ -2473,9 +2485,7 @@ pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter>
     )
     .parse(text)
     .ok()?;
-    rest.chars()
-        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
-        .then_some(filter)
+    Some((filter, rest))
 }
 
 pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
@@ -3134,6 +3144,46 @@ fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpe
         }
     }
     None
+}
+
+/// CR 115.1d: "one or two target X" / "one, two, or three target X" before a
+/// targeted phrase (Electrolyze: "among one or two target creatures and/or
+/// players").
+fn strip_bounded_target_prefix(text: &str) -> Option<(&str, MultiTargetSpec)> {
+    let lower = text.to_ascii_lowercase();
+    for (prefix, min, max) in [
+        ("one or two target ", 1usize, 2usize),
+        ("one, two, or three target ", 1, 3),
+    ] {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
+            let consumed = lower.len() - rest.len();
+            return Some((
+                text[consumed..].trim_start(),
+                MultiTargetSpec::fixed(min, max),
+            ));
+        }
+    }
+    None
+}
+
+fn strip_distribute_among_target_quantifier<'a>(
+    text: &'a str,
+    pool: &QuantityExpr,
+) -> (&'a str, Option<MultiTargetSpec>) {
+    let target_lower = text.to_lowercase();
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("any number of ").parse(target_lower.as_str())
+    {
+        let skip = target_lower.len() - rest.len();
+        return (&text[skip..], Some(multi_target_for_distribute_among(pool)));
+    }
+    if let Some((rest, spec)) = strip_bounded_targets_placeholder(text) {
+        return (rest, Some(spec));
+    }
+    if let Some((rest, spec)) = strip_bounded_target_prefix(text) {
+        return (rest, Some(spec));
+    }
+    strip_optional_target_prefix(text)
 }
 
 /// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.
@@ -3812,24 +3862,8 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let target_text = target_tp.original.trim();
 
     // CR 115.1d: Detect the target-count quantifier before the target phrase.
-    // "any number of" is capped by the distribution pool (each chosen target must
-    // receive at least one — CR 601.2d), while "up to N target ..." carries an
-    // explicit printed cap of N independent of the divided amount (Shatterskull
-    // Smashing: "X damage divided ... among up to two target creatures and/or
-    // planeswalkers"). `strip_optional_target_prefix` surfaces the latter as
-    // MultiTargetSpec { min: 0, max: N }.
-    let target_lower = target_text.to_lowercase();
-    let (stripped_target_text, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(target_lower.as_str())
-    {
-        let skip = target_lower.len() - rest.len();
-        (
-            &target_text[skip..],
-            Some(multi_target_for_distribute_among(&amount)),
-        )
-    } else {
-        strip_optional_target_prefix(target_text)
-    };
+    let (stripped_target_text, multi_target) =
+        strip_distribute_among_target_quantifier(target_text, &amount);
     let (target, _) = parse_target(stripped_target_text);
 
     Some(ParsedEffectClause {
@@ -3903,18 +3937,8 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     // CR 115.1d: Detect "any number of" quantifier before the target phrase.
     let target_text = &text[target_offset..];
-    let target_text_lower = &lower[target_offset..];
-    let (stripped_target, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(target_text_lower)
-    {
-        let skip = target_text_lower.len() - rest.len();
-        (
-            &target_text[skip..],
-            Some(multi_target_for_distribute_among(&count_expr)),
-        )
-    } else {
-        strip_optional_target_prefix(target_text)
-    };
+    let (stripped_target, multi_target) =
+        strip_distribute_among_target_quantifier(target_text, &count_expr);
     let (target, _) = parse_target(stripped_target);
 
     // Verify the "among" comes after the counter word (sanity guard against false matches).
@@ -3984,20 +4008,8 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         .or_else(|| after_damage_tp.strip_after("distributed among "))?;
     let target_text = target_tp.original.trim();
 
-    // CR 601.2d: each divide target must receive at least one unit — "any number of"
-    // corresponds to multi_target with min:0 (player may assign zero to any target).
-    let target_lower = target_text.to_lowercase();
-    let (stripped_target, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(target_lower.as_str())
-    {
-        let skip = target_lower.len() - rest.len();
-        (
-            &target_text[skip..],
-            Some(multi_target_for_distribute_among(&qty)),
-        )
-    } else {
-        strip_optional_target_prefix(target_text)
-    };
+    let (stripped_target, multi_target) =
+        strip_distribute_among_target_quantifier(target_text, &qty);
     let (target, _) = parse_target(stripped_target);
 
     // Convert the parsed QuantityExpr to PreventionAmount.
@@ -4281,15 +4293,33 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         // CDA quantity parser (`the number of … you control`, `your life total`,
         // …). Without this fallback the phrase degrades to a raw `Variable`, which
         // resolves to 0 at runtime — the damage silently no-ops.
-        let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
-            .or_else(|| {
+        let qty =
+            crate::parser::oracle_quantity::parse_event_context_quantity(qty_text).or_else(|| {
                 crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
-            })
-            .unwrap_or_else(|| QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: qty_text.to_string(),
-                },
             });
+        let qty = match qty {
+            Some(qty) => qty,
+            // CR 120.1 + CR 202.3: The typed quantity parsers declined this
+            // amount. Only the spell variable "X" resolves through the
+            // `Variable` runtime path (`quantity.rs` — `name == "X"`, or a named
+            // choice); any OTHER unrecognized phrase ("the total mana value of
+            // those exiled cards", Ensnared by the Mara) would be stored
+            // verbatim and silently resolve to 0 damage. Storing raw Oracle text
+            // as a `Variable` name is the prohibited verbatim-text-in-parser
+            // smell, so strict-fail instead: return `None` here, letting the
+            // effect lower to `Effect::Unimplemented` so coverage honestly flags
+            // the branch as unsupported rather than dealing the wrong (zero)
+            // amount. Reaching a resolvable model ("those exiled cards" as a
+            // typed exiled-this-resolution mana-value aggregate) is a future
+            // building block; until then coverage waits on the strict-failure
+            // tag rather than masking the gap.
+            None if qty_text.eq_ignore_ascii_case("x") => QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            None => return None,
+        };
         (qty, &amount_text[before_to.len() + 4..])
     } else {
         return None;
@@ -4350,6 +4380,27 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     player_filter,
                 },
                 "",
+            ));
+        }
+        // CR 120.2b + CR 120.3: multi-target chain whose FIRST segment is an
+        // each-player scope with a repeated-amount continuation (Dagger Caster:
+        // "deals 1 damage to each opponent and 1 damage to each creature your
+        // opponents control"). The all-consuming arm above rejected it because
+        // the continuation isn't punctuation-only; emit DamageEachPlayer for the
+        // player half and hand the continuation back to the chain loop (CR 120.2b
+        // independent events). NOT the " and each " compound (caught upstream by
+        // the compound parser); the chain joins two separately-amounted segments.
+        if let Some((player_filter, rem)) =
+            parse_damage_each_player_scope_with_remainder(after_to_for_classification)
+        {
+            let consumed = after_to_for_classification.len() - rem.len();
+            let rem_full = &after_to[consumed..];
+            return Some((
+                Effect::DamageEachPlayer {
+                    amount,
+                    player_filter,
+                },
+                rem_full,
             ));
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
@@ -5222,6 +5273,17 @@ pub(super) fn apply_where_x_effect_expression(
         Effect::SearchLibrary { filter, count, .. } | Effect::Seek { filter, count, .. } => {
             *filter = apply_where_x_to_filter(filter.clone(), where_x_expression);
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+        }
+        // CR 107.3i + CR 400.7: "return/put up to one target creature card with
+        // mana value X or less ..., where X is <expression>" binds the
+        // `ChangeZone` target filter's `Cmc` bound (Moseo, Vein's New Dean's
+        // Infusion ability). Without this arm the filter's bound stayed an
+        // unresolved bare `Variable("X")`, which resolves to 0 at runtime and
+        // makes the reanimation target only mana value 0 or less — silently
+        // breaking the trigger's intended behavior. Mirrors the
+        // `SearchLibrary`/`Seek` filter rewrite above.
+        Effect::ChangeZone { target, .. } => {
+            *target = apply_where_x_to_filter(target.clone(), where_x_expression);
         }
         Effect::Scry { count, .. } => {
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
