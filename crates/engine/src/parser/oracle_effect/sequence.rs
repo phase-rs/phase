@@ -1975,6 +1975,13 @@ fn local_subject_before_continuous_verb(before_and: &str, before_verb_len: usize
 /// "gain 3 life" / "lose X life" from continuous-modification "gain lifelink".
 fn next_token_is_count(s: &str) -> bool {
     let trimmed = s.trim_start();
+    // CR 107.1a + CR 121.1 + CR 119.3: a fraction-led amount ("half their life")
+    // is a valid player-action count head; the divisor word is the split
+    // discriminator. `parse_fraction_divisor` matches only half/third/tenth
+    // (with trailing space), never keyword grants ("flying"/"all abilities").
+    if crate::parser::oracle_nom::quantity::parse_fraction_divisor(trimmed).is_ok() {
+        return true;
+    }
     let first_char = match trimmed.chars().next() {
         Some(c) => c,
         None => return false,
@@ -1996,12 +2003,20 @@ fn next_token_is_count(s: &str) -> bool {
 /// article counts ("draws a card") without false-splitting continuous keyword
 /// grants such as "gains flying" or "loses all abilities".
 fn next_token_is_player_action_count(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    // CR 107.1a + CR 121.1 + CR 119.3: a fraction-led amount ("half their life")
+    // is a valid player-action count head; the divisor word is the split
+    // discriminator. `parse_fraction_divisor` matches only half/third/tenth
+    // (with trailing space), never keyword grants ("flying"/"all abilities").
+    if crate::parser::oracle_nom::quantity::parse_fraction_divisor(trimmed).is_ok() {
+        return true;
+    }
     let count = alt((
         value((), nom_primitives::parse_number),
         value((), tag::<_, _, OracleError<'_>>("x")),
     ));
     let noun = alt((tag("cards"), tag("card"), tag("life")));
-    (count, multispace1, noun).parse(s.trim_start()).is_ok()
+    (count, multispace1, noun).parse(trimmed).is_ok()
 }
 
 /// Checks if text starts with a subject-prefixed damage verb.

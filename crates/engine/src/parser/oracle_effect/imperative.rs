@@ -284,6 +284,18 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
     .parse(lower)
     {
         let qty_text = qty_tail.trim_end_matches('.').trim();
+        // CR 107.1a + CR 121.1: "cards equal to half the number of cards in
+        // their library" — fraction-led dynamic draw count, rounded per CR
+        // 107.1a. `qty_text` is already lowercase + trimmed, so call
+        // `parse_fraction_rounded` directly (no `nom_on_lower` bridge), and
+        // require full consumption before accepting the fraction expression.
+        if let Ok((rest, expr)) =
+            crate::parser::oracle_nom::quantity::parse_fraction_rounded(qty_text)
+        {
+            if rest.trim().is_empty() {
+                return Some(expr);
+            }
+        }
         if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
             return Some(QuantityExpr::Ref { qty });
         }
@@ -8903,6 +8915,55 @@ mod tests {
 
     fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
         tf.properties.iter().any(|candidate| candidate == &prop)
+    }
+
+    /// CR 107.1a + CR 121.1: Change B — `parse_dynamic_count_phrase` routes a
+    /// fraction-led draw count ("cards equal to half the number of cards in
+    /// their library") through `parse_fraction_rounded` FIRST, yielding a
+    /// `DivideRounded` over the target's library count (Peer into the Abyss).
+    #[test]
+    fn dynamic_count_phrase_fraction_routes_to_divide_rounded() {
+        let qty =
+            parse_dynamic_count_phrase("cards equal to half the number of cards in their library")
+                .expect("fraction-led draw count must parse");
+        match qty {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } => {
+                assert_eq!(divisor, 2);
+                // Rounding defaults to Down here; the trailing "Round up each
+                // time." post-pass flips it to Up at the card level.
+                assert_eq!(rounding, crate::types::ability::RoundingMode::Down);
+                assert!(
+                    matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: crate::types::ability::ZoneRef::Library
+                            }
+                        }
+                    ),
+                    "expected TargetZoneCardCount{{Library}} inner, got {inner:?}"
+                );
+            }
+            other => panic!("expected DivideRounded, got {other:?}"),
+        }
+    }
+
+    /// Change B fallback guard: a NON-fraction "cards equal to <ref>" draw
+    /// count still parses to its prior `QuantityExpr::Ref` via the unchanged
+    /// semantic `parse_quantity_ref` call — `parse_fraction_rounded` misses on
+    /// the non-fraction lead and falls through (no regression).
+    #[test]
+    fn dynamic_count_phrase_nonfraction_falls_through_to_ref() {
+        let qty = parse_dynamic_count_phrase("cards equal to the number of creatures you control")
+            .expect("non-fraction draw count must still parse");
+        assert!(
+            matches!(qty, QuantityExpr::Ref { .. }),
+            "non-fraction draw count must remain a plain Ref, got {qty:?}"
+        );
     }
 
     /// CR 122.1: `counter_placement_is_mass` recognizes "on each"/"on all"
