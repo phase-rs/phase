@@ -988,10 +988,57 @@ pub(crate) fn parent_referent_context_from_events(
 
     // CR 608.2c: a later instruction's "that creature" may refer to a single
     // creature an earlier instruction in the same resolution tapped — e.g.
-    // Enlist's "+X/+0 … where X is the tapped creature's power". Tried last so
-    // sacrifice/move/reveal referents continue to take precedence. The tapped
-    // permanent stays on the battlefield, so it is snapshot live.
-    tapped_object_context_from_events(state, events)
+    // Enlist's "+X/+0 … where X is the tapped creature's power". Tried before
+    // the damage referent so sacrifice/move/reveal/tap referents continue to
+    // take precedence. The tapped permanent stays on the battlefield, so it is
+    // snapshot live.
+    if let Some(snapshot) = tapped_object_context_from_events(state, events) {
+        return Some(snapshot);
+    }
+
+    // CR 608.2c: the weakest referent — a later instruction's "that creature"
+    // may refer to the single creature an earlier instruction in the same
+    // resolution dealt damage to (e.g. fight-back templates: "~ deals damage
+    // equal to its power to target creature. That creature deals damage equal
+    // to its power to ~"). A damaged permanent stays on the battlefield, so its
+    // claim is the weakest; sacrifice/move/reveal/tap referents from the same
+    // resolution still win.
+    damaged_object_context_from_events(state, events)
+}
+
+/// CR 608.2c: capture a single creature an earlier instruction dealt damage to
+/// as the resolution's anaphoric referent (the "fight-back clause"). A
+/// multi-target damage parent (e.g. Living Inferno, which deals damage to each
+/// creature) has no singular "that creature", so it yields no snapshot —
+/// Living Inferno is intentionally NOT fixed here; it needs distributive
+/// per-creature resolution this referent does not attempt. Player-targeted
+/// damage (`TargetRef::Player`) is filtered out. The damaged permanent stays on
+/// the battlefield, so it is snapshot live.
+fn damaged_object_context_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Option<CostPaidObjectSnapshot> {
+    let mut seen = HashSet::new();
+    let mut damaged = events.iter().filter_map(|event| match event {
+        // CR 608.2c: only object-targeted damage introduces a "that creature".
+        GameEvent::DamageDealt {
+            target: TargetRef::Object(object_id),
+            ..
+        } if seen.insert(*object_id) => {
+            state
+                .objects
+                .get(object_id)
+                .map(|obj| CostPaidObjectSnapshot {
+                    object_id: *object_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                })
+        }
+        _ => None,
+    });
+    // CR 608.2c: single-object guard — a multi-target damage parent has no
+    // singular referent.
+    let first = damaged.next()?;
+    damaged.next().is_none().then_some(first)
 }
 
 /// CR 608.2c: capture a single creature tapped by the parent instruction as the
@@ -9048,6 +9095,85 @@ mod tests {
             card_names: vec!["A".into(), "B".into()],
         }];
         assert!(revealed_object_context_from_events(&state, &events).is_none());
+    }
+
+    /// CR 608.2c: a single object-targeted `DamageDealt` introduces a
+    /// fight-back referent ("that creature deals damage equal to its power").
+    #[test]
+    fn damaged_object_context_reads_single_object_damage() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Five Power Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let events = vec![GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(creature),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        }];
+
+        let snapshot = damaged_object_context_from_events(&state, &events)
+            .expect("a single object-targeted damage event should provide a referent");
+        assert_eq!(snapshot.object_id, creature);
+        assert_eq!(snapshot.lki.name, "Five Power Creature");
+    }
+
+    /// CR 608.2c: a multi-target damage parent (e.g. Living Inferno) has no
+    /// singular "that creature" — the single-object guard declines it.
+    #[test]
+    fn damaged_object_context_ignores_multi_target_damage() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "A".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "B".into(),
+            Zone::Battlefield,
+        );
+        let events = vec![
+            GameEvent::DamageDealt {
+                source_id: ObjectId(99),
+                target: TargetRef::Object(a),
+                amount: 1,
+                is_combat: false,
+                excess: 0,
+            },
+            GameEvent::DamageDealt {
+                source_id: ObjectId(99),
+                target: TargetRef::Object(b),
+                amount: 1,
+                is_combat: false,
+                excess: 0,
+            },
+        ];
+        assert!(damaged_object_context_from_events(&state, &events).is_none());
+        assert!(parent_referent_context_from_events(&state, &events).is_none());
+    }
+
+    /// CR 608.2c: player-targeted damage carries no "that creature" referent.
+    #[test]
+    fn damaged_object_context_ignores_player_damage() {
+        let state = GameState::new_two_player(42);
+        let events = vec![GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        }];
+        assert!(damaged_object_context_from_events(&state, &events).is_none());
     }
 
     /// Two separate `CardsRevealed` events → ambiguous "it" → no referent.
