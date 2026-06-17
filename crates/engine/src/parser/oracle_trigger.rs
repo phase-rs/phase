@@ -22269,6 +22269,55 @@ mod tests {
         }
     }
 
+    /// Issue #1307: Moseo, Vein's New Dean's Infusion ability — an end-step
+    /// trigger gated by an intervening-if condition whose effect's
+    /// `ChangeZone` target filter bears a `Cmc` bound defined by a trailing
+    /// "where X is …" clause. `apply_where_x_effect_expression` previously had
+    /// no `Effect::ChangeZone` arm, so the filter's bound stayed an unresolved
+    /// bare `Variable("X")` (resolves to 0 at runtime via
+    /// `QuantityRef::Variable`), making the reanimation target only mana value
+    /// 0 or less and the ability appear to never fire for any real graveyard
+    /// card. The fix threads the where-X rewrite into `ChangeZone`'s target
+    /// filter the same way `SearchLibrary`/`Seek` already do.
+    #[test]
+    fn moseo_infusion_end_step_reanimate_binds_cmc_to_life_gained_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained life this turn, return up to one target creature card with mana value X or less from your graveyard to the battlefield, where X is the amount of life you gained this turn.",
+            "Moseo, Vein's New Dean",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target,
+                ..
+            } => match target {
+                TargetFilter::Typed(typed) => {
+                    assert!(
+                        typed.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Ref {
+                                    qty: QuantityRef::LifeGainedThisTurn {
+                                        player: PlayerScope::Controller
+                                    }
+                                },
+                            }
+                        )),
+                        "expected Cmc{{LE, LifeGainedThisTurn{{Controller}}}} bound, got {:?}",
+                        typed.properties
+                    );
+                }
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected ChangeZone effect, got {other:?}"),
+        }
+    }
+
     #[test]
     fn phase_trigger_combat_on_your_turn() {
         let def = parse_trigger_line(
