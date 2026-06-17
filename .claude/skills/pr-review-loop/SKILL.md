@@ -1,6 +1,6 @@
 ---
 name: pr-review-loop
-description: Use to run a continuous, hands-off review sweep over open contributor PRs in phase.rs — select unreviewed/updated PRs, dispatch an isolated agent to review each against the architecture/idiom/value lenses, post one verdict comment per PR, then poll for new PRs and real content commits until told to stop. Use when the user says "review PRs starting from N", "keep reviewing new PRs", "run the PR review loop", or asks to watch open PRs and leave a review on each. Read-only — it comments, it never checks out or rewrites PRs (that is `pr-contribution-handler`).
+description: Use to run a continuous, hands-off review sweep over open contributor PRs in phase.rs — select unreviewed/updated PRs, dispatch an isolated agent to review each against the architecture/idiom/value lenses, post one verdict comment per PR, then poll for new PRs and real content commits until told to stop. Use when the user says "review PRs starting from N", "keep reviewing new PRs", "run the PR review loop", or asks to watch open PRs and leave a review on each. Read-only — it comments and never checks out or rewrites PRs (that is `pr-contribution-handler`). An opt-in authorized maintainer mode additionally delegates approve/label/enqueue to `pr-contribution-handler` when the runner genuinely has merge authority on the repo.
 ---
 
 # PR Review Loop
@@ -12,7 +12,11 @@ This skill is the **orchestration loop**. It does not contain review lenses — 
 ## Relationship to sibling skills
 
 - **`review-impl`** — the per-PR findings checklist (correct seam · idiomatic code at that seam · does it provide value, plus surface-specific lenses). The spawned reviewer runs this. Do not duplicate its lenses here.
-- **`pr-contribution-handler`** — checks out and *fixes* PRs end-to-end. This loop is strictly read-only: it posts a comment and moves on. It never checks out, edits, or enqueues a PR.
+- **`pr-contribution-handler`** — checks out and *fixes/enqueues* PRs end-to-end. The loop delegates to it in authorized mode; it is never reimplemented here.
+
+**Two modes.** The sweep mechanics (candidate selection, dedup gate, pacing) are identical in both; they differ only in what happens after a verdict is reached:
+- **Read-only review (default):** post exactly one verdict comment per PR and move on — never check out, edit, or enqueue. This is the rest of this file.
+- **Authorized maintainer (opt-in — only when the runner genuinely has approve/enqueue authority on the repo):** after the verdict, additionally drive worthy PRs toward merge by delegating to `pr-contribution-handler` (approve / label / enqueue), and maintain the two persistent artifacts in *Persistent state (authorized mode)*. Everything the read-only mode does still applies; this is a superset.
 
 ## Arguments
 
@@ -33,7 +37,7 @@ This skill is phase.rs-bound (it assumes Comprehensive Rules, the `review-impl` 
 
 ## Source of truth
 
-**GitHub is the ledger.** Per-PR dedup is reconstructed each sweep from the acting login's own comment timestamps — there is no external state file. This is durable and crash-idempotent: if the orchestrator dies after a comment posts, the next sweep sees the comment and dedups correctly. Two different people can run this loop without colliding, because each keys on *their own* login's comments.
+**GitHub is the ledger.** Per-PR dedup is reconstructed each sweep from the acting login's own comment timestamps — in read-only mode there is no external state file. (Authorized mode adds two local cache/log files, see *Persistent state* below; they are an optional cache only, and GitHub still wins on any conflict.) This is durable and crash-idempotent: if the orchestrator dies after a comment posts, the next sweep sees the comment and dedups correctly. Two different people can run this loop without colliding, because each keys on *their own* login's comments.
 
 A running tally carried in the wakeup prompt is an *optional cache* to skip re-deriving timestamps. It is never authoritative — when cache and GitHub disagree, GitHub wins.
 
@@ -65,6 +69,8 @@ done
 
 For each surviving candidate, decide review / re-review / skip. Query each field with its **own** `gh pr view --json X --jq` call — combining fields into one blob and piping through a shell var triggers jq control-char parse errors.
 
+*(Authorized mode only — zero-cost skip:* before the GitHub-derived gate below, consult the tracker (*Persistent state*). If its newest row for `$n` has `head_sha == current head` **and** a *terminal* verdict, skip without any further `gh` calls. On a non-terminal verdict, a mismatched/absent head, or any doubt, fall through to the GitHub-derived gate — GitHub wins.)
+
 The "ledger" is *all* of the acting login's prior activity on the PR — a plain comment (what this loop posts) **or** a formal review (a human runner may have left one). Take the max timestamp across both; one extra cheap call avoids redundantly re-reviewing a PR whose only prior verdict was a formal review:
 
 ```bash
@@ -92,15 +98,28 @@ gh api "repos/$REPO/pulls/$n/commits" --paginate \
 
 ### 3. Dispatch a reviewer
 
-For each PR genuinely needing review, spawn **one opus general-purpose agent in worktree isolation** that:
+**The bar is invariant; only the investigation depth scales.** Every PR, at every tier, must be validated against the same non-negotiable three lenses (owned by `review-impl` / `pr-contribution-handler`):
+1. the change is at the **right architectural seam**;
+2. the code is **idiomatic and follows repo patterns/standards AT that seam**;
+3. the PR provides real **value** (and, for a fix, carries a discriminating test that fails on revert).
+
+The tier does **not** change this bar — it changes **how much investigation you spend to become confident in it**. A small, isolated diff is *cheaper to be confident about*, not held to a lower standard. **If you cannot confidently clear all three lenses at a lower tier, that is not a pass — it is an escalation trigger.** Spend the least investigation that yields genuine confidence in the three lenses; never trade the bar for speed. Classify from the **diffstat + touched paths + contributor standing** (all cheap, no deep read):
+
+- **Tier 0 — inline, no agent.** Trivial diffs (≲30 lines), test-only / doc-only, or a commit that exactly addresses a prior finding. You still confirm all three lenses — it's just fast on a tiny surface. Verify the hunks via the API diff, post a short verdict. (The trivial-fix-up shortcut from step 2.)
+- **Tier 1 — light agent (e.g. sonnet, no worktree).** Small, single-surface, low-blast-radius changes (parser-only, one isolated card, a contained bugfix) from a contributor whose quality-log standing is `trusted`. The agent confirms the **same three lenses** against the read-only diff; "light" means **less machinery** (no worktree, no surface-specific deep-dives that don't apply to this diff) — **not a lower standard**. If the three lenses can't be confidently cleared from the diff alone, it escalates.
+- **Tier 2 — full `review-impl`, opus agent in worktree isolation.** Required when the diff touches a **shared/hot seam** (targeting, casting/priority, layer system, combat, mana, stack), introduces **new engine machinery** (a new enum variant or public surface), is **large / multi-file**, is **AI/policy** (escalated rigor — decision-space/bail/cache-key/determinism), or comes from a contributor whose standing is `watch`/`probation` or who is **first-time** (no log entry). Runs the full `review-impl` lenses + an adversarial second pass.
+
+**Route conservatively:** the default is Tier 2; drop to Tier 1/0 only when the diff is *demonstrably* small, isolated, and from a trusted contributor. Any whiff of a shared seam, new machinery, or value-uncertainty escalates. The classifier exists to avoid wasting *deep investigation* on trivia — never to skip *scrutiny* on risky code, and never to let a PR through without actually confirming seam, idiom, and value.
+
+The dispatched reviewer (Tier 1 cheap agent, or Tier 2 opus in worktree isolation):
 
 1. Fetches the ground-truth diff via the **GitHub API**, never `gh pr diff` (rtk corrupts it into fabricated content):
    ```bash
    gh api "repos/$REPO/pulls/$n.diff" -H "Accept: application/vnd.github.v3.diff"
    ```
-2. Runs the **`review-impl`** skill against the diff (the three lenses + surface-specific lenses live there).
+2. Tier 2: runs the **`review-impl`** skill (three lenses + surface-specific lenses). Tier 1: applies just the three core lenses inline.
 3. Applies the orchestration discipline below.
-4. Posts **exactly one** comment via `gh pr comment "$n" --repo "$REPO" --body ...` containing an explicit verdict line, e.g. `VERDICT: approve` / `VERDICT: request-changes` / `VERDICT: approve with comments`. Use a plain comment, **not** a formal `gh pr review --approve/--request-changes` — a non-maintainer bot identity stacking formal review states is noisy and can interfere with required-review/merge-queue gates. (Override only if the user asks for formal reviews.)
+4. Posts **exactly one** comment via `gh pr comment "$n" --repo "$REPO" --body ...` containing an explicit verdict line, e.g. `VERDICT: approve` / `VERDICT: request-changes` / `VERDICT: approve with comments`. Use a plain comment, **not** a formal `gh pr review --approve/--request-changes` — a non-maintainer bot identity stacking formal review states is noisy and can interfere with required-review/merge-queue gates. (Override only if the user asks for formal reviews, e.g. authorized maintainer mode.)
 
 Bound concurrency: on a large first-run backlog, dispatch sequentially or in a small parallel batch rather than spawning an agent per PR all at once.
 
@@ -124,6 +143,42 @@ These are loop-level checks that sit *around* the `review-impl` lenses — state
 
 - **Caught up** (every candidate reviewed or skipped) → schedule the next sweep after `interval`, carrying this skill's loop prompt forward (optionally with the non-authoritative tally cache). Use the interval arg; never a literal duration.
 - **User says stop / pause** → end the loop by **omitting** the next wakeup. Do not schedule a placeholder tick. (`resume` re-invokes the skill.)
+
+## Authorized maintainer mode (opt-in)
+
+Only when the runner has real approve/enqueue authority. The sweep, dedup, and tiered review above are unchanged; this adds what happens *after* the verdict:
+
+- **`VERDICT: approve` and it clears the bar** → hand the PR to **`pr-contribution-handler`** to bring-current / fix-narrow / verify, then **repush-guard → approve → label → enqueue**:
+  - **Repush guard (mandatory):** capture `EXPECT=headRefOid`, add `@me` as assignee, re-read the head, **ABORT if it moved**. A sticky `reviewDecision=APPROVED` survives a contributor force-push, so the only freshness signal is current head vs the head you reviewed.
+  - **Label** one of the repo's valid labels; **enqueue**; confirm `isInMergeQueue=true`. `mergeStateStatus=BLOCKED` is the *normal* resting state of a queued PR and `autoMergeRequest` reads `null` even when queued — queue membership is the affirmative signal.
+- **`VERDICT: request-changes`** → post the precise blocker (and the exact fix when it's a one-liner); record it. Narrow mechanical fixes (shared-`main.rs` test-registration conflicts, a one-line lint) are fine to land yourself; **wrong-seam / overbroad / unpolished is a BLOCK** — hand back.
+
+CI green is necessary, not sufficient: `cancelled` ≠ `failed` (read the latest `completed/success`); a `BEHIND` PR's red can be a stale-base artifact main already fixed (verify the named test against a completed `origin/main` run); a test asserting *wrong* behavior is a false green.
+
+## Persistent state (authorized mode only): tracker + quality log
+
+Read-only mode keeps no state — GitHub is the ledger. Authorized mode adds two local files (outside the repo, never committed):
+
+**PR tracker — in-flight state, pruned on merge.** Append-only TSV, newest row per PR authoritative; an *optional cache* over GitHub (GitHub wins on conflict) for enqueue bookkeeping + a zero-cost skip. Columns: `timestamp  pr  author  tier  verdict  label  enqueued  head_sha  notes`. `head_sha` = the head you assessed (high-water mark). **Verdict vocabulary** — *terminal* (skip at same head): `ENQUEUED · MERGED · CLOSED · CHANGES_REQUESTED · STILL-BLOCKED-same · SUPERSEDE-pending-close`; *non-terminal* (re-surface next pass even at same head): `…-pending-CI · …-needs-review · PARTIALLY-RESOLVED-judgment · CONFLICT-RESOLVED-awaiting-CI`. Append (never edit); record current head each time; `STILL-BLOCKED-same` for a new-but-non-fixing head; **prune all rows for a PR when it merges** (awk on the first `^[0-9]{4}$` field).
+
+**Contributor-quality log — lifetime signal, never pruned, keyed BY CONTRIBUTOR.** A separate file precisely because the tracker is pruned on merge and this is *not reconstructible from GitHub* once PRs merge. The shape is chosen so a single lookup sets a PR's review tier — **one section per login**, not a flat chronological log (which would force scanning the whole file to assess one contributor):
+
+```markdown
+### <login> — standing: trusted | watch | probation   (updated <YYYY-MM-DD>)
+<one-line rolling assessment: current trend + why>
+signals: <running tally, e.g. clippy-not-run ×3 · ast-shape-only ×2>
+- <YYYY-MM-DD> #<pr> — <observation + concrete evidence>
+- <YYYY-MM-DD> #<pr> — <…>   (positives recorded too — the point is the trend)
+```
+
+- **`standing` is the actionable field and the ONE mutable line** — update it in place each time you reassess; everything below it is **append-only** (never edit or delete a past observation). Standing is the file's contract with the loop:
+  - `trusted` → eligible for **Tier 0/1** review.
+  - `watch` / `probation` → **Tier 2 minimum**, regardless of diff size.
+  - no section yet (**first-time contributor**) → **Tier 2** by default; create the section after the first review.
+- **Signal vocabulary** (one is a yellow flag; a recurring pattern moves standing toward `watch`/`probation`): `fmt-not-run` / `clippy-not-run` (lint red on submit); `ast-shape-only` (tests assert AST shape, no runtime `apply()` discrimination); **`tests-protect-wrong-behavior`** (after a rules flag, author adds tests asserting the *violating* behavior — a false green, the most insidious); `parsed-but-not-consumed` (new AST field no handler reads); `allow-noncombinator-escape-hatch` (substring dispatch on new parser surface); `revert-churn` (revert-of-revert instead of a clean rebase; net diff deletes others' merged work); `rebase-not-fix` (new head is only `Merge branch main`). Record **positives** (clean enum parameterization, genuine fail-on-revert tests, single-round responsiveness) — standing moves both directions.
+- **Escalate the stance, not just the standing:** when defects recur, the hand-back should become directive ("this needs the full `engine-implementer` cycle, not another patch") rather than another round of the same nit.
+
+This closes the loop: the quality log feeds the tier classifier (`standing` → tier floor), and each review's outcome feeds the quality log (signals + standing update). The bar (three lenses) is unchanged for everyone — standing only decides *how much investigation* a contributor's next PR warrants by default.
 
 ## Tooling gotchas
 

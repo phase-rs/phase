@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-15T00:00:00Z",
+  "updated": "2026-06-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -467,138 +467,6 @@
       ]
     },
     {
-      "name": "Grixis Reanimator",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Abhorrent Oculus"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Cruelty"
-        },
-        {
-          "count": 1,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 4,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 4,
-          "name": "Faithless Looting"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Persist"
-        },
-        {
-          "count": 4,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 1,
-          "name": "Raucous Theater"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Thought Scour"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Unearth"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
-          "name": "Meltdown"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 1,
-          "name": "Surgical Extraction"
-        },
-        {
-          "count": 2,
-          "name": "Vexing Bauble"
-        }
-      ]
-    },
-    {
       "name": "Eldrazi Tron",
       "author": "MTGGoldfish",
       "colors": [
@@ -737,11 +605,142 @@
       ]
     },
     {
-      "name": "Living End",
+      "name": "Grixis Reanimator",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "R",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Abhorrent Oculus"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Cruelty"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 4,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 4,
+          "name": "Faithless Looting"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Persist"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
+          "count": 1,
+          "name": "Raucous Theater"
+        },
+        {
+          "count": 1,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Thought Scour"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 4,
+          "name": "Unearth"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Damping Sphere"
+        },
+        {
+          "count": 2,
+          "name": "Meltdown"
+        },
+        {
+          "count": 2,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 2,
+          "name": "Vexing Bauble"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
         "U",
-        "G",
         "R"
       ],
       "tags": [
@@ -749,39 +748,155 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 1,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 2,
-          "name": "Colossal Skyturtle"
-        },
-        {
-          "count": 1,
-          "name": "Commercial District"
-        },
-        {
           "count": 4,
-          "name": "Curator of Mysteries"
+          "name": "Dragon's Rage Channeler"
         },
         {
-          "count": 4,
-          "name": "Force of Negation"
+          "count": 1,
+          "name": "Stormchaser's Talent"
         },
         {
           "count": 3,
-          "name": "Living End"
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 4,
+          "name": "Lightning Bolt"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Flashback"
+        },
+        {
+          "count": 3,
+          "name": "Mutagenic Growth"
+        },
+        {
+          "count": 4,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 4,
+          "name": "Lava Dart"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Mishra's Bauble"
+        },
+        {
+          "count": 2,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Slickshot Show-Off"
+        },
+        {
+          "count": 2,
+          "name": "Fiery Islet"
+        },
+        {
+          "count": 4,
+          "name": "Expressive Iteration"
+        },
+        {
+          "count": 4,
+          "name": "Preordain"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 1,
+          "name": "Assault Strobe"
+        },
+        {
+          "count": 2,
+          "name": "Unholy Heat"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Tormod's Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Meltdown"
+        },
+        {
+          "count": 2,
+          "name": "Eddymurk Crab"
+        }
+      ]
+    },
+    {
+      "name": "Living End",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G",
+        "R",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Vibrance"
+        },
+        {
+          "count": 1,
+          "name": "Mistrise Village"
+        },
+        {
+          "count": 3,
+          "name": "Curator of Mysteries"
+        },
+        {
+          "count": 3,
+          "name": "Oliphaunt"
         },
         {
           "count": 1,
           "name": "Forest"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Generous Ent"
         },
         {
@@ -789,32 +904,8 @@
           "name": "Hedge Maze"
         },
         {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Mistrise Village"
-        },
-        {
           "count": 4,
           "name": "Misty Rainforest"
-        },
-        {
-          "count": 2,
-          "name": "Oliphaunt"
-        },
-        {
-          "count": 4,
-          "name": "Street Wraith"
-        },
-        {
-          "count": 1,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
         },
         {
           "count": 1,
@@ -822,15 +913,31 @@
         },
         {
           "count": 1,
-          "name": "Striped Riverwinder"
+          "name": "Scalding Tarn"
         },
         {
           "count": 4,
-          "name": "Subtlety"
+          "name": "Wistfulness"
+        },
+        {
+          "count": 3,
+          "name": "Street Wraith"
         },
         {
           "count": 1,
-          "name": "Thundering Falls"
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
@@ -841,54 +948,66 @@
           "name": "Shardless Agent"
         },
         {
+          "count": 2,
+          "name": "Colossal Skyturtle"
+        },
+        {
+          "count": 4,
+          "name": "Subtlety"
+        },
+        {
+          "count": 2,
+          "name": "Sink into Stupor"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
           "count": 3,
-          "name": "Wistfulness"
+          "name": "Living End"
         },
         {
           "count": 4,
           "name": "Endurance"
-        },
-        {
-          "count": 1,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 1,
-          "name": "Wooded Foothills"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
-          "count": 2,
-          "name": "Brotherhood's End"
-        },
-        {
-          "count": 1,
-          "name": "Dismember"
-        },
-        {
-          "count": 1,
-          "name": "Faerie Macabre"
-        },
-        {
-          "count": 1,
-          "name": "Ingot Chewer"
-        },
-        {
           "count": 3,
-          "name": "Mystical Dispute"
+          "name": "Dead // Gone"
         },
         {
           "count": 4,
-          "name": "Obsidian Charmaw"
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Inevitable Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Foundation Breaker"
         },
         {
           "count": 2,
           "name": "Force of Vigor"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Brotherhood's End"
         }
       ]
     },
@@ -1028,129 +1147,6 @@
         {
           "count": 2,
           "name": "Spell Pierce"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Dragon's Rage Channeler"
-        },
-        {
-          "count": 1,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 3,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 4,
-          "name": "Lightning Bolt"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Flashback"
-        },
-        {
-          "count": 3,
-          "name": "Mutagenic Growth"
-        },
-        {
-          "count": 4,
-          "name": "Cori-Steel Cutter"
-        },
-        {
-          "count": 4,
-          "name": "Lava Dart"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 4,
-          "name": "Mishra's Bauble"
-        },
-        {
-          "count": 2,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Slickshot Show-Off"
-        },
-        {
-          "count": 2,
-          "name": "Fiery Islet"
-        },
-        {
-          "count": 4,
-          "name": "Expressive Iteration"
-        },
-        {
-          "count": 4,
-          "name": "Preordain"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 1,
-          "name": "Assault Strobe"
-        },
-        {
-          "count": 2,
-          "name": "Unholy Heat"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 2,
-          "name": "Tormod's Crypt"
-        },
-        {
-          "count": 2,
-          "name": "Meltdown"
-        },
-        {
-          "count": 2,
-          "name": "Eddymurk Crab"
         }
       ]
     },

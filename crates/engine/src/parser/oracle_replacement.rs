@@ -150,7 +150,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    // --- "[Type] your opponents control enter tapped" (external replacement) ---
+    // --- "[Type] enter tapped" / "[Type] played by your opponents enter tapped" ---
     if let Some(def) = parse_external_enters_tapped(&norm_lower, &text) {
         return Some(def);
     }
@@ -287,8 +287,30 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    // --- "If you would draw a card, {effect}" ---
-    if nom_primitives::scan_contains(&lower, "you would draw") {
+    // --- Explore replacement: "If a creature you control would explore, instead …"
+    // (Twists and Turns / Topography Tracker class).
+    if nom_primitives::scan_contains(&lower, "would explore") {
+        if let Some(def) = parse_explore_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
+    // --- "If [player] would draw [a card | one or more cards], {effect}" ---
+    // CR 614.1a: Widened from "you would draw" to handle opponent/player
+    // scope (Notion Thief, Hullbreacher, Chains of Mephistopheles) mirroring
+    // the gain-life widening below.
+    let mentions_draw = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("would draw a card"),
+                tag("would draw one or more cards"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if mentions_draw {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::Draw).description(text.to_string());
@@ -307,6 +329,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             }
             def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
         }
+        // CR 614.1a: Player scope for draw replacements.
+        apply_draw_player_scope(&lower, &mut def);
         // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
         // "except the first one [you|they] draw in each of [your|their] draw
         // steps" exception clause and gate the replacement so it does NOT
@@ -405,6 +429,20 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
     if let Some(def) = parse_lose_life_replacement(&text, &lower) {
         return Some(def);
+    }
+
+    // --- "Double all damage that [subject] would deal" (without "instead") ---
+    // CR 614.1: Static damage modification abilities like Collective Inferno
+    // are continuous replacement effects even though they do not use "instead".
+    // Must be checked BEFORE the "instead" guard to avoid falling through to stub.
+    if nom_primitives::scan_contains(&lower, "would deal")
+        && nom_primitives::scan_contains(&lower, "damage")
+        && !nom_primitives::scan_contains(&lower, "instead")
+        && nom_primitives::scan_contains(&lower, "double")
+    {
+        if let Some(def) = parse_damage_modification_static(&norm_lower, &text) {
+            return Some(def);
+        }
     }
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
@@ -517,6 +555,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
     if let Some(def) = parse_global_object_counter_prohibition(&lower, &text) {
+        return Some(def);
+    }
+    if let Some(def) = parse_inverted_typed_counter_prohibition(&lower, &text) {
         return Some(def);
     }
 
@@ -856,6 +897,10 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
                 },
                 win_effect: None,
                 lose_effect: None,
+                // CR 614.1a + CR 705.2: the replacement re-flips for the same
+                // flipper the original event named (the replacement applier rebinds
+                // the acting controller), so `Controller` reads that flipper.
+                flipper: crate::types::ability::TargetFilter::Controller,
             },
         ))
         .description(text.to_string());
@@ -2963,40 +3008,130 @@ fn parse_replacement_ability_word_condition(text: &str) -> Option<ReplacementCon
     .map(|(condition, _)| condition)
 }
 
-fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalEntryKind {
+    Plain {
+        enters_tapped: bool,
+    },
+    /// CR 614.1d: Uphill Battle class — cast/played entry only, not tokens.
+    PlayedByOpponents {
+        enters_tapped: bool,
+    },
+}
+
+/// CR 614.1d: Peel external entry-tapped suffixes from a normalized clause.
+/// Played-by-opponents variants are checked before plain enter-tapped suffixes
+/// so "creatures played by your opponents enter tapped" does not fall through
+/// to the Authority-of-the-Consuls control-based shape.
+fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKind)> {
     stripped
-        .strip_suffix(" enter tapped")
-        .map(|subject| (subject, true))
-        .or_else(|| {
-            stripped
-                .strip_suffix(" enters tapped")
-                .map(|subject| (subject, true))
+        .strip_suffix(" played by your opponents enter the battlefield tapped") // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+        .map(|subject| {
+            (
+                subject,
+                ExternalEntryKind::PlayedByOpponents {
+                    enters_tapped: true,
+                },
+            )
         })
         .or_else(|| {
             stripped
-                .strip_suffix(" enter untapped")
-                .map(|subject| (subject, false))
+                .strip_suffix(" played by your opponents enter tapped") // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+                .map(|subject| {
+                    (
+                        subject,
+                        ExternalEntryKind::PlayedByOpponents {
+                            enters_tapped: true,
+                        },
+                    )
+                })
         })
         .or_else(|| {
-            stripped
-                .strip_suffix(" enters untapped")
-                .map(|subject| (subject, false))
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enter tapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: true,
+                    },
+                )
+            })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enters tapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: true,
+                    },
+                )
+            })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enter untapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: false,
+                    },
+                )
+            })
+        })
+        .or_else(|| {
+            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
+            stripped.strip_suffix(" enters untapped").map(|subject| {
+                (
+                    subject,
+                    ExternalEntryKind::Plain {
+                        enters_tapped: false,
+                    },
+                )
+            })
         })
 }
 
 fn build_external_entry_replacement(
     subject: &str,
     original_text: &str,
-    enters_tapped: bool,
+    kind: ExternalEntryKind,
 ) -> Option<ReplacementDefinition> {
     if subject.contains('~') {
         return None;
     }
 
+    let enters_tapped = match kind {
+        ExternalEntryKind::Plain { enters_tapped }
+        | ExternalEntryKind::PlayedByOpponents { enters_tapped } => enters_tapped,
+    };
+
     let (filter, rest) = parse_type_phrase(subject);
     if !rest.trim().is_empty() {
         return None;
     }
+
+    let valid_card = match kind {
+        ExternalEntryKind::PlayedByOpponents { .. } => match filter {
+            TargetFilter::Typed(mut tf) => {
+                tf.controller = Some(ControllerRef::Opponent);
+                tf.properties.push(FilterProp::WasPlayed);
+                TargetFilter::Typed(tf)
+            }
+            TargetFilter::Or { filters } if filters.len() == 1 => {
+                match filters.into_iter().next()? {
+                    TargetFilter::Typed(mut tf) => {
+                        tf.controller = Some(ControllerRef::Opponent);
+                        tf.properties.push(FilterProp::WasPlayed);
+                        TargetFilter::Typed(tf)
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        },
+        ExternalEntryKind::Plain { .. } => filter,
+    };
 
     let effect = if enters_tapped {
         Effect::SetTapState {
@@ -3015,7 +3150,7 @@ fn build_external_entry_replacement(
     Some(
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
-            .valid_card(filter)
+            .valid_card(valid_card)
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
@@ -3034,8 +3169,8 @@ fn parse_source_state_external_entry(
     let condition = replacement_condition_from_static(condition)?;
     let rest_lower = rest.to_lowercase();
     let stripped = rest_lower.trim_end_matches('.');
-    let (entry_subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
-    let mut def = build_external_entry_replacement(entry_subject, original_text, enters_tapped)?;
+    let (entry_subject, kind) = parse_external_entry_suffix(stripped)?;
+    let mut def = build_external_entry_replacement(entry_subject, original_text, kind)?;
     def.condition = Some(condition);
     Some(def)
 }
@@ -3046,26 +3181,35 @@ fn parse_external_enters_untapped(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let stripped = norm_lower.trim_end_matches('.');
-    let (subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
-    if enters_tapped {
+    let (subject, kind) = parse_external_entry_suffix(stripped)?;
+    let ExternalEntryKind::Plain {
+        enters_tapped: false,
+    } = kind
+    else {
         return None;
-    }
-    build_external_entry_replacement(subject, original_text, false)
+    };
+    build_external_entry_replacement(subject, original_text, kind)
 }
 
 /// Parse "[Type] enter tapped" / "[Type] enters tapped" — external replacement effects.
 /// E.g., "Creatures your opponents control enter tapped." (Authority of the Consuls)
 /// E.g., "Artifacts and creatures your opponents control enter tapped." (Blind Obedience)
+/// E.g., "Creatures played by your opponents enter tapped." (Uphill Battle)
 fn parse_external_enters_tapped(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let stripped = norm_lower.trim_end_matches('.');
-    let (subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
-    if !enters_tapped {
-        return None;
+    let (subject, kind) = parse_external_entry_suffix(stripped)?;
+    match kind {
+        ExternalEntryKind::Plain {
+            enters_tapped: true,
+        }
+        | ExternalEntryKind::PlayedByOpponents {
+            enters_tapped: true,
+        } => build_external_entry_replacement(subject, original_text, kind),
+        _ => None,
     }
-    build_external_entry_replacement(subject, original_text, true)
 }
 
 /// CR 614.1a: Parse "If [filter] would die, …instead…" replacement effects.
@@ -3712,6 +3856,47 @@ fn parse_damage_modification_replacement(
     Some(def)
 }
 
+/// CR 614.1: Parse static damage modification abilities without "instead" keyword.
+/// Handles patterns like "Double all damage that [subject] would deal" (Collective Inferno).
+/// Uses quantifier parser ("double all damage") instead of anaphor parser ("double that damage").
+/// The subject is between "that" and "would deal", not before "would deal" like in anaphor patterns.
+fn parse_damage_modification_static(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // --- 1. Extract modification formula using quantifier parser ---
+    let modification =
+        nom_primitives::scan_at_word_boundaries(norm_lower, parse_damage_modification_quantifier)?;
+
+    // --- 2. Extract source filter from the subject clause (between "that" and "would deal") ---
+    // Pattern: "Double all damage that [subject] would deal"
+    // Split on "that" to get the modification prefix, then extract subject between "that" and "would deal"
+    let (_, (_, after_that)) = nom_primitives::split_once_on(norm_lower, "that ").ok()?;
+    let (_, (subject, _)) = nom_primitives::split_once_on(after_that, " would deal").ok()?;
+
+    let source_filter = parse_damage_source_subject(subject.trim());
+
+    // --- 3. Extract combat scope ---
+    let combat_scope = scan_combat_scope(norm_lower);
+
+    // --- 4. Extract target filter ---
+    let target_filter = parse_damage_target_filter(norm_lower);
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_modification(modification)
+        .description(original_text.to_string());
+    if let Some(sf) = source_filter {
+        def = def.damage_source_filter(sf);
+    }
+    if let Some(tf) = target_filter {
+        def = def.damage_target_filter(tf);
+    }
+    if let Some(cs) = combat_scope {
+        def = def.combat_scope(cs);
+    }
+    Some(def)
+}
+
 /// CR 614.9 + CR 614.1a + CR 615: Parse a one-shot "the next time [source]
 /// would deal [combat] damage [to X] this turn, [modify/redirect] instead"
 /// damage-replacement effect into `Effect::CreateDamageReplacement`.
@@ -4044,104 +4229,146 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         .map_or(subject, |(rest, _)| rest)
         .trim();
 
-    // "source you control" with optional qualifiers
-    if let Some(prefix) = subject.strip_suffix("source you control") {
-        let prefix = prefix.trim();
-        let mut filter = TypedFilter::default().controller(ControllerRef::You);
-        let mut props = Vec::new();
-
-        if !prefix.is_empty() {
-            // Check for "another" prefix — may appear alone or before a qualifier
-            let qualifier = if prefix == "another" {
-                props.push(FilterProp::Another);
-                ""
-            } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("another ").parse(prefix) {
-                props.push(FilterProp::Another);
-                rest.trim()
-            } else {
-                prefix
-            };
-
-            // Check for color qualifier (e.g. "red")
-            if let Some(color) = parse_color_word(qualifier) {
-                props.push(FilterProp::HasColor { color });
-            }
-            // CR 205.4b: "noncreature" qualifier — negation via TypeFilter::Non
-            else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("non").parse(qualifier) {
-                if tag::<_, _, OracleError<'_>>("token")
-                    .parse(rest)
-                    .is_ok_and(|(after, _)| after.is_empty())
-                {
-                    props.push(FilterProp::NonToken);
-                } else {
-                    let inner = alt((
-                        value(
-                            TypeFilter::Creature,
-                            tag::<_, _, OracleError<'_>>("creature"),
-                        ),
-                        value(TypeFilter::Land, tag::<_, _, OracleError<'_>>("land")),
-                        value(
-                            TypeFilter::Artifact,
-                            tag::<_, _, OracleError<'_>>("artifact"),
-                        ),
-                        value(
-                            TypeFilter::Enchantment,
-                            tag::<_, _, OracleError<'_>>("enchantment"),
-                        ),
-                        value(
-                            TypeFilter::Planeswalker,
-                            tag::<_, _, OracleError<'_>>("planeswalker"),
-                        ),
-                    ))
-                    .parse(rest)
-                    .ok()
-                    .filter(|(after, _)| after.is_empty())
-                    .map_or_else(
-                        || TypeFilter::Subtype(capitalize_first(rest)),
-                        |(_, filter)| filter,
-                    );
-                    filter = filter.with_type(TypeFilter::Non(Box::new(inner)));
-                }
-            }
-            // Check for creature type qualifier (e.g. "giant")
-            else if !qualifier.is_empty() {
-                filter = filter.subtype(capitalize_first(qualifier));
-            }
-        }
-
-        if !props.is_empty() {
-            filter.properties = props;
-        }
-        return Some(TargetFilter::Typed(filter));
-    }
-
-    // "source you control" without explicit "source" word
-    if subject.ends_with("you control") {
-        return Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::You),
-        ));
-    }
-
     // "a spell" — any spell is the source; no typed filter (Benevolent Unicorn).
     // Must precede `parse_type_phrase`, which maps bare "spell" to Card.
     if subject == "spell" {
         return None;
     }
 
-    // "a source" with no qualifier — no filter needed (matches any source)
-    if subject == "source" {
+    // "a source" / "sources" with no qualifier — no filter needed (matches any source).
+    if matches!(subject, "source" | "sources") {
         return None;
     }
 
+    if let Some(filter) = parse_damage_source_subject(subject) {
+        return Some(filter);
+    }
+
     // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
-    // counter on it", "Giant source you control", …) — delegate to the shared
-    // type-phrase parser (Uncivil Unrest, Torbran-adjacent prints).
+    // counter on it", …) — delegate to the shared type-phrase parser
+    // (Uncivil Unrest, Torbran-adjacent prints).
     let (filter, rest) = parse_type_phrase(subject);
     if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
     }
 
     None
+}
+
+/// Parse source-noun subjects shared by "instead" and no-"instead" damage
+/// replacement text:
+/// - "Giant source you control"
+/// - "Goblin sources you control"
+/// - "sources you control of the chosen type"
+fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
+    let (qualifier, tail) = split_damage_source_noun(subject)?;
+    if qualifier.trim().is_empty() && tail.trim().is_empty() {
+        return None;
+    }
+
+    let mut filter = TypedFilter::default();
+    let mut props = Vec::new();
+
+    let mut tail = tail.trim();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control").parse(tail) {
+        filter = filter.controller(ControllerRef::You);
+        tail = rest.trim();
+    }
+
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("of the chosen type").parse(tail) {
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        props.push(FilterProp::IsChosenCreatureType);
+    } else if !tail.is_empty() {
+        return None;
+    }
+
+    apply_damage_source_qualifier(&mut filter, &mut props, qualifier.trim());
+
+    if !props.is_empty() {
+        filter.properties = props;
+    }
+
+    Some(TargetFilter::Typed(filter))
+}
+
+fn split_damage_source_noun(subject: &str) -> Option<(&str, &str)> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("sources").parse(subject) {
+        return Some(("", rest));
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("source").parse(subject) {
+        return Some(("", rest));
+    }
+    if let Ok((_, (qualifier, rest))) = nom_primitives::split_once_on(subject, " sources") {
+        return Some((qualifier, rest));
+    }
+    if let Ok((_, (qualifier, rest))) = nom_primitives::split_once_on(subject, " source") {
+        return Some((qualifier, rest));
+    }
+    None
+}
+
+fn apply_damage_source_qualifier(
+    filter: &mut TypedFilter,
+    props: &mut Vec<FilterProp>,
+    qualifier: &str,
+) {
+    if qualifier.is_empty() {
+        return;
+    }
+
+    let qualifier = if qualifier == "another" {
+        props.push(FilterProp::Another);
+        ""
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("another ").parse(qualifier) {
+        props.push(FilterProp::Another);
+        rest.trim()
+    } else {
+        qualifier
+    };
+
+    if let Some(color) = parse_color_word(qualifier) {
+        props.push(FilterProp::HasColor { color });
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("non").parse(qualifier) {
+        // CR 205.4b: "noncreature" qualifier — negation via TypeFilter::Non.
+        if tag::<_, _, OracleError<'_>>("token")
+            .parse(rest)
+            .is_ok_and(|(after, _)| after.is_empty())
+        {
+            props.push(FilterProp::NonToken);
+        } else {
+            let inner = alt((
+                value(
+                    TypeFilter::Creature,
+                    tag::<_, _, OracleError<'_>>("creature"),
+                ),
+                value(TypeFilter::Land, tag::<_, _, OracleError<'_>>("land")),
+                value(
+                    TypeFilter::Artifact,
+                    tag::<_, _, OracleError<'_>>("artifact"),
+                ),
+                value(
+                    TypeFilter::Enchantment,
+                    tag::<_, _, OracleError<'_>>("enchantment"),
+                ),
+                value(
+                    TypeFilter::Planeswalker,
+                    tag::<_, _, OracleError<'_>>("planeswalker"),
+                ),
+            ))
+            .parse(rest)
+            .ok()
+            .filter(|(after, _)| after.is_empty())
+            .map_or_else(
+                || TypeFilter::Subtype(capitalize_first(rest)),
+                |(_, filter)| filter,
+            );
+            *filter = filter.clone().with_type(TypeFilter::Non(Box::new(inner)));
+        }
+    } else if !qualifier.is_empty() {
+        *filter = filter.clone().subtype(capitalize_first(qualifier));
+    }
 }
 
 /// Parse the damage target filter from the clause after "damage".
@@ -4299,6 +4526,14 @@ fn parse_damage_modification_phrase(
     .parse(input)
 }
 
+/// Nom combinator for quantifier damage modification phrases ("double all damage").
+/// Used for static abilities like Collective Inferno that lack the "instead" keyword.
+fn parse_damage_modification_quantifier(
+    input: &str,
+) -> nom::IResult<&str, DamageModification, OracleError<'_>> {
+    value(DamageModification::Double, tag("double all damage")).parse(input)
+}
+
 /// Scan for combat damage scope at word boundaries.
 /// "noncombat" tried first since "combat damage" is a substring.
 fn scan_combat_scope(text: &str) -> Option<CombatDamageScope> {
@@ -4356,6 +4591,19 @@ fn apply_gain_life_player_scope(lower: &str, def: &mut ReplacementDefinition) {
         def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
     }
     // else: "you would gain life" → valid_player stays None (controller-only).
+}
+
+/// CR 614.1a: Apply `valid_player` scope to draw replacements from the
+/// antecedent subject ("an opponent", "a player", or default controller-only).
+fn apply_draw_player_scope(lower: &str, def: &mut ReplacementDefinition) {
+    if nom_primitives::scan_contains(lower, "an opponent would draw")
+        || nom_primitives::scan_contains(lower, "opponent would draw")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    } else if nom_primitives::scan_contains(lower, "a player would draw") {
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    }
+    // else: "you would draw" → valid_player stays None (controller-only).
 }
 
 fn parse_color_word(word: &str) -> Option<ManaColor> {
@@ -4513,6 +4761,26 @@ fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<Repl
     Some(
         ReplacementDefinition::new(ReplacementEvent::Scry)
             .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 701.44 + CR 614.1a: Parse explore replacement effects such as Twists and
+/// Turns ("instead you scry 1, then that creature explores") and Topography
+/// Tracker ("instead it explores, then it explores again").
+fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "if a creature you control would explore") {
+        return None;
+    }
+    let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
+    let execute_text = execute_text.trim().trim_end_matches('.');
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Explore)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
             .description(original_text.to_string()),
     )
 }
@@ -4772,6 +5040,9 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
         TokenReplacementShape::Double => {
             def = def.quantity_modification(QuantityModification::Double);
         }
+        TokenReplacementShape::Half => {
+            def = def.quantity_modification(QuantityModification::Half);
+        }
         TokenReplacementShape::PlusSpec { spec } => {
             def = def.additional_token_spec(*spec);
         }
@@ -4781,6 +5052,12 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
     if nom_primitives::scan_contains(lower, "under your control") {
         def = def.token_owner_scope(ControllerRef::You);
     }
+    // Halving Season class: "If an opponent would create …"
+    if nom_primitives::scan_contains(lower, "an opponent would create")
+        || nom_primitives::scan_contains(lower, "opponent would create")
+    {
+        def = def.token_owner_scope(ControllerRef::Opponent);
+    }
 
     Some(def)
 }
@@ -4788,6 +5065,8 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
 enum TokenReplacementShape {
     /// "twice that many tokens … are created instead" (Doubling Season).
     Double,
+    /// "half that many … tokens … instead, rounded down" (Halving Season).
+    Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
         spec: Box<crate::types::proposed_event::TokenSpec>,
@@ -4798,6 +5077,11 @@ enum TokenReplacementShape {
 /// `nom_on_lower` for case-preserving parsing and delegates token-spec
 /// extraction to the existing `parse_token_description` building block.
 fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
+    // "half that many" → Halving Season token-halving pattern.
+    if nom_primitives::scan_contains(lower, "half that many") {
+        return Some(TokenReplacementShape::Half);
+    }
+
     // "twice that many" → Doubling Season pattern.
     if nom_on_lower(lower, lower, |i| {
         let (i, _) = take_until::<_, _, OracleError<'_>>("twice that many").parse(i)?;
@@ -5180,7 +5464,9 @@ fn parse_energy_get_replacement(lower: &str, original_text: &str) -> Option<Repl
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
-    let modification = if nom_primitives::scan_contains(lower, "twice that many") {
+    let modification = if nom_primitives::scan_contains(lower, "half that many") {
+        QuantityModification::Half
+    } else if nom_primitives::scan_contains(lower, "twice that many") {
         QuantityModification::Double
     } else if let Some(rest) = strip_after(lower, "that many plus ") {
         // "that many plus one ... counters are put on it instead"
@@ -5211,6 +5497,11 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
         def = def.valid_card(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
+    }
+    if nom_primitives::scan_contains(lower, "an opponent would put")
+        || nom_primitives::scan_contains(lower, "opponent would put")
+    {
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
     }
 
     // CR 122.1a + CR 614.1a: When the Oracle text names a specific counter type
@@ -5261,6 +5552,47 @@ fn parse_global_object_counter_prohibition(
                 parse_counter_prohibition_type_separator,
                 parse_counter_prohibition_type,
             ),
+        ),
+        opt(tag(".")),
+    ));
+    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let type_filter = match type_filters.as_slice() {
+        [single] => single.clone(),
+        _ => TypeFilter::AnyOf(type_filters),
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(attach_zone_to_filter(
+                TargetFilter::Typed(TypedFilter::new(type_filter)),
+                Zone::Battlefield,
+            ))
+            .quantity_modification(QuantityModification::Prevent)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.17 + CR 614.6 + CR 122.1: Parse inverted type-scoped counter
+/// prohibitions such as "Creatures can't have counters put on them." Lowers to
+/// the same `AddCounter` + `Prevent` replacement as Solemnity's object-counter
+/// line, scoped to a single permanent type on the battlefield.
+fn parse_inverted_typed_counter_prohibition(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Inverted surface form of `parse_global_object_counter_prohibition`: the
+    // permanent type is the grammatical subject ("Creatures can't have counters
+    // put on them") rather than the object ("Counters can't be put on
+    // creatures"). Same replacement class, so it reuses the shared type-list
+    // combinators and covers every permanent type (and comma/or-separated
+    // lists) in one arm.
+    let mut combinator = all_consuming(terminated(
+        terminated(
+            separated_list1(
+                parse_counter_prohibition_type_separator,
+                parse_counter_prohibition_type,
+            ),
+            tag::<_, _, OracleError<'_>>(" can't have counters put on them"),
         ),
         opt(tag(".")),
     ));
@@ -9612,6 +9944,54 @@ mod tests {
     }
 
     #[test]
+    fn uphill_battle_played_by_opponents_enter_tapped() {
+        let text = "Creatures played by your opponents enter the battlefield tapped.";
+        assert!(
+            parse_external_enters_tapped(&text.to_lowercase(), text).is_some(),
+            "external entry parser must match Uphill Battle"
+        );
+        let def =
+            parse_replacement_line(text, "Uphill Battle").expect("Uphill Battle played-by entry");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                assert!(tf.properties.contains(&FilterProp::WasPlayed));
+            }
+            other => panic!("Expected Typed filter with WasPlayed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn played_by_opponents_entry_covers_creature_and_land() {
+        for (text, card, type_filter) in [
+            (
+                "Creatures played by your opponents enter the battlefield tapped.",
+                "Uphill Battle",
+                TypeFilter::Creature,
+            ),
+            (
+                "Lands played by your opponents enter tapped.",
+                "Contamination",
+                TypeFilter::Land,
+            ),
+        ] {
+            let def = parse_replacement_line(text, card)
+                .unwrap_or_else(|| panic!("failed to parse {text}"));
+            assert_eq!(def.event, ReplacementEvent::ChangeZone);
+            match &def.valid_card {
+                Some(TargetFilter::Typed(tf)) => {
+                    assert!(tf.type_filters.contains(&type_filter));
+                    assert!(tf.properties.contains(&FilterProp::WasPlayed));
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn blind_obedience_compound_or_filter() {
         let def = parse_replacement_line(
             "Artifacts and creatures your opponents control enter tapped.",
@@ -10183,6 +10563,42 @@ mod tests {
                 assert_eq!(tf.get_subtype(), Some("Giant"));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_collective_inferno_double_all_chosen_type() {
+        // Collective Inferno: "Double all damage that sources you control of the chosen type would deal"
+        let def = parse_replacement_line(
+            "Double all damage that sources you control of the chosen type would deal.",
+            "Collective Inferno",
+        )
+        .expect("Collective Inferno static should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::IsChosenCreatureType));
+            }
+            other => panic!("Expected Typed filter with IsChosenCreatureType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_double_all_goblin_sources() {
+        // Type-filtered variant
+        let def = parse_replacement_line(
+            "Double all damage that Goblin sources you control would deal.",
+            "Goblin Doubler",
+        )
+        .expect("Goblin doubler should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.get_subtype(), Some("Goblin"));
+            }
+            other => panic!("Expected Typed filter with Goblin subtype, got {other:?}"),
         }
     }
 
@@ -11002,18 +11418,61 @@ mod tests {
     }
 
     #[test]
-    fn no_counters_replacement_rejects_non_self_subject() {
-        // CR 614.1a: the parser must NOT match the global "creatures can't
-        // have counters put on them" wording — that is a different (wider)
-        // replacement class (Solemnity-style) which is intentionally out of
-        // scope for this PR. The current scope is strictly self-targeted.
-        // A non-self subject must fall through to the unimplemented path
-        // rather than silently lower into a SelfRef replacement.
-        let def = parse_replacement_line("Creatures can't have counters put on them.", "Test Card");
-        assert!(
-            def.is_none(),
-            "non-self subject must not match the SelfRef-scoped parser"
-        );
+    fn inverted_typed_counter_prohibition_covers_every_permanent_type() {
+        // CR 614.6 + CR 122.1: "<type> can't have counters put on them" lowers to
+        // the AddCounter+Prevent replacement scoped to that permanent type. The
+        // single combinator covers every permanent type, so creatures (#3450),
+        // planeswalkers (#3453), artifacts (#3455, #3502), and lands are all
+        // handled by one arm — no per-type parallel tests needed.
+        for (oracle_type, expected) in [
+            ("Creatures", TypeFilter::Creature),
+            ("Planeswalkers", TypeFilter::Planeswalker),
+            ("Artifacts", TypeFilter::Artifact),
+            ("Enchantments", TypeFilter::Enchantment),
+            ("Lands", TypeFilter::Land),
+        ] {
+            let text = format!("{oracle_type} can't have counters put on them.");
+            let def = parse_replacement_line(&text, "Test Card")
+                .unwrap_or_else(|| panic!("{oracle_type} counter prohibition must parse"));
+            assert_eq!(def.event, ReplacementEvent::AddCounter);
+            assert_eq!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            );
+            assert!(
+                matches!(
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.type_filters == vec![expected.clone()]
+                            && tf.controller.is_none()
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InZone { zone: Zone::Battlefield }
+                            ))
+                ),
+                "{oracle_type} must scope to {expected:?} on the battlefield"
+            );
+        }
+    }
+
+    #[test]
+    fn inverted_typed_counter_prohibition_handles_multiple_types() {
+        // CR 614.6: comma/or-separated type lists reuse the shared type-list
+        // combinator, so "Creatures or artifacts" lowers to a TypeFilter::AnyOf.
+        let def = parse_replacement_line(
+            "Creatures or artifacts can't have counters put on them.",
+            "T",
+        )
+        .expect("multi-type counter prohibition must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters == vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Artifact,
+                ])]
+        ));
     }
 
     #[test]
@@ -11742,6 +12201,61 @@ mod tests {
         ));
     }
 
+    /// CR 614.1a + CR 121.1: Opponent draw replacements with the shared
+    /// except-first-draw-in-draw-step clause (Notion Thief / Hullbreacher class).
+    #[test]
+    fn parses_opponent_draw_replacement_except_first_draw_in_step() {
+        let notion_thief = parse_replacement_line(
+            "If an opponent would draw a card except the first one they draw in each of their draw steps, instead that player skips that draw and you draw a card.",
+            "Notion Thief",
+        )
+        .expect("Notion Thief draw replacement");
+        assert_eq!(notion_thief.event, ReplacementEvent::Draw);
+        assert_eq!(
+            notion_thief.valid_player,
+            Some(ReplacementPlayerScope::Opponent)
+        );
+        assert_eq!(
+            notion_thief.condition,
+            Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+        assert!(
+            notion_thief.execute.is_some(),
+            "replacement execute chain must be present"
+        );
+
+        let hullbreacher = parse_replacement_line(
+            "If an opponent would draw a card except the first one they draw in each of their draw steps, instead you create a Treasure token.",
+            "Hullbreacher",
+        )
+        .expect("Hullbreacher draw replacement");
+        assert_eq!(hullbreacher.event, ReplacementEvent::Draw);
+        assert_eq!(
+            hullbreacher.valid_player,
+            Some(ReplacementPlayerScope::Opponent)
+        );
+        assert_eq!(
+            hullbreacher.condition,
+            Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+    }
+
+    /// CR 614.1a: Global-player draw replacement (Chains of Mephistopheles class).
+    #[test]
+    fn parses_any_player_draw_replacement_except_first_draw_in_step() {
+        let def = parse_replacement_line(
+            "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead.",
+            "Chains of Mephistopheles",
+        )
+        .expect("Chains draw replacement antecedent");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+    }
+
     #[test]
     fn parses_opponent_mill_replacement_with_multiplier() {
         let text =
@@ -12118,6 +12632,57 @@ mod tests {
             Some(QuantityModification::Plus { value: 1 })
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
+    }
+
+    #[test]
+    fn parses_halving_season_opponent_counter_replacement() {
+        let def = parse_replacement_line(
+            "If an opponent would put one or more counters on a permanent or player, they put half that many of those counters on that permanent or player instead, rounded down.",
+            "Halving Season",
+        )
+        .expect("halving season");
+        assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+    }
+
+    #[test]
+    fn parses_explore_replacement_scry_prelude() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead you scry 1, then that creature explores.",
+            "Twists and Turns",
+        )
+        .expect("Twists and Turns explore replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters == vec![TypeFilter::Creature]
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn parses_explore_replacement_double_explore() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead it explores, then it explores again.",
+            "Topography Tracker",
+        )
+        .expect("Topography Tracker explore replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn parses_halving_season_opponent_token_replacement() {
+        let def = parse_replacement_line(
+            "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.",
+            "Halving Season",
+        )
+        .expect("Halving Season token halving must parse");
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::Opponent));
     }
 }
 

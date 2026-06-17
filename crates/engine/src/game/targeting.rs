@@ -368,6 +368,20 @@ pub fn resolve_event_context_target(
     source_id: ObjectId,
 ) -> Option<TargetRef> {
     match filter {
+        // CR 608.2c: Resolution-scoped anaphors — not derived from the trigger
+        // event. `Attach::resolve` already falls back to these lists; counter
+        // and other effect handlers route through `resolve_event_context_targets`
+        // and must see the same referent (Fractal Harness ETB chain).
+        TargetFilter::LastCreated => state
+            .last_created_token_ids
+            .first()
+            .copied()
+            .map(TargetRef::Object),
+        TargetFilter::LastRevealed => state
+            .last_revealed_ids
+            .first()
+            .copied()
+            .map(TargetRef::Object),
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
@@ -400,6 +414,24 @@ pub fn resolve_event_context_targets(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
+    match filter {
+        TargetFilter::LastCreated => {
+            return state
+                .last_created_token_ids
+                .iter()
+                .map(|id| TargetRef::Object(*id))
+                .collect();
+        }
+        TargetFilter::LastRevealed => {
+            return state
+                .last_revealed_ids
+                .iter()
+                .map(|id| TargetRef::Object(*id))
+                .collect();
+        }
+        _ => {}
+    }
+
     if state.current_trigger_events.is_empty() {
         return resolve_event_context_target(state, filter, source_id)
             .into_iter()

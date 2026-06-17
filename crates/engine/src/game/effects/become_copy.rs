@@ -214,12 +214,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::database::synthesis::KeywordTriggerInstaller;
     use crate::game::layers::{compute_current_copiable_values, evaluate_layers};
     use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::turns::execute_cleanup;
     use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{Effect, StaticCondition, TargetFilter, TargetRef};
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1947,6 +1949,67 @@ mod tests {
             tce.affected,
             TargetFilter::SpecificObject { id: source_id },
             "the copy modification still applies to the SOURCE"
+        );
+    }
+
+    /// CR 707.2: Keyword abilities such as Persist are copiable values. When
+    /// the copied object carries the keyword but its printed trigger list was
+    /// not populated (or was stripped before the copy snapshot), the copy must
+    /// still receive the synthesized dies trigger so Persist/Undying function.
+    #[test]
+    fn become_copy_installs_keyword_triggers_for_copied_keywords() {
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Persist Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.base_keywords = vec![Keyword::Persist];
+            obj.keywords = vec![Keyword::Persist];
+        }
+
+        let clone = create_creature(&mut state, 2, PlayerId(0), "Clone", 0, 0);
+        let ability = make_copy_ability(target, clone, PlayerId(0), None);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&clone].keywords.contains(&Keyword::Persist),
+            "copy must receive Persist keyword"
+        );
+        assert!(
+            state.objects[&clone]
+                .trigger_definitions
+                .iter_all()
+                .any(|trigger| {
+                    KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                        trigger,
+                        &Keyword::Persist,
+                    )
+                }),
+            "copy must carry Persist's dies trigger even when the target had no printed trigger entry"
+        );
+
+        state.objects.get_mut(&clone).unwrap().damage_marked = 99;
+        let mut death_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut death_events);
+        crate::game::triggers::process_triggers(&mut state, &death_events);
+        while !state.stack.is_empty() {
+            crate::game::stack::resolve_top(&mut state, &mut Vec::new());
+        }
+
+        assert_eq!(
+            state.objects[&clone].zone,
+            Zone::Battlefield,
+            "Persist copy must return to the battlefield"
+        );
+        assert!(
+            state.objects[&clone]
+                .counters
+                .get(&CounterType::Minus1Minus1)
+                .copied()
+                .unwrap_or(0)
+                >= 1,
+            "Persist copy must re-enter with a -1/-1 counter"
         );
     }
 }

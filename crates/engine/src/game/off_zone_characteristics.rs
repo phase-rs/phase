@@ -164,12 +164,20 @@ fn apply_keyword_modification(
 }
 
 fn upsert_keyword(keywords: &mut Vec<Keyword>, keyword: Keyword) {
-    if let Some(existing) = keywords
-        .iter_mut()
-        .find(|existing| existing.kind() == keyword.kind())
-    {
-        *existing = keyword;
-        return;
+    // CR 702.164b: summing keywords (Toxic) accumulate — never overwrite; push so
+    // every instance is counted by the aggregate reader (effective_total_toxic_value).
+    // Gate on the INCOMING keyword's summing flag (not a kind comparison) so a
+    // granted off-zone Toxic pushes rather than clobbering an unrelated printed
+    // keyword that shares its (Unknown) kind. Non-summing keywords keep the
+    // upsert-by-kind dedup below unchanged.
+    if !keyword.sums_across_instances() {
+        if let Some(existing) = keywords
+            .iter_mut()
+            .find(|existing| existing.kind() == keyword.kind())
+        {
+            *existing = keyword;
+            return;
+        }
     }
 
     keywords.push(keyword);
@@ -199,6 +207,72 @@ mod tests {
             obj.timestamp = timestamp;
         }
         object_id
+    }
+
+    /// CR 702.164b (issue #955): `upsert_keyword` must PUSH summing keywords
+    /// (Toxic) so the off-zone aggregate reader counts every instance, while
+    /// keeping the upsert-by-kind dedup for all non-summing keywords. The gate
+    /// keys on the INCOMING keyword's summing flag, not a kind comparison, so a
+    /// granted Toxic (which collapses to `KeywordKind::Unknown`) does NOT clobber
+    /// an unrelated printed keyword that happens to share that `Unknown` kind.
+    #[test]
+    fn upsert_keyword_sums_toxic_but_dedups_others() {
+        use crate::types::keywords::WardCost;
+
+        // Summing keyword: two Toxic(1) accumulate (push) -> len 2.
+        let mut toxic = Vec::new();
+        upsert_keyword(&mut toxic, Keyword::Toxic(1));
+        upsert_keyword(&mut toxic, Keyword::Toxic(1));
+        assert_eq!(toxic.len(), 2, "two granted Toxic(1) must both be retained");
+        assert_eq!(
+            toxic
+                .iter()
+                .filter(|kw| matches!(kw, Keyword::Toxic(_)))
+                .count(),
+            2
+        );
+
+        // Non-summing keyword sharing a distinct kind: the second Ward overwrites
+        // the first (upsert-by-kind dedup preserved) -> len 1.
+        let mut ward = Vec::new();
+        upsert_keyword(
+            &mut ward,
+            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            })),
+        );
+        upsert_keyword(
+            &mut ward,
+            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })),
+        );
+        assert_eq!(ward.len(), 1, "non-summing Ward keeps upsert-by-kind dedup");
+        assert_eq!(
+            ward[0],
+            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })),
+            "the later Ward instance overwrites the earlier one"
+        );
+
+        // Clobber-protection residual: an incoming Toxic grant must NOT overwrite
+        // an unrelated printed keyword that also collapses to KeywordKind::Unknown
+        // (StartingIntensity). Both must survive.
+        assert_eq!(Keyword::StartingIntensity(1).kind(), KeywordKind::Unknown);
+        assert_eq!(Keyword::Toxic(1).kind(), KeywordKind::Unknown);
+        let mut mixed = vec![Keyword::StartingIntensity(1)];
+        upsert_keyword(&mut mixed, Keyword::Toxic(1));
+        assert_eq!(
+            mixed.len(),
+            2,
+            "Toxic grant must not clobber an unrelated same-(Unknown)-kind printed keyword"
+        );
+        assert!(mixed.contains(&Keyword::StartingIntensity(1)));
+        assert!(mixed.contains(&Keyword::Toxic(1)));
     }
 
     #[test]
