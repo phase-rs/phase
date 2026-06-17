@@ -11746,6 +11746,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_choose_from_zone_at_random_strips_qualifier_no_target_fallback() {
+        // CR 608.2d (override): "choose a creature card at random from target
+        // opponent's graveyard" (Tariel, Reckoner of Souls) → FromZone with
+        // selection=Random and zone_owner=TargetedPlayer. The captured "at
+        // random" must be stripped before the filter parse so it does NOT leak
+        // into the search-filter prefix and emit a spurious
+        // "search-filter-suffix unmatched" TargetFallback (pre-fix regression).
+        let text = "choose a creature card at random from target opponent's graveyard";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        match parse_choose_ast(text, &lower, &mut ctx) {
+            Some(ChooseImperativeAst::FromZone {
+                selection,
+                zone_owner,
+                ..
+            }) => {
+                assert_eq!(selection, CardSelectionMode::Random);
+                assert_eq!(zone_owner, ZoneOwner::TargetedPlayer);
+            }
+            other => panic!("expected random FromZone, got {other:?}"),
+        }
+        // The clean parse emits no target-fallback at all; pre-fix the leaked
+        // "at random" produced a "search-filter-suffix unmatched" TargetFallback.
+        assert!(
+            !ctx.diagnostics
+                .iter()
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. })),
+            "the stripped 'at random' qualifier must not leak a target-fallback: {:?}",
+            ctx.diagnostics
+        );
+    }
+
+    #[test]
     fn parse_choose_anaphoric_non_random_defaults_to_chosen() {
         // Building-block regression: the ordinary anaphoric path stays Chosen.
         let text = "choose one of them";
