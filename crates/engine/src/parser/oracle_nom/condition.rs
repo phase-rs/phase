@@ -6707,6 +6707,19 @@ mod tests {
         }
     }
 
+    /// "Glimmer" (Duskmourn enchantment-creature subtype) and "Mammoth" must be
+    /// recognized so their oracle-text references parse.
+    #[test]
+    fn test_you_control_glimmer_mammoth_subtypes() {
+        for w in ["glimmer", "mammoth"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
     #[test]
     fn test_you_control_compound_presence() {
         let (rest, c) =
