@@ -16,6 +16,7 @@
 //!     attacking player qualifies (CR 303.4e).
 //!   - attacked-target narrowing ("attack a player", CR 508.3a) → moves to the
 //!     purpose-built `attack_target_filter`.
+//!
 //! Decoupling them is what lets Killian fire when its enchanted creature attacks
 //! a planeswalker or battle, not only a player.
 //!
