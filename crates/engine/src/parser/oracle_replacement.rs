@@ -323,6 +323,15 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         }
     }
 
+    // --- Untap-step replacement: "If [filter] would untap during [its
+    // controller's | your] untap step, [effect] instead" (Freyalise's Winds,
+    // Edge of Malacol). CR 502.3 + CR 502.4 + CR 614.1a.
+    if nom_primitives::scan_contains(&lower, "would untap during") {
+        if let Some(def) = parse_untap_step_replacement(&text, &lower) {
+            return Some(def);
+        }
+    }
+
     // --- "If [player] would draw [a card | one or more cards], {effect}" ---
     // CR 614.1a: Widened from "you would draw" to handle opponent/player
     // scope (Notion Thief, Hullbreacher, Chains of Mephistopheles) mirroring
@@ -5005,6 +5014,61 @@ fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<Replace
     )
 }
 
+/// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement —
+/// "If [filter] would untap during [its controller's | your] untap step,
+/// [effect] instead" (Freyalise's Winds, Edge of Malacol). The `valid_card`
+/// filter scopes WHICH permanent (parsed generically via `parse_type_phrase`),
+/// and `ReplacementCondition::DuringUntapStep` scopes WHEN (so effect-untaps at
+/// other times are unaffected). The alternative effect appears BEFORE "instead"
+/// ("remove all wind counters from it instead", "put two +1/+1 counters on it
+/// instead").
+fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "untap step")
+        || !nom_primitives::scan_contains(lower, "instead")
+    {
+        return None;
+    }
+
+    // Subject filter: between "if " and " would untap during".
+    let (head, after_would) = split_once_on_lower(original_text, lower, " would untap during ")?;
+    // Self-reference untap clauses ("~ would untap") are handled elsewhere.
+    if head.contains('~') {
+        return None;
+    }
+    // CR 614.1a: consume the leading "if " with a `tag` combinator, then parse
+    // the subject as a typed filter (lowercase, as `parse_type_phrase` expects).
+    let head_lc = head.trim().to_ascii_lowercase();
+    let (subject_lc, _) = tag::<_, _, OracleError<'_>>("if ")
+        .parse(head_lc.as_str())
+        .ok()?;
+    let (filter, subject_rest) = parse_type_phrase(subject_lc.trim());
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
+        return None;
+    }
+
+    // Skip past "[its controller's | your] untap step" to the alternative effect.
+    let after_would_lc = after_would.to_ascii_lowercase();
+    let (_step_owner, after_step) =
+        split_once_on_lower(after_would, &after_would_lc, "untap step")?;
+    let after_step = after_step.trim_start_matches([',', ' ']);
+
+    // Effect is the text before " instead".
+    let after_step_lc = after_step.to_ascii_lowercase();
+    let (effect_text, _) = split_once_on_lower(after_step, &after_step_lc, "instead")?;
+    let effect_text = effect_text.trim().trim_end_matches([',', ' ']);
+    if effect_text.is_empty() {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Untap)
+            .valid_card(filter)
+            .condition(ReplacementCondition::DuringUntapStep)
+            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .description(original_text.to_string()),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum ScryReplacementAction {
     Draw,
@@ -7142,6 +7206,45 @@ mod tests {
             }
             other => panic!("expected MayCost, got {other:?}"),
         }
+    }
+
+    /// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement. Edge of Malacol
+    /// "If a creature you control would untap during your untap step, put two
+    /// +1/+1 counters on it instead." gates to the untap step (so effect-untaps
+    /// elsewhere are unaffected) and keeps the alternative effect.
+    #[test]
+    fn untap_step_replacement_edge_of_malacol() {
+        let def = parse_replacement_line(
+            "If a creature you control would untap during your untap step, put two +1/+1 counters on it instead.",
+            "Edge of Malacol",
+        )
+        .expect("untap-step replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Untap);
+        assert_eq!(def.condition, Some(ReplacementCondition::DuringUntapStep));
+        assert!(
+            def.execute.is_some(),
+            "alternative effect (+1/+1 counters) must not be dropped"
+        );
+        assert!(
+            def.valid_card.is_some(),
+            "valid_card filter (a creature you control) should be set"
+        );
+    }
+
+    /// CR 502.3 + CR 614.1a: untap-step replacement with a counter-filtered
+    /// subject — Freyalise's Winds "If a permanent with a wind counter on it
+    /// would untap during its controller's untap step, remove all wind counters
+    /// from it instead."
+    #[test]
+    fn untap_step_replacement_freyalises_winds() {
+        let def = parse_replacement_line(
+            "If a permanent with a wind counter on it would untap during its controller's untap step, remove all wind counters from it instead.",
+            "Freyalise's Winds",
+        )
+        .expect("counter-filtered untap-step replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Untap);
+        assert_eq!(def.condition, Some(ReplacementCondition::DuringUntapStep));
+        assert!(def.execute.is_some());
     }
 
     /// CR 614.12a: Karoo artifact — Mox Diamond's "you may discard ..." cost.

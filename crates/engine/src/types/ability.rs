@@ -13518,6 +13518,14 @@ pub enum ReplacementCondition {
     /// "twice that many of each of those kinds of counters" doubling
     /// replacement) is the canonical case.
     ClassLevelGE { level: u8 },
+    /// CR 502.3 + CR 502.4: True only during the untap step. Permanents untap as
+    /// a turn-based action during the untap step (502.3) and no player receives
+    /// priority then (502.4), so the only `ProposedEvent::Untap` raised during
+    /// this phase is the turn-based untap. Gates an untap replacement ("if [X]
+    /// would untap during [its controller's / your] untap step, [effect]
+    /// instead" — Freyalise's Winds, Edge of Malacol) so it does NOT apply to
+    /// effect-untaps ("untap target creature") at other times.
+    DuringUntapStep,
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring

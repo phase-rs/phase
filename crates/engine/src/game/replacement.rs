@@ -2579,13 +2579,52 @@ fn untap_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -
     matches!(event, ProposedEvent::Untap { .. })
 }
 
+// CR 614.1a + CR 614.6: An untap-step replacement ("If [perm] would untap
+// during [...] untap step, [effect] instead") replaces the untap with its
+// alternative effect, bound to the permanent that would have untapped ("it").
+// With no alternative effect it is a pure prevention ("doesn't untap"). Either
+// way the original untap does not happen, so the applier returns `Prevented`.
 fn untap_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    let ProposedEvent::Untap { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::Untap { object_id, applied });
+    };
+    let controller = source.controller;
+    let execute = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone());
+
+    // Run the alternative effect chain (if any) against the would-be-untapped
+    // permanent, then prevent the untap. A replacement with no execute is a
+    // bare "doesn't untap" prevention.
+    if let Some(execute) = execute {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::types::ability::TargetRef;
+
+        // CR 614.6: the alternative effect ("put two +1/+1 counters on it",
+        // "remove all wind counters from it") refers to the permanent that would
+        // have untapped — NOT the replacement source. Resolve the chain with the
+        // would-be-untapped object as the source so its `it`/SelfRef anaphor
+        // binds to that permanent, and seed `targets` for the `None`-anaphor form.
+        let mut current = Some(execute.as_ref());
+        while let Some(def) = current {
+            let mut ability = build_resolved_from_def(def, object_id, controller);
+            ability.targets = vec![TargetRef::Object(object_id)];
+            let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            current = def.sub_ability.as_deref();
+        }
+    }
+
+    ApplyResult::Prevented
 }
 
 // --- 14. Counter (spell countering) ---
@@ -3552,6 +3591,14 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
+        // CR 502.3 + CR 502.4: untap-step gate. Permanents untap as a turn-based
+        // action during the untap step, and no player receives priority then, so
+        // any `ProposedEvent::Untap` raised while `phase == Untap` is the
+        // turn-based untap (effect-untaps like "untap target creature" occur in
+        // phases that grant priority). Restricts the replacement to the untap
+        // step exactly as the "during [its controller's / your] untap step"
+        // wording requires.
+        ReplacementCondition::DuringUntapStep => state.phase == crate::types::phase::Phase::Untap,
         // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
         // while the controller has at least `minimum` permanents matching `filter` on
         // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
