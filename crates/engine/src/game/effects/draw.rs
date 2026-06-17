@@ -75,7 +75,11 @@ pub fn resolve(
         // player choice mechanism in `engine_resolution_choices` and
         // baked it into the ProposedEvent::Draw count.
         Effect::Draw { count, target } => (
-            resolve_quantity_with_targets(state, count, ability) as u32,
+            // CR 107.1b: a calculation yielding a negative number uses zero
+            // instead. Clamp before the `as u32` cast — an unclamped negative
+            // (e.g. Mr. Foxglove when the defender's hand is smaller than the
+            // controller's) would wrap to ~4 billion and draw the whole library.
+            resolve_quantity_with_targets(state, count, ability).max(0) as u32,
             // CR 121.1 + CR 615.5 + CR 609.7: context-ref target filters
             // (PostReplacementSourceController, ParentTargetController, etc.)
             // resolve via state slots — falling straight to `ability.controller`

@@ -569,8 +569,15 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // mana value — must precede `parse_event_context_refs` so the
         // cost/effect referent resolver wins over the generic event-source
         // resolver for sacrificed/exiled/milled possessives (Food Chain, Burnt
-        // Offering, Metamorphosis, Heed the Mists).
-        parse_cost_paid_object_ref,
+        // Offering, Metamorphosis, Heed the Mists). The two cost-paid-object
+        // front-forms (possessive "the sacrificed permanent's mana value" and
+        // prepositional "the mana value of the sacrificed permanent" —
+        // Morbid Curiosity) are nested to keep the outer `alt` within nom 8.0's
+        // 21-item tuple arity; both resolve the same `ObjectScope::CostPaidObject`.
+        alt((
+            parse_cost_paid_object_ref,
+            parse_cost_paid_object_prepositional_ref,
+        )),
         parse_event_context_refs,
     ))
     .or(alt((
@@ -1278,6 +1285,23 @@ fn parse_recipient_controller_hand_count(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
+/// CR 506.2 + CR 402: Parse "defending player's hand" → defending-player hand
+/// size. Mr. Foxglove's "the number of cards in defending player's hand" — the
+/// possessive references the player being attacked (CR 506.2 defines the
+/// defending player), resolved at runtime via `PlayerScope::DefendingPlayer`.
+/// Does not consume the leading "cards in " — the caller
+/// (`parse_zone_card_count`) has stripped that prefix.
+fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("defending player's ").parse(input)?;
+    let (rest, _) = tag("hand").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::HandSize {
+            player: PlayerScope::DefendingPlayer,
+        },
+    ))
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
@@ -1301,6 +1325,9 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     // singular zone (`CountScope::All`) and silently misroute the count.
     if card_types.is_empty() || card_types == vec![TypeFilter::Card] {
         if let Ok((after_zone, q)) = parse_recipient_controller_hand_count(rest) {
+            return Ok((after_zone, q));
+        }
+        if let Ok((after_zone, q)) = parse_defending_player_hand_count(rest) {
             return Ok((after_zone, q));
         }
     }
@@ -1995,25 +2022,9 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// object that moved from the library to the graveyard; its mana value is read
 /// from that public-zone object or LKI as needed.
 fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // Possessive form: "[the] (sacrificed|…) (permanent|…)'s (mana value|power|…)"
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((
-        tag("sacrificed "),
-        tag("exiled "),
-        tag("discarded "),
-        // CR 701.17a: "milled" — card moved library → graveyard by the mill action.
-        tag("milled "),
-    ))
-    .parse(rest)?;
-    let (rest, _) = alt((
-        tag("creature"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ))
-    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_participle_noun(rest)?;
     let (rest, property) = parse_object_property_possessive_suffix(rest)?;
     let qty = match property {
         ObjectProperty::Power => QuantityRef::Power {
@@ -2027,6 +2038,57 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         },
     };
     Ok((rest, qty))
+}
+
+/// CR 202.3 + CR 608.2k + CR 400.7j: Prepositional cost-paid mana-value form,
+/// e.g. Morbid Curiosity's "the mana value of the sacrificed permanent".
+///
+/// Mirrors the possessive `parse_cost_paid_object_ref` but reads
+/// `[the] mana value of the (sacrificed|exiled|discarded|milled) (creature|permanent|…)`.
+/// Reuses the shared participle+noun combinator so both prepositional and
+/// possessive front-forms resolve the same `ObjectScope::CostPaidObject` ref.
+/// Power/toughness have no idiomatic prepositional Oracle phrasing, so this arm
+/// only emits the mana-value reference.
+fn parse_cost_paid_object_prepositional_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = alt((
+        tag("mana value of the "),
+        tag("converted mana cost of the "),
+    ))
+    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_participle_noun(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    ))
+}
+
+/// Shared participle + noun matcher for the cost-paid-object class. Each axis is
+/// a single `alt()` over independent variants — adding a participle or noun
+/// extends one branch and both the possessive and prepositional arms inherit it.
+///
+/// CR 701.17a: "milled" — card moved library → graveyard by the mill action.
+fn parse_cost_paid_participle_noun(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        tag("sacrificed "),
+        tag("exiled "),
+        tag("discarded "),
+        tag("milled "),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    Ok((rest, ()))
 }
 
 fn parse_object_property_possessive_suffix(input: &str) -> OracleResult<'_, ObjectProperty> {
@@ -4649,6 +4711,49 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 202.3 + CR 608.2k: prepositional cost-paid mana-value form
+    /// (Morbid Curiosity) resolves the same `CostPaidObject` referent as the
+    /// possessive "the sacrificed permanent's mana value".
+    #[test]
+    fn parse_quantity_ref_cost_paid_object_prepositional_mana_value() {
+        for phrase in [
+            "the mana value of the sacrificed permanent",
+            "mana value of the sacrificed permanent",
+            "the mana value of the exiled creature",
+            "the converted mana cost of the sacrificed artifact",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: crate::types::ability::ObjectScope::CostPaidObject,
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+    }
+
+    /// CR 506.2 + CR 402: "cards in defending player's hand" → defending-player
+    /// hand size (Mr. Foxglove), reachable both bare and after "the number of".
+    #[test]
+    fn parse_quantity_ref_defending_player_hand() {
+        for phrase in [
+            "cards in defending player's hand",
+            "the number of cards in defending player's hand",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::HandSize {
+                    player: PlayerScope::DefendingPlayer,
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
     }
 
     #[test]

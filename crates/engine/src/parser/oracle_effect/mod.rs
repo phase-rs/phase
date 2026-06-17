@@ -5917,8 +5917,17 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
     let rest = rest_lower.trim().trim_end_matches('.');
-    // CR 603.7c: Prefer event context quantity for triggered effects.
-    let qty = super::oracle_quantity::parse_event_context_quantity(rest)?;
+    // CR 603.7c: Prefer event context quantity for triggered effects — keeps
+    // "that much"/"this way"/"that many" bound to the triggering-event amount.
+    // CR 121.1 + CR 107.1b: When the count is a static/dynamic CDA expression
+    // rather than an event-context reference (e.g. Narset's "spells you've cast
+    // this turn", Mr. Foxglove's "cards in defending player's hand minus the
+    // number of cards in your hand"), fall back to the arithmetic-aware
+    // `parse_cda_quantity` so binary minus / offset / fraction draw counts
+    // resolve instead of dropping the whole clause. Event-context FIRST is what
+    // preserves the trigger semantics for the cards that need them.
+    let qty = super::oracle_quantity::parse_event_context_quantity(rest)
+        .or_else(|| super::oracle_quantity::parse_cda_quantity(rest))?;
     match verb {
         EqualToQtyVerb::Mill => Some(parsed_clause(Effect::Mill {
             count: qty,
