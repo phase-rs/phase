@@ -51,8 +51,7 @@ fn resolve_imprint_exile(
         .execute
         .as_ref()
         .expect("imprint trigger must carry an execute ability");
-    let mut resolved =
-        engine::game::ability_utils::build_resolved_from_def(execute, labyrinth, P0);
+    let mut resolved = engine::game::ability_utils::build_resolved_from_def(execute, labyrinth, P0);
     resolved.targets = vec![TargetRef::Object(imprint_candidate)];
     let mut events = Vec::new();
     engine::game::effects::change_zone::resolve(runner.state_mut(), &resolved, &mut events)
@@ -85,9 +84,10 @@ fn ugin_labyrinth_with_imprinted_card_produces_two_colorless() {
         .expect("mana ability must carry imprint delta sub_ability");
     match sub.condition.as_ref() {
         Some(engine::types::ability::AbilityCondition::QuantityCheck {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::CardsExiledBySource,
-            },
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
             ..
         }) => {}
         other => panic!("expected CardsExiledBySource condition, got {other:?}"),
