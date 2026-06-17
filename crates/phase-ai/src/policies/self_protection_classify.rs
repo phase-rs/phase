@@ -149,11 +149,47 @@ fn modification_is_defensive(m: &ContinuousModification) -> bool {
     match m {
         ContinuousModification::AddKeyword { keyword } => keyword_is_defensive(keyword),
         ContinuousModification::AddStaticMode { mode } => static_mode_is_defensive(mode),
-        ContinuousModification::GrantAbility { definition } => collect_chain_effects(definition)
-            .iter()
-            .any(|effect| is_self_protection_effect(effect)),
+        // CR 613.1d: granted abilities inherit the grant's affected object — inner
+        // static defs often omit `affected` because the payload applies to ~.
+        ContinuousModification::GrantAbility { definition } => {
+            ability_has_defensive_payload(definition)
+        }
         _ => false,
     }
+}
+
+fn static_definition_has_defensive_payload(sd: &StaticDefinition) -> bool {
+    if static_mode_is_defensive(&sd.mode) {
+        return true;
+    }
+    sd.modifications
+        .iter()
+        .any(modification_has_defensive_payload)
+}
+
+fn modification_has_defensive_payload(m: &ContinuousModification) -> bool {
+    match m {
+        ContinuousModification::AddKeyword { keyword } => keyword_is_defensive(keyword),
+        ContinuousModification::AddStaticMode { mode } => static_mode_is_defensive(mode),
+        ContinuousModification::GrantAbility { definition } => {
+            ability_has_defensive_payload(definition)
+        }
+        _ => false,
+    }
+}
+
+fn ability_has_defensive_payload(ability: &AbilityDefinition) -> bool {
+    collect_chain_effects(ability)
+        .iter()
+        .any(|effect| match effect {
+            Effect::PreventDamage { .. } => true,
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities
+                .iter()
+                .any(static_definition_has_defensive_payload),
+            _ => false,
+        })
 }
 
 fn keyword_is_defensive(keyword: &Keyword) -> bool {
@@ -294,9 +330,34 @@ fn grants_from_modification(m: &ContinuousModification) -> Vec<DefensiveGrant> {
     match m {
         ContinuousModification::AddKeyword { keyword } => grant_from_keyword(keyword),
         ContinuousModification::AddStaticMode { mode } => grant_from_static_mode(mode),
-        ContinuousModification::GrantAbility { definition } => extract_defensive_grants(definition),
+        ContinuousModification::GrantAbility { definition } => {
+            extract_defensive_payload_grants(definition)
+        }
         _ => Vec::new(),
     }
+}
+
+/// Extract defensive grants from a granted ability without re-requiring self-scope
+/// on inner static definitions (see `modification_is_defensive` GrantAbility arm).
+fn extract_defensive_payload_grants(ability: &AbilityDefinition) -> Vec<DefensiveGrant> {
+    let mut grants = Vec::new();
+    for effect in collect_chain_effects(ability) {
+        match effect {
+            Effect::PreventDamage { .. } => grants.push(DefensiveGrant::PreventDamage),
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for sd in static_abilities {
+                    grants.extend(grant_from_static_mode(&sd.mode));
+                    for m in &sd.modifications {
+                        grants.extend(grants_from_modification(m));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    grants
 }
 
 fn grant_from_keyword(keyword: &Keyword) -> Vec<DefensiveGrant> {
@@ -788,7 +849,10 @@ mod tests {
         ));
     }
 
-    fn create_test_creature(state: &mut GameState, controller: PlayerId) -> engine::types::identifiers::ObjectId {
+    fn create_test_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+    ) -> engine::types::identifiers::ObjectId {
         use engine::game::zones::create_object;
         use engine::types::identifiers::CardId;
         use engine::types::zones::Zone;
