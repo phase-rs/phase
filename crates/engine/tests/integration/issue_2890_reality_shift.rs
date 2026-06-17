@@ -131,6 +131,8 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
         Effect::Manifest {
             target: engine::types::ability::TargetFilter::ParentTargetController,
             count: QuantityExpr::Fixed { value: 1 },
+            profile: None,
+            enters_under: None,
         },
         vec![],
         ObjectId(100),

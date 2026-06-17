@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_initiative, eval_is_monarch, eval_source_entered_this_turn,
+    eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
 use crate::game::filter;
@@ -95,6 +96,7 @@ pub mod exchange_control;
 // `intensify.rs`, so `intensify.rs` stays implementation-only).
 pub mod cloak;
 pub mod exchange_life;
+pub mod exchange_life_totals;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -486,6 +488,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_additions(state, events);
     if waits_for_resolution_choice(&state.waiting_for) {
+        return;
+    }
+    // CR 101.4 + CR 608.2c: A `ChooseFromZone { EachPlayer }` iteration that is
+    // still mid-flight (more players to prompt) must not let the parked
+    // continuation ("put those cards onto the battlefield") run until every
+    // player's graveyard pick has accumulated into the tracked set. The
+    // per-player drain re-parks the next prompt; this guard ensures the
+    // continuation waits for the whole sweep (Breach the Multiverse).
+    if state.pending_per_player_zone_choice.is_some() {
         return;
     }
     if let Some(cont) = state.pending_continuation.take() {
@@ -1655,6 +1666,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::ZoneChangedThisWay { .. }
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
             | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
             | AbilityCondition::ConditionInstead { .. }
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
@@ -2499,6 +2511,7 @@ pub fn resolve_effect(
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
+        Effect::ExchangeLifeTotals { .. } => exchange_life_totals::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())
@@ -2565,7 +2578,17 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || effect_references_tracked_set(&ability.effect);
+    ) || effect_references_tracked_set(&ability.effect)
+        // CR 608.2c + CR 609.3: `repeat_for` is a loop-count quantity on the
+        // ResolvedAbility, not inside Effect — e.g. "for each nonland card
+        // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
+        // Without this check, the forced-discard path (no WaitingFor pause)
+        // never publishes the tracked set, so the downstream token loop sees
+        // size 0 and creates no tokens (Seasoned Pyromancer bug #740).
+        || ability
+            .repeat_for
+            .as_ref()
+            .is_some_and(quantity_expr_references_tracked_set);
 
     consumes
         || ability
@@ -3107,6 +3130,20 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                     action: PlayerActionKind::SearchedLibrary,
                     ..
                 }
+            )
+        }),
+        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
+        // gates the rider on whether control actually changed (Kain, Traitorous
+        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
+        // recipient differs from the object's current controller,
+        // `ControllerChanged`.
+        Effect::GiveControl { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::GiveControl,
+                    ..
+                } | GameEvent::ControllerChanged { .. }
             )
         }),
         _ => true,
@@ -3791,10 +3828,41 @@ fn hydrate_event_context_targets<'a>(
     Cow::Owned(resolved)
 }
 
+/// CR 603.2: Filters that auto-resolve from `state.current_trigger_event` during
+/// hydration / unless-pay payer resolution (issue #2361, Kain #1335).
+fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::StackSpell
+    )
+}
+
 /// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
 fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 110.2 + CR 603.7c: `GiveControl` carries both an object `target` and a
+    // `recipient`. Kain ("that player gains control of Kain") binds the recipient
+    // to `TriggeringPlayer` while the object is `SelfRef` — only the recipient
+    // is an event-context player ref and must be hydrated into `ability.targets`
+    // when empty (issue #1335).
+    if let Effect::GiveControl { target, recipient } = effect {
+        if hydratable_event_context_filter(recipient) {
+            return Some(recipient);
+        }
+        if hydratable_event_context_filter(target) {
+            return Some(target);
+        }
+        return None;
+    }
+
     let filter = match effect {
         Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
@@ -3853,7 +3921,6 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::SkipNextStep { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::AdditionalPhase { target, .. }
-        | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
         // CR 701.26a/b + CR 603.7c: only the single-permanent tap/untap exposes
@@ -3887,17 +3954,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         _ => return None,
     };
 
-    if matches!(
-        filter,
-        TargetFilter::TriggeringSpellController
-            | TargetFilter::TriggeringSpellOwner
-            | TargetFilter::TriggeringPlayer
-            | TargetFilter::TriggeringSource
-            | TargetFilter::DefendingPlayer
-            | TargetFilter::ParentTargetController
-            | TargetFilter::ParentTarget
-            | TargetFilter::StackSpell
-    ) {
+    if hydratable_event_context_filter(filter) {
         Some(filter)
     } else {
         None
@@ -6313,6 +6370,17 @@ pub(crate) fn evaluate_condition(
         // For the untapped sense, wrap with `Not`. No battlefield zone guard
         // (ability conditions; zone constrained by functioning-abilities path).
         AbilityCondition::SourceIsTapped => eval_source_is_tapped(state, ability.source_id),
+        // CR 301.5 + CR 303.4: "if this permanent is attached to a creature you
+        // control" — check the source Aura/Equipment's host. False when the
+        // source is unattached or its host isn't a creature controlled by the
+        // ability's controller. Lets bestow triggers like Springheart Nantuko
+        // skip their optional payment branch silently while still resolving
+        // the fallback sub-ability.
+        AbilityCondition::SourceAttachedToCreature => eval_source_attached_to_controlled_creature(
+            state,
+            ability.source_id,
+            ability.controller,
+        ),
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
@@ -6668,21 +6736,39 @@ fn resolve_grant_next_spell_ability(
     ability: &crate::types::ability::ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), crate::types::ability::EffectError> {
-    let (modifier, spell_filter) = match &ability.effect {
+    let (modifier, player_scope, spell_filter) = match &ability.effect {
         Effect::GrantNextSpellAbility {
             modifier,
+            player,
             spell_filter,
-        } => (modifier.clone(), spell_filter.clone()),
+        } => (modifier.clone(), player.clone(), spell_filter.clone()),
         _ => {
             return Err(crate::types::ability::EffectError::MissingParam(
                 "GrantNextSpellAbility".to_string(),
             ))
         }
     };
+    // CR 115.1: "they cast / that player casts" (PlayerScope::Target) = the
+    // player this ability targets — the mana-clause recipient on Bigger on the
+    // Inside, inherited onto this SequentialSibling via chain target
+    // propagation. CR 109.5: every other scope = the effect's controller
+    // ("the next spell you cast"). Exhaustive over PlayerScope (no `_`), so any
+    // future variant forces a maintainer to re-confirm its next-spell semantics.
+    let player = match player_scope {
+        PlayerScope::Target => ability.target_player(),
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer => ability.controller,
+    };
     state
         .pending_next_spell_modifiers
         .push(crate::types::game_state::PendingNextSpellModifier {
-            player: ability.controller,
+            player,
             modifier,
             spell_filter,
         });
@@ -7162,6 +7248,30 @@ mod tests {
     }
 
     #[test]
+    fn repeat_for_tracked_set_marks_ability_as_referencing_tracked_set() {
+        // Issue #740 (Seasoned Pyromancer): "for each nonland card discarded this
+        // way, create a token" carries its loop count as `repeat_for: TrackedSetSize`
+        // on the ResolvedAbility, NOT inside Effect. The publish predicate must
+        // detect it so the forced-discard path (no WaitingFor pause) still publishes
+        // the tracked set; without this check the token loop sees size 0.
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        // Control: a plain GainLife with no `repeat_for` references no tracked set.
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+        // With a tracked-set loop count, the predicate must return true.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    #[test]
     fn optional_trigger_prompt_includes_may_trigger_key() {
         let mut state = GameState::new_two_player(42);
         let source_id = ObjectId(100);
@@ -7506,6 +7616,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         crate::game::engine::apply(
@@ -8483,6 +8594,8 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::ParentTargetController,
                 count: QuantityExpr::Fixed { value: 1 },
+                profile: None,
+                enters_under: None,
             },
             vec![],
             ObjectId(100),
@@ -11647,6 +11760,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -11683,6 +11797,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_profile: None,
                 count_param: 0,
+                is_cost_payment: false,
             },
             GameAction::SelectCards {
                 cards: vec![second],
@@ -17536,6 +17651,34 @@ mod tests {
         assert!(
             !mandatory_parent_effect_performed(&copy, &not_made),
             "a CopySpell that made no copy is NOT 'performed' — the draw rider must run"
+        );
+    }
+
+    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
+    /// Kain. If they do, …" gates the rider on whether control actually
+    /// transferred. `GiveControl` counts as performed only when
+    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    #[test]
+    fn give_control_performed_tracks_controller_changed_event() {
+        let give = Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::TriggeringPlayer,
+        };
+
+        let transferred = [GameEvent::ControllerChanged {
+            object_id: ObjectId(1),
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+        }];
+        assert!(
+            mandatory_parent_effect_performed(&give, &transferred),
+            "GiveControl that changed controllers is 'performed'"
+        );
+
+        let not_transferred: [GameEvent; 0] = [];
+        assert!(
+            !mandatory_parent_effect_performed(&give, &not_transferred),
+            "GiveControl that failed must not seed the if-they-do rider"
         );
     }
 

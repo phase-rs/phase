@@ -109,6 +109,26 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             ),
         },
 
+        // CR 406.6: The power of a specific card exiled by the source.
+        // Used by The Mimeoplasm to read the second exiled card's power.
+        GameNumber::PowerOfExiledCard(card_in_exile) => {
+            let index = match &**card_in_exile {
+                CardInExile::TheFirstCardExiledThisWay => 0,
+                CardInExile::TheSecondCardExiledThisWay => 1,
+                _ => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "QuantityRef",
+                        needed_variant: format!(
+                            "PowerOfExiledCard with CardInExile: {card_in_exile:?}"
+                        ),
+                    });
+                }
+            };
+            QuantityExpr::Ref {
+                qty: QuantityRef::ExiledCardPower { index },
+            }
+        }
+
         // CR 601.2h + CR 202.2: Sunburst / Converge.
         GameNumber::TheNumberOfColorsOfManaSpentToCastSpell(spell) => match &**spell {
             Spell::ThisSpell => mana_spent_quantity(
@@ -1490,6 +1510,21 @@ mod tests {
             converted,
             QuantityExpr::Ref {
                 qty: QuantityRef::CardsExiledBySource,
+            }
+        );
+    }
+
+    #[test]
+    fn power_of_exiled_card_converts_to_exiled_card_power() {
+        let converted = convert(&GameNumber::PowerOfExiledCard(Box::new(
+            CardInExile::TheSecondCardExiledThisWay,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            converted,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ExiledCardPower { index: 1 },
             }
         );
     }

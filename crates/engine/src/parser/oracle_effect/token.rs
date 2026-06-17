@@ -300,6 +300,11 @@ fn parse_token_description_with_context(
     // Pakal, Thousandth Moon) — accept that as a valid terminator in addition
     // to EOF so the attacking flag is captured even when a variable-X binding
     // trails the clause.
+    // CR 508.4: trailing defender phrases ("that player or a planeswalker they
+    // control", "that opponent", etc. — Adeline, Resplendent Cathar / Myriad
+    // class) must not prevent the inline modifier from matching; accept a word
+    // boundary after "attacking" the same way `parse_battlefield_entry_qualifiers`
+    // does for put-onto-battlefield effects.
     let attacking_clause = |i| -> OracleResult<'_, bool> {
         let (i, _) = alt((
             tag(" that's"),
@@ -313,7 +318,14 @@ fn parse_token_description_with_context(
             value(false, tag(" attacking")),
         ))
         .parse(i)?;
-        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+        let (i, _) = alt((
+            value((), nom::combinator::eof),
+            value((), tag(", where ")),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(i)?;
         Ok((i, tapped))
     };
     // Nom parses forward; scan byte positions (only those starting with the
@@ -1379,6 +1391,38 @@ mod tests {
         );
     }
 
+    /// CR 707.9b + CR 205.1b: The Apprentice's Folly — elided-subject "is a
+    /// Reflection in addition to its other types" in a comma-anded token-copy
+    /// except clause must restore `AddSubtype(Reflection)` to
+    /// `CopyTokenOf.additional_modifications`. Uses the TRUNCATED text the saga
+    /// sentence-splitter produces (no "and has haste" — that is diverted upstream
+    /// into a separate Unimplemented sibling, a separate out-of-scope saga bug).
+    /// We assert nothing about `extra_keywords`: on this card path there is no
+    /// surviving keyword in the clause.
+    #[test]
+    fn elided_subtype_token_copy_routes_subtype_to_additional_modifications() {
+        let effect = try_parse_token(
+            "create a token that's a copy of that permanent, except it isn't legendary, is a reflection in addition to its other types",
+            "Create a token that's a copy of that permanent, except it isn't legendary, is a Reflection in addition to its other types",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Reflection"
+            )),
+            "AddSubtype(Reflection) must reach CopyTokenOf.additional_modifications; got {additional_modifications:?}"
+        );
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones: "create a token that's a copy of
     /// that card, except it's an enchantment and loses all other card types."
     /// CR 205.1a + CR 707.9d: the "loses all other card types" suffix is the
@@ -2090,6 +2134,30 @@ mod tests {
         );
     }
 
+    /// CR 508.4 + CR 506.3a: Adeline, Resplendent Cathar — "for each opponent,
+    /// create … token that's tapped and attacking that player or a planeswalker
+    /// they control." The trailing defender phrase must not defeat the inline
+    /// modifier (issue #3303).
+    #[test]
+    fn token_thats_tapped_and_attacking_that_player_suffix_sets_flags() {
+        let text = "create a 1/1 white human creature token that's tapped and attacking that player or a planeswalker they control";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect");
+        };
+        assert!(tapped, "Human token must enter tapped");
+        assert!(
+            enters_attacking,
+            "Human token must enter attacking despite trailing defender phrase"
+        );
+    }
+
     /// CR 111.4 + CR 111.1: A registry-defined named token (here the Mutavault
     /// land token) parses to a complete `Effect::Token` sourced from the
     /// predefined-token catalog, instead of dropping to `Effect::Unimplemented`.
@@ -2222,4 +2290,38 @@ mod tests {
             assert_eq!(types, expected);
         }
     }
+}
+
+#[test]
+fn copy_token_non_saga_token_you_control_issue_3294() {
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+
+    let effect = try_parse_token(
+        "create a token that's a copy of a non-saga token you control",
+        "Create a token that's a copy of a non-Saga token you control.",
+        &mut ParseContext::default(),
+    )
+    .expect("expected CopyTokenOf");
+    let Effect::CopyTokenOf {
+        target,
+        source_filter,
+        ..
+    } = effect
+    else {
+        panic!("expected CopyTokenOf, got {effect:?}");
+    };
+    assert!(source_filter.is_none());
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected Typed copy source, got {target:?}");
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Saga".to_string()
+            )))),
+        "expected Non(Saga), got {:?}",
+        tf.type_filters
+    );
+    assert!(tf.properties.contains(&FilterProp::Token));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
 }

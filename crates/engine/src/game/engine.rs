@@ -4377,14 +4377,26 @@ fn apply_action(
                     log_entries: vec![],
                 });
             }
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::Proliferate,
-                source_id: ObjectId(0), // Source not tracked through choice state
-            });
             // CR 701.34a: Emit player-action event so proliferate triggers fire.
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
+            });
+            let completion_source = state
+                .pending_proliferate_actions
+                .as_ref()
+                .map(|pending| pending.source_id)
+                .unwrap_or(ObjectId(0));
+            if !effects::proliferate::resume_pending_proliferate_actions(state, &mut events) {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
+            events.push(GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Proliferate,
+                source_id: completion_source,
             });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
@@ -17902,6 +17914,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -17971,6 +17984,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let result = apply_as_current(
@@ -18016,6 +18030,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });

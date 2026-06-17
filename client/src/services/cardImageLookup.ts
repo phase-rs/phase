@@ -51,7 +51,10 @@ export interface CardImageLookup {
  *      issue #90 (The Legend of Kuruk) for context.
  */
 export function cardImageLookup(
-  obj: Pick<GameObject, "name" | "transformed" | "back_face" | "printed_ref">,
+  obj: Pick<
+    GameObject,
+    "name" | "transformed" | "back_face" | "printed_ref" | "is_emblem" | "emblem_source"
+  >,
 ): CardImageLookup {
   if (obj.printed_ref) {
     return {
@@ -59,6 +62,21 @@ export function cardImageLookup(
       faceName: obj.printed_ref.face_name,
       name: obj.name,
       faceIndex: obj.transformed ? 1 : 0,
+    };
+  }
+
+  // CR 114.5: an emblem is neither a card nor a permanent and has no
+  // `printed_ref` of its own (setting one would leak the source card's
+  // types/P-T into the layer system). Resolve its art from the display-only
+  // `emblem_source` provenance — the card the emblem represents (e.g. Momir Vig
+  // for the Momir emblem) — so an emblem's activated ability on the stack shows
+  // the same art as its command-zone chip instead of a blank placeholder.
+  if (obj.is_emblem && obj.emblem_source) {
+    return {
+      name: obj.emblem_source.name,
+      oracleId: obj.emblem_source.printed_ref?.oracle_id,
+      faceName: obj.emblem_source.printed_ref?.face_name,
+      faceIndex: 0,
     };
   }
 

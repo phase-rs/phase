@@ -814,11 +814,17 @@ pub enum Keyword {
     /// on target creature, which gains this creature's other abilities until EOT.
     Backup(u32),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (variable additional cost + ETB token-per-payment
-    /// not wired).
-    /// CR 702.157: Squad {cost} — as an additional cost to cast, you may pay {cost}
-    /// any number of times; ETB creates that many tokens.
+    /// CR 702.157a: Squad {cost} — "As an additional cost to cast this spell,
+    /// you may pay {cost} any number of times." "When this creature enters, if
+    /// its squad cost was paid, create a token that's a copy of it for each time
+    /// its squad cost was paid." (CR 702.157b: each instance triggers separately.)
+    ///
+    /// Runtime: `database::synthesis::synthesize_squad` builds a
+    /// `AdditionalCost::Optional { repeatability: Repeatable }` additional-cost
+    /// instance (origin: `AdditionalCostOrigin::Squad`) and an ETB copy trigger
+    /// keyed on `QuantityRef::AdditionalCostPaymentCountFor { origin: Squad }`.
+    /// `casting_costs::effective_squad_additional_cost_instances` surfaces the
+    /// per-instance additional costs during casting. Fully wired.
     Squad(ManaCost),
 
     /// CR 702.29: Typecycling — "{subtype}cycling {cost}": discard this card and pay {cost}
@@ -923,11 +929,17 @@ pub enum Keyword {
     /// mana cost.
     Replicate(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cast hook + awaken-paid branch not wired).
-    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts
-    /// N +1/+1 counters on target land, animating it as a 0/0 Elemental
-    /// creature with haste.
+    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts N +1/+1
+    /// counters on target land you control, animating it as a 0/0 Elemental
+    /// creature with haste (it's still a land). Casting with awaken follows
+    /// CR 601.2b and CR 601.2f–h. CR 702.113b: the land target exists only
+    /// when the awaken cost was paid.
+    ///
+    /// Runtime: `CastingVariant::Awaken` + `casting::handle_awaken_cost_choice`
+    /// substitutes the awaken mana cost for the printed cost and calls
+    /// `effects::awaken::append_awaken_rider` to append the resolution rider
+    /// (`PutCounter{N, land you control}` → `Animate{0/0 Elemental, Haste,
+    /// Permanent}`) at the tail of the spell's ability tree. Fully wired.
     Awaken {
         count: u32,
         cost: ManaCost,
@@ -939,40 +951,57 @@ pub enum Keyword {
     /// trigger semantics are synthesized in `database::synthesis`.
     ForMirrodin,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cost cast hook not wired).
     /// CR 702.162a: More Than Meets the Eye {cost} — alternative cost
-    /// (Transformers crossover). "You may cast this card converted by
-    /// paying [cost] rather than its mana cost." Stores the alt mana
-    /// cost; the runtime alt-cost cast hook is not yet wired.
+    /// (Transformers crossover). "You may cast this card converted by paying
+    /// [cost] rather than its mana cost." Follows CR 701.28 (Convert) —
+    /// the permanent enters the battlefield transformed (back face up).
+    /// Alternative cost rules: CR 601.2b, CR 601.2f–h, CR 118.9.
+    ///
+    /// Runtime: `CastingVariant::MoreThanMeetsTheEye` + `casting::handle_mtmte_cost_choice`
+    /// substitutes the MTMTE mana cost for the printed cost and routes through
+    /// `continue_cast_with_alternative_spell_face`, which sets the stack spell
+    /// to use back-face characteristics. On resolution, `enter_transformed`
+    /// ZoneChange seed ensures the permanent enters back face up.
+    /// `CastingVariant::restores_front_face_after_stack_exit` handles cleanup
+    /// if the spell leaves the stack without resolving. Fully wired.
     MoreThanMeetsTheEye(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (alt-cast hook + combat-damage-this-turn predicate
-    /// not wired).
-    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay
-    /// [cost] rather than pay this spell's mana cost if a player was
-    /// dealt combat damage this turn by a creature that, at the time it
-    /// dealt that damage, was an Assassin creature or a commander under
-    /// your control." Stores the alt mana cost; runtime alt-cast hook
-    /// (combat-damage-this-turn predicate) is not yet wired.
+    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay [cost]
+    /// rather than pay this spell's mana cost if a player was dealt combat damage
+    /// this turn by a creature that, at the time it dealt that damage, was an
+    /// Assassin creature or a commander under your control." Follows CR 601.2b
+    /// and CR 601.2f–h. A pure cost substitution — no resolution rider.
+    ///
+    /// Runtime: The eligibility predicate is tracked in
+    /// `GameState::assassin_or_commander_dealt_combat_damage_this_turn`
+    /// (a `HashSet<PlayerId>` seeded by `triggers::collect_pending_triggers`
+    /// when an Assassin or commander deals combat damage, per CR 702.173a).
+    /// The ledger is cleared at cleanup (CR 514) by `turns::run_cleanup`.
+    /// `casting::casting_variant_candidates` checks the ledger to surface
+    /// `CastingVariant::Freerunning`; `casting_costs` substitutes the
+    /// Freerunning cost for the printed cost. Fully wired.
     Freerunning(ManaCost),
 
     /// CR 702.191a: Increment — spell-cast trigger synthesized in
     /// `database::synthesis::synthesize_increment`.
     Increment,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (choose-color + transform hooks not wired).
-    /// CR ???: Specialize {cost} — not in CR text (needs manual
-    /// verification). Strixhaven student-into-mage transformation:
-    /// activated alt-cast that turns the source into a colour-specific
-    /// version. Stores the activation mana cost; the choose-color and
-    /// transform hooks are not yet wired. mtgish encodes activation
-    /// timing modifiers and from-graveyard variants separately; this
-    /// keyword carries only the cost (the engine drops the activation
-    /// modifier and the from-graveyard hint, mirroring how `LevelUp`
-    /// drops its `Vec<Level>` payload).
+    /// Digital-only Specialize (Alchemy Horizons: Baldur's Gate) — not in the
+    /// Comprehensive Rules; behavior follows MTG Arena. "{cost}, Discard a
+    /// colored card or a card with a basic land subtype: This permanent becomes
+    /// the matching color-specialized face permanently." Activated ability,
+    /// sorcery speed. The keyword carries only the activation mana cost; the
+    /// discard filter and color selection are built at synthesis time.
+    ///
+    /// Runtime: `database::synthesis::synthesize_specialize` builds a sorcery-
+    /// speed `AbilityKind::Activated` with `Effect::Specialize` and
+    /// `AbilityCost::Composite { Mana + Discard { filter: specialize_discard_filter } }`.
+    /// `effects::specialize::resolve` reads the discarded card's LKI snapshot to
+    /// determine eligible colors via `game::specialize::eligible_specialize_colors`,
+    /// then either calls `specialize_permanent` directly (one option) or sets
+    /// `WaitingFor::SpecializeColor` for the player to choose.
+    /// `engine_resolution_choices` dispatches `GameAction::ChooseSpecializeColor`
+    /// to complete the transformation. Fully wired.
     Specialize(ManaCost),
 
     /// CR 702.48a: "[Quality] offering" — as an additional cost to cast this
@@ -1328,6 +1357,24 @@ impl Keyword {
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )
+    }
+
+    /// CR 702.164b: Keywords whose multiple instances SUM their parameter values
+    /// into a single aggregate (e.g. a creature's total toxic value), rather than
+    /// collapsing identical instances. When such a keyword is granted on top of an
+    /// identical printed instance, BOTH must remain on the keyword list so the
+    /// aggregate reader counts every copy. Distinct from `instances_function_separately`
+    /// (which gates per-instance trigger installation — a different semantic axis).
+    /// Conservative/CR-driven: only Toxic sums today (CR 702.164b). Protection
+    /// (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do NOT sum — they keep
+    /// deduping identical instances. Add any future "sum of all N" keyword here.
+    ///
+    /// Out of scope (intentionally not gated by this predicate): cast-time spell
+    /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
+    /// Toxic is inert at cast time) and the layers `AddDynamicKeyword` arm
+    /// (`DynamicKeywordKind` is only Annihilator/Modular, never Toxic).
+    pub fn sums_across_instances(&self) -> bool {
+        matches!(self, Keyword::Toxic(_))
     }
 }
 
@@ -2135,7 +2182,12 @@ impl FromStr for Keyword {
             "riot" => Ok(Keyword::Riot),
             "livingweapon" => Ok(Keyword::LivingWeapon),
             "jobselect" => Ok(Keyword::JobSelect),
-            "formirrodin!" => Ok(Keyword::ForMirrodin),
+            // Accept both the Oracle spelling ("For Mirrodin!") and the
+            // serialized variant name ("ForMirrodin"). `Serialize` emits the
+            // bare variant name (no "!"), so card-data.json round-trips through
+            // this path as "formirrodin"; without the second spelling it would
+            // fall to `Keyword::Unknown` and drop the keyword on reload.
+            "formirrodin!" | "formirrodin" => Ok(Keyword::ForMirrodin),
             // CR 702.89a/b: "umbra armor" is the current name; "totem armor" is the
             // obsolete printing both Oracle text and MTGJSON may still carry.
             "totemarmor" | "totem armor" | "umbra armor" | "umbraarmor" => Ok(Keyword::TotemArmor),
@@ -2305,7 +2357,7 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
     }
 }
 
-fn parse_protection_target(s: &str) -> ProtectionTarget {
+pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
     // Lookup table on an atomic quality string (not Oracle-text dispatch) — the
     // caller has already isolated the quality token from "protection from X".
     let lower = s.to_ascii_lowercase();
@@ -2833,6 +2885,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Afterlife" => Ok(Keyword::Afterlife(uint(data))),
         "Fading" => Ok(Keyword::Fading(uint(data))),
         "Vanishing" => Ok(Keyword::Vanishing(uint(data))),
+        // CR 702.48: Offering — `Offering(String)` serializes as
+        // {"Offering": "<quality>"}; round-trip it back rather than dropping
+        // the keyword to Unknown on reload of card-data.json.
+        "Offering" => Ok(Keyword::Offering(
+            data.as_str().unwrap_or_default().to_string(),
+        )),
+        // Specialize (Alchemy Horizons: Baldur's Gate) — `Specialize(ManaCost)`
+        // serializes as {"Specialize": <ManaCost>}; round-trip it back to the
+        // typed variant so the synthesized specialize ability is not lost.
+        "Specialize" => mana(data).map(Keyword::Specialize),
         "Crew" => {
             // Struct variant: {"Crew": {"power": N, "once_per_turn": {...}}}.
             // A bare number is also accepted for forward/back compatibility.
@@ -3046,6 +3108,26 @@ mod tests {
         );
         assert_eq!(Keyword::from_str("Battle Cry").unwrap(), Keyword::Battlecry);
         assert_eq!(Keyword::from_str("Aftermath").unwrap(), Keyword::Aftermath);
+    }
+
+    #[test]
+    fn unit_keywords_survive_serde_round_trip() {
+        // `Serialize` emits the bare variant name; the custom `Deserialize`
+        // routes plain strings through `FromStr`. Every unit keyword must
+        // round-trip back to itself rather than degrading to `Unknown`.
+        // ForMirrodin regressed here: its variant name "ForMirrodin" lacks the
+        // "!" that the Oracle-spelling `FromStr` arm required.
+        for kw in [
+            Keyword::Flying,
+            Keyword::LivingWeapon,
+            Keyword::JobSelect,
+            Keyword::TotemArmor,
+            Keyword::ForMirrodin,
+        ] {
+            let value = serde_json::to_value(&kw).unwrap();
+            let back: Keyword = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(back, kw, "round-trip failed for {value:?}");
+        }
     }
 
     #[test]
@@ -4017,6 +4099,22 @@ mod tests {
         match kw {
             Keyword::Freerunning(_) => {} // cost shape validated by ManaCost deser
             other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameterized_keywords_survive_serde_round_trip() {
+        // Serialize emits these as externally-tagged objects
+        // ({"Specialize": <ManaCost>}, {"Offering": "<quality>"}); the custom
+        // Deserialize must route them back through keyword_from_tagged rather
+        // than dropping them to Unknown on reload of card-data.json.
+        for kw in [
+            Keyword::Specialize(parse_keyword_mana_cost("{2}")),
+            Keyword::Offering("Fox".to_string()),
+        ] {
+            let json = serde_json::to_value(&kw).unwrap();
+            let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(kw, deserialized, "round-trip failed for {json}");
         }
     }
 

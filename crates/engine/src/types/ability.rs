@@ -57,6 +57,13 @@ pub enum ZoneOwner {
     /// pool is "permanents owned by the voter". For Battlefield, filters
     /// by `obj.owner` (ownership) rather than `obj.controller` (control).
     ScopedPlayer,
+    /// CR 101.4 + CR 608.2c: Every player owns a referenced zone, iterated in
+    /// APNAP order. A `ChooseFromZone { zone_owner: EachPlayer }` parks one
+    /// choice per player, drawing candidates from THAT player's zone, and
+    /// accumulates each pick into the resolution chain's tracked object set.
+    /// Building block for Breach the Multiverse ("For each player, choose a
+    /// creature or planeswalker card in that player's graveyard").
+    EachPlayer,
 }
 
 /// CR 101.4: Who selects permanents in a multi-player category choice effect
@@ -2107,6 +2114,9 @@ pub enum ControllerRef {
     /// object target inherited by this chained effect ("that permanent's
     /// controller may sacrifice a land").
     ParentTargetController,
+    /// CR 608.2c + CR 108.3: Filter owner is the owner of the parent object
+    /// target inherited by this chained effect ("its owner's graveyard").
+    ParentTargetOwner,
     /// CR 508.5 / CR 508.5a: Filter controller is the defending player for
     /// the source attacking creature, resolved per attacker through
     /// `combat::defending_player_for_attacker`. Used by intervening-if
@@ -2212,6 +2222,10 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 305.1 + CR 601.2a: Matches objects entering from being played
+    /// (land play) or cast (spell), excluding tokens put directly onto the
+    /// battlefield without a prior zone.
+    WasPlayed,
     /// CR 508.1b: Matches attacking creatures, optionally scoped by which player
     /// the creature is attacking.
     Attacking {
@@ -2245,6 +2259,11 @@ pub enum FilterProp {
     Untapped,
     /// CR 702.171b: Matches permanents with the saddled designation.
     IsSaddled,
+    /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
+    /// `controller` relative to the ability source ("each battle they protect").
+    ProtectorMatches {
+        controller: ControllerRef,
+    },
     /// CR 302.6 + CR 702.10b + CR 702.154a: Matches creatures that either have
     /// haste or have been under their controller's control continuously since
     /// that player's most recent turn began. Used by Enlist's tap eligibility.
@@ -2598,6 +2617,11 @@ pub enum FilterProp {
     /// contains an `{X}` shard. Used for "activate an ability with {X} in its
     /// activation cost" on `AbilityActivated` delayed triggers (Magus Lucea Kane).
     HasXInActivationCost,
+    /// CR 702.33d: Matches spells whose kicker additional cost was paid for this
+    /// cast. Used for "the first kicked spell you cast each turn" cost reducers
+    /// (Vine Gecko). Live evaluation reads `pending_cast` / `GameObject.kickers_paid`;
+    /// turn-history evaluation reads `SpellCastRecord.was_kicked`.
+    WasKicked,
     /// CR 605.1: Matches objects that have at least one ability classified as a
     /// mana ability by the engine's authoritative mana-ability classifier.
     /// Used for library filters such as "artifact card with a mana ability".
@@ -3116,9 +3140,17 @@ pub enum TargetFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
-    /// CR 610.3: Cards exiled by a specific source via "exile until ~ leaves" links.
+    /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
+    /// CR 607.2b: References a specific card exiled by the source, indexed by order.
+    /// Used by The Mimeoplasm to distinguish "the first card exiled this way" from
+    /// "the second card exiled this way". The index is 0-based and corresponds to
+    /// the order in `state.cards_exiled_with_source_this_turn[source_id]`.
+    /// ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
+    ExiledCardByIndex {
+        index: u32,
+    },
     /// CR 603.7c: Resolves to the controller of the spell/ability that triggered this.
     TriggeringSpellController,
     /// CR 603.7c: Resolves to the owner of the spell/ability that triggered this.
@@ -3433,6 +3465,10 @@ pub enum CastManaObjectScope {
     SelfObject,
     /// The spell object referenced by the current trigger event.
     TriggeringSpell,
+    /// CR 115.1 + CR 601.2h: The first object target of the resolving ability —
+    /// "it"/"that spell" when the condition gates on the targeted spell
+    /// (Nix: "Counter target spell if no mana was spent to cast it").
+    AbilityTarget,
 }
 
 /// CR 106.3 + CR 601.2h: What to measure about mana spent to cast a spell.
@@ -3653,6 +3689,9 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
+    /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
+    ExiledCardPower { index: u32 },
     /// CR 604.3: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
     /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller
@@ -8152,6 +8191,12 @@ pub enum Effect {
     /// Creates a one-shot modifier applied when the player casts their next qualifying spell.
     GrantNextSpellAbility {
         modifier: crate::types::game_state::NextSpellModifier,
+        /// CR 601.2f + CR 115.1: whose next spell receives the modifier.
+        /// `Controller` = "the next spell you cast"; `Target` = "the next
+        /// spell they cast / that player casts" (the player this ability
+        /// targets, e.g. the mana recipient on Bigger on the Inside).
+        #[serde(default = "default_player_scope_controller")]
+        player: PlayerScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
     },
@@ -8423,11 +8468,31 @@ pub enum Effect {
         modifier: Option<DieRollModifier>,
     },
     /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
+    ///
+    /// CR 705.2: "only the player who flips a coin wins or loses the flip." The
+    /// `flipper` selects WHICH player flips (and therefore whose win/lose result
+    /// drives the branches and whose `CoinFlipped` is recorded). It is the same
+    /// player-reference type every other player-acting effect carries
+    /// (`LoseLife.target`, `Draw.target`, `GainLife.player`) and is resolved by
+    /// the single-authority `resolve_player_for_context_ref`, so "that player
+    /// flips a coin" (Mirrored Depths, Planar Chaos) flips for the triggering
+    /// player rather than the source's controller. Defaults to `Controller` for
+    /// the bare "flip a coin" / "you flip a coin" case (CR 705.2) and for
+    /// back-compat with serialized data written before this field existed.
+    /// "each player flips a coin" is NOT expressed here — it rides the
+    /// surrounding `AbilityDefinition.player_scope` iteration (CR 101.4 APNAP),
+    /// which rebinds the acting controller per player so `flipper = Controller`
+    /// flips once for each player.
     FlipCoin {
         #[serde(default)]
         win_effect: Option<Box<AbilityDefinition>>,
         #[serde(default)]
         lose_effect: Option<Box<AbilityDefinition>>,
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        flipper: TargetFilter,
     },
     /// CR 705: Flip N coins. `win_effect` runs once per heads (win),
     /// `lose_effect` runs once per tails (loss). Generalization of `FlipCoin`
@@ -8435,6 +8500,9 @@ pub enum Effect {
     /// Lecturer). The one-flip degenerate case stays as `FlipCoin` — this
     /// variant is only emitted when `count > 1` or when the Oracle text
     /// explicitly binds a count.
+    ///
+    /// CR 705.2: `flipper` selects which player flips all `count` coins (see
+    /// `FlipCoin::flipper`). Defaults to `Controller`.
     FlipCoins {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -8442,6 +8510,11 @@ pub enum Effect {
         win_effect: Option<Box<AbilityDefinition>>,
         #[serde(default)]
         lose_effect: Option<Box<AbilityDefinition>>,
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        flipper: TargetFilter,
     },
     /// CR 705: Flip coins until you lose a flip, then execute effect with win count.
     FlipCoinUntilLose {
@@ -8762,6 +8835,20 @@ pub enum Effect {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 708.2a: Effect-specified face-down characteristics override
+        /// ("They're 2/2 Cyberman artifact creatures."). `None` = the vanilla
+        /// 2/2 manifest default (CR 701.40a). The put-clause seeds
+        /// `Some(vanilla_2_2())` when the surface form is "put the top N cards
+        /// ... onto the battlefield face down", and a trailing
+        /// `FaceDownProfileSpec` continuation refines it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<FaceDownProfile>,
+        /// CR 110.2a: Controller override on entry ("under your control"). `None`
+        /// leaves each manifested card under the library owner's control (the
+        /// CR 701.40a default). Cybership routes the damaged player's cards under
+        /// the Cybership controller via `ControllerRef::You`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 701.62a: Manifest dread — look at top 2 cards of library, manifest one,
     /// put the rest into graveyard. Uses interactive WaitingFor::ManifestDreadChoice.
@@ -8970,6 +9057,15 @@ pub enum Effect {
         player: TargetFilter,
         stat: PtStat,
     },
+    /// CR 701.12a: Two players exchange life totals. player_a/player_b each select a
+    /// player (Controller for "you", Opponent filter for "target opponent", Player
+    /// for "target player"). Both swap simultaneously, all-or-nothing.
+    ExchangeLifeTotals {
+        #[serde(default = "default_target_filter_any")]
+        player_a: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        player_b: TargetFilter,
+    },
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
@@ -9070,6 +9166,13 @@ fn default_quantity_one() -> QuantityExpr {
 
 fn default_duration_until_end_of_turn() -> Duration {
     Duration::UntilEndOfTurn
+}
+
+/// CR 109.5: backward-compatible serde default for `Effect::GrantNextSpellAbility`'s
+/// `player` field — pre-field data and "the next spell YOU cast" grants resolve to
+/// the controller.
+fn default_player_scope_controller() -> PlayerScope {
+    PlayerScope::Controller
 }
 
 fn default_comparator_ge() -> Comparator {
@@ -9959,6 +10062,9 @@ impl Effect {
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
+            // CR 701.12a: player targets (player_a/player_b) are surfaced as
+            // dual target slots by ability_utils, not by `target_filter()`.
+            | Effect::ExchangeLifeTotals { .. }
             // CR 601.2a: candidates gathered by `filter`/`zones` at resolution,
             // no player-selectable target slot.
             | Effect::FreeCastFromZones { .. }
@@ -10203,6 +10309,7 @@ impl Effect {
             | Effect::Endure { .. }
             | Effect::ExchangeControl { .. }
             | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::FlipCoin { .. }
@@ -10404,6 +10511,7 @@ impl Effect {
             | Effect::Endure { .. }
             | Effect::ExchangeControl { .. }
             | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::FlipCoin { .. }
@@ -10633,6 +10741,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Seek { .. } => "Seek",
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
         Effect::ExchangeLifeWithStat { .. } => "ExchangeLifeWithStat",
+        Effect::ExchangeLifeTotals { .. } => "ExchangeLifeTotals",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
@@ -10832,6 +10941,7 @@ pub enum EffectKind {
     Seek,
     SetLifeTotal,
     ExchangeLifeWithStat,
+    ExchangeLifeTotals,
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
@@ -11046,6 +11156,7 @@ impl From<&Effect> for EffectKind {
             Effect::Seek { .. } => EffectKind::Seek,
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
             Effect::ExchangeLifeWithStat { .. } => EffectKind::ExchangeLifeWithStat,
+            Effect::ExchangeLifeTotals { .. } => EffectKind::ExchangeLifeTotals,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
@@ -12322,6 +12433,14 @@ pub enum AbilityCondition {
     /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// For the untapped sense, wrap with `AbilityCondition::Not`.
     SourceIsTapped,
+    /// CR 301.5 + CR 303.4: "if this permanent is attached to a creature you control" —
+    /// checks whether the source Aura/Equipment is currently attached to a creature
+    /// controlled by the ability's controller. Used at the effect-resolution seam by
+    /// optional bestow-trigger branches like Springheart Nantuko's landfall pay
+    /// (the trigger itself fires regardless; only the optional payment / copy-token
+    /// sub-ability is gated on attachment so the fallback Insect token branch can
+    /// still resolve when the Aura is unattached).
+    SourceAttachedToCreature,
     /// CR 614.1a / CR 614.15: General "instead" self-replacement — wraps any
     /// `AbilityCondition` with replacement semantics. When the inner condition is
     /// met at resolution, the sub's
@@ -13014,6 +13133,20 @@ pub enum TriggerCondition {
     /// Checked at both fire-time and resolution-time per CR 603.4.
     EventDamageSourceMatchesFilter { filter: TargetFilter },
 
+    /// CR 120.1 + CR 108.3 + CR 603.4: Intervening-if predicate that holds when
+    /// the player dealt the triggering damage is the OWNER of the object that
+    /// dealt it ("deals combat damage to its owner"). Reads the triggering
+    /// `GameEvent::DamageDealt`: true when `target == Player(p)` and the damage
+    /// source object's `owner == p` (CR 120.1: the object that deals damage is
+    /// the source of that damage). Distinct from `EventDamageSourceMatchesFilter`
+    /// (which filters the damage *source* by a TargetFilter) and from
+    /// `DealtDamageBySourceThisTurn` (which gates a dying creature against
+    /// this-turn damage records) — this gates the recipient↔source-owner
+    /// relation, which no static `TargetFilter` can express. Evaluated at both
+    /// fire-time and resolution-time per CR 603.4, and per synthetic per-source
+    /// event on the aggregate combat-damage path. The Beast, Deathless Prince.
+    DamagedPlayerIsEventSourceOwner,
+
     /// CR 614.12c + CR 607.2d + CR 603.4: True when the trigger source's
     /// persisted `ChosenAttribute::Label` matches the given anchor word.
     /// Used by anchor-word modal permanents (Khans of Tarkir Sieges, Tarkir:
@@ -13165,6 +13298,37 @@ pub enum ReplacementCondition {
     /// "enters with an indestructible counter on it if you cast it from your
     /// hand"). Evaluated against `GameObject.cast_from_zone`.
     CastFromZone { zone: Zone },
+    /// CR 614.1d + CR 601: Gates a replacement on how the *entering* object
+    /// (the event's `affected_object_id`) arrived — NOT the replacement source.
+    /// Both halves reference the entering object, which distinguishes this from
+    /// `CastFromZone` (which reads the replacement's `source_id`; for a global
+    /// floating install that source is the sentinel `ObjectId(0)`, so
+    /// `CastFromZone` cannot express entering-object origin).
+    ///
+    /// `origin_constraint` reuses the engine's canonical from-zone primitive
+    /// (`OriginConstraint`) to test the event's `from` field — the "would enter
+    /// from <zone>" half (CR 614.1d). Because `ProposedEvent::ZoneChange.from`
+    /// is a non-optional `Zone`, the evaluator wraps it as `Some(from)` before
+    /// delegating to `OriginConstraint::matches_from`.
+    ///
+    /// `cast_origin`, when `Some(zone)`, additionally matches when the entering
+    /// object was cast from `zone` (`GameObject.cast_from_zone == Some(zone)`)
+    /// and thus physically enters from the Stack — the "or after being cast from
+    /// <zone>" half (CR 601) that `OriginConstraint` cannot express because it
+    /// only inspects `from`, never `cast_from_zone`. The two halves are
+    /// OR-combined. Covers Don't Blink's "if one or more creatures would enter
+    /// from exile or after being cast from exile" in a single leaf.
+    EnteredFromZone {
+        /// Physical "would enter from <zone>" half. `None` when the clause has
+        /// only a cast-origin half ("...or after being cast from <zone>") — in
+        /// that case the physical path must NOT match, so this is an
+        /// `Option` rather than collapsing to `OriginConstraint::Any` (which
+        /// would make the OR-combined physical half true for every entry).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_constraint: Option<OriginConstraint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_origin: Option<Zone>,
+    },
     /// CR 207.2c (Raid ability word) + CR 614.1c: "if you attacked this turn"
     /// — replacement applies only when the controller attacked with a
     /// creature earlier this turn. Evaluated against
@@ -13335,6 +13499,21 @@ impl OriginConstraint {
     /// compact for the common no-restriction case.
     pub fn is_any(&self) -> bool {
         matches!(self, OriginConstraint::Any)
+    }
+
+    /// CR 111.1 + CR 400.1: Does an object that moved from `from` satisfy this
+    /// source-zone constraint? `from = None` (CR 111.1 direct creation / token
+    /// entry, where the object had no prior zone) matches only `Any`; any
+    /// constraint naming a specific source zone cannot match a `None` origin.
+    /// Single authority shared by the zone-change trigger matcher and the
+    /// `ReplacementCondition::EnteredFromZone` physical-entry half.
+    pub fn matches_from(&self, from: &Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => from == &Some(*z),
+            OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
+            OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
     }
 }
 
@@ -13831,6 +14010,8 @@ pub enum DamageModification {
 pub enum QuantityModification {
     /// count * 2 — Primal Vigor, Doubling Season, Parallel Lives, Anointed Procession
     Double,
+    /// count / 2 rounded down — Halving Season
+    Half,
     /// count + value — Hardened Scales (+1)
     Plus { value: u32 },
     /// count.saturating_sub(value) — Vizier of Remedies (-1)
@@ -15267,6 +15448,66 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 111.1 + CR 400.1: the shared `OriginConstraint::matches_from` predicate
+    /// (used by both the zone-change trigger matcher and the `EnteredFromZone`
+    /// replacement condition's physical half). Verifies the `None` origin case
+    /// (CR 111.1 direct/token creation) the `Some()` wrap protects against, plus
+    /// every variant axis.
+    #[test]
+    fn origin_constraint_matches_from_predicate() {
+        use crate::types::zones::Zone;
+        // Equals: exact source-zone match; None never matches a specific zone.
+        let eq = OriginConstraint::Equals(Zone::Exile);
+        assert!(eq.matches_from(&Some(Zone::Exile)));
+        assert!(!eq.matches_from(&Some(Zone::Hand)));
+        assert!(!eq.matches_from(&None));
+        // NotEquals: any named source except this; None does not match.
+        let ne = OriginConstraint::NotEquals(Zone::Battlefield);
+        assert!(ne.matches_from(&Some(Zone::Exile)));
+        assert!(!ne.matches_from(&Some(Zone::Battlefield)));
+        assert!(!ne.matches_from(&None));
+        // OneOf: membership only.
+        let one_of = OriginConstraint::OneOf(vec![Zone::Graveyard, Zone::Library]);
+        assert!(one_of.matches_from(&Some(Zone::Graveyard)));
+        assert!(one_of.matches_from(&Some(Zone::Library)));
+        assert!(!one_of.matches_from(&Some(Zone::Exile)));
+        assert!(!one_of.matches_from(&None));
+        // Any: matches everything, including the None direct-creation origin.
+        assert!(OriginConstraint::Any.matches_from(&None));
+        assert!(OriginConstraint::Any.matches_from(&Some(Zone::Battlefield)));
+    }
+
+    /// CR 101.4 + CR 608.2c (issue #3302): `ZoneOwner::EachPlayer` is a shared
+    /// serialized engine type (card-data export, WASM/IPC transport). A
+    /// serialize→deserialize round-trip must reproduce the exact variant so a
+    /// Breach the Multiverse `ChooseFromZone { zone_owner: EachPlayer }` survives
+    /// the wire. Every variant is checked so adding `EachPlayer` did not perturb
+    /// the others' tags.
+    #[test]
+    fn zone_owner_serde_round_trips_each_variant() {
+        for owner in [
+            ZoneOwner::Controller,
+            ZoneOwner::TargetedPlayer,
+            ZoneOwner::Opponent,
+            ZoneOwner::ScopedPlayer,
+            ZoneOwner::EachPlayer,
+        ] {
+            let json = serde_json::to_string(&owner).expect("ZoneOwner serializes");
+            let round_tripped: ZoneOwner =
+                serde_json::from_str(&json).expect("ZoneOwner deserializes");
+            assert_eq!(round_tripped, owner, "round-trip must preserve {owner:?}");
+        }
+        // The new variant's external tag is its identifier (default enum repr).
+        assert_eq!(
+            serde_json::to_string(&ZoneOwner::EachPlayer).unwrap(),
+            "\"EachPlayer\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ZoneOwner>("\"EachPlayer\"").unwrap(),
+            ZoneOwner::EachPlayer
+        );
+    }
 
     /// #506: `AbilityCost::consumes_source` classifies a self-discard cost
     /// (cycling, Channel) as source-consuming so the UI confirms a lone such

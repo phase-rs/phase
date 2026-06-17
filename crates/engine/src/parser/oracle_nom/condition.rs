@@ -1119,14 +1119,21 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     value(StaticCondition::SourceIsSaddled, tag("is saddled")).parse(rest)
 }
 
-/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature" → SourceAttachedToCreature.
+/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature [you control]"
+/// → SourceAttachedToCreature.
+///
+/// The optional " you control" suffix covers bestow-trigger gates like Springheart
+/// Nantuko ("if this permanent is attached to a creature you control"). All printed
+/// Oracle uses controller=You for this gate (the host of an Aura/bestow card is
+/// always under its controller by CR 303.4d/CR 702.103b), so the controller axis
+/// is parameter-free at the AST layer — the runtime evaluator checks the host's
+/// controller against the ability's controller.
 fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
-    value(
-        StaticCondition::SourceAttachedToCreature,
-        tag("is attached to a creature"),
-    )
-    .parse(rest)
+    let (rest, _) = tag("is attached to a creature").parse(rest)?;
+    // Optional trailing " you control" — consumed but not represented in the AST.
+    let (rest, _) = opt(tag(" you control")).parse(rest)?;
+    Ok((rest, StaticCondition::SourceAttachedToCreature))
 }
 
 /// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
@@ -2276,6 +2283,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
+        // CR 508.1: "a creature is attacking you" → IsPresent(creature attacking you)
+        parse_creature_attacking_you,
         // "you don't control a/an [type]" → Not(IsPresent)
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
@@ -2467,6 +2476,25 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
 /// not just hardcoded creature/artifact/enchantment/planeswalker.
 /// "another" is handled by passing "another [type]" to `parse_type_phrase`,
 /// which recognizes "another" and adds `FilterProp::Another`.
+/// CR 508.1: "a creature is attacking you" — presence check for an attacker
+/// whose defending player is the controller. Gates Confront the Assault's
+/// casting restriction and the Swat Away / Heroic Return cost reductions.
+/// Lowers to `IsPresent` over a creature filter carrying `FilterProp::Attacking
+/// { defender: You }` — the same filter "for each creature attacking you" uses.
+fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a creature is attacking you").parse(input)?;
+    let mut filter = TypedFilter::creature();
+    filter.properties.push(FilterProp::Attacking {
+        defender: Some(ControllerRef::You),
+    });
+    Ok((
+        rest,
+        StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(filter)),
+        },
+    ))
+}
+
 fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // Strip "you control " prefix, then pass the rest (including a/an/another) to parse_type_phrase.
     // parse_type_phrase handles "a ", "an ", and "another " as article/modifier prefixes.
@@ -4066,13 +4094,14 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
 /// and an object ("life this turn"). Each verb maps to a QuantityRef, and the result
 /// is `StaticCondition::And { conditions: [lhs >= 1, rhs >= 1] }`.
 ///
-/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1, LifeLostThisTurn >= 1)
+/// "you [verb1] (and|or) [verb2] life this turn" where each verb is gained/lost.
+/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1,
+/// LifeLostThisTurn >= 1); "you gained or lost life this turn" → Or(...) (Star
+/// Charter, Starseer Mentor, Starlit Soothsayer).
 fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
-
-    // Map event verbs to their QuantityRef for the shared "life this turn" object.
-    fn life_verb(v: &str) -> Option<QuantityRef> {
-        let result: nom::IResult<&str, QuantityRef, OracleError<'_>> = alt((
+    // "gained"/"lost" → the matching controller-scoped "life this turn" QuantityRef.
+    fn life_verb(i: &str) -> OracleResult<'_, QuantityRef> {
+        alt((
             value(
                 QuantityRef::LifeGainedThisTurn {
                     player: PlayerScope::Controller,
@@ -4086,34 +4115,25 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
                 tag("lost"),
             ),
         ))
-        .parse(v);
-        let (rest, qty) = result.ok()?;
-        rest.is_empty().then_some(qty)
+        .parse(i)
     }
 
-    // Try "[verb1] and [verb2] life this turn"
-    if let Some(and_pos) = rest.find(" and ") {
-        let verb1 = &rest[..and_pos];
-        let after_and = &rest[and_pos + " and ".len()..];
-        // Find the shared object: " life this turn"
-        if let Some(obj_pos) = after_and.find(" life this turn") {
-            let verb2 = &after_and[..obj_pos];
-            if let (Some(lhs), Some(rhs)) = (life_verb(verb1), life_verb(verb2)) {
-                let remainder = &after_and[obj_pos + " life this turn".len()..];
-                return Ok((
-                    remainder,
-                    StaticCondition::And {
-                        conditions: vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)],
-                    },
-                ));
-            }
-        }
-    }
+    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
+    let (rest, lhs) = life_verb(rest)?;
+    // CR 119: the connective selects the boolean shape — "and" requires both
+    // life changes, "or" requires either — over the shared LifeGained/LifeLost
+    // ThisTurn QuantityRef building blocks.
+    let (rest, is_or) = alt((value(false, tag(" and ")), value(true, tag(" or ")))).parse(rest)?;
+    let (rest, rhs) = life_verb(rest)?;
+    let (rest, _) = tag(" life this turn").parse(rest)?;
 
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    let conditions = vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)];
+    let condition = if is_or {
+        StaticCondition::Or { conditions }
+    } else {
+        StaticCondition::And { conditions }
+    };
+    Ok((rest, condition))
 }
 
 /// Parse "you gained [N or more] life this turn".
@@ -5952,6 +5972,50 @@ mod tests {
         }
     }
 
+    /// CR 108.3 + CR 109.4 + CR 603.4: "you control N or more permanents you
+    /// don't own" — the bare negated-ownership suffix must be consumed by the
+    /// type-phrase parser so the whole count condition is recognized (Agent of
+    /// Treachery #3304). Before the fix "you don't own" was left unconsumed,
+    /// leaving a non-empty remainder that aborted intervening-if hoisting.
+    #[test]
+    fn parse_control_count_ge_permanents_you_dont_own() {
+        for text in [
+            "you control three or more permanents you don't own",
+            "you control three or more permanents you do not own",
+        ] {
+            let (rest, cond) = parse_control_count_ge(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } = cond
+            else {
+                panic!("expected ObjectCount >= 3 comparison for {text:?}, got {cond:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}, got {filter:?}");
+            };
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "controller pinned to You via inject_controller_you for {text:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }),
+                "filter must carry Owned{{Opponent}} (\"you don't own it\") for {text:?}, \
+                 got {:?}",
+                tf.properties
+            );
+        }
+    }
+
     #[test]
     fn parse_quantity_quantity_comparison_x_ge_library() {
         // CR 107.3 + CR 608.2c: Thassa's Oracle trailing intervening-if.
@@ -6618,11 +6682,85 @@ mod tests {
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
     }
 
+    /// CR 508.1: "a creature is attacking you" presence condition (Confront the
+    /// Assault, Swat Away, Heroic Return).
+    #[test]
+    fn test_a_creature_is_attacking_you() {
+        let (rest, c) = parse_inner_condition("a creature is attacking you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                )),
+                "filter should carry Attacking {{ defender: You }}, got {tf:?}"
+            ),
+            other => panic!("expected IsPresent with attacking filter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_you_control_an_artifact() {
         let (rest, c) = parse_inner_condition("you control an artifact").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// The "Villain" creature subtype (Marvel set) must be recognized so that
+    /// "you control a Villain" conditions parse — e.g. the conditional self
+    /// cost-reduction on Visions of Villainy / Venom's Hunger.
+    #[test]
+    fn test_you_control_a_villain_subtype() {
+        let (rest, c) = parse_inner_condition("you control a villain").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// Recent Universe Beyond / Standard creature subtypes (Hero, Spy,
+    /// Scientist, Cyborg, Sorcerer) must be recognized so their oracle-text
+    /// references ("you control a <type>", typed tokens, etc.) parse.
+    #[test]
+    fn test_you_control_recent_subtypes() {
+        for w in ["hero", "spy", "scientist", "cyborg", "sorcerer"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
+    /// Universe Beyond creature subtypes (Marvel: Gamma/Symbiote/Kree/Inhuman/
+    /// Skrull; Transformers: Autobot; DC: Brainiac) must be recognized.
+    #[test]
+    fn test_you_control_universe_beyond_subtypes() {
+        for w in [
+            "gamma", "symbiote", "kree", "inhuman", "skrull", "autobot", "brainiac",
+        ] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
+    }
+
+    /// "Glimmer" (Duskmourn enchantment-creature subtype) and "Mammoth" must be
+    /// recognized so their oracle-text references parse.
+    #[test]
+    fn test_you_control_glimmer_mammoth_subtypes() {
+        for w in ["glimmer", "mammoth"] {
+            let input = format!("you control a {w}");
+            let (rest, c) = parse_inner_condition(&input)
+                .unwrap_or_else(|_| panic!("'{w}' subtype should be recognized"));
+            assert_eq!(rest, "", "leftover after parsing '{w}'");
+            assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+        }
     }
 
     #[test]
@@ -7544,6 +7682,17 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
 
         let (rest, c) = parse_inner_condition("this creature is attached to a creature").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceAttachedToCreature);
+
+        // CR 303.4 + CR 702.103: Springheart Nantuko's bestow landfall gate
+        // — the optional " you control" suffix must be consumed and treated
+        // the same as the bare form (the host of a bestow Aura is always under
+        // its controller, so the controller axis adds no AST information; the
+        // evaluator already binds the host's controller to the ability's
+        // controller).
+        let (rest, c) =
+            parse_inner_condition("this permanent is attached to a creature you control").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
     }

@@ -61,6 +61,15 @@ fn resolve_sacrifice_scope(
             .map(|pid| vec![pid])
             .unwrap_or_default()
         }
+        Some(ControllerRef::ParentTargetOwner) => {
+            crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::ParentTargetOwner,
+            )
+            .map(|pid| vec![pid])
+            .unwrap_or_default()
+        }
         Some(ControllerRef::DefendingPlayer) => {
             crate::game::combat::defending_player_for_attacker(state, ability.source_id)
                 .map(|pid| vec![pid])
@@ -302,6 +311,7 @@ pub fn resolve(
             // CR 708.2a: sacrifice selection is not a face-down entry.
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses

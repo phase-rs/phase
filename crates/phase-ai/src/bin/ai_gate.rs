@@ -10,7 +10,12 @@ use phase_ai::duel_suite::run::{run_suite, SuiteOptions, SuiteReport};
 
 const DEFAULT_BASELINE: &str = "crates/phase-ai/baselines/suite-baseline.json";
 const DEFAULT_CURRENT: &str = "target/ai-gate-current.json";
-const DEFAULT_QUICK_FILTER: &str = "red-mirror";
+// Quick PR-gate matchup set (comma-separated id substrings). `red-mirror` is the
+// fast aggro-mirror smoke; `affinity-mirror` and `enchantress-mirror` are the
+// floor-crossing artifacts/enchantments decks that exercise ArtifactSynergyPolicy
+// and EnchantmentsPayoffPolicy (commitment >= COMMITMENT_FLOOR), so the required
+// gate actually runs the policies these baselines are meant to guard.
+const DEFAULT_QUICK_FILTER: &str = "red-mirror,affinity-mirror,enchantress-mirror";
 const DEFAULT_SEED: u64 = 0xA1_57A1;
 
 struct Args {
@@ -186,6 +191,6 @@ fn write_report(report: &SuiteReport, path: &Path) -> Result<(), std::io::Error>
 
 fn print_usage() {
     eprintln!("Usage: cargo ai-gate [--refresh-baseline] [--games N] [--seed S]");
-    eprintln!("                     [--suite-filter STR | --full-suite]");
+    eprintln!("                     [--suite-filter STR[,STR...] | --full-suite]");
     eprintln!("                     [--data-root DIR] [--baseline PATH] [--current-output PATH]");
 }

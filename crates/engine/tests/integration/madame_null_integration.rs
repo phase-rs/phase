@@ -99,6 +99,8 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             controller: PlayerId(0),
             owner: PlayerId(0),
             from_zone: Some(Zone::Hand),
+            cast_from_zone: None,
+            played_from_zone: None,
             to_zone: Zone::Battlefield,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),

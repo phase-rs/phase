@@ -328,6 +328,54 @@ pub(crate) fn parse_compound_subject_keyword_static(
     Some(vec![object_def, player_def])
 }
 
+/// CR 702.16 + CR 702.16k + CR 702.16i: Player-SUBJECT protection of the form
+/// `"You have protection from <quality>."` — the PLAYER gains the protection,
+/// distinct from `"creatures you control have protection from <quality>"`
+/// (which grants the keyword to permanents). A `StaticDefinition` cannot carry
+/// the keyword on a player, so this emits `StaticMode::PlayerProtection` with
+/// `affected = the controller (Typed{controller: You})`, mirroring the
+/// player-half produced by `parse_compound_subject_keyword_static` and consumed
+/// by `player_protection_from`.
+///
+/// Quality classification is delegated to the single authority
+/// `parse_protection_target`, so every quality form already understood for
+/// permanent protection (color, everything, each of your opponents, card type,
+/// mana-value filter) is unlocked for the player subject in one stroke — this
+/// builds the player-subject protection class, not one card (Absolute Virtue).
+pub(crate) fn parse_player_protection_static(text: &str, lower: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    // Subject + verb prefix: "you have protection from " (compose apostrophe /
+    // contracted variants via `alt` only as real Oracle text requires them).
+    let (rest_lower, _) = alt((
+        tag::<_, _, VE<'_>>("you have protection from "),
+        tag("you've got protection from "),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Recover the original-case quality slice (TextPair-equivalent offset idiom),
+    // then strip the sentence terminator. The quality is classified by the typed
+    // `parse_protection_target` lookup — never an Oracle-text dispatch here.
+    let quality = text[text.len() - rest_lower.len()..]
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    if quality.is_empty() {
+        return None;
+    }
+
+    let target = crate::types::keywords::parse_protection_target(quality);
+
+    Some(
+        StaticDefinition::new(StaticMode::PlayerProtection(target))
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .description(text.to_string()),
+    )
+}
+
 pub(crate) fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
     value(
         (),

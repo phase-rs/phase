@@ -25,6 +25,7 @@ client/src/wasm/*.wasm.d.ts
 # Claude worktrees and local state
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/projects/
 
 # Build output
 client/dist/

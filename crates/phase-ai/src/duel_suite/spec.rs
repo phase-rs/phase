@@ -234,7 +234,14 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p1_label: "Orzhov Greasefang (P1)",
         p0: snap("pioneer", "orzhov-greasefang.json"),
         p1: snap("pioneer", "orzhov-greasefang.json"),
-        exercises: &[FeatureKind::Aristocrats],
+        // Orzhov Greasefang is the canonical reanimator list: discard outlets
+        // (Fleeting Spirit, Iron-Shield Elf, Guardian of New Benalia) pitch
+        // Parhelion II, then Greasefang / Lively Dirge return it from the
+        // graveyard to the battlefield. It clears `reanimator::COMMITMENT_FLOOR`,
+        // so this matchup is the gate's exercise of `ReanimatorPayoffPolicy`
+        // (verified by `greasefang_mirror_deck_activates_reanimator_payoff`
+        // below). It also exercises the aristocrats axis via its sacrifice value.
+        exercises: &[FeatureKind::Aristocrats, FeatureKind::Reanimator],
         expected: Expected::Mirror {
             tolerance: MIRROR_TOLERANCE,
         },
@@ -245,7 +252,34 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p1_label: "Affinity (P1)",
         p0: snap("modern", "affinity.json"),
         p1: snap("modern", "affinity.json"),
-        exercises: &[FeatureKind::PlusOneCounters, FeatureKind::AggroPressure],
+        // Modern Affinity is the canonical artifacts-matter list: an artifact-dense
+        // board (Mox Opal, Arcbound Ravager, Mishra's Bauble, …) feeding
+        // affinity-for-artifacts / improvise payoffs (Kappa Cannoneer, Metallic
+        // Rebuke). It clears `artifacts::COMMITMENT_FLOOR`, so this matchup is the
+        // gate's exercise of `ArtifactSynergyPolicy` (verified by
+        // `affinity_mirror_deck_activates_artifact_synergy` below).
+        exercises: &[
+            FeatureKind::Artifacts,
+            FeatureKind::PlusOneCounters,
+            FeatureKind::AggroPressure,
+        ],
+        expected: Expected::Mirror {
+            tolerance: MIRROR_TOLERANCE,
+        },
+    },
+    MatchupSpec {
+        id: "enchantress-mirror",
+        p0_label: "Selesnya Enchantress (P0)",
+        p1_label: "Selesnya Enchantress (P1)",
+        p0: snap("pioneer", "selesnya-enchantress.json"),
+        p1: snap("pioneer", "selesnya-enchantress.json"),
+        // Selesnya Enchantress is the canonical enchantments-matter list:
+        // enchantress / constellation payoffs (Eidolon of Blossoms, Setessan
+        // Champion, Sythis, Enchantress's Presence) over an enchantment-dense
+        // board. It clears `enchantments::COMMITMENT_FLOOR`, so this matchup is
+        // the gate's exercise of `EnchantmentsPayoffPolicy` (verified by
+        // `enchantress_mirror_deck_activates_enchantments_payoff` below).
+        exercises: &[FeatureKind::Enchantments],
         expected: Expected::Mirror {
             tolerance: MIRROR_TOLERANCE,
         },
@@ -312,6 +346,23 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p0: snap("modern", "boros-energy.json"),
         p1: snap("modern", "boros-energy.json"),
         exercises: &[FeatureKind::AggroPressure],
+        expected: Expected::Mirror {
+            tolerance: MIRROR_TOLERANCE,
+        },
+    },
+    MatchupSpec {
+        id: "equipment-mirror",
+        p0_label: "Mono-White Equipment (P0)",
+        p1_label: "Mono-White Equipment (P1)",
+        p0: snap("modern", "mono-white-equipment.json"),
+        p1: snap("modern", "mono-white-equipment.json"),
+        // Mono-White Equipment is the canonical voltron list: a dense Equipment
+        // package (Bonesplitter, Vulshok Morningstar, Armory of Iroas, …) plus
+        // equipment-matters support (Stoneforge Mystic, Puresteel Paladin, Kor
+        // Outfitter, Steelshaper's Gift). It clears `equipment::COMMITMENT_FLOOR`,
+        // so this matchup is the gate's exercise of `EquipmentPayoffPolicy`
+        // (verified by `equipment_mirror_deck_activates_equipment_payoff` below).
+        exercises: &[FeatureKind::Equipment],
         expected: Expected::Mirror {
             tolerance: MIRROR_TOLERANCE,
         },

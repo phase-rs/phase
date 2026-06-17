@@ -287,6 +287,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -463,6 +464,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -769,6 +771,13 @@ fn resolve_event_scoped_ref(
                 &FilterContext::from_source(state, id),
             )
         }
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::AbilityTarget,
+                    metric: _,
+                },
+        } => None,
         _ => None,
     }
 }
@@ -1655,6 +1664,18 @@ fn resolve_ref(
         QuantityRef::CardsExiledBySource => usize_to_i32_saturating(
             crate::game::players::linked_exile_cards_for_source(state, source_id).len(),
         ),
+        // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
+        // ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
+        QuantityRef::ExiledCardPower { index } => {
+            let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);
+            match exiled_cards.and_then(|cards| cards.get(*index as usize)) {
+                Some(&card_id) => {
+                    let card = state.objects.get(&card_id);
+                    card.and_then(|obj| obj.power).unwrap_or(0)
+                }
+                None => 0,
+            }
+        }
         // CR 604.3: Count cards in a zone matching optional type filters.
         QuantityRef::ZoneCardCount {
             zone,
@@ -1876,6 +1897,13 @@ fn resolve_ref(
                     .current_trigger_event
                     .as_ref()
                     .and_then(crate::game::targeting::extract_source_from_event),
+                CastManaObjectScope::AbilityTarget => targets.iter().find_map(|target| {
+                    if let crate::types::ability::TargetRef::Object(id) = target {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                }),
             };
             cast_object
                 .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
@@ -2387,6 +2415,9 @@ fn resolve_ref(
                                 crate::game::ability_utils::parent_target_controller(a, state)
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::ParentTargetOwner) => ability
+                            .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
@@ -2444,6 +2475,9 @@ fn damage_source_controller_matches(
             .and_then(|ability| {
                 crate::game::ability_utils::parent_target_controller(ability, state)
             })
+            .is_some_and(|player| actual == player),
+        ControllerRef::ParentTargetOwner => ability
+            .and_then(|ability| crate::game::ability_utils::parent_target_owner(ability, state))
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, ctx.source)
@@ -7999,6 +8033,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -8011,6 +8046,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
+                    was_kicked: false,
                 },
             ]),
         );

@@ -433,6 +433,34 @@ fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, Quanti
     Ok((rest, QuantityRef::CardsDrawnThisTurn { player }))
 }
 
+/// CR 701.9 + CR 603.4: "card(s) [you('ve)] discarded this turn". Reuses the
+/// runtime `CardsDiscardedThisTurn` quantity ref already wired for condition
+/// checks; this routes it into the dynamic "for each" count path (Misty Knight,
+/// Green Goblin, Astonishing Spider-Man: "draw a card for each card you've
+/// discarded this turn"). Mirrors `parse_number_of_cards_drawn_this_turn`: the
+/// leading "card" word is optionally plural so both the "the number of *cards* …"
+/// count phrase and the "for each *card* …" clause are served uniformly.
+fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, player) = alt((
+        // CR 701.9 + CR 102.2/102.3: opponents' discards this turn, summed
+        // across all opponents.
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+            tag("your opponents have discarded this turn"),
+        ),
+        // CR 701.9: the caster's own discards this turn.
+        value(PlayerScope::Controller, tag("you've discarded this turn")),
+        value(PlayerScope::Controller, tag("you have discarded this turn")),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::CardsDiscardedThisTurn { player }))
+}
+
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
 ///
 /// CR 107.1a: Oracle text must specify rounding direction for fractional
@@ -502,6 +530,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_distinct_card_types_among_tracked_set,
             parse_distinct_card_types_among_objects,
+            // CR 201.2 + CR 603.4: "different <power|mana value> among <type>"
+            // distinct-by-quality count (nested here to stay within nom's
+            // tuple arity).
+            parse_distinct_quality_among_objects,
         )),
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
@@ -522,6 +554,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // exact complete phrase (no greedy prefix consumption).
         alt((
             parse_number_of_cards_drawn_this_turn,
+            parse_number_of_cards_discarded_this_turn,
             parse_cards_in_zone_ref,
         )),
         parse_self_power_ref,
@@ -804,13 +837,20 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_distinct_card_types_among_tracked_set,
             parse_distinct_card_types_among_objects,
         )),
-        // CR 201.2 + CR 603.4: "differently named <type-phrase>" — distinct-by-
-        // name population count. Must precede `parse_number_of_controlled_type`
+        // CR 201.2 + CR 603.4: "differently named <type-phrase>" (distinct-by-name)
+        // and "different <power|mana value> among <type>" (distinct-by-quality —
+        // Celebrate the Harvest's "the number of different powers among ..."
+        // routes here after the "the number of " prefix strip). Distinct-
+        // population counts that must precede `parse_number_of_controlled_type`
         // so the adjective prefix is consumed before the generic typed-filter
-        // fallback. Class: Gimbal, Audience with Trostani, Awakened Amalgam,
-        // Sandsteppe War Riders, All-Fates Scroll, Fungal Colossus, Euroakus,
-        // Neriv, Emil, and other "differently named X" counters.
-        parse_distinct_named_objects,
+        // fallback. Nested to stay within nom's tuple arity. Named class: Gimbal,
+        // Audience with Trostani, Awakened Amalgam, Sandsteppe War Riders,
+        // All-Fates Scroll, Fungal Colossus, Euroakus, Neriv, Emil, and other
+        // "differently named X" counters.
+        alt((
+            parse_distinct_named_objects,
+            parse_distinct_quality_among_objects,
+        )),
         // CR 122.1: "[kind] counters <possessor>" must be tried BEFORE the
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
@@ -849,9 +889,14 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_number_of_controlled_type`, whose " you control" suffix does
         // not match the battlefield-wide form.
         parse_number_of_type_on_battlefield_with_keyword,
-        // CR 121.1: "cards you've drawn this turn" — must precede generic
-        // controlled-type arms whose type words could overlap.
-        parse_number_of_cards_drawn_this_turn,
+        // CR 121.1 + CR 701.9 + CR 603.4: "cards you've drawn this turn" and
+        // "cards you've discarded this turn" — must precede generic
+        // controlled-type arms whose type words could overlap. Nested together
+        // to stay within nom's top-level `alt` arity (nom 8.0 max: 21 items).
+        alt((
+            parse_number_of_cards_drawn_this_turn,
+            parse_number_of_cards_discarded_this_turn,
+        )),
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -1396,6 +1441,24 @@ fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, Quantit
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::PlayerCount { filter }))
+}
+
+/// CR 119.3 + CR 603.2c: "1 life you gained" / "1 life you lost" — the per-1
+/// multiplier in a "for each 1 life you gained/lost" clause on a
+/// `Whenever you gain/lose life` trigger. The triggering `GameEvent::LifeChanged`
+/// carries the gained/lost magnitude, which `EventContextAmount` resolves via
+/// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => `amount.abs()`).
+/// The leading "1 "/"one " disambiguates from the duration class "life you
+/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`, which has no
+/// "1 ") and from Blood Tyrant's "1 life lost or gained this way" (no "you";
+/// handled by the `TrackedSetSize` "this way" block).
+fn parse_for_each_one_life_changed(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("1 life you "), tag("one life you "))).parse(input)?;
+    value(
+        QuantityRef::EventContextAmount,
+        alt((tag("gained"), tag("lost"))),
+    )
+    .parse(rest)
 }
 
 /// Parse "your life total".
@@ -2246,6 +2309,36 @@ fn parse_for_each_differently_named(input: &str) -> OracleResult<'_, QuantityRef
     ))
 }
 
+/// Parse "different <quality> among <type-phrase>" patterns (distinct-value
+/// population count). Used for "for each different power among creatures you
+/// control" (Golden Ratio), "different mana value among nonland permanents you
+/// control" (Lunar Insight), "different mana value among nonland cards in your
+/// graveyard" (Sudden Insight), and the "the number of different powers among
+/// creatures you control" form (Celebrate the Harvest). The quality-generalized
+/// sibling of `parse_for_each_differently_named` (which is the Name case).
+/// CR 201.2 + CR 603.4: Distinct-by-quality population count.
+fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("different ").parse(input)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        QuantityRef::ObjectCountDistinct {
+            filter,
+            qualities: vec![quality],
+        },
+    ))
+}
+
 pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -2261,6 +2354,7 @@ fn parse_for_each_clause_ref_with_they_controller(
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_for_each_one_life_changed,
         parse_for_each_opponents_life_change,
         parse_counter_added_this_turn_for_each,
         parse_object_colors_for_each,
@@ -2274,6 +2368,11 @@ fn parse_for_each_clause_ref_with_they_controller(
         // CR 201.2: "for each differently named <type>" — distinct-by-name
         // iteration. Must precede generic type-filter arm.
         parse_for_each_differently_named,
+        // CR 201.2 + CR 603.4: "for each different <power|mana value> among <type>"
+        // — distinct-by-quality count (Golden Ratio, Lunar Insight, Sudden
+        // Insight). Must precede the generic type-filter arm so the "different
+        // <quality>" adjective prefix is consumed before the bare type word.
+        parse_distinct_quality_among_objects,
         // CR 700.8: "creature in your party" must precede the generic
         // "<type> you control" arm — same reason as in
         // `parse_number_of_inner`.
@@ -3806,6 +3905,58 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 119.3 + CR 603.2c: "for each 1 life you gained/lost" — the per-1
+    /// multiplier on a `Whenever you gain/lose life` trigger resolves to the
+    /// triggering event's amount via `EventContextAmount` (Cradle of Vitality,
+    /// Transcendence, Lich's Tomb). Without the dedicated arm the for-each parse
+    /// fails and the count silently stays `Fixed{1}`.
+    #[test]
+    fn parse_for_each_one_life_changed_yields_event_amount() {
+        use crate::parser::oracle_quantity::{parse_for_each_clause, parse_for_each_clause_expr};
+
+        for clause in ["1 life you gained", "1 life you lost"] {
+            assert_eq!(
+                parse_for_each_clause(clause),
+                Some(QuantityRef::EventContextAmount),
+                "{clause:?} must resolve to the triggering life-change amount",
+            );
+        }
+        // "one life you ..." spelled-out variant.
+        assert_eq!(
+            parse_for_each_clause("one life you lost"),
+            Some(QuantityRef::EventContextAmount),
+        );
+        // Expr wrapper used by the for-each effect path.
+        assert_eq!(
+            parse_for_each_clause_expr("1 life you lost"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+        );
+    }
+
+    /// No-regression: "life you gained/lost this turn" (no leading "1 ") must
+    /// keep its duration-class lower, NOT the per-1 event-amount arm.
+    #[test]
+    fn parse_for_each_one_life_changed_requires_one_prefix() {
+        let (rest, q) = parse_quantity_ref("life you gained this turn").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+        let (rest, q) = parse_quantity_ref("life you lost this turn").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]
@@ -5505,6 +5656,85 @@ mod tests {
         assert_eq!(controller, Some(ControllerRef::You));
         assert!(properties.contains(&FilterProp::Token));
         assert_eq!(qualities, vec![SharedQuality::Name]);
+    }
+
+    /// Helper: pull `qualities` out of an `ObjectCountDistinct`, panicking (so
+    /// the test fails loudly) on `Fixed`/`Variable`/any other shape — the exact
+    /// misparse this fix corrects.
+    fn distinct_qualities(q: &QuantityRef) -> Vec<SharedQuality> {
+        match q {
+            QuantityRef::ObjectCountDistinct { qualities, .. } => qualities.clone(),
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_different_power_among_creatures_you_control() {
+        // Golden Ratio: "Draw a card for each different power among creatures
+        // you control." Must be a distinct-power count, not Fixed(1).
+        let (rest, q) =
+            parse_for_each_clause_ref("different power among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(qualities, vec![SharedQuality::Power]);
+    }
+
+    #[test]
+    fn for_each_different_powers_plural_among_creatures() {
+        // Plural "powers" must parse identically (Celebrate the Harvest uses it).
+        let (rest, q) =
+            parse_for_each_clause_ref("different powers among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(distinct_qualities(&q), vec![SharedQuality::Power]);
+    }
+
+    #[test]
+    fn for_each_different_mana_value_among_nonland_permanents() {
+        // Lunar Insight: "for each different mana value among nonland permanents
+        // you control."
+        let (rest, q) =
+            parse_for_each_clause_ref("different mana value among nonland permanents you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(distinct_qualities(&q), vec![SharedQuality::ManaValue]);
+    }
+
+    #[test]
+    fn for_each_different_mana_value_among_graveyard_nonland_cards() {
+        // Sudden Insight: "for each different mana value among nonland cards in
+        // your graveyard." The graveyard zone must survive into the filter so
+        // the runtime counts graveyard cards (not the default battlefield).
+        let (rest, q) =
+            parse_for_each_clause_ref("different mana value among nonland cards in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCountDistinct { filter, qualities } => {
+                assert_eq!(qualities, vec![SharedQuality::ManaValue]);
+                assert_eq!(
+                    filter.extract_in_zone(),
+                    Some(crate::types::zones::Zone::Graveyard),
+                    "graveyard zone must survive into the filter: {filter:?}"
+                );
+            }
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn number_of_different_powers_among_creatures_celebrate_the_harvest() {
+        // Celebrate the Harvest: "...where X is the number of different powers
+        // among creatures you control." Routes through the "the number of" path.
+        let (rest, q) =
+            parse_quantity_ref("the number of different powers among creatures you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(qualities, vec![SharedQuality::Power]);
     }
 
     #[test]

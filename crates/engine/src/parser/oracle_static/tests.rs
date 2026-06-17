@@ -5,10 +5,10 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter,
-    ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, Comparator, CountScope,
+    DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -72,6 +72,83 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
             TypedFilter::default().controller(ControllerRef::You)
         )),
         "player-half must affect the controller"
+    );
+}
+
+/// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
+/// each of your opponents." (Absolute Virtue) must emit a SINGLE
+/// `PlayerProtection(FromPlayer(Opponent))` def affecting the controller — NOT a
+/// permanent-targeting `Continuous`/`AddKeyword` def (which would grant nothing
+/// to the player).
+#[test]
+fn player_subject_protection_each_opponent_emits_player_protection() {
+    use crate::types::keywords::ProtectionTarget;
+
+    let def = parse_static_line("You have protection from each of your opponents.")
+        .expect("player-protection static def");
+    assert_eq!(
+        def.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::FromPlayer(ControllerRef::Opponent)),
+        "player subject must emit PlayerProtection(FromPlayer(Opponent)), got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        )),
+        "player-protection must affect the controller"
+    );
+}
+
+/// CR 702.16: the player-subject protection class is quality-general — the SAME
+/// `parse_protection_target` classifier handles color, everything, etc. for the
+/// player subject, not just the one card.
+#[test]
+fn player_subject_protection_handles_color_and_everything() {
+    use crate::types::keywords::ProtectionTarget;
+    use crate::types::mana::ManaColor;
+
+    let red = parse_static_line("You have protection from red.").expect("color def");
+    assert_eq!(
+        red.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::Color(ManaColor::Red))
+    );
+
+    let everything =
+        parse_static_line("You have protection from everything.").expect("everything def");
+    assert_eq!(
+        everything.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::Everything)
+    );
+}
+
+/// CR 702.16a: Regression — the permanent-SUBJECT path ("Creatures you control
+/// have protection from <X>") must NOT be claimed by the player-subject parser.
+/// It still emits a `Continuous`/`AddKeyword(Protection)` on permanents.
+#[test]
+fn permanent_subject_protection_still_continuous() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+
+    let defs = parse_static_line_multi("Creatures you control have protection from red.");
+    let cont = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("permanent path must remain a Continuous def, not PlayerProtection");
+    assert!(
+        defs.iter()
+            .all(|d| !matches!(d.mode, StaticMode::PlayerProtection(_))),
+        "permanent subject must NOT emit PlayerProtection, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        cont.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            }),
+        "permanent path must grant Protection(Color(Red)) on permanents, got {:?}",
+        cont.modifications
     );
 }
 
@@ -3466,21 +3543,50 @@ fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
 }
 
 /// CR 601.2f + CR 702.33d: "The first kicked spell you cast each turn costs {1}
-/// less to cast." (Vine Gecko). The "kicked" qualifier — whether the spell's
-/// kicker additional cost was paid — is not a representable spell-cost filter,
-/// so the parser must DECLINE the cost static rather than emit a filterless,
-/// conditionless reducer. A broad reducer would silently drop both the printed
-/// "first … each turn" once-per-turn gate and the "kicked" qualifier, reducing
-/// every spell the controller casts (the bug this guards against).
+/// less to cast." (Vine Gecko).
 #[test]
-fn static_first_kicked_spell_does_not_emit_broad_reducer() {
-    let parsed =
-        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.");
+fn static_first_kicked_spell_costs_less() {
+    let def =
+        parse_static_line("The first kicked spell you cast each turn costs {1} less to cast.")
+            .expect("Vine Gecko static should parse");
 
-    assert!(
-        parsed.is_none(),
-        "kicked-spell cost reducer must be declined until paid-kicker state is representable; got {parsed:?}"
-    );
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(1));
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected WasKicked spell filter");
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter { properties, .. })
+            if properties.contains(&FilterProp::WasKicked)
+    ));
+
+    let condition = def.condition.expect("expected first-kicked-spell gate");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if matches!(
+            inner,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::WasKicked)
+        )
+    ));
 }
 
 #[test]
@@ -6060,6 +6166,56 @@ fn static_legend_rule_creature_tokens_scope() {
 }
 
 #[test]
+fn static_legend_rule_creatures_you_control() {
+    // CR 704.5j: Council of Reeds — bare permanent type "creatures you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creatures you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    match def.affected {
+        Some(TargetFilter::Typed(ref typed)) => {
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert!(typed
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, crate::types::ability::TypeFilter::Creature)));
+        }
+        other => panic!("expected typed creature filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_legend_rule_tokens_you_control() {
+    // CR 111.1 + CR 704.5j: Cadric, Soul Kindler — "tokens you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to tokens you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_legend_rule_commanders_you_control() {
+    // CR 903.3 + CR 704.5j: "commanders you control".
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to commanders you control.").unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::IsCommander)
+    ));
+}
+
+#[test]
 fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
     // CR 603.2 + CR 609.3: The Master, Multiplied.
     let def = parse_static_line(
@@ -6088,8 +6244,10 @@ fn static_legend_rule_defers_unparseable_scopes() {
     // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
     // deferred (left Unimplemented), never misparsed into a no-op exemption.
     for text in [
-            "The \"legend rule\" doesn't apply to tokens you control.", // Cadric
-            "The \"legend rule\" doesn't apply to commanders you control.", // Try-My-Deck Elemental
+            // Bare pronoun scope with no concrete filter — must defer, not be
+            // emitted as a no-op exemption.
+            "The \"legend rule\" doesn't apply to them.",
+            // Conditional form that doesn't begin with the exemption clause.
             "If there are exactly two permanents named Brothers Yamazaki on the battlefield, the \"legend rule\" doesn't apply to them.",
         ] {
             assert!(
@@ -7056,6 +7214,46 @@ fn graveyard_cast_permission_exile_rider() {
             play_mode: CardPlayMode::Cast,
             graveyard_destination_replacement: Some(Zone::Exile),
         }
+    ));
+}
+
+/// CR 122.2 + CR 113.6b: The counter-persistence static — "Counters remain on
+/// ~ as it moves to any zone other than a player's hand or library." — must
+/// parse to `CountersPersistAcrossZones { excluded_zones: [Hand, Library] }`
+/// for the whole class (Me, the Immortal and Skullbriar, the Walking Grave
+/// share the verbatim phrase). Tested on the normalized `~` form the dispatch
+/// chain sees, so the assertion is name-agnostic.
+#[test]
+fn counters_persist_across_zones_me_and_skullbriar() {
+    let def = parse_static_line(
+        "Counters remain on ~ as it moves to any zone other than a player's hand or library.",
+    )
+    .expect("should parse the counter-persistence static");
+    match &def.mode {
+        StaticMode::CountersPersistAcrossZones { excluded_zones } => {
+            assert_eq!(excluded_zones, &vec![Zone::Hand, Zone::Library]);
+        }
+        other => panic!("expected CountersPersistAcrossZones, got {other:?}"),
+    }
+    // CR 122.2: the persistence applies to the source's own counters.
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    // CR 113.6b: must function in the zones the object can leave with counters.
+    assert!(def.active_zones.contains(&Zone::Battlefield));
+    assert!(def.active_zones.contains(&Zone::Graveyard));
+}
+
+/// Word-order variant ("library or hand") parses to the same excluded set —
+/// verifies the combinator covers the axis, not a single literal.
+#[test]
+fn counters_persist_across_zones_word_order_variant() {
+    let def = parse_static_line(
+        "Counters remain on ~ as it moves to any zone other than a player's library or hand.",
+    )
+    .expect("should parse the swapped-order phrase");
+    assert!(matches!(
+        &def.mode,
+        StaticMode::CountersPersistAcrossZones { excluded_zones }
+            if excluded_zones == &vec![Zone::Hand, Zone::Library]
     ));
 }
 
@@ -12712,6 +12910,30 @@ fn static_raw_cardname_is_colorless_is_not_contextless_self_cda() {
 }
 
 #[test]
+fn ghostfire_colorless_cda_via_oracle_text() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    let parsed = parse_oracle_text(
+        "Ghostfire is colorless.",
+        "Ghostfire",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("Ghostfire colorless CDA should parse via oracle text");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(def.characteristic_defining);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor { colors: vec![] }]
+    );
+}
+
+#[test]
 fn static_self_is_multicolor_cda() {
     let def = parse_static_line("~ is white and blue.").unwrap();
     assert_eq!(
@@ -14657,10 +14879,25 @@ fn cant_search_library_each_player_may_not_variant() {
 }
 
 #[test]
-fn cant_search_library_opponents_form_deferred() {
-    // Opponent-scoped direct-search phrasing remains deferred until the runtime
-    // cause-vs-searcher axis is split.
-    assert!(parse_static_line("Your opponents can't search libraries.").is_none());
+fn cant_search_library_opponents_form() {
+    // CR 701.23 + CR 609.3: opponent-scoped direct search prohibition.
+    let def = parse_static_line("Your opponents can't search libraries.")
+        .expect("opponent-scoped direct search prohibition should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CantSearchLibrary {
+            cause: ProhibitionScope::Opponents,
+        }
+    );
+
+    let each = parse_static_line("Each opponent can't search libraries.")
+        .expect("each-opponent variant should parse");
+    assert_eq!(
+        each.mode,
+        StaticMode::CantSearchLibrary {
+            cause: ProhibitionScope::Opponents,
+        }
+    );
 }
 
 // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
@@ -16321,6 +16558,191 @@ fn enters_with_dynamic_count_not_matched_as_fixed() {
             def.mode
         );
     }
+}
+
+const THUNDEROUS_TIERED_COUNTER_LINE: &str =
+    "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
+
+fn filter_has_typed(filter: &TargetFilter, pred: impl Fn(&TypedFilter) -> bool + Copy) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => pred(typed),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|filter| filter_has_typed(filter, pred))
+        }
+        _ => false,
+    }
+}
+
+fn filter_has_cmc(filter: &TargetFilter, comparator: Comparator, threshold: u32) -> bool {
+    filter_has_typed(filter, |typed| {
+        typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: parsed_comparator,
+                    value: QuantityExpr::Fixed { value },
+                } if *parsed_comparator == comparator
+                    && u32::try_from(*value).ok() == Some(threshold)
+            )
+        })
+    })
+}
+
+fn has_tiered_plus1_branch(
+    defs: &[StaticDefinition],
+    count: u32,
+    comparator: Comparator,
+    threshold: u32,
+) -> bool {
+    defs.iter().any(|def| {
+        matches!(
+            &def.mode,
+            StaticMode::EntersWithAdditionalCounters {
+                counter_type,
+                count: parsed_count,
+            } if counter_type == &CounterType::Plus1Plus1 && *parsed_count == count
+        ) && def
+            .affected
+            .as_ref()
+            .is_some_and(|filter| filter_has_cmc(filter, comparator, threshold))
+    })
+}
+
+fn filter_has_other_vehicle_you_control(filter: &TargetFilter) -> bool {
+    filter_has_typed(filter, |typed| {
+        typed.controller == Some(ControllerRef::You)
+            && typed.properties.contains(&FilterProp::Another)
+            && typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Vehicle".to_string()))
+    })
+}
+
+fn filter_has_other_creature_you_control(filter: &TargetFilter) -> bool {
+    filter_has_typed(filter, |typed| {
+        typed.controller == Some(ControllerRef::You)
+            && typed.properties.contains(&FilterProp::Another)
+            && typed.type_filters.contains(&TypeFilter::Creature)
+    })
+}
+
+#[test]
+fn continuous_subject_filter_distributes_shared_you_control_suffix() {
+    let filter = parse_continuous_subject_filter("Each other Vehicle and creature you control")
+        .expect("shared-suffix compound subject should parse");
+    assert!(
+        filter_has_other_vehicle_you_control(&filter),
+        "Vehicle branch must preserve Other + controller you, got {filter:?}"
+    );
+    assert!(
+        filter_has_other_creature_you_control(&filter),
+        "creature branch must preserve Other + controller you, got {filter:?}"
+    );
+}
+
+#[test]
+fn tiered_enters_with_additional_counters_static_thunderous_line() {
+    let defs = parse_static_line_multi(THUNDEROUS_TIERED_COUNTER_LINE);
+    assert_eq!(
+        defs.len(),
+        2,
+        "tiered ETB-counter line must emit exactly two statics, got {defs:?}"
+    );
+    assert!(
+        defs.iter().all(|def| def.condition.is_none()),
+        "tiered statics must not carry StaticCondition; CMC belongs in affected filters: {defs:?}"
+    );
+
+    let first = defs
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::EntersWithAdditionalCounters {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                }
+            )
+        })
+        .expect("expected <=4 branch with one +1/+1 counter");
+    let otherwise = defs
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::EntersWithAdditionalCounters {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 3,
+                }
+            )
+        })
+        .expect("expected >4 branch with three +1/+1 counters");
+
+    let first_filter = first.affected.as_ref().expect("first branch affected");
+    let otherwise_filter = otherwise
+        .affected
+        .as_ref()
+        .expect("otherwise branch affected");
+    assert!(
+        filter_has_cmc(first_filter, Comparator::LE, 4),
+        "first branch must carry Cmc <= 4, got {first_filter:?}"
+    );
+    assert!(
+        filter_has_cmc(otherwise_filter, Comparator::GT, 4),
+        "otherwise branch must carry Cmc > 4, got {otherwise_filter:?}"
+    );
+    for filter in [first_filter, otherwise_filter] {
+        assert!(
+            filter_has_other_vehicle_you_control(filter),
+            "affected filter must include other Vehicle you control, got {filter:?}"
+        );
+        assert!(
+            filter_has_other_creature_you_control(filter),
+            "affected filter must include other creature you control, got {filter:?}"
+        );
+    }
+}
+
+#[test]
+fn tiered_enters_with_additional_counters_static_plural_their_mana_value() {
+    let defs = parse_static_line_multi(
+        "Each other Vehicle and creature you control enter with an additional +1/+1 counter on them if their mana value is 4 or less. Otherwise, they enter with three additional +1/+1 counters on them.",
+    );
+
+    assert_eq!(
+        defs.len(),
+        2,
+        "plural tiered ETB-counter line must emit two statics, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 1, Comparator::LE, 4),
+        "plural first branch must parse their mana value as Cmc <= 4, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 3, Comparator::GT, 4),
+        "plural otherwise branch must parse as Cmc > 4, got {defs:?}"
+    );
+}
+
+#[test]
+fn tiered_enters_with_additional_counters_static_one_counter_otherwise_singular() {
+    let defs = parse_static_line_multi(
+        "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with one additional +1/+1 counter on it.",
+    );
+
+    assert_eq!(
+        defs.len(),
+        2,
+        "one-counter otherwise tiered ETB-counter line must emit two statics, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 1, Comparator::LE, 4),
+        "first branch must still parse with one counter and Cmc <= 4, got {defs:?}"
+    );
+    assert!(
+        has_tiered_plus1_branch(&defs, 1, Comparator::GT, 4),
+        "otherwise branch must accept singular 'counter on' and carry Cmc > 4, got {defs:?}"
+    );
 }
 
 /// CR 205.3 + CR 604.1 + CR 702.18a: "All Slivers have shroud." (Crystalline

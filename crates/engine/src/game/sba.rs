@@ -374,6 +374,7 @@ fn static_affects_player(
             Some(ControllerRef::ScopedPlayer) => false,
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: chosen-player scope has no meaning here. Fail closed.
             Some(ControllerRef::SourceChosenPlayer) => false,
@@ -438,6 +439,11 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
 /// CR 903.9a: If a commander is in a graveyard or exile (and was put there
 /// since the last SBA check), its owner may put it into the command zone.
 /// CR 903.9b: Hand and library are also covered (see `commander_eligible_for_zone_return`).
+/// CR 903.9c: Also handles merged/melded permanents — after
+/// `merge::split_merged_permanent_on_leave` places each absorbed component
+/// in its destination zone with `is_commander` intact, the next SBA pass
+/// finds the commander component here and presents the choice identically to
+/// the standalone case.
 ///
 /// Pauses the SBA loop by setting `WaitingFor::CommanderZoneChoice` so the
 /// player can accept (move to command zone) or decline (leave in place).
@@ -3059,6 +3065,64 @@ mod tests {
         assert!(
             !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
             "creature-token legend-rule exemption must suppress the choice"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_for_bare_tokens_scope() {
+        // CR 704.5j: Cadric — duplicate legendary tokens (any type) exempt.
+        use crate::types::ability::FilterProp;
+        let mut state = setup();
+        let id1 = add_creature_token(&mut state, PlayerId(0), "Cadric Token", true);
+        let id2 = add_creature_token(&mut state, PlayerId(0), "Cadric Token", true);
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .properties(vec![FilterProp::Token])
+                    .controller(ControllerRef::You),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "bare-token legend-rule exemption must suppress the choice"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_for_commanders_scope() {
+        // CR 704.5j + CR 903.3: commander-scoped exemption.
+        use crate::types::ability::FilterProp;
+        let mut state = setup();
+        let id1 = add_legendary(&mut state, CardId(10), PlayerId(0), "Kenrith", 1);
+        let id2 = add_legendary(&mut state, CardId(11), PlayerId(0), "Kenrith", 2);
+        state.objects.get_mut(&id1).unwrap().is_commander = true;
+        state.objects.get_mut(&id2).unwrap().is_commander = true;
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .properties(vec![FilterProp::IsCommander])
+                    .controller(ControllerRef::You),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "commander-scoped legend-rule exemption must suppress the choice"
         );
         assert!(state.battlefield.contains(&id1));
         assert!(state.battlefield.contains(&id2));

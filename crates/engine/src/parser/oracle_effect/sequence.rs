@@ -515,6 +515,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     // ("get +2/+0 and gain haste ... and attack this turn if able") are body
     // delimiters owned by `try_parse_compound_subject_each`, not clause splits.
     let mut compound_subject_each_sticky = false;
+    // CR 701.55a + CR 701.55d: once a villainous-choice head ("[subject] face(s)
+    // a villainous choice — ") is detected, keep the WHOLE choice block intact
+    // for the rest of the current sentence. Everything after the em-dash is one
+    // indivisible instruction whose internal "," / " then " / " and " / " or "
+    // are branch delimiters owned by `try_parse_choose_one_of_inline`, not clause
+    // splits. Without this latch the chunker bisects a branch body (e.g. Ensnared
+    // by the Mara: "... until they exile a nonland card, then you may cast that
+    // card ...") and the lead-in is severed into a failing `Unimplemented{face}`.
+    let mut villainous_choice_sticky = false;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -548,6 +557,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     }
                 }
             }
+            ',' if paren_depth == 0
+                && !in_single_quote
+                && !in_double_quote
+                // CR 701.55a: inside a latched villainous-choice block, "," is a
+                // branch delimiter (", then" / ", or"), not a clause boundary.
+                && villainous_choice_sticky =>
+            {
+                current.push(ch);
+            }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
                 if let Some((boundary, chars_to_skip)) =
@@ -563,16 +581,41 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     current.push(ch);
                 }
             }
-            '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
+            // A sentence-ending period closes the clause (text-structure rule;
+            // no governing CR). Real quoted ability text in Oracle text always
+            // uses DOUBLE quotes, so a dangling single-quote here can only have
+            // been opened by a possessive/contraction apostrophe (e.g. "~'s
+            // power gains skulk until end of turn. Goad it." — The Master,
+            // Mesmerist). Such a "quote" must not swallow a sentence boundary:
+            // split here and reset the phantom single-quote state.
+            // `in_double_quote` (a genuine quoted ability) still suppresses the
+            // split.
+            '.' if paren_depth == 0 && !in_double_quote => {
+                in_single_quote = false;
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
                 compound_subject_each_sticky = false;
+                // CR 701.55a: a true sentence boundary ends the choice block.
+                villainous_choice_sticky = false;
                 while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
                     chars.next();
                 }
             }
             _ => {
                 current.push(ch);
+                // CR 701.55a: latch the villainous-choice block once the chunk
+                // accumulated so far contains the choice opener "a villainous
+                // choice — " (em-dash + trailing space). Anchored on the full
+                // opener so it covers "face"/"faces" and any chooser prefix
+                // ("that creature's controller faces a villainous choice — ").
+                if !villainous_choice_sticky
+                    && nom_primitives::scan_contains(
+                        &current.to_ascii_lowercase(),
+                        "a villainous choice \u{2014} ",
+                    )
+                {
+                    villainous_choice_sticky = true;
+                }
                 // Detect bare " and " at word boundary followed by an imperative verb.
                 // Handles patterns like "you lose 1 life and create a Treasure token".
                 // Uses a restricted verb list to avoid false positives on noun phrases
@@ -625,7 +668,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // is a single compound search-and-exile action — keep it together so
                         // the imperative dispatcher can recognize the multi-zone pattern.
                         // Accepts "search ..." and "then search ..." prefixes, and either
-                        // "with that name" or "with the same name as that card" suffixes.
+                        // "with that name" or "with the same name as that {card,creature,…}"
+                        // suffixes (Eradicate / Counterbore / Surgical Extraction class).
                         let has_search_prefix =
                             nom_primitives::scan_contains(&before_lower, "search ");
                         let search_with_that_name = has_search_prefix
@@ -781,6 +825,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || choice_partition_remainder
                         || compound_subject_each
                         || compound_subject_each_sticky // CR 109.5 + CR 115.1: keep the whole compound-subject body intact
+                        || villainous_choice_sticky // CR 701.55a: keep the whole villainous-choice block intact
                         || inside_otherwise_body
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
@@ -865,9 +910,24 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with that name"),
-        tag("with the chosen name"),
-        tag("with the same name as that card"),
+        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        value((), tag("with the chosen name")),
+        value(
+            (),
+            (
+                tag("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
+        ),
     ))
     .parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
@@ -1431,6 +1491,56 @@ fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 601.2c + CR 611.2c: A second `"target <noun>"` clause joined by a bare
+/// `" and "` opens its OWN target (each instance of the word "target" is a
+/// distinct target — CR 601.2c) and applies a continuous modification
+/// (CR 611.2c). Skulduggery: "... target creature you control gets +1/+1 and
+/// target creature an opponent controls gets -1/-1." (also Monoist
+/// Circuit-Feeder). Without this arm the second conjunct is not recognized as a
+/// clause start and is swallowed by the first `Pump`, so the opponent-debuff is
+/// dropped. The discriminator is a conjugated continuous-modification verb
+/// (gets/gains/has/loses) somewhere after the `"target <noun>"` subject — a
+/// genuine noun-phrase continuation ("... and target land") has no such verb
+/// and is left un-split. `take_until` consumes the intervening qualifier
+/// ("creature you control", "creature an opponent controls") up to the verb.
+fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("target ").parse(s)?;
+    alt((
+        value((), (take_until(" gets "), tag(" gets "))),
+        value((), (take_until(" gains "), tag(" gains "))),
+        value((), (take_until(" has "), tag(" has "))),
+        value((), (take_until(" loses "), tag(" loses "))),
+    ))
+    .parse(rest)
+}
+
+/// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
+/// player" clause joined by a bare " and " is a fresh player-scoped clause start
+/// (Slitherwisp "you draw a card and each opponent loses 1 life"; Curry Favor;
+/// Disinformation Campaign; Bad Deal; Clockwork Fox). Without this arm the
+/// conjunct is swallowed by the first effect and the player-scoped half is
+/// dropped. The discriminator is a conjugated player-action verb immediately
+/// after the "each opponent "/"each player " subject — a bare-noun continuation
+/// (Goblin Chainwhirler's "... and each creature you control") has no such verb
+/// and is left un-split, preserving the single DamageAll. Player-scope sibling of
+/// `starts_target_continuous_clause_lower`.
+fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((tag("each opponent "), tag("each player "))).parse(s)?;
+    value(
+        (),
+        alt((
+            tag("loses "),
+            tag("gains "),
+            tag("draws "),
+            tag("discards "),
+            tag("mills "),
+            tag("sacrifices "),
+            tag("exiles "),
+        )),
+    )
+    .parse(rest)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -1659,6 +1769,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             ),
         ),
     )))
+    // CR 601.2c + CR 611.2c: a fresh "target <noun> gets/gains/has/loses ..."
+    // conjunct opens its own target and continuous modification (Skulduggery).
+    // Wired as a trailing `.or()` arm (mirroring the
+    // `starts_they_continuous_clause_lower` helper) rather than a new tuple
+    // element so the enclosing `alt(...)` cluster stays under nom's 21-arm limit.
+    .or(value((), starts_target_continuous_clause_lower))
+    // CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a fresh "each opponent"/"each
+    // player" conjunct + conjugated player-action verb is a player-scoped clause
+    // start (Slitherwisp, Curry Favor, Disinformation Campaign, Bad Deal,
+    // Clockwork Fox). Trailing `.or()` arm (mirroring
+    // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
+    // under nom's 21-arm limit.
+    .or(value((), starts_each_player_predicate_clause_lower))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -2459,6 +2582,14 @@ pub(super) fn apply_clause_continuation(
                     | Effect::ChangeZone {
                         face_down_profile: fdp @ Some(_),
                         ..
+                    }
+                    // CR 708.2a: "put the top N ... onto the battlefield face
+                    // down" lowers to `Effect::Manifest` (Cybership). Overwrite
+                    // the seeded vanilla 2/2 profile with the spec's
+                    // characteristics ("2/2 Cyberman artifact creatures").
+                    | Effect::Manifest {
+                        profile: fdp @ Some(_),
+                        ..
                     } => {
                         *fdp = Some(profile);
                         break;
@@ -2975,6 +3106,14 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 return None;
             }
             let full_lower = full_text.to_ascii_lowercase();
+            // CR 400.7 + CR 701.23 + CR 701.24: Name-hate compounds ("search … graveyard,
+            // hand, and library … with the same name as that {creature,spell,…} and exile
+            // them") lower to `ChangeZoneAll { SameNameAsParentTarget }`, not SearchLibrary
+            // + SearchDestination. Suppress the generic put/exile step when the full
+            // sentence matches the multi-zone same-name exile recognizer.
+            if super::imperative::try_parse_multi_zone_same_name_exile(&full_lower).is_some() {
+                return None;
+            }
             // CR 608.2c: Conditional result destinations ("put it onto the
             // battlefield tapped if it's a land card. Otherwise, put it into
             // your hand" — Archdruid's Charm) are represented by the parsed
@@ -3922,6 +4061,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Seek { .. }
         | Effect::SetLifeTotal { .. }
         | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
@@ -4462,7 +4602,14 @@ pub(super) fn parse_followup_continuation_ast(
         // preceding Mill/ChangeZone/ChangeZoneAll carries `face_down_profile`).
         // Refines the face-down profile with the specified characteristics. Placed
         // BEFORE the broad Mill/Dig from-among arm so it claims the spec sentence.
-        Effect::Mill { .. } | Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+        Effect::Mill { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        // CR 701.40a + CR 708.2a: "put the top N ... onto the battlefield face
+        // down" lowers to `Effect::Manifest` (Cybership), seeded with a
+        // `Some(_)` profile by the put-clause. The trailing "They're 2/2 Cyberman
+        // artifact creatures." spec refines that seed via the back-walk patcher.
+        | Effect::Manifest { profile: Some(_), .. }
             if face_down_profile_spec.is_some() =>
         {
             let profile = face_down_profile_spec.clone()?;
@@ -4750,6 +4897,14 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 ///
 /// Returns `TokenEntersWithCounters` so it shares the continuation absorption
 /// path with `try_parse_token_enters_with_counters` (declarative form).
+/// CR 122.6a + CR 301.5b: Returns true when the counter followup consumed the
+/// entire clause. A trailing `"and attach …"` conjunct (Fractal Harness) must
+/// not be absorbed here — the bare-and splitter needs to peel it into its own
+/// attach clause.
+fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
+    rest.trim().trim_start_matches(['.', ' ']).is_empty()
+}
+
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the verb. Both `put ` (imperative) and `puts ` (third-person,
@@ -4769,9 +4924,12 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // <quantity>". Delegates to the shared building block in `oracle_effect/
     // mod.rs`. The body consumes the full clause (including trailing period),
     // so on success we're done — emit the continuation directly.
-    if let Ok((_, (counter_type, count))) =
+    if let Ok((remainder, (counter_type, count))) =
         super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
     {
+        if !token_counter_followup_tail_is_clean(remainder) {
+            return None;
+        }
         return Some(ContinuationAst::TokenEntersWithCounters {
             counter_type,
             count,
@@ -4839,6 +4997,10 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         } else {
             None
         };
+
+    if quantity.is_none() && !token_counter_followup_tail_is_clean(rest) {
+        return None;
+    }
 
     let count = if let Some(qty) = quantity {
         qty
@@ -5032,6 +5194,32 @@ mod tests {
         // standalone ChangeZone.
         let chunks = clause_texts(
             "search target opponent's graveyard, hand, and library for any number of cards with the chosen name and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_creature_search_exile_compound() {
+        // CR 201.2 + CR 701.23a + CR 701.18a: Eradicate-class "same name as that
+        // creature" must stay one compound so `MultiZoneSameNameExile` wins.
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_spell_search_exile_compound() {
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for all cards with the same name as that spell and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_same_name_land_search_exile_compound() {
+        let chunks = clause_texts(
+            "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
@@ -6752,6 +6940,144 @@ mod tests {
         assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
     }
 
+    /// CR 400.7 + CR 608.2c + CR 110.2a + CR 205.1b: Breach the Multiverse's
+    /// full four-clause text must assemble into a `Mill → ChooseFromZone{
+    /// zone_owner: EachPlayer, filter: creature-or-planeswalker } →
+    /// ChangeZoneAll{ origin: Graveyard, enters_under: You, target: tracked-set }
+    /// → GenericEffect(AddSubtype("Phyrexian"))` chain — with NO `Unimplemented`.
+    /// Clause 1 (Mill) already parsed before this fix; clauses 2-4 were dropped.
+    #[test]
+    fn breach_multiverse_assembles_per_player_reanimation_chain() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::ZoneOwner;
+
+        let def = parse_effect_chain(
+            "Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        // No clause may fall through to Unimplemented.
+        for d in &effects {
+            assert!(
+                !matches!(&*d.effect, Effect::Unimplemented { .. }),
+                "no clause may be Unimplemented, got {:?}",
+                d.effect
+            );
+        }
+
+        // Clause 1: the ten-card mill survives untouched.
+        assert!(
+            effects
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::Mill { .. })),
+            "clause 1 mill must remain in the chain, chain was {:?}",
+            effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+        );
+
+        // Clause 2: per-player graveyard choice (controller chooses one
+        // creature-or-planeswalker card from EACH player's graveyard).
+        let choose = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::ChooseFromZone { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "clause 2 must lower to ChooseFromZone, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+        let Effect::ChooseFromZone {
+            count,
+            zone,
+            zone_owner,
+            filter,
+            chooser,
+            ..
+        } = &*choose.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*count, 1, "one card per player");
+        assert_eq!(*zone, Zone::Graveyard);
+        assert_eq!(
+            *zone_owner,
+            ZoneOwner::EachPlayer,
+            "BLOCKER: 'for each player ... in that player's graveyard' must iterate every player"
+        );
+        assert_eq!(
+            *chooser,
+            Chooser::Controller,
+            "the spell's controller chooses"
+        );
+        let filter = filter
+            .as_ref()
+            .expect("clause 2 filter must restrict to creature/planeswalker cards");
+        // The filter must admit a creature AND a planeswalker (Or/Typed over both).
+        assert!(
+            matches!(filter, TargetFilter::Or { .. } | TargetFilter::Typed(_)),
+            "filter must be a creature-or-planeswalker type filter, got {filter:?}"
+        );
+
+        // Clause 3: "put those cards onto the battlefield under your control"
+        // must bind the tracked set from clause 2 and enter under the controller.
+        let put = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "clause 3 must lower to ChangeZoneAll, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            ..
+        } = &*put.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard), "scan the graveyards");
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*enters_under, Some(ControllerRef::You));
+        assert!(
+            matches!(
+                target,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            ),
+            "'those cards' must bind the clause-2 tracked set, got {target:?}"
+        );
+
+        // Clause 4: "each creature you control becomes a Phyrexian in addition
+        // to its other types" → GenericEffect granting AddSubtype("Phyrexian").
+        let phyrexian = effects.iter().any(|d| match &*d.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().any(|sa| {
+                sa.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddSubtype { subtype } if subtype == "Phyrexian"
+                    )
+                })
+            }),
+            _ => false,
+        });
+        assert!(
+            phyrexian,
+            "clause 4 must grant AddSubtype(\"Phyrexian\"), chain was {:?}",
+            effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+        );
+    }
+
     /// CR 708.2a: A bare "put all creature cards milled this way onto the
     /// battlefield face down." with no trailing characteristics sentence keeps
     /// the default vanilla 2/2 profile.
@@ -6777,6 +7103,69 @@ mod tests {
         };
         assert_eq!(quantity, PutCount::All);
         assert_eq!(face_down_profile, Some(FaceDownProfile::vanilla_2_2()));
+    }
+
+    /// CR 701.40a + CR 708.2a + CR 110.2a: Cybership's two-sentence body —
+    /// "put the top two cards of [a player]'s library onto the battlefield face
+    /// down under your control. They're 2/2 Cyberman artifact creatures." — must
+    /// assemble into an `Effect::Manifest` whose `profile` is refined from the
+    /// seeded vanilla 2/2 to the Cyberman characteristics by the back-walk
+    /// patcher, and whose `enters_under` carries the controller override.
+    #[test]
+    fn cybership_put_top_face_down_manifest_profile_chain() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Put the top two cards of your library onto the battlefield face down under your control. They're 2/2 Cyberman artifact creatures.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        // No Unimplemented{they're} anywhere in the chain.
+        for d in &effects {
+            assert!(
+                !matches!(&*d.effect, Effect::Unimplemented { name, .. } if name == "they're"),
+                "the 'They're ...' clause must not produce Unimplemented, got {:?}",
+                d.effect
+            );
+        }
+
+        let manifest = effects
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::Manifest { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a Manifest effect, chain was {:?}",
+                    effects.iter().map(|d| &d.effect).collect::<Vec<_>>()
+                )
+            });
+
+        let Effect::Manifest {
+            count,
+            profile,
+            enters_under,
+            ..
+        } = &*manifest.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 }, "top TWO cards");
+        assert_eq!(
+            *enters_under,
+            Some(ControllerRef::You),
+            "under your control"
+        );
+        let profile = profile.as_ref().expect("manifest profile must be set");
+        assert_eq!(profile.power, Some(2));
+        assert_eq!(profile.toughness, Some(2));
+        assert_eq!(profile.extra_core_types, vec![CoreType::Artifact]);
+        assert_eq!(profile.subtypes, vec!["Cyberman".to_string()]);
     }
 
     /// Parser AST-shape test (issue #420). Birthing Ritual's full triggered-
@@ -7206,6 +7595,17 @@ mod tests {
     }
 
     #[test]
+    fn put_counters_on_it_followup_rejects_trailing_attach_conjunct() {
+        assert!(
+            try_parse_put_counters_on_token_followup(
+                "put x +1/+1 counters on it and attach this equipment to it"
+            )
+            .is_none(),
+            "trailing attach conjunct must split as its own clause (Fractal Harness)"
+        );
+    }
+
+    #[test]
     fn put_counters_on_it_followup_where_x_is() {
         // Fractal Anomaly: "... put X +1/+1 counters on it, where X is the
         // number of cards you've drawn this turn"
@@ -7416,6 +7816,340 @@ mod tests {
         assert!(!starts_bare_and_clause("they attack this turn"));
         assert!(!starts_bare_and_clause("they get +1/+1 until end of turn"));
         assert!(!starts_bare_and_clause("they lose 6 life"));
+    }
+
+    /// CR 601.2c + CR 611.2c: A second `"target <noun>"` conjunct joined by a
+    /// bare `" and "` is a fresh clause start (its own target + continuous
+    /// modification), not a noun-phrase continuation of the first Pump.
+    /// Skulduggery / Monoist Circuit-Feeder: "... target creature you control
+    /// gets +1/+1 and target creature an opponent controls gets -1/-1". The
+    /// conjugated CM verb (gets/gains/has/loses) after the subject is the
+    /// discriminator; a bare noun continuation ("target land") has no such verb.
+    #[test]
+    fn bare_and_clause_starts_on_second_target_continuous_subject() {
+        // Skulduggery's two conjuncts.
+        assert!(starts_bare_and_clause(
+            "target creature an opponent controls gets -1/-1"
+        ));
+        assert!(starts_bare_and_clause(
+            "target creature you control gets +1/+1"
+        ));
+        // Monoist Circuit-Feeder's debuff conjunct (X distributes downstream).
+        assert!(starts_bare_and_clause(
+            "target creature an opponent controls gets -0/-x"
+        ));
+        // Verb-axis coverage: gains / has / loses.
+        assert!(starts_bare_and_clause(
+            "target creature an opponent controls gains flying"
+        ));
+        assert!(starts_bare_and_clause(
+            "target creature an opponent controls has flying"
+        ));
+        assert!(starts_bare_and_clause(
+            "target creature an opponent controls loses flying"
+        ));
+        // NO-REGRESSION negatives:
+        // Anaphoric shared-target rider — no fresh "target", must NOT split.
+        assert!(!starts_bare_and_clause("gains flying"));
+        // Genuine noun-phrase continuation — "target land" with no CM verb.
+        assert!(!starts_bare_and_clause("target land"));
+        assert!(!starts_bare_and_clause("target creature you control"));
+    }
+
+    /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: A second "each opponent"/"each
+    /// player" conjunct joined by a bare " and " is a fresh player-scoped clause
+    /// start when followed by a conjugated player-action verb. Slitherwisp ("you
+    /// draw a card and each opponent loses 1 life"), Curry Favor, Disinformation
+    /// Campaign, Bad Deal, Clockwork Fox. The conjugated verb immediately after
+    /// the subject is the discriminator; a bare-noun continuation (Goblin
+    /// Chainwhirler's "and each creature you control") has no such verb.
+    #[test]
+    fn bare_and_clause_starts_on_each_player_predicate_subject() {
+        // Verb-axis coverage for "each opponent".
+        assert!(starts_bare_and_clause("each opponent loses 1 life"));
+        assert!(starts_bare_and_clause("each opponent discards a card"));
+        assert!(starts_bare_and_clause("each opponent discards two cards"));
+        assert!(starts_bare_and_clause("each opponent draws a card"));
+        assert!(starts_bare_and_clause("each opponent loses x life"));
+        // "each player" subject.
+        assert!(starts_bare_and_clause("each player loses 2 life"));
+        // NO-REGRESSION negatives:
+        // Bare-noun continuation — no conjugated player-action verb.
+        assert!(!starts_bare_and_clause("each creature you control"));
+        // Goblin Chainwhirler — "each opponent" with no verb before "and each
+        // creature ...": immediate-tag cannot match a downstream verb.
+        assert!(!starts_bare_and_clause(
+            "each opponent and each creature you control"
+        ));
+        // Possessive noun phrase — not a predicate clause.
+        assert!(!starts_bare_and_clause("each opponent's creatures"));
+    }
+
+    /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each
+    /// opponent <verb> ..." compound must split into TWO chunks (previously the
+    /// player-scoped conjunct was swallowed by the first effect and dropped).
+    /// Goblin Chainwhirler's bare-noun "and each creature you control" must stay
+    /// ONE chunk (no conjugated verb → no split).
+    #[test]
+    fn bare_and_splits_each_player_predicate_conjunct() {
+        assert_eq!(
+            clause_texts("you draw a card and each opponent loses 1 life"),
+            vec!["you draw a card", "each opponent loses 1 life"]
+        );
+        assert_eq!(
+            clause_texts("you draw two cards and each opponent discards two cards"),
+            vec!["you draw two cards", "each opponent discards two cards"]
+        );
+        // No-regression: Goblin Chainwhirler stays a single DamageAll chunk.
+        assert_eq!(
+            clause_texts("deals 1 damage to each opponent and each creature you control"),
+            vec!["deals 1 damage to each opponent and each creature you control"]
+        );
+    }
+
+    /// CR 602.5 + CR 611.2c: Skulduggery — symmetric dual-target pump. The
+    /// bare `" and "` between the two `"target creature ... gets +/-"` conjuncts
+    /// must split so BOTH Pumps survive; previously the second (opponent-debuff)
+    /// conjunct was swallowed by the first Pump and dropped. Conjunct 2's
+    /// "an opponent controls" resolves the target's controller to
+    /// `ControllerRef::Opponent`. Pump carries no duration field — the leading
+    /// "Until end of turn," applies at resolution (Pump defaults to until end of
+    /// turn), so this test asserts only the two Pump shapes + controllers.
+    #[test]
+    fn skulduggery_parses_both_pump_targets() {
+        use super::super::parse_effect_chain;
+
+        // Real Oracle text (AtomicCards.json), leading "Until end of turn,".
+        let def = parse_effect_chain(
+            "Until end of turn, target creature you control gets +1/+1 and target creature an opponent controls gets -1/-1.",
+            AbilityKind::Spell,
+        );
+
+        let mut pumps: Vec<(&PtValue, &PtValue, &TargetFilter)> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            if let Effect::Pump {
+                power,
+                toughness,
+                target,
+            } = &*d.effect
+            {
+                pumps.push((power, toughness, target));
+            }
+            node = d.sub_ability.as_deref();
+        }
+
+        assert_eq!(
+            pumps.len(),
+            2,
+            "Skulduggery must produce TWO Pumps (second conjunct was dropped before the fix); got {pumps:?}"
+        );
+
+        // Conjunct 1: +1/+1 on a creature you control.
+        let (p0, t0, tgt0) = pumps[0];
+        assert_eq!(*p0, PtValue::Fixed(1));
+        assert_eq!(*t0, PtValue::Fixed(1));
+        let TargetFilter::Typed(f0) = tgt0 else {
+            panic!("conjunct 1 target should be Typed, got {tgt0:?}");
+        };
+        assert_eq!(f0.controller, Some(ControllerRef::You));
+
+        // Conjunct 2: -1/-1 on a creature an opponent controls (the dropped one).
+        let (p1, t1, tgt1) = pumps[1];
+        assert_eq!(*p1, PtValue::Fixed(-1));
+        assert_eq!(*t1, PtValue::Fixed(-1));
+        let TargetFilter::Typed(f1) = tgt1 else {
+            panic!("conjunct 2 target should be Typed, got {tgt1:?}");
+        };
+        assert_eq!(
+            f1.controller,
+            Some(ControllerRef::Opponent),
+            "conjunct 2 must target an opponent's creature"
+        );
+    }
+
+    /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: full-card discriminating gate
+    /// for the bare-and "each opponent/player <verb>" split. Slitherwisp ("you
+    /// draw a card and each opponent loses 1 life"), Curry Favor (where-X bound to
+    /// BOTH conjuncts), Bad Deal (each-opponent discards two). Before the fix the
+    /// second conjunct was swallowed by the first effect and the player-scoped
+    /// half (life loss / discard) was dropped entirely.
+    #[test]
+    fn each_player_predicate_conjunct_parses_end_to_end() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::PlayerFilter;
+
+        // --- Slitherwisp: Draw (controller) + LoseLife (opponent, amount 1). ---
+        let def = parse_effect_chain(
+            "You draw a card and each opponent loses 1 life.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let has_draw = nodes
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Draw { .. }));
+        assert!(
+            has_draw,
+            "Slitherwisp must keep the controller Draw: {nodes:?}"
+        );
+        let lose = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::LoseLife { .. }))
+            .expect("Slitherwisp's each-opponent LoseLife conjunct was dropped before the fix");
+        assert_eq!(
+            lose.player_scope,
+            Some(PlayerFilter::Opponent),
+            "life loss is scoped to each opponent"
+        );
+        let Effect::LoseLife { amount, .. } = &*lose.effect else {
+            unreachable!()
+        };
+        assert_eq!(*amount, QuantityExpr::Fixed { value: 1 });
+
+        // --- Curry Favor: GainLife{Knights} + LoseLife{opponent, X=Knights}. ---
+        let def = parse_effect_chain(
+            "You gain X life and each opponent loses X life, where X is the number of Knights you control.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let gain = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::GainLife { .. }))
+            .expect("Curry Favor must keep the controller GainLife conjunct");
+        let lose = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::LoseLife { .. }))
+            .expect("Curry Favor's each-opponent LoseLife conjunct was dropped before the fix");
+        assert_eq!(
+            lose.player_scope,
+            Some(PlayerFilter::Opponent),
+            "life loss is scoped to each opponent"
+        );
+        // where-X binds to BOTH conjuncts: neither amount is a bare Fixed(0).
+        let Effect::GainLife {
+            amount: gain_amt, ..
+        } = &*gain.effect
+        else {
+            unreachable!()
+        };
+        let Effect::LoseLife {
+            amount: lose_amt, ..
+        } = &*lose.effect
+        else {
+            unreachable!()
+        };
+        assert_ne!(
+            *gain_amt,
+            QuantityExpr::Fixed { value: 0 },
+            "X must bind on the gain conjunct (got {gain_amt:?})"
+        );
+        assert_ne!(
+            *lose_amt,
+            QuantityExpr::Fixed { value: 0 },
+            "X must bind on the loss conjunct (got {lose_amt:?})"
+        );
+        assert_eq!(
+            gain_amt, lose_amt,
+            "both conjuncts share the same where-X quantity"
+        );
+
+        // --- Bad Deal: each-opponent Discard (count 2, opponent scope) present. ---
+        let def = parse_effect_chain(
+            "You draw two cards and each opponent discards two cards. You lose 2 life and each opponent loses 4 life.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let discard = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::Discard { .. }))
+            .expect("Bad Deal's each-opponent Discard conjunct was dropped before the fix");
+        assert_eq!(
+            discard.player_scope,
+            Some(PlayerFilter::Opponent),
+            "discard is scoped to each opponent"
+        );
+        let Effect::Discard { count, .. } = &*discard.effect else {
+            unreachable!()
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    /// CR 611.2c: No-regression guard for the shared-target rider shape. A
+    /// "gets +1/+1 and gains <kw>" rider with NO second "target" must stay a
+    /// SINGLE shared-target continuous effect — one `GenericEffect` whose one
+    /// target (Typed Creature you control) carries both the P/T and keyword
+    /// modifications — and must NOT be split into a second targeted clause. The
+    /// new `starts_target_continuous_clause_lower` arm only fires on a fresh
+    /// "target <noun>" after the bare " and "; this rider's "gains flying ..."
+    /// remainder has no such "target", so the arm must leave it un-split.
+    #[test]
+    fn shared_target_pump_then_keyword_rider_is_not_split() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Target creature you control gets +1/+1 and gains flying until end of turn.",
+            AbilityKind::Spell,
+        );
+
+        // Exactly one effect node — not split into two targeted clauses.
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        assert_eq!(
+            effects.len(),
+            1,
+            "rider must stay a single shared-target clause, got {effects:?}"
+        );
+
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &*effects[0].effect
+        else {
+            panic!(
+                "rider should lower to one GenericEffect, got {:?}",
+                effects[0].effect
+            );
+        };
+
+        // ONE shared target — Typed Creature you control (not a second target).
+        let Some(TargetFilter::Typed(f)) = target else {
+            panic!("rider target should be a single Typed filter, got {target:?}");
+        };
+        assert_eq!(f.controller, Some(ControllerRef::You));
+
+        // The single target carries BOTH the P/T pump and the keyword grant.
+        assert_eq!(static_abilities.len(), 1);
+        let mods = &static_abilities[0].modifications;
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })),
+            "missing +1 power on shared target: {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Flying)),
+            "missing flying keyword on shared target: {mods:?}"
+        );
     }
 
     /// CR 702: "The same is true for <keyword list>." — Odric, Lunarch

@@ -58,7 +58,11 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
     (!zones.is_empty()).then_some(zones)
 }
 
-fn resolve_enters_under_player(
+/// CR 110.2a: Resolve the optional `enters_under` controller override to a
+/// concrete `PlayerId` for any battlefield-entry effect. Shared by `ChangeZone`,
+/// `ChangeZoneAll`, and `Manifest` so every entry path resolves the reference
+/// through the single canonical `ControllerRef` authority (`controller_ref_player`).
+pub(crate) fn resolve_enters_under_player(
     state: &GameState,
     ability: &ResolvedAbility,
     effect_name: &str,
@@ -551,6 +555,7 @@ pub fn resolve(
             // resolves the choice.
             face_down_profile: face_down_profile.clone(),
             count_param: 0,
+            is_cost_payment: false,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -5029,6 +5034,13 @@ mod tests {
             "Grizzly Bears".to_string(),
             Zone::Library,
         );
+        let caster_bear_hand = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
 
         // Distractor: a card in the graveyard with a different name. Must not exile.
         let other_gy = create_object(
@@ -5044,12 +5056,14 @@ mod tests {
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::default().properties(vec![
-                        FilterProp::InAnyZone {
-                            zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
-                        },
-                        FilterProp::SameNameAsParentTarget,
-                    ]),
+                    crate::types::ability::TypedFilter::default()
+                        .controller(ControllerRef::ParentTargetController)
+                        .properties(vec![
+                            FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                            },
+                            FilterProp::SameNameAsParentTarget,
+                        ]),
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -5077,6 +5091,11 @@ mod tests {
         }
         // Distractor untouched.
         assert_eq!(state.objects[&other_gy].zone, Zone::Graveyard);
+        assert_eq!(
+            state.objects[&caster_bear_hand].zone,
+            Zone::Hand,
+            "same-name cards outside the searched player's zones must stay put"
+        );
 
         // Per-resolution counter equals the number of cards exiled FROM HAND only.
         assert_eq!(
@@ -6503,6 +6522,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let _ = apply_as_current(

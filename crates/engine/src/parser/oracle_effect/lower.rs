@@ -25,9 +25,10 @@ use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialCla
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
     Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
-    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -844,6 +845,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
+    rewire_cross_sentence_token_counter_attach(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
@@ -1256,6 +1258,57 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
     }
 
     rewrite_populated_anaphor_in_effect(&mut def.effect);
+    // CR 608.2c + CR 701.36a: recurse into sub_ability chains so anaphoric
+    // rewrites apply to sibling followups (Fractal Harness PutCounter/Attach).
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_populated_anaphor_in_def(sub);
+    }
+}
+
+/// CR 608.2c + CR 122.6 + CR 614.1c: Fractal Harness class — sentence
+/// splitting lowers token creation and a sibling `PutCounter` targeting
+/// `SelfRef` (the ETB source). Preserve `Token -> PutCounter -> Attach` as
+/// separate instructions; rebind anaphoric targets to `LastCreated`.
+fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Token { .. }) {
+        return;
+    }
+    let Some(put_box) = def.sub_ability.take() else {
+        return;
+    };
+    let mut put_sub = *put_box;
+    if put_sub.sub_link != SubAbilityLink::SequentialSibling {
+        def.sub_ability = Some(Box::new(put_sub));
+        return;
+    }
+    let Effect::PutCounter { target, .. } = put_sub.effect.as_ref() else {
+        def.sub_ability = Some(Box::new(put_sub));
+        return;
+    };
+    if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+        def.sub_ability = Some(Box::new(put_sub));
+        return;
+    }
+    let attach_sub = match put_sub.sub_ability.take() {
+        Some(sub) if matches!(&*sub.effect, Effect::Attach { .. }) => sub,
+        other => {
+            put_sub.sub_ability = other;
+            def.sub_ability = Some(Box::new(put_sub));
+            return;
+        }
+    };
+
+    if let Effect::PutCounter { target, .. } = &mut *put_sub.effect {
+        *target = TargetFilter::LastCreated;
+    }
+    put_sub.sub_link = SubAbilityLink::ContinuationStep;
+
+    let mut attach_sub = *attach_sub;
+    attach_sub.sub_link = SubAbilityLink::ContinuationStep;
+    rewrite_parent_target_to_last_created(&mut attach_sub.effect);
+
+    put_sub.sub_ability = Some(Box::new(attach_sub));
+    def.sub_ability = Some(Box::new(put_sub));
 }
 
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
@@ -1283,6 +1336,11 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     // (God-Pharaoh's Gift: "create a token … It gains haste"). Rebind to the
     // just-created token.
     rebind_self_ref_grant_to_last_created(effect);
+
+    // Case 4 (CR 301.5b + CR 122.6a): imperative followups like Fractal Harness's
+    // "attach this Equipment to it" parse "it" as ParentTarget (Self-ETB trigger
+    // subject). After a token creator in the same chain, rewrite to LastCreated.
+    rewrite_parent_target_to_last_created(effect);
 }
 
 /// If `effect` is `Unimplemented { description: "<anaphor> <verb-phrase>" }`,
@@ -1363,6 +1421,7 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ..
         }
         | Effect::Pump { target, .. }
+        | Effect::Attach { target, .. }
         | Effect::ChangeZone { target, .. } => {
             if matches!(target, TargetFilter::ParentTarget) {
                 *target = TargetFilter::LastCreated;
@@ -1446,14 +1505,17 @@ fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut AbilityDefini
 pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
     let mut i = 0;
     while i < defs.len() {
-        // CR 705: Consolidate coin flip branches
-        if matches!(
-            &*defs[i].effect,
-            Effect::FlipCoin {
-                win_effect: None,
-                lose_effect: None,
-            }
-        ) {
+        // CR 705: Consolidate coin flip branches. CR 705.2: the bare flip carries
+        // the `flipper` (which player flips); the following branch-only flips are
+        // stubs with the default `Controller` flipper, so preserve the bare flip's
+        // flipper rather than the stubs'.
+        if let Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper,
+        } = &*defs[i].effect
+        {
+            let flipper = flipper.clone();
             let mut win = None;
             let mut lose = None;
             let mut j = i + 1;
@@ -1462,6 +1524,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                     Effect::FlipCoin {
                         win_effect: Some(w),
                         lose_effect: None,
+                        ..
                     } if win.is_none() => {
                         win = Some(w.clone());
                         j += 1;
@@ -1469,6 +1532,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                     Effect::FlipCoin {
                         win_effect: None,
                         lose_effect: Some(l),
+                        ..
                     } if lose.is_none() => {
                         lose = Some(l.clone());
                         j += 1;
@@ -1480,6 +1544,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                 *defs[i].effect = Effect::FlipCoin {
                     win_effect: win,
                     lose_effect: lose,
+                    flipper,
                 };
                 defs.drain(i + 1..j);
             }
@@ -1504,15 +1569,18 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             win_effect: None,
             lose_effect: None,
             count,
+            flipper,
         } = &*defs[i].effect
         {
             if i + 1 < defs.len() {
                 let count = count.clone();
+                let flipper = flipper.clone();
                 let next = defs.remove(i + 1);
                 *defs[i].effect = Effect::FlipCoins {
                     count,
                     win_effect: Some(Box::new(next)),
                     lose_effect: None,
+                    flipper,
                 };
             }
         }
@@ -1548,83 +1616,7 @@ pub(super) fn strip_optional_effect_prefix(
     Option<PlayerFilter>,
     String,
 ) {
-    let lower = text.to_lowercase();
-    // CR 608.2d + CR 115.7: "you may choose new targets for …" is a retarget
-    // effect, not a generic optional wrapper. Only that narrow class keeps the
-    // full surface form; other specialized `you may cast/play/…` clauses still
-    // peel here so `optional: true` is stamped (Beseech the Mirror, etc.).
-    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
-        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(input)
-    }) {
-        let rest_lower = rest.to_lowercase();
-        if crate::parser::clause_shell::is_specialized_you_may_retarget_phrase(&rest_lower) {
-            return (false, None, None, text.to_string());
-        }
-        return (true, None, None, rest.to_string());
-    }
-    // CR 608.2d: "each opponent may" — per-opponent optional effect.
-    // "any opponent may" — first-accept-wins opponent-choice optional effect.
-    if let Some(((scope, player_scope), rest)) = nom_on_lower(text, &lower, |input| {
-        alt((
-            value(
-                (None, Some(PlayerFilter::Opponent)),
-                tag("each opponent may "),
-            ),
-            value(
-                (
-                    Some(crate::types::ability::OpponentMayScope::AnyOpponent),
-                    None,
-                ),
-                tag("any opponent may "),
-            ),
-            // CR 608.2d + CR 101.4: "any player may" — every player INCLUDING the
-            // controller is offered in APNAP order; first accept wins (group
-            // bargain / punisher cards: Browbeat, Argothian Wurm, …). Diverges
-            // from "any opponent may " at byte 5 — no ordering hazard.
-            value(
-                (
-                    Some(crate::types::ability::OpponentMayScope::AnyPlayer),
-                    None,
-                ),
-                tag("any player may "),
-            ),
-            // CR 608.2c: "the first player may" — Oath of Mages and analogous
-            // cross-clause patterns where the chooser of a prior sentence
-            // (= TriggeringPlayer for upkeep/event triggers) is invited to
-            // take an optional action in a later sentence. Marks the chunk
-            // optional and scopes the actor to the triggering player.
-            value(
-                (None, Some(PlayerFilter::TriggeringPlayer)),
-                tag("the first player may "),
-            ),
-            // CR 608.2d: "Target opponent may have ~ deal … to them" (Risk Factor).
-            value(
-                (None, Some(PlayerFilter::Opponent)),
-                tag("target opponent may "),
-            ),
-            // CR 506.2 + CR 608.2d + CR 121.3a: "Defending player may have you
-            // draw a card" (Shakedown Heavy) — on an attack trigger, the
-            // defending player is the may-actor who decides whether the
-            // controller performs the granted action. CR 121.3a: the chooser
-            // need not be the player who draws. Parallels the targeted-opponent
-            // arm above; the actor scope is the attack's defending player.
-            value(
-                (None, Some(PlayerFilter::DefendingPlayer)),
-                tag("defending player may "),
-            ),
-            // CR 608.2d: "That creature's controller may have this artifact deal …"
-            // (Requiem Monolith) — the targeted creature's controller chooses.
-            value(
-                (None, Some(PlayerFilter::ParentObjectTargetController)),
-                tag("that creature's controller may "),
-            ),
-        ))
-        .parse(input)
-    }) {
-        (true, scope, player_scope, rest.to_string())
-    } else {
-        (false, None, None, text.to_string())
-    }
+    crate::parser::clause_shell::peel_optional_slots(text)
 }
 
 /// CR 107.1: Detect and strip a trailing "a number of times equal to the
@@ -1663,7 +1655,7 @@ fn is_chain_veil_for_each_grant(lower: &str) -> bool {
     )
 }
 
-pub(super) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
         let rest_lower = &lower[text.len() - rest.len()..];
@@ -1856,7 +1848,7 @@ pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>,
 /// CR 609.3 "do as much as possible" rule. Unified with `strip_for_each_prefix`
 /// at the chain level so the base action is parsed normally and the resolver
 /// loops it N times.
-pub(super) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
+pub(crate) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     let suffixes: &[(&str, i32)] = &[
         (" twice", 2),
@@ -1900,7 +1892,7 @@ pub(super) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, St
 /// "Each opponent discards a card" → (Some(Opponent), "discard a card")
 /// "Each other player sacrifices a creature" → (Some(Opponent), "sacrifice a creature")
 /// "Each player draws a card" → (Some(All), "draw a card")
-pub(super) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
+pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let (scope, stripped) = strip_linked_exile_owner_subject(text);
     if scope.is_some() {
         return (scope, stripped);
@@ -1925,6 +1917,18 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     let Some((scope, rest)) = scope_rest else {
         return (None, text.to_string());
     };
+
+    // CR 611.2a + CR 400.7i: "each player may play/cast …" is a per-grantee
+    // casting permission (`try_parse_per_grantee_play_grant`), not a player-scoped
+    // imperative subject. Stripping "each player " leaves "may play …", which
+    // misroutes to `Effect::CastFromZone` instead of `GrantCastingPermission`.
+    let rest_lower = rest.trim_start().to_lowercase();
+    if alt((tag::<_, _, OracleError<'_>>("may play "), tag("may cast ")))
+        .parse(rest_lower.as_str())
+        .is_ok()
+    {
+        return (None, text.to_string());
+    }
 
     // CR 109.4 + CR 109.5: A "who controls [comparator] [count] [type-phrase]"
     // relative clause restricts the player set to those whose controlled-permanent
@@ -2453,6 +2457,18 @@ pub(super) fn parse_damage_player_scope(
 /// "each other player" excludes the controller (the only "other" antecedent
 /// available outside trigger context) and reduces to plain `Opponent`.
 pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter> {
+    let (filter, rest) = parse_damage_each_player_scope_with_remainder(text)?;
+    rest.chars()
+        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
+        .then_some(filter)
+}
+
+/// CR 120.2b + CR 120.3 + CR 102.2: leading "each opponent/player/foe/other
+/// opponent/other player" damage scope, returning the matched filter AND the
+/// unconsumed remainder. Unlike `parse_damage_each_player_scope` it is NOT
+/// all-consuming — used only by the multi-target damage CHAIN primary, which
+/// hands the trailing " and M damage to ..." segment back to the loop.
+fn parse_damage_each_player_scope_with_remainder(text: &str) -> Option<(PlayerFilter, &str)> {
     let (rest, filter) = preceded(
         tag("each "),
         alt((
@@ -2469,9 +2485,7 @@ pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter>
     )
     .parse(text)
     .ok()?;
-    rest.chars()
-        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
-        .then_some(filter)
+    Some((filter, rest))
 }
 
 pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
@@ -3132,6 +3146,46 @@ fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpe
     None
 }
 
+/// CR 115.1d: "one or two target X" / "one, two, or three target X" before a
+/// targeted phrase (Electrolyze: "among one or two target creatures and/or
+/// players").
+fn strip_bounded_target_prefix(text: &str) -> Option<(&str, MultiTargetSpec)> {
+    let lower = text.to_ascii_lowercase();
+    for (prefix, min, max) in [
+        ("one or two target ", 1usize, 2usize),
+        ("one, two, or three target ", 1, 3),
+    ] {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
+            let consumed = lower.len() - rest.len();
+            return Some((
+                text[consumed..].trim_start(),
+                MultiTargetSpec::fixed(min, max),
+            ));
+        }
+    }
+    None
+}
+
+fn strip_distribute_among_target_quantifier<'a>(
+    text: &'a str,
+    pool: &QuantityExpr,
+) -> (&'a str, Option<MultiTargetSpec>) {
+    let target_lower = text.to_lowercase();
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("any number of ").parse(target_lower.as_str())
+    {
+        let skip = target_lower.len() - rest.len();
+        return (&text[skip..], Some(multi_target_for_distribute_among(pool)));
+    }
+    if let Some((rest, spec)) = strip_bounded_targets_placeholder(text) {
+        return (rest, Some(spec));
+    }
+    if let Some((rest, spec)) = strip_bounded_target_prefix(text) {
+        return (rest, Some(spec));
+    }
+    strip_optional_target_prefix(text)
+}
+
 /// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.
 /// "up to one target creature" → ("target creature", Some { min: 0, max: Some(1) })
 /// "up to one other target creature or spell" → ("other target creature or spell", Some { ... })
@@ -3745,6 +3799,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let (_, after_tp) = tp.split_at(pos + verb_len);
 
     let (amount, rest_tp) = if let Some((qty, rem)) = parse_count_expr(after_tp.lower) {
+        // Pattern A: "[qty] damage divided/distributed among …"
         if tag::<_, _, OracleError<'_>>("damage").parse(rem).is_ok() {
             let skip = after_tp.lower.len() - rem.len() + "damage".len();
             let (_, rest) = after_tp.split_at(skip);
@@ -3752,6 +3807,33 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         } else {
             return None;
         }
+    } else if let Ok((after_prefix, _)) =
+        tag::<_, _, OracleError<'_>>("damage equal to ").parse(after_tp.lower)
+    {
+        // Pattern B: "damage equal to [qty] divided/distributed among …"
+        // CR 601.2d: the quantity follows the "equal to" phrase and is a dynamic
+        // reference (e.g., "its power" — Emberwilde Captain), so it routes through
+        // the CDA quantity layer rather than the fixed/X-only `parse_count_expr`.
+        // The quantity slice is the text between "equal to " and the distribution
+        // keyword; the distribution phrase is then located in `rest` below exactly
+        // as in Pattern A.
+        let after_prefix_offset = after_tp.lower.len() - after_prefix.len();
+        let (_, rest) = after_tp.split_at(after_prefix_offset);
+        let qty_end = [
+            "divided as you choose among",
+            "distributed among",
+            "divided evenly",
+        ]
+        .iter()
+        // allow-noncombinator: structural slice bound, not parsing dispatch — locate
+        // the earliest distribution keyword so `parse_cda_quantity` receives only the
+        // quantity phrase. The dispatch on *which* distribution kind applies is done
+        // by the `distribute_kind` combinator block below; this only bounds the slice.
+        .filter_map(|kw| rest.lower.find(kw))
+        .min()?;
+        let qty_text = rest.lower[..qty_end].trim();
+        let qty = parse_cda_quantity(qty_text)?;
+        (qty, rest)
     } else {
         return None;
     };
@@ -3780,24 +3862,8 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let target_text = target_tp.original.trim();
 
     // CR 115.1d: Detect the target-count quantifier before the target phrase.
-    // "any number of" is capped by the distribution pool (each chosen target must
-    // receive at least one — CR 601.2d), while "up to N target ..." carries an
-    // explicit printed cap of N independent of the divided amount (Shatterskull
-    // Smashing: "X damage divided ... among up to two target creatures and/or
-    // planeswalkers"). `strip_optional_target_prefix` surfaces the latter as
-    // MultiTargetSpec { min: 0, max: N }.
-    let target_lower = target_text.to_lowercase();
-    let (stripped_target_text, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(target_lower.as_str())
-    {
-        let skip = target_lower.len() - rest.len();
-        (
-            &target_text[skip..],
-            Some(multi_target_for_distribute_among(&amount)),
-        )
-    } else {
-        strip_optional_target_prefix(target_text)
-    };
+    let (stripped_target_text, multi_target) =
+        strip_distribute_among_target_quantifier(target_text, &amount);
     let (target, _) = parse_target(stripped_target_text);
 
     Some(ParsedEffectClause {
@@ -3819,10 +3885,19 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
 /// CR 601.2d: Parse "distribute N [type] counters among [targets]"
 /// → Effect::PutCounter with distribute flag set.
 pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffectClause> {
-    // "distribute " is 11 bytes; Oracle text is ASCII so byte == char offsets.
-    let (after_lower, _) = tag::<_, _, OracleError<'_>>("distribute ")
-        .parse(lower)
-        .ok()?;
+    // "distribute " = 11 bytes; "distributes " = 12 bytes. Capture matched length for
+    // the expected_min sanity check. Both infinitive and 3rd-person forms appear in Oracle text.
+    let (after_lower, verb_len): (&str, usize) = {
+        let mut verb_alt = alt((
+            tag::<_, _, OracleError<'_>>("distributes "),
+            tag::<_, _, OracleError<'_>>("distribute "),
+        ));
+        if let Ok((rest, matched)) = verb_alt.parse(lower) {
+            (rest, matched.len())
+        } else {
+            return None;
+        }
+    };
     let (count_expr, rest_lower) =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_lower) {
             let (inner, rest) = parse_count_expr(rest)?;
@@ -3862,23 +3937,13 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     // CR 115.1d: Detect "any number of" quantifier before the target phrase.
     let target_text = &text[target_offset..];
-    let target_text_lower = &lower[target_offset..];
-    let (stripped_target, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(target_text_lower)
-    {
-        let skip = target_text_lower.len() - rest.len();
-        (
-            &target_text[skip..],
-            Some(multi_target_for_distribute_among(&count_expr)),
-        )
-    } else {
-        strip_optional_target_prefix(target_text)
-    };
+    let (stripped_target, multi_target) =
+        strip_distribute_among_target_quantifier(target_text, &count_expr);
     let (target, _) = parse_target(stripped_target);
 
     // Verify the "among" comes after the counter word (sanity guard against false matches).
     let expected_min =
-        "distribute ".len() + (after_lower.len() - rest_lower.len()) + type_end + counter_word_len;
+        verb_len + (after_lower.len() - rest_lower.len()) + type_end + counter_word_len;
     if among_pos < expected_min {
         return None;
     }
@@ -3894,6 +3959,78 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         duration: None,
         sub_ability: None,
         distribute: Some(DistributionUnit::Counters(counter_name)),
+        multi_target,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 601.2d + CR 615.7: Parse "prevent [qty] damage divided/distributed among [targets]"
+/// → Effect::PreventDamage with distribute flag. Called from the Prevent intercept arm
+/// in `lower_imperative_family_ast` before the standard prevent resolver.
+pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Quick-reject: require a distribution marker before spending effort on parsing.
+    if !scan_contains_phrase(&lower, "distributed among")
+        && !scan_contains_phrase(&lower, "divided as you choose among")
+    {
+        return None;
+    }
+    // Parse "prevent " prefix via nom combinator.
+    let (after_prevent, _) = tag::<_, _, OracleError<'_>>("prevent ")
+        .parse(lower.as_str())
+        .ok()?;
+    // CR 615.7: prevention shields are printed as "prevent the next N damage …".
+    // Strip the optional "the next "/"next " quantifier before the count so the
+    // shared `parse_count_expr` sees a bare quantity. `opt` makes both the
+    // "the next" and the determiner-less "next" forms parse, and leaves the input
+    // untouched for "prevent N damage" (no quantifier).
+    let (after_quantifier, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("the next "),
+        tag::<_, _, OracleError<'_>>("next "),
+    )))
+    .parse(after_prevent)
+    .unwrap_or((after_prevent, None));
+    // Parse the prevention amount.
+    let (qty, rem) = parse_count_expr(after_quantifier)?;
+    // CR 615.7: Require "damage" immediately after the quantity.
+    let (after_damage, _) = tag::<_, _, OracleError<'_>>("damage").parse(rem).ok()?;
+
+    // Locate the distribution keyword using TextPair-style strip_after.
+    let tp = TextPair::new(text, &lower);
+    // Reconstruct byte offset into after_damage in the lower string.
+    let after_damage_offset = lower.len() - after_damage.len();
+    let (_, after_damage_tp) = tp.split_at(after_damage_offset);
+
+    let target_tp = after_damage_tp
+        .strip_after("divided as you choose among ")
+        .or_else(|| after_damage_tp.strip_after("distributed among "))?;
+    let target_text = target_tp.original.trim();
+
+    let (stripped_target, multi_target) =
+        strip_distribute_among_target_quantifier(target_text, &qty);
+    let (target, _) = parse_target(stripped_target);
+
+    // Convert the parsed QuantityExpr to PreventionAmount.
+    // CR 615.7: Fixed amounts use Next(n); dynamic amounts use amount_dynamic.
+    let (amount, amount_dynamic) = match &qty {
+        QuantityExpr::Fixed { value } => (PreventionAmount::Next(*value as u32), None),
+        _ => (PreventionAmount::All, Some(qty)),
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            target,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: Some(DistributionUnit::Damage),
         multi_target,
         condition: None,
         optional: false,
@@ -4156,15 +4293,33 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         // CDA quantity parser (`the number of … you control`, `your life total`,
         // …). Without this fallback the phrase degrades to a raw `Variable`, which
         // resolves to 0 at runtime — the damage silently no-ops.
-        let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
-            .or_else(|| {
+        let qty =
+            crate::parser::oracle_quantity::parse_event_context_quantity(qty_text).or_else(|| {
                 crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
-            })
-            .unwrap_or_else(|| QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: qty_text.to_string(),
-                },
             });
+        let qty = match qty {
+            Some(qty) => qty,
+            // CR 120.1 + CR 202.3: The typed quantity parsers declined this
+            // amount. Only the spell variable "X" resolves through the
+            // `Variable` runtime path (`quantity.rs` — `name == "X"`, or a named
+            // choice); any OTHER unrecognized phrase ("the total mana value of
+            // those exiled cards", Ensnared by the Mara) would be stored
+            // verbatim and silently resolve to 0 damage. Storing raw Oracle text
+            // as a `Variable` name is the prohibited verbatim-text-in-parser
+            // smell, so strict-fail instead: return `None` here, letting the
+            // effect lower to `Effect::Unimplemented` so coverage honestly flags
+            // the branch as unsupported rather than dealing the wrong (zero)
+            // amount. Reaching a resolvable model ("those exiled cards" as a
+            // typed exiled-this-resolution mana-value aggregate) is a future
+            // building block; until then coverage waits on the strict-failure
+            // tag rather than masking the gap.
+            None if qty_text.eq_ignore_ascii_case("x") => QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            None => return None,
+        };
         (qty, &amount_text[before_to.len() + 4..])
     } else {
         return None;
@@ -4225,6 +4380,27 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     player_filter,
                 },
                 "",
+            ));
+        }
+        // CR 120.2b + CR 120.3: multi-target chain whose FIRST segment is an
+        // each-player scope with a repeated-amount continuation (Dagger Caster:
+        // "deals 1 damage to each opponent and 1 damage to each creature your
+        // opponents control"). The all-consuming arm above rejected it because
+        // the continuation isn't punctuation-only; emit DamageEachPlayer for the
+        // player half and hand the continuation back to the chain loop (CR 120.2b
+        // independent events). NOT the " and each " compound (caught upstream by
+        // the compound parser); the chain joins two separately-amounted segments.
+        if let Some((player_filter, rem)) =
+            parse_damage_each_player_scope_with_remainder(after_to_for_classification)
+        {
+            let consumed = after_to_for_classification.len() - rem.len();
+            let rem_full = &after_to[consumed..];
+            return Some((
+                Effect::DamageEachPlayer {
+                    amount,
+                    player_filter,
+                },
+                rem_full,
             ));
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
@@ -5098,6 +5274,17 @@ pub(super) fn apply_where_x_effect_expression(
             *filter = apply_where_x_to_filter(filter.clone(), where_x_expression);
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }
+        // CR 107.3i + CR 400.7: "return/put up to one target creature card with
+        // mana value X or less ..., where X is <expression>" binds the
+        // `ChangeZone` target filter's `Cmc` bound (Moseo, Vein's New Dean's
+        // Infusion ability). Without this arm the filter's bound stayed an
+        // unresolved bare `Variable("X")`, which resolves to 0 at runtime and
+        // makes the reanimation target only mana value 0 or less — silently
+        // breaking the trigger's intended behavior. Mirrors the
+        // `SearchLibrary`/`Seek` filter rewrite above.
+        Effect::ChangeZone { target, .. } => {
+            *target = apply_where_x_to_filter(target.clone(), where_x_expression);
+        }
         Effect::Scry { count, .. } => {
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }
@@ -5838,6 +6025,56 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn distribute_damage_power_equal_pattern() {
+        // Gap 1: "damage equal to its power" — Pattern B where qty follows "damage equal to"
+        use crate::types::game_state::DistributionUnit;
+        let text = "deal damage equal to its power divided as you choose among any number of target creatures and/or players";
+        let lower = text.to_lowercase();
+        let clause = super::try_parse_distribute_damage(&lower, text).expect("Gap 1 should parse");
+        assert!(matches!(clause.distribute, Some(DistributionUnit::Damage)));
+        assert!(
+            clause.multi_target.is_some(),
+            "must have multi_target for distribute"
+        );
+        assert!(matches!(clause.effect, Effect::DealDamage { .. }));
+    }
+
+    #[test]
+    fn distribute_counters_third_person_predicate() {
+        // Gap 2: "distributes" (3rd-person) verb after subject stripping
+        use crate::types::game_state::DistributionUnit;
+        let text = "distributes 3 +1/+1 counters among any number of target creatures you control";
+        let lower = text.to_lowercase();
+        let clause =
+            super::try_parse_distribute_counters(&lower, text).expect("Gap 2 should parse");
+        // Counter distribution uses DistributionUnit::Counters, NOT Damage
+        assert!(matches!(
+            clause.distribute,
+            Some(DistributionUnit::Counters(_))
+        ));
+        assert!(clause.multi_target.is_some());
+    }
+
+    #[test]
+    fn distribute_prevent_damage_fixed() {
+        // Gap 3: fixed-N prevent-divide
+        use crate::types::ability::PreventionAmount;
+        use crate::types::game_state::DistributionUnit;
+        let text =
+            "prevent the next 5 damage divided as you choose among any number of target creatures";
+        let clause = super::try_parse_prevent_distribute(text).expect("Gap 3 should parse");
+        assert!(matches!(clause.distribute, Some(DistributionUnit::Damage)));
+        assert!(clause.multi_target.is_some());
+        assert!(matches!(
+            clause.effect,
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(5),
+                ..
+            }
+        ));
+    }
 
     /// CR 400.7 + CR 700.4: A per-turn VALUE quantity's " this turn" suffix must
     /// not be claimed as an outer effect duration. Both the value-ownership

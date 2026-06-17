@@ -71,6 +71,16 @@ export interface FormatConfig {
    */
   uses_commander: boolean;
   /**
+   * Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`): true
+   * when the format's deck is fixed and supplied automatically by the engine,
+   * so the player builds/selects nothing (Momir's Madness). The engine always
+   * emits it in the format registry; it is optional here (like the engine's
+   * `#[serde(default)]`) so hand-built configs need not restate it. Read it via
+   * `formatSuppliesDeck`, which goes through the registry — never re-list
+   * fixed-deck formats client-side.
+   */
+  supplies_fixed_deck?: boolean;
+  /**
    * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
    * from any player in the `debug_permitted` set. Off by default. Orthogonal
    * to format — applies on top of any `GameFormat`. Immutable for the life
@@ -1142,7 +1152,7 @@ export type WaitingFor =
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
-  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
+  | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }

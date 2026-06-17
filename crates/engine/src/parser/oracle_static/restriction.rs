@@ -98,12 +98,14 @@ pub(crate) fn parse_legend_rule_exemption(
 }
 
 /// CR 704.5j: Resolve the `<scope>` noun phrase of a legend-rule exemption
-/// ("permanents you control", "Slivers you control", ...) into a
-/// controller-scoped `affected` filter. Returns `None` for scopes this parser
-/// cannot resolve precisely ("tokens", "commanders", "them"),
-/// so those cards are deferred rather than given a filter that silently matches
-/// nothing. "creature tokens you control" is handled explicitly (The Master,
-/// Multiplied).
+/// ("permanents you control", "creatures you control", "tokens you control",
+/// "commanders you control", "Slivers you control", ...) into a
+/// controller-scoped `affected` filter. The legend rule applies only to
+/// permanents (CR 704.5j: "legendary permanents"), so only permanent card
+/// types are accepted as bare-type scopes. Returns `None` for scopes this
+/// parser cannot resolve precisely (e.g. the bare pronoun "them"), so those
+/// cards are deferred rather than given a filter that silently matches nothing.
+/// "creature tokens you control" is handled explicitly (The Master, Multiplied).
 /// CR 109.5: "you control" resolves to the source's controller.
 pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
     // Drop the trailing sentence terminator so the combinator suffix split sees
@@ -132,6 +134,37 @@ pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilt
         ));
     }
 
+    // CR 704.5j: bare permanent card-type scopes ("creatures you control",
+    // "artifacts you control", ...). Generalizes the "creatures" case (Council
+    // of Reeds) to the whole "<permanent type>s you control" class. Only
+    // permanent types map — the legend rule applies solely to permanents.
+    if let Some(card_type) = legend_rule_permanent_type(base.lower) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::new(card_type).controller(ControllerRef::You),
+        ));
+    }
+
+    // CR 111.1 + CR 704.5j: "tokens you control" — any token permanent (Cadric,
+    // Soul Kindler). Token-ness is a property, not a card type.
+    if base.lower == "tokens" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You),
+        ));
+    }
+
+    // CR 903.3 + CR 704.5j: "commanders you control" — permanents that are
+    // commanders. Commander designation is a card attribute, modeled as a
+    // permanent property.
+    if base.lower == "commanders" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::IsCommander])
+                .controller(ControllerRef::You),
+        ));
+    }
+
     if let Some((canonical, consumed)) = parse_subtype(base.original) {
         if consumed == base.original.len() {
             return Some(TargetFilter::Typed(
@@ -143,6 +176,31 @@ pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilt
     }
 
     None
+}
+
+/// CR 704.5j: Map a plural permanent card-type word ("creatures", "artifacts",
+/// …) to its `TypeFilter`. Only permanent types are returned — the legend rule
+/// applies solely to permanents — so instant/sorcery words (and anything else)
+/// yield `None` and the card stays deferred rather than mis-scoped.
+fn legend_rule_permanent_type(word: &str) -> Option<crate::types::ability::TypeFilter> {
+    use crate::types::ability::TypeFilter;
+    // Composed via nom `alt`/`value` per the combinator mandate; a new permanent
+    // type is one extra `value(..., tag(...))` branch. Instant/sorcery words (and
+    // anything else) fail every branch, so the card stays deferred.
+    let (rest, tf) = alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, OracleError<'_>>("creatures"),
+        ),
+        value(TypeFilter::Artifact, tag("artifacts")),
+        value(TypeFilter::Enchantment, tag("enchantments")),
+        value(TypeFilter::Planeswalker, tag("planeswalkers")),
+        value(TypeFilter::Land, tag("lands")),
+        value(TypeFilter::Battle, tag("battles")),
+    ))
+    .parse(word)
+    .ok()?;
+    rest.is_empty().then_some(tf)
 }
 
 /// Parse the subject of "X can't be countered" lines.
@@ -395,9 +453,13 @@ pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option
     }
 
     // Mindlock Orb class: "Players can't search libraries." / "Each player can't
-    // search libraries." Keep this branch all-players only.
+    // search libraries." (all players), and opponent-scoped direct search
+    // prohibitions ("Your opponents can't search libraries.").
     let (cause, predicate) = strip_casting_prohibition_subject(tp.lower)?;
-    if cause != ProhibitionScope::AllPlayers {
+    if !matches!(
+        cause,
+        ProhibitionScope::AllPlayers | ProhibitionScope::Opponents
+    ) {
         return None;
     }
     let predicate_lower = predicate.to_lowercase();
@@ -1454,6 +1516,71 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         def = def.active_zones(vec![Zone::Graveyard]);
     }
     Some(def)
+}
+
+/// CR 122.2 + CR 113.6b: Parse the counter-persistence static — "Counters
+/// remain on ~ as it moves to any zone other than [zone list]." Overrides the
+/// default CR 122.2 rule that counters cease to exist on a zone change, except
+/// for moves into the excluded destination zones.
+///
+/// Class members (verbatim): Me, the Immortal and Skullbriar, the Walking
+/// Grave, both "... other than a player's hand or library" →
+/// `excluded_zones = [Hand, Library]`. The zone-list tail is parsed by a
+/// combinator (`alt`) so additional "other than [zones]" exclusion sets slot
+/// in without a new variant.
+///
+/// Anchors on the self-reference glyph `~` (the card name is normalized to `~`
+/// upstream), so the parser is name-agnostic and covers the whole class.
+pub(crate) fn try_parse_counters_persist_across_zones(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // "counters remain on ~ as it moves to any zone other than " <zone-list>
+    let rest = nom_tag_lower(
+        lower,
+        lower,
+        "counters remain on ~ as it moves to any zone other than ",
+    )?;
+    // allow-noncombinator: trailing-period/whitespace cleanup on the tokenized
+    // tail before the zone-list combinator runs (matches the file-wide idiom at
+    // lines 84/264/304/360); the actual parsing dispatch is the `alt` below.
+    let rest = rest.trim_end_matches('.').trim();
+    // Zone-list combinator: the only shipping exclusion set is "a player's hand
+    // or library". Expressed as an `alt` so future exclusion phrasings are
+    // added as sibling arms rather than string-equality checks.
+    let excluded_zones = parse_excluded_zone_list(rest)?;
+    Some(
+        StaticDefinition::new(StaticMode::CountersPersistAcrossZones { excluded_zones })
+            // CR 122.2: the persistence applies to this object's own counters.
+            .affected(TargetFilter::SelfRef)
+            // CR 113.6b: per Me's ruling the ability is read from the zone the
+            // object is moving FROM; it must function in every zone the object
+            // can carry counters out of, so it is active in all zones.
+            .active_zones(vec![
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Command,
+                Zone::Stack,
+            ])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 122.2: Parse the "any zone other than [zones]" exclusion list into the
+/// typed destination-zone set whose moves still clear counters. Combinator-only
+/// (no `contains` dispatch); add sibling `alt` arms for new exclusion phrasings.
+fn parse_excluded_zone_list(rest: &str) -> Option<Vec<Zone>> {
+    let res: nom::IResult<&str, Vec<Zone>, OracleError<'_>> = value(
+        vec![Zone::Hand, Zone::Library],
+        alt((
+            tag::<_, _, OracleError<'_>>("a player's hand or library"),
+            tag::<_, _, OracleError<'_>>("a player's library or hand"),
+        )),
+    )
+    .parse(rest);
+    res.ok()
+        .and_then(|(remainder, zones)| remainder.trim().is_empty().then_some(zones))
 }
 
 /// CR 601.2a + CR 113.6b + CR 118.9: Parse the Maralen-class exile cast

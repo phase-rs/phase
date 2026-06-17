@@ -729,10 +729,166 @@ fn split_static_sentences(text: &str) -> Vec<String> {
     segments
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TieredEntersWithAdditionalCountersPattern {
+    pub counter_type: crate::types::counter::CounterType,
+    pub threshold: u32,
+    pub first_count: u32,
+    pub otherwise_count: u32,
+}
+
+fn parse_enter_with_an_additional_counter_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("enter with an additional "),
+            tag("enters with an additional "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_counter_carrier_pronoun(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("it"), tag("them")))).parse(input)
+}
+
+fn parse_counter_on_phrase(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(" counter on "), tag(" counters on ")))).parse(input)
+}
+
+fn parse_tiered_mana_value_clause(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("if ").parse(input)?;
+    let (input, _) = alt((tag("its"), tag("their"))).parse(input)?;
+    let (input, _) = tag(" mana value is ").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_tiered_enters_with_additional_counters_predicate(
+    input: &str,
+) -> OracleResult<'_, TieredEntersWithAdditionalCountersPattern> {
+    let (input, _) = parse_enter_with_an_additional_counter_prefix(input)?;
+    let (input, counter_type) = nom_primitives::parse_strict_counter_type(input)?;
+    let (input, _) = parse_counter_on_phrase(input)?;
+    let (input, _) = parse_counter_carrier_pronoun(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = parse_tiered_mana_value_clause(input)?;
+    let (input, threshold) = nom_primitives::parse_number(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag("or less.").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag("otherwise,").parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = alt((tag("it enters with "), tag("they enter with "))).parse(input)?;
+    let (input, otherwise_count) = nom_primitives::parse_number(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, _) = tag("additional ").parse(input)?;
+    let (input, otherwise_counter_type) = nom_primitives::parse_strict_counter_type(input)?;
+    let (input, _) = parse_counter_on_phrase(input)?;
+    let (input, _) = parse_counter_carrier_pronoun(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+
+    if otherwise_counter_type != counter_type {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((
+        input,
+        TieredEntersWithAdditionalCountersPattern {
+            counter_type,
+            threshold,
+            first_count: 1,
+            otherwise_count,
+        },
+    ))
+}
+
+fn parse_tiered_enters_with_additional_counters_parts(
+    tp: &TextPair<'_>,
+) -> Option<(TargetFilter, TieredEntersWithAdditionalCountersPattern)> {
+    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        parse_enter_with_an_additional_counter_prefix(i)
+    })?;
+    let (_, pattern) = all_consuming(terminated(
+        parse_tiered_enters_with_additional_counters_predicate,
+        space0,
+    ))
+    .parse(predicate_lower)
+    .ok()?;
+
+    let subject_original = tp.original[..subject_lower.len()].trim();
+    let affected = parse_continuous_subject_filter(subject_original)?;
+    if !filter_is_controller_you(&affected) {
+        return None;
+    }
+
+    Some((affected, pattern))
+}
+
+fn cmc_filter_prop(comparator: Comparator, threshold: u32) -> Option<FilterProp> {
+    Some(FilterProp::Cmc {
+        comparator,
+        value: QuantityExpr::Fixed {
+            value: i32::try_from(threshold).ok()?,
+        },
+    })
+}
+
+fn parse_tiered_enters_with_additional_counters_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (base, pattern) = parse_tiered_enters_with_additional_counters_parts(tp)?;
+    let le_filter = add_property(
+        base.clone(),
+        cmc_filter_prop(Comparator::LE, pattern.threshold)?,
+    )
+    .normalized();
+    let gt_filter =
+        add_property(base, cmc_filter_prop(Comparator::GT, pattern.threshold)?).normalized();
+
+    Some(vec![
+        StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+            counter_type: pattern.counter_type.clone(),
+            count: pattern.first_count,
+        })
+        .affected(le_filter)
+        .description(text.to_string()),
+        StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+            counter_type: pattern.counter_type,
+            count: pattern.otherwise_count,
+        })
+        .affected(gt_filter)
+        .description(text.to_string()),
+    ])
+}
+
+pub(crate) fn is_tiered_enters_with_additional_counters_static(lower: &str) -> bool {
+    let tp = TextPair::new(lower, lower);
+    parse_tiered_enters_with_additional_counters_parts(&tp).is_some()
+}
+
+pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
+    lower: &str,
+) -> Option<TieredEntersWithAdditionalCountersPattern> {
+    let tp = TextPair::new(lower, lower);
+    parse_tiered_enters_with_additional_counters_parts(&tp).map(|(_, pattern)| pattern)
+}
+
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 604.1 + CR 614.1c + CR 122.1 + CR 202.3: Tiered ETB-counter
+    // replacement static. The otherwise sentence is a semantic companion to
+    // the first sentence, so it must bind before generic multi-sentence
+    // splitting can treat "Otherwise" as independent prose.
+    if let Some(defs) = parse_tiered_enters_with_additional_counters_static(&tp, &stripped) {
+        return defs;
+    }
 
     // CR 611.3 + CR 613.1: A static ability whose Oracle text is several
     // independent sentences (each a self-contained continuous effect) defines
@@ -1607,6 +1763,64 @@ pub(crate) fn parse_qualified_creatures_you_control_suffix<'a>(
     Some((filter, predicate_text))
 }
 
+fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    let (descriptor, suffix) = parse_subject_suffix(subject, " you control")
+        .map(|descriptor| (descriptor, " you control"))
+        .or_else(|| {
+            parse_subject_suffix(subject, " your opponents control")
+                .map(|descriptor| (descriptor, " your opponents control"))
+        })?;
+
+    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(descriptor.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
+    })?;
+    let right_start = descriptor.lower.len() - right_lower.len();
+    let left_original = descriptor.original[..left_lower.len()].trim();
+    let right_original = descriptor.original[right_start..].trim();
+    if left_original.is_empty() || right_original.is_empty() {
+        return None;
+    }
+
+    let left_lower_owned = left_original.to_lowercase();
+    let left_tp = TextPair::new(left_original, &left_lower_owned);
+    let (left_core, distribute_other) = if let Some(rest) = nom_tag_tp(&left_tp, "each other ") {
+        (rest.original.trim(), true)
+    } else if let Some(rest) = nom_tag_tp(&left_tp, "other ") {
+        (rest.original.trim(), true)
+    } else if let Some(rest) = nom_tag_tp(&left_tp, "each ") {
+        (rest.original.trim(), false)
+    } else {
+        (left_original, false)
+    };
+    if left_core.is_empty() {
+        return None;
+    }
+
+    let left_subject = if distribute_other {
+        format!("other {left_core}{suffix}")
+    } else {
+        format!("{left_core}{suffix}")
+    };
+    let right_subject = if distribute_other {
+        format!("other {right_original}{suffix}")
+    } else {
+        format!("{right_original}{suffix}")
+    };
+
+    let left_filter = parse_continuous_subject_filter(&left_subject)?;
+    let right_filter = parse_continuous_subject_filter(&right_subject)?;
+    if !filter_has_source_or_controller_anchor(&left_filter)
+        || !filter_has_source_or_controller_anchor(&right_filter)
+    {
+        return None;
+    }
+
+    let mut filters = Vec::new();
+    push_or_filter_branch(&mut filters, left_filter);
+    push_or_filter_branch(&mut filters, right_filter);
+    Some(TargetFilter::Or { filters })
+}
+
 pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -1619,6 +1833,10 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     // string and matches zero real creatures.
     if let Some(rest_tp) = nom_tag_tp(&tp, "each ").or_else(|| nom_tag_tp(&tp, "all ")) {
         return parse_continuous_subject_filter(rest_tp.original.trim());
+    }
+
+    if let Some(filter) = parse_shared_controller_compound_subject_filter(&tp) {
+        return Some(filter);
     }
 
     if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&tp) {
@@ -2320,6 +2538,21 @@ pub(crate) fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilt
                 TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
             ],
         },
+    }
+}
+
+/// CR 109.5: True when `filter` is anchored to the source's controller via a
+/// `ControllerRef::You` constraint (directly or within an Or/And composition).
+/// Stricter than `filter_has_source_or_controller_anchor`, which also accepts
+/// `Opponent` — "enters with an additional counter" statics are always
+/// "you control" scoped, so an opponent anchor must NOT match.
+pub(crate) fn filter_is_controller_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller == Some(ControllerRef::You),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().all(filter_is_controller_you)
+        }
+        _ => false,
     }
 }
 

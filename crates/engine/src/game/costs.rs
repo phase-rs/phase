@@ -42,7 +42,9 @@
 
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityCost, EffectKind, TargetFilter, REMOVE_COUNTER_COST_ALL};
+use crate::types::ability::{
+    AbilityCost, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -56,10 +58,103 @@ use super::casting::{
     pay_effect_mana_cost,
 };
 use super::engine::EngineError;
+use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
 use crate::types::ability::ResolvedAbility;
+
+/// Helper to find eligible cards for exile cost payment at resolution.
+/// Returns cards in the specified zone matching the filter, excluding the source.
+fn find_eligible_exile_targets(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    zone: Zone,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_source(state, source_id);
+    let player_state = state.players.get(player.0 as usize);
+
+    match zone {
+        Zone::Graveyard => {
+            // CR 406.6: Check if the filter is controller-scoped. When the filter
+            // has controller: None (unrestricted "graveyards"), scan all players'
+            // graveyards. When controller: Some(ControllerRef::You) ("your graveyard"),
+            // scan only the payer's graveyard.
+            let is_unrestricted = filter.is_none_or(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(TypedFilter {
+                        controller: None,
+                        ..
+                    })
+                )
+            });
+
+            if is_unrestricted {
+                // Scan all players' graveyards
+                state
+                    .players
+                    .iter()
+                    .flat_map(|p| p.graveyard.iter().copied())
+                    .filter(|&id| {
+                        id != source_id
+                            && filter.is_none_or(|f| {
+                                super::filter::matches_target_filter(state, id, f, &ctx)
+                            })
+                    })
+                    .collect()
+            } else {
+                // Scan only the payer's graveyard (controller-scoped)
+                player_state
+                    .map(|p| {
+                        p.graveyard
+                            .iter()
+                            .copied()
+                            .filter(|&id| {
+                                id != source_id
+                                    && filter.is_none_or(|f| {
+                                        super::filter::matches_target_filter(state, id, f, &ctx)
+                                    })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+        }
+        Zone::Hand => player_state
+            .map(|p| {
+                p.hand
+                    .iter()
+                    .copied()
+                    .filter(|&id| {
+                        id != source_id
+                            && filter.is_none_or(|f| {
+                                super::filter::matches_target_filter(state, id, f, &ctx)
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Zone::Battlefield => state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|&id| {
+                state
+                    .objects
+                    .get(&id)
+                    .map(|obj| obj.controller == player)
+                    .unwrap_or(false)
+                    && id != source_id
+                    && filter
+                        .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 /// Selects the payment regime for `pay_ability_cost_inner`. The two variants
 /// capture the only CR-confirmed differences between activation-time and
@@ -276,6 +371,33 @@ fn pay_ability_cost_inner(
             events.push(GameEvent::PermanentTapped {
                 object_id: source_id,
                 caused_by: None,
+            });
+        }
+        // CR 107.6: The untap symbol in a cost means "Untap this permanent. A
+        // permanent that's already untapped can't be untapped again to pay the
+        // cost." Mirrors the `AbilityCost::Tap` arm above: paying is illegal when
+        // the source is in the wrong tap state, so the activation fails rather
+        // than silently no-op'ing (which would let Umbral Mantle-style {Q} pumps
+        // fire on an untapped creature, against the rules).
+        AbilityCost::Untap => {
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            if obj.zone != Zone::Battlefield {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay untap cost: source is not on the battlefield".to_string(),
+                ));
+            }
+            if !obj.tapped {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay untap cost: permanent is already untapped".to_string(),
+                ));
+            }
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.tapped = false;
+            events.push(GameEvent::PermanentUntapped {
+                object_id: source_id,
             });
         }
         AbilityCost::Mana { cost } => match scope {
@@ -507,6 +629,71 @@ fn pay_ability_cost_inner(
                 }
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
+        }
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::EffectZoneChoice with is_cost_payment: true.
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+        } if !matches!(filter, Some(TargetFilter::SelfRef))
+            && matches!(scope, PaymentScope::Resolution { .. }) =>
+        {
+            let count = *count as usize;
+            let effective_zone = zone.unwrap_or(Zone::Graveyard);
+            let eligible = find_eligible_exile_targets(
+                state,
+                player,
+                source_id,
+                effective_zone,
+                filter.as_ref(),
+            );
+            if eligible.len() < count {
+                return Ok(payment_failed("not enough cards to exile"));
+            }
+            if count == 0 {
+                // CR 118.12: record the (zero) paid count for downstream chain
+                // steps that read `QuantityRef::EventContextAmount`.
+                state.last_effect_count = Some(0);
+                return Ok(PaymentOutcome::Paid);
+            }
+            // Forced-choice fast path: when the eligible set exactly
+            // fills the requirement there is no choice to surface, so the
+            // exile executes immediately.
+            if eligible.len() == count {
+                for card_id in eligible {
+                    super::zones::move_to_zone(state, card_id, Zone::Exile, events);
+                    super::exile_links::push_exiled_with_source_this_turn(
+                        state, card_id, source_id,
+                    );
+                }
+                state.last_effect_count = Some(count as i32);
+            } else {
+                state.waiting_for = WaitingFor::EffectZoneChoice {
+                    player,
+                    cards: eligible,
+                    count,
+                    min_count: 0,
+                    up_to: false,
+                    source_id,
+                    effect_kind: crate::types::ability::EffectKind::PayCost,
+                    zone: effective_zone,
+                    destination: Some(Zone::Exile),
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_transformed: false,
+                    enters_under_player: None,
+                    enters_attacking: false,
+                    owner_library: false,
+                    track_exiled_by_source: true,
+                    face_down_profile: None,
+                    count_param: 0,
+                    is_cost_payment: true,
+                };
+                return Ok(PaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
+            }
         }
         // CR 702.167a: Craft's materials are exiled by the interactive
         // `WaitingFor::PayCost { kind: ExileMaterials }` detour before this
@@ -783,8 +970,7 @@ fn pay_ability_cost_inner(
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
-        AbilityCost::Untap
-        | AbilityCost::Exile { .. }
+        AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -924,6 +1110,10 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
             self_scope: DiscardSelfScope::FromHand,
             ..
         } => true,
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::PayCost before this resume runs.
+        AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1013,6 +1203,26 @@ fn can_pay_resolution(
                 .unwrap_or(0) as usize;
             let eligible =
                 find_eligible_discard_targets(state, payer, ability.source_id, filter.as_ref());
+            eligible.len() >= count
+        }
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::EffectZoneChoice.
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+            ..
+        } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+            let count = *count as usize;
+            let effective_zone = zone.unwrap_or(Zone::Graveyard);
+            let eligible = find_eligible_exile_targets(
+                state,
+                payer,
+                ability.source_id,
+                effective_zone,
+                filter.as_ref(),
+            );
             eligible.len() >= count
         }
         // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.
@@ -1353,6 +1563,37 @@ mod tests {
                 "can_pay==true but pay_cost returned Failed for {cost:?}"
             );
         }
+    }
+
+    #[test]
+    fn untap_cost_untaps_tapped_source_and_rejects_when_already_untapped() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Untap Source", 2, 2).id();
+        scenario.state.objects.get_mut(&src).unwrap().tapped = true;
+
+        let cost = AbilityCost::Untap;
+        let excluded = ability_mana_payment_excluded_sources(&cost, src);
+        let scope = PaymentScope::Activation {
+            excluded_sources: &excluded,
+        };
+        let mut events = Vec::new();
+        let outcome =
+            pay_ability_cost_inner(&mut scenario.state, P0, src, &cost, &mut events, &scope)
+                .unwrap();
+        assert!(matches!(outcome, PaymentOutcome::Paid));
+        assert!(!scenario.state.objects.get(&src).unwrap().tapped);
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == src)
+        ));
+
+        // CR 107.6: a permanent that's already untapped can't be untapped again
+        // to pay the cost — the second payment must FAIL, not silently no-op.
+        let result =
+            pay_ability_cost_inner(&mut scenario.state, P0, src, &cost, &mut events, &scope);
+        assert!(
+            result.is_err(),
+            "paying {{Q}} on an already-untapped permanent must be rejected (CR 107.6)"
+        );
     }
 
     #[test]

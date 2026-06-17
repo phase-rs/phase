@@ -23,10 +23,10 @@ export function ModeChoiceModal() {
       : waitingFor.data.pending_cast.object_id;
   const unavailableModes: number[] = useMemo(
     () =>
-      isAbilityMode && "unavailable_modes" in waitingFor.data
+      isModeChoice && "unavailable_modes" in waitingFor.data
         ? (waitingFor.data.unavailable_modes ?? [])
         : [],
-    [isAbilityMode, waitingFor],
+    [isModeChoice, waitingFor],
   );
   const isMyChoice = isModeChoice && canActForWaitingState;
 

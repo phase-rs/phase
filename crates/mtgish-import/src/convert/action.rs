@@ -555,6 +555,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         } => win_effect
             .iter_mut()
             .chain(lose_effect.iter_mut())
@@ -564,6 +565,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
             count,
             win_effect,
             lose_effect,
+            ..
         } => {
             win_effect
                 .iter_mut()
