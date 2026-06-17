@@ -54,12 +54,21 @@ jobs:
           echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
+        # Full data/mtgjson dir under the `mtgjson-full-` namespace: this job
+        # runs gen-card-data.sh, which populates every file (AtomicCards, Meta,
+        # SetList, token sets, decks). Kept distinct from ci.yml's partial
+        # `mtgjson-atomic-`/`mtgjson-sets-` caches; all stay under the
+        # `mtgjson-` prefix that clear-caches.yml deletes.
+        #
+        # Exact weekly key, NO restore-keys: a new week misses so gen-card-data.sh
+        # re-fetches fresh MTGJSON data (its `[ ! -f ]` guards download whatever
+        # the empty dir is missing); a restore-keys fallback would pin the
+        # file-existence-gated fetches to last week's data forever.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
           path: data/mtgjson
-          key: mtgjson-${{ steps.cache-keys.outputs.week }}
-          restore-keys: mtgjson-
+          key: mtgjson-full-${{ steps.cache-keys.outputs.week }}
 
       # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
       # download when the file already exists, so a stale restore-key hit would
@@ -82,7 +91,8 @@ jobs:
         run: |
           if [ ! -f data/mtgjson/AtomicCards.json ]; then
             mkdir -p data/mtgjson
-            curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           fi
 
       - name: Generate card data and coverage (from source)
