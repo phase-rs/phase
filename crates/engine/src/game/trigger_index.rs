@@ -856,7 +856,8 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // exchange emits LifeChanged/PowerToughnessChanged handled by their own
         // event arms (ExchangeLifeWithStat). No-op here.
         | EffectKind::CastCopyOfCard
-        | EffectKind::ExchangeLifeWithStat => {}
+        | EffectKind::ExchangeLifeWithStat
+        | EffectKind::ExchangeLifeTotals => {}
     }
 }
 

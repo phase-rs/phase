@@ -258,6 +258,10 @@ pub struct SpellCastRecord {
     /// for serialized snapshots predating this field.
     #[serde(default)]
     pub cast_variant: CastingVariant,
+    /// CR 702.33d: Whether kicker was paid when this spell was cast. Captured at
+    /// cast-time for per-turn spell-history filters ("first kicked spell each turn").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub was_kicked: bool,
 }
 
 /// Snapshot of a land play's cast-capable origin for per-turn history queries.
@@ -289,6 +293,7 @@ impl Default for SpellCastRecord {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
             cast_variant: CastingVariant::Normal,
+            was_kicked: false,
         }
     }
 }
@@ -392,6 +397,13 @@ pub struct ZoneChangeRecord {
     /// on the battlefield, emblem creation in the command zone). For normal
     /// zone moves this carries the origin zone.
     pub from_zone: Option<Zone>,
+    /// CR 601.2a: Cast origin as of the zone change — distinct from `from_zone`
+    /// for objects put onto the battlefield without being cast (reanimate, etc.).
+    #[serde(default)]
+    pub cast_from_zone: Option<Zone>,
+    /// CR 305.1: Land-play provenance as of the zone change.
+    #[serde(default)]
+    pub played_from_zone: Option<Zone>,
     pub to_zone: Zone,
     /// CR 603.10a + CR 603.6e: Snapshot of attachments on the object at the moment
     /// of the zone change. Required by look-back triggers of the form
@@ -525,6 +537,8 @@ impl ZoneChangeRecord {
             controller: PlayerId(0),
             owner: PlayerId(0),
             from_zone: from,
+            cast_from_zone: None,
+            played_from_zone: None,
             to_zone: to,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),
@@ -909,6 +923,12 @@ pub enum PendingCoinFlipKind {
 pub struct PendingCoinFlip {
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// CR 705.2: The player who flips (and therefore wins/loses) the coin — the
+    /// already-resolved `Effect::FlipCoin::flipper`. The kept Krark's-Thumb flip's
+    /// `CoinFlipped` is recorded for this player, not `controller`. Defaults to
+    /// the controller for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub flipper: PlayerId,
     pub targets: Vec<TargetRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_effect: Option<Box<AbilityDefinition>>,
@@ -1040,6 +1060,33 @@ pub struct PendingChooseOneOf {
     #[serde(default)]
     pub context: super::ability::SpellContext,
     pub remaining_players: Vec<PlayerId>,
+}
+
+/// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { zone_owner: EachPlayer }`
+/// iteration state. A single chooser (the spell's controller) picks one card
+/// from EACH player's zone in APNAP order; this stashes the players not yet
+/// prompted while the current player's `WaitingFor::ChooseFromZoneChoice` is
+/// outstanding. Created when the first player's choice is parked, drained after
+/// each pick accumulates into the resolution chain's tracked set, and disposed
+/// once every player has been prompted — at which point the parked
+/// `pending_continuation` (e.g. "put those cards onto the battlefield") runs.
+/// Building block for Breach the Multiverse.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPerPlayerZoneChoice {
+    /// The `Effect::ChooseFromZone` ability whose per-player body repeats. Its
+    /// `zone`/`filter`/`count`/`chooser` describe each player's prompt.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet prompted, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// CR 603.7 + CR 608.2c: Whether a pick from THIS per-player iteration has
+    /// already started its fresh chosen-card tracked set. The first non-empty
+    /// pick must START a fresh set (so the chosen cards do NOT merge with an
+    /// earlier producer's set — e.g. Breach the Multiverse's preceding mill,
+    /// whose milled cards would otherwise reanimate alongside the chosen ones);
+    /// every later pick EXTENDS that fresh set. `false` until the first pick is
+    /// published, then `true` for the remainder of the iteration.
+    #[serde(default)]
+    pub accumulated: bool,
 }
 
 /// CR 701.38d + CR 608.2c: Stores the remaining voters whose per-ballot
@@ -3143,6 +3190,10 @@ pub enum WaitingFor {
         player: PlayerId,
         modal: ModalChoice,
         pending_cast: Box<PendingCast>,
+        /// Mode indices unavailable due to NoRepeat constraints or unsatisfied
+        /// targeting requirements (CR 700.2a-b). Mirrors `AbilityModeChoice`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_modes: Vec<usize>,
     },
     /// Player must choose which cards to discard down to maximum hand size (cleanup step).
     DiscardToHandSize {
@@ -6098,6 +6149,13 @@ pub struct GameState {
     /// before `pending_repeat_iteration`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
+    /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
+    /// iteration paused by the current player's interactive choice. Drained
+    /// alongside `pending_vote_ballot_iteration`, BEFORE `pending_continuation`
+    /// runs, so every player's graveyard pick accumulates into the chain's
+    /// tracked set before "put those cards onto the battlefield" resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
 
     /// CR 122.5: Pending atomic counter moves selected during a resolution-time
     /// distribution prompt. Drained before normal pending continuations so
@@ -7001,6 +7059,7 @@ impl GameState {
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
+            pending_per_player_zone_choice: None,
             pending_counter_moves: None,
             pending_batch_deliveries: None,
             pending_counter_additions: None,
@@ -7470,6 +7529,7 @@ impl PartialEq for GameState {
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
+            && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
@@ -7948,6 +8008,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: dummy_pending(),
+            unavailable_modes: vec![],
         }));
         variants.push(Box::new(WaitingFor::DiscardToHandSize {
             player: PlayerId(0),
@@ -8765,6 +8826,7 @@ mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Graveyard,
             cast_variant: CastingVariant::Normal,
+            was_kicked: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

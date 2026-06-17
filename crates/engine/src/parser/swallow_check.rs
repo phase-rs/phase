@@ -1918,6 +1918,22 @@ fn detect_condition_if(
     if stripped.contains("if you don't") && any_replacement_has_may_cost_decline(parsed) {
         return;
     }
+    // CR 608.2c: "If you [lost/gained] life this way, draw that many cards"
+    // (Mister Negative). "[lost/gained] life this way" is a result-reference to
+    // the life the controller lost/gained from the preceding effect, and "that
+    // many" lowers the dependent draw to `count: EventContextAmount`. The
+    // conditional is jointly represented by the event-context quantity —
+    // drawing zero when zero life changed is exactly the no-op the "if" guards —
+    // so the leading "if" is a representation marker, not a swallowed condition.
+    // Mirrors the Screaming Nemesis "dealt damage this way" exemption above.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if (stripped.contains("lost life this way") || stripped.contains("gained life this way"))
+        && stripped.contains("that many") // allow-noncombinator: swallow detector marker scan on classified text
+        && ast_json.contains("EventContextAmount")
+    // allow-noncombinator: structural AST-shape JSON probe
+    {
+        return;
+    }
     // CR 117.6 / 702.8: A `SpellCastingOption` with `cost: Some(_)` encodes
     // the "if you pay [cost]" surcharge gate inline (Ghitu Fire, Rout-class
     // "as though it had flash if you pay X" cycle). The "if" is a cost
@@ -2356,6 +2372,14 @@ fn detect_duration_this_turn(
         // by "prevent [damage] this turn"; the lifetime is inherent to the
         // one-shot prevention effect.
         "PreventDamage",
+        // CR 614.9 + CR 615.1: `CreateDamageReplacement` is the typed prevention
+        // /redirection shield for "the next [N] damage that would be dealt to ~
+        // this turn is [prevented/dealt to <recipient>] instead" (the en-Kor
+        // cycle, General's Regalia). Like `PreventDamage` and the `DamageDone`
+        // replacement event above, the shield's "this turn" lifetime is inherent
+        // to the one-shot effect (it expires at cleanup, CR 514.2), not a
+        // separate `duration` slot.
+        "CreateDamageReplacement",
         "AddTargetReplacement",
         // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
         // IS the "next [event] this turn" delayed-trigger scope (Chandra,
@@ -3276,6 +3300,33 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
+    /// CR 614.9 + CR 615.1: the en-Kor cycle (Nomads / Spirit / Warrior / Shaman
+    /// / Lancers en-Kor) and General's Regalia parse the redirection clause into
+    /// a `CreateDamageReplacement` shield whose "this turn" lifetime is inherent
+    /// to the one-shot effect — it must NOT be reported as a swallowed duration.
+    #[test]
+    fn duration_this_turn_accepts_one_shot_damage_replacement_shield() {
+        for (oracle, name) in [
+            (
+                "{0}: The next 1 damage that would be dealt to this creature this turn \
+                 is dealt to target creature you control instead.",
+                "Nomads en-Kor",
+            ),
+            (
+                "{3}: The next time a source of your choice would deal damage to you this turn, \
+                 that damage is dealt to target creature you control instead.",
+                "General's Regalia",
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, &["Creature"]);
+            assert!(
+                !has_swallowed_detector(&parsed, "Duration_ThisTurn"),
+                "{name}: one-shot damage-replacement shield must not report a swallowed this-turn duration: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
     #[test]
     fn replacement_instead_accepts_effect_chain_instead_condition() {
         let parsed = parse_named(
@@ -3300,6 +3351,28 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    /// CR 608.2c: Mister Negative's "If you lost life this way, draw that many
+    /// cards" rider — the "lost life this way" result-reference and "that many"
+    /// draw quantity are jointly represented by `Draw { count:
+    /// EventContextAmount }`, so the leading "if" must NOT be reported as a
+    /// swallowed condition.
+    #[test]
+    fn condition_if_accepts_lost_life_this_way_draw_that_many() {
+        let parsed = parse_named(
+            "Vigilance, lifelink\n\
+             When this creature enters, you may exchange life totals with target opponent. \
+             If you lost life this way, draw that many cards.",
+            "Mister Negative",
+            &["Creature"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "lost-life-this-way result-reference draw must not report a swallowed condition: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]
@@ -3710,6 +3783,26 @@ mod tests {
                 "This creature can't attack unless defending player is poisoned.",
                 "Chained Throatseeker",
                 &["Creature"][..],
+            ),
+            // Issue #3466: counter spells with a NON-mana "unless" cost. The
+            // counter path previously recognized only the mana form ("pays
+            // {N}") and silently dropped life / sacrifice / discard costs,
+            // shipping an unconditional counter. CR 118.12 / CR 119.4 / CR
+            // 608.2c.
+            (
+                "Counter target spell unless its controller pays 5 life.",
+                "Dash Hopes",
+                &["Instant"][..],
+            ),
+            (
+                "Counter target spell unless its controller sacrifices a creature.",
+                "Counter-Sacrifice",
+                &["Instant"][..],
+            ),
+            (
+                "Counter target spell unless its controller discards a card.",
+                "Counter-Discard",
+                &["Instant"][..],
             ),
         ] {
             let parsed = parse_named(oracle, name, types);

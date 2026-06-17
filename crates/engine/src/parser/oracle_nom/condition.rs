@@ -1119,14 +1119,21 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     value(StaticCondition::SourceIsSaddled, tag("is saddled")).parse(rest)
 }
 
-/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature" → SourceAttachedToCreature.
+/// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature [you control]"
+/// → SourceAttachedToCreature.
+///
+/// The optional " you control" suffix covers bestow-trigger gates like Springheart
+/// Nantuko ("if this permanent is attached to a creature you control"). All printed
+/// Oracle uses controller=You for this gate (the host of an Aura/bestow card is
+/// always under its controller by CR 303.4d/CR 702.103b), so the controller axis
+/// is parameter-free at the AST layer — the runtime evaluator checks the host's
+/// controller against the ability's controller.
 fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
-    value(
-        StaticCondition::SourceAttachedToCreature,
-        tag("is attached to a creature"),
-    )
-    .parse(rest)
+    let (rest, _) = tag("is attached to a creature").parse(rest)?;
+    // Optional trailing " you control" — consumed but not represented in the AST.
+    let (rest, _) = opt(tag(" you control")).parse(rest)?;
+    Ok((rest, StaticCondition::SourceAttachedToCreature))
 }
 
 /// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
@@ -4066,13 +4073,14 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
 /// and an object ("life this turn"). Each verb maps to a QuantityRef, and the result
 /// is `StaticCondition::And { conditions: [lhs >= 1, rhs >= 1] }`.
 ///
-/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1, LifeLostThisTurn >= 1)
+/// "you [verb1] (and|or) [verb2] life this turn" where each verb is gained/lost.
+/// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1,
+/// LifeLostThisTurn >= 1); "you gained or lost life this turn" → Or(...) (Star
+/// Charter, Starseer Mentor, Starlit Soothsayer).
 fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
-
-    // Map event verbs to their QuantityRef for the shared "life this turn" object.
-    fn life_verb(v: &str) -> Option<QuantityRef> {
-        let result: nom::IResult<&str, QuantityRef, OracleError<'_>> = alt((
+    // "gained"/"lost" → the matching controller-scoped "life this turn" QuantityRef.
+    fn life_verb(i: &str) -> OracleResult<'_, QuantityRef> {
+        alt((
             value(
                 QuantityRef::LifeGainedThisTurn {
                     player: PlayerScope::Controller,
@@ -4086,34 +4094,25 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
                 tag("lost"),
             ),
         ))
-        .parse(v);
-        let (rest, qty) = result.ok()?;
-        rest.is_empty().then_some(qty)
+        .parse(i)
     }
 
-    // Try "[verb1] and [verb2] life this turn"
-    if let Some(and_pos) = rest.find(" and ") {
-        let verb1 = &rest[..and_pos];
-        let after_and = &rest[and_pos + " and ".len()..];
-        // Find the shared object: " life this turn"
-        if let Some(obj_pos) = after_and.find(" life this turn") {
-            let verb2 = &after_and[..obj_pos];
-            if let (Some(lhs), Some(rhs)) = (life_verb(verb1), life_verb(verb2)) {
-                let remainder = &after_and[obj_pos + " life this turn".len()..];
-                return Ok((
-                    remainder,
-                    StaticCondition::And {
-                        conditions: vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)],
-                    },
-                ));
-            }
-        }
-    }
+    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
+    let (rest, lhs) = life_verb(rest)?;
+    // CR 119: the connective selects the boolean shape — "and" requires both
+    // life changes, "or" requires either — over the shared LifeGained/LifeLost
+    // ThisTurn QuantityRef building blocks.
+    let (rest, is_or) = alt((value(false, tag(" and ")), value(true, tag(" or ")))).parse(rest)?;
+    let (rest, rhs) = life_verb(rest)?;
+    let (rest, _) = tag(" life this turn").parse(rest)?;
 
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
+    let conditions = vec![make_quantity_ge(lhs, 1), make_quantity_ge(rhs, 1)];
+    let condition = if is_or {
+        StaticCondition::Or { conditions }
+    } else {
+        StaticCondition::And { conditions }
+    };
+    Ok((rest, condition))
 }
 
 /// Parse "you gained [N or more] life this turn".
@@ -5952,6 +5951,50 @@ mod tests {
         }
     }
 
+    /// CR 108.3 + CR 109.4 + CR 603.4: "you control N or more permanents you
+    /// don't own" — the bare negated-ownership suffix must be consumed by the
+    /// type-phrase parser so the whole count condition is recognized (Agent of
+    /// Treachery #3304). Before the fix "you don't own" was left unconsumed,
+    /// leaving a non-empty remainder that aborted intervening-if hoisting.
+    #[test]
+    fn parse_control_count_ge_permanents_you_dont_own() {
+        for text in [
+            "you control three or more permanents you don't own",
+            "you control three or more permanents you do not own",
+        ] {
+            let (rest, cond) = parse_control_count_ge(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } = cond
+            else {
+                panic!("expected ObjectCount >= 3 comparison for {text:?}, got {cond:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter for {text:?}, got {filter:?}");
+            };
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "controller pinned to You via inject_controller_you for {text:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }),
+                "filter must carry Owned{{Opponent}} (\"you don't own it\") for {text:?}, \
+                 got {:?}",
+                tf.properties
+            );
+        }
+    }
+
     #[test]
     fn parse_quantity_quantity_comparison_x_ge_library() {
         // CR 107.3 + CR 608.2c: Thassa's Oracle trailing intervening-if.
@@ -7544,6 +7587,17 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
 
         let (rest, c) = parse_inner_condition("this creature is attached to a creature").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceAttachedToCreature);
+
+        // CR 303.4 + CR 702.103: Springheart Nantuko's bestow landfall gate
+        // — the optional " you control" suffix must be consumed and treated
+        // the same as the bare form (the host of a bestow Aura is always under
+        // its controller, so the controller axis adds no AST information; the
+        // evaluator already binds the host's controller to the ability's
+        // controller).
+        let (rest, c) =
+            parse_inner_condition("this permanent is attached to a creature you control").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceAttachedToCreature);
     }

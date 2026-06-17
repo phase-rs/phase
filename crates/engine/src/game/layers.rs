@@ -12,7 +12,9 @@ use crate::game::conditions::{
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
-use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
+use crate::game::printed_cards::{
+    apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
+};
 use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
@@ -3764,7 +3766,17 @@ fn apply_continuous_effect_filtered(
                     },
                     other => other.clone(),
                 };
-                if !obj.keywords.contains(&resolved_keyword) {
+                // CR 702.164b: summing keywords (Toxic) accumulate even when an
+                // identical instance is already present (granted Toxic 1 on
+                // printed Toxic 1 -> total 2). All other parameterized keywords
+                // keep deduping identical instances per CR 702.16g (Protection
+                // A+B are separate abilities; Ward/Annihilator each apply
+                // independently). `evaluate_layers` resets `obj.keywords =
+                // obj.base_keywords.clone()` each pass, so this never accumulates
+                // unbounded across re-evaluations.
+                if resolved_keyword.sums_across_instances()
+                    || !obj.keywords.contains(&resolved_keyword)
+                {
                     obj.keywords.push(resolved_keyword.clone());
                 }
                 for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {
@@ -3823,7 +3835,9 @@ fn apply_continuous_effect_filtered(
             // mirroring `AddChosenColor` / `RemoveChosenKeyword`.
             ContinuousModification::AddChosenKeyword => {
                 if let Some(kw) = chosen_keyword.as_ref() {
-                    if !obj.keywords.contains(kw) {
+                    // CR 702.164b: summing keywords (Toxic) accumulate rather
+                    // than dedup, mirroring the plain `AddKeyword` arm above.
+                    if kw.sums_across_instances() || !obj.keywords.contains(kw) {
                         obj.keywords.push(kw.clone());
                     }
                     for trigger in KeywordTriggerInstaller::triggers_for(kw) {
@@ -4340,6 +4354,9 @@ pub(crate) fn compute_current_copiable_values(
             _ => {}
         }
     }
+    // CR 707.2: Copies must receive synthesized keyword companion triggers when
+    // the copiable snapshot carries the keyword but omits its dies trigger.
+    ensure_keyword_triggers_for_copiable_values(&mut values);
     Some(values)
 }
 

@@ -159,6 +159,19 @@ pub(crate) fn apply_zone_exit_cleanup(
             }
         }
 
+        // CR 708.9: A face-down permanent leaving the battlefield, or a
+        // face-down spell leaving the stack for a zone other than the battlefield,
+        // is revealed to all players. Restore its stored identity so public zones
+        // show the real card instead of a face-down 2/2 shell.
+        if obj_mut.face_down
+            && (from == Zone::Battlefield || (from == Zone::Stack && to != Zone::Battlefield))
+        {
+            obj_mut.face_down = false;
+            if let Some(back_face) = obj_mut.back_face.take() {
+                apply_back_face_to_object(obj_mut, back_face);
+            }
+        }
+
         // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
         // (prevents re-casting if the card returns to exile via a different effect).
         if from == Zone::Exile {
@@ -2016,6 +2029,81 @@ mod tests {
         assert_eq!(obj.name, "Front Face", "must show front face in graveyard");
         assert_eq!(obj.power, Some(1), "power must revert to front face");
         assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// CR 708.9: A face-down permanent is revealed when it leaves the battlefield.
+    #[test]
+    fn face_down_permanent_turns_face_up_when_leaving_battlefield() {
+        use crate::game::morph::manifest_card;
+        use crate::types::ability::FaceDownProfile;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(3285),
+            PlayerId(0),
+            "Hidden Bear".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library.push_front(id);
+
+        let mut events = Vec::new();
+        manifest_card(
+            &mut state,
+            PlayerId(0),
+            id,
+            id,
+            FaceDownProfile::vanilla_2_2(),
+            &mut events,
+        )
+        .unwrap();
+        assert!(state.objects[&id].face_down);
+
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        let obj = &state.objects[&id];
+        assert!(
+            !obj.face_down,
+            "CR 708.9 must clear face_down on battlefield exit"
+        );
+        assert_eq!(obj.name, "Hidden Bear");
+        assert!(obj.back_face.is_none());
+    }
+
+    /// CR 708.4: A face-down spell that resolves to the battlefield becomes a
+    /// face-down permanent. CR 708.9 reveal only applies when it leaves the stack
+    /// for a zone other than the battlefield.
+    #[test]
+    fn face_down_spell_stays_face_down_when_resolving_to_battlefield() {
+        use crate::game::morph::apply_face_down_creature_characteristics;
+        use crate::game::printed_cards::snapshot_object_face;
+        use crate::types::ability::FaceDownProfile;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(3286),
+            PlayerId(0),
+            "Hidden Stack Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let original = snapshot_object_face(&state.objects[&id]);
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_face_down_creature_characteristics(obj, &FaceDownProfile::vanilla_2_2());
+            obj.back_face = Some(original);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        let obj = &state.objects[&id];
+        assert!(
+            obj.face_down,
+            "CR 708.4 keeps the resolved permanent face down"
+        );
+        assert_eq!(obj.name, "");
+        assert!(obj.back_face.is_some());
     }
 
     /// CR 712.8a: A countered MDFC spell (stack → graveyard) must also revert to

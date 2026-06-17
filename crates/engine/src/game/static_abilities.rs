@@ -1063,6 +1063,7 @@ pub fn player_protection_from(
     source: Option<ObjectId>,
 ) -> bool {
     use crate::game::keywords::source_matches_card_type;
+    use crate::types::ability::ControllerRef;
     use crate::types::keywords::ProtectionTarget;
 
     // CR 702.16j: protection from everything covers every source.
@@ -1100,8 +1101,33 @@ pub fn player_protection_from(
                     .and_then(|ct| ct.protection_quality_str())
                     .is_some_and(|quality| source_matches_card_type(src, quality))
             }),
-            // Inert — the parser never emits other arms for `PlayerProtection`.
-            _ => false,
+            // CR 702.16k: "Protection from [a player]" at the player level — the
+            // protected player has protection from each object the specified
+            // player(s) control. "Each of your opponents" (CR 702.16i) → the
+            // `Opponent` scope: any source NOT controlled by the protected
+            // player is an opponent's object in 1v1 and free-for-all. Mirrors the
+            // object-level arm in `game/keywords.rs::source_matches_protection_target`.
+            ProtectionTarget::FromPlayer(scope) => {
+                state
+                    .objects
+                    .get(&source_id)
+                    .is_some_and(|src| match scope {
+                        ControllerRef::Opponent => src.controller != player_id,
+                        ControllerRef::You => src.controller == player_id,
+                        // Target/chosen player refs have no static context here —
+                        // fail closed (the parser never emits them for protection).
+                        _ => false,
+                    })
+            }
+            // Truly inert at the player level — no card grants these qualities to
+            // a player; object-level grants of these qualities flow through the
+            // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
+            ProtectionTarget::ChosenColor
+            | ProtectionTarget::Color(_)
+            | ProtectionTarget::Multicolored
+            | ProtectionTarget::Quality(_)
+            | ProtectionTarget::CardType(_)
+            | ProtectionTarget::Filter(_) => false,
         };
         if protects {
             return true;
@@ -2252,6 +2278,66 @@ mod tests {
         // Remove the transient — mirrors the cleanup path in layers.rs.
         state.transient_continuous_effects.clear();
         assert!(!player_has_protection_from_everything(&state, PlayerId(0)));
+    }
+
+    /// CR 702.16k + CR 702.16i: A `PlayerProtection(FromPlayer(Opponent))` static
+    /// (Absolute Virtue's "You have protection from each of your opponents.")
+    /// makes its controller protected from every opponent-controlled source and
+    /// NOT from its own sources. Exercises the runtime `FromPlayer` arm — the
+    /// building block, not the card name.
+    #[test]
+    fn player_protection_from_opponent_grants_against_opponent_sources() {
+        let mut state = setup();
+
+        // The granting permanent, controlled by PlayerId(0), carries the static.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Absolute Virtue".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::PlayerProtection(
+                    crate::types::keywords::ProtectionTarget::FromPlayer(ControllerRef::Opponent),
+                ))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent's Bolt Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "My Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_protection_from(&state, PlayerId(0), Some(opponent_source)),
+            "controller must have protection from an opponent-controlled source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(0), Some(own_source)),
+            "controller must NOT have protection from its own source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(1), Some(own_source)),
+            "the opponent gains no protection — affected is the controller only"
+        );
     }
 
     #[test]

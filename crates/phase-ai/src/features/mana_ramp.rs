@@ -272,7 +272,7 @@ fn chain_puts_land_to_safe_zone(ability: &AbilityDefinition) -> bool {
     })
 }
 
-fn target_filter_references_land(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_references_land(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed.type_filters.iter().any(type_filter_is_land),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {

@@ -284,6 +284,9 @@ pub(super) fn handle_replacement_choice(
                 scry @ ProposedEvent::Scry { .. } => {
                     apply_scry_after_replacement(state, scry, events);
                 }
+                // CR 701.37a: Explore accepted after replacement choice — the
+                // explore resolver handles the actual explore logic; this is a no-op here.
+                ProposedEvent::Explore { .. } => {}
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.

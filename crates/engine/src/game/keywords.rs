@@ -860,6 +860,78 @@ mod tests {
         assert_eq!(effective_total_toxic_value(&state, plain), 0);
     }
 
+    /// CR 702.164b (regression for issue #955): a *granted* Toxic 1 (e.g. Skrelv)
+    /// applied on top of a *printed* Toxic 1 (e.g. Jawbone Duelist) must sum to a
+    /// total toxic value of 2 — both instances remain on the keyword list so the
+    /// aggregate reader counts every copy. This drives the real layer-6 grant
+    /// pipeline (`add_transient_continuous_effect` + `evaluate_layers`), exercising
+    /// the `AddKeyword` summing branch end-to-end. Pre-fix the layer-6 dedup
+    /// (`!obj.keywords.contains(&kw)`) dropped the identical granted Toxic(1) and
+    /// this asserted 1, not 2.
+    #[test]
+    fn granted_toxic_stacks_with_printed_toxic_via_layers() {
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+
+        let mut state = GameState::new_two_player(1);
+
+        // Printed Toxic 1 creature (the recipient of the grant).
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jawbone Duelist".to_string(),
+            Zone::Battlefield,
+        );
+        // `evaluate_layers` resets `obj.keywords = obj.base_keywords.clone()` each
+        // pass, so the printed Toxic must live in `base_keywords` to survive the
+        // reset and be present when the layer-6 grant is applied on top of it.
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.base_keywords.push(Keyword::Toxic(1));
+        obj.keywords.push(Keyword::Toxic(1));
+
+        // Grant source (stands in for Skrelv granting Toxic 1).
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Skrelv".to_string(),
+            Zone::Battlefield,
+        );
+
+        // CR 613.1f layer-6 ability-adding grant of an identical Toxic 1.
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: creature },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Toxic(1),
+            }],
+            None,
+        );
+
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // The aggregate reader must see BOTH instances summed (1 + 1 = 2).
+        assert_eq!(
+            effective_total_toxic_value(&state, creature),
+            2,
+            "CR 702.164b: granted Toxic 1 must sum with printed Toxic 1 to total 2"
+        );
+
+        // Sub-assert: the keyword list physically holds two Toxic instances after
+        // the grant (the printed one + the granted one), not a deduped single.
+        let toxic_count = state.objects[&creature]
+            .keywords
+            .iter()
+            .filter(|kw| matches!(kw, Keyword::Toxic(_)))
+            .count();
+        assert_eq!(
+            toxic_count, 2,
+            "both printed and granted Toxic instances must remain on the keyword list"
+        );
+    }
+
     /// CR 702.138a: a bare-mana escape with no exile residual is a parse failure
     /// / `FromStr` placeholder, not a legal cost-free escape. `effective_escape_data`
     /// must refuse it (return `None`) so the mis-parse can't produce an illegal
