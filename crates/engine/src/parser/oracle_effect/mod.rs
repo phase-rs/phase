@@ -15854,6 +15854,28 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 115.1 + CR 608.2c: "Counter target spell if it was kicked" — the lowered
+/// AdditionalCostPaid condition's "it" = the target spell, not the counter. The
+/// lowering can't see the effect, so retarget subject Source->Target post-assembly
+/// where Effect::Counter and the condition coexist. Self-kicked counters don't
+/// exist (Fires of Victory's rider is on its own resolution), so gating on
+/// Effect::Counter is correct and leaves all other AdditionalCostPaid cards Source.
+fn retarget_counter_additional_cost_to_target(def: &mut AbilityDefinition) {
+    if matches!(&*def.effect, Effect::Counter { .. }) {
+        if let Some(AbilityCondition::AdditionalCostPaid { subject, .. }) = def.condition.as_mut() {
+            if matches!(subject, ObjectScope::Source) {
+                *subject = ObjectScope::Target;
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        retarget_counter_additional_cost_to_target(sub);
+    }
+    if let Some(e) = def.else_ability.as_mut() {
+        retarget_counter_additional_cost_to_target(e);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RepeatStopPredicate {
     PutToHand,

@@ -128,23 +128,19 @@ fn counter_with_ertai(pay_kicker: bool) -> bool {
     runner.state().objects.get(&target).map(|o| o.zone) == Some(Zone::Graveyard)
 }
 
-/// CR 702.33d + CR 608.2c: Ertai's Trickery counters the target *only* when the
-/// target spell was kicked.
+/// CR 702.33d + CR 608.2c + CR 115.1: Ertai's Trickery counters the target *only*
+/// when the target spell was kicked.
 ///
-/// IGNORED — known engine gap, not a parser gap. The parser (this branch)
-/// correctly lowers "if it was kicked" to `AbilityCondition::AdditionalCostPaid`,
-/// but at resolution `evaluate_condition` reads that condition against Ertai's
-/// Trickery's OWN `ability.context` (always empty — Ertai itself has no kicker),
-/// never against the *target* spell's `kickers_paid`. There is no object/target
-/// scope axis on `AdditionalCostPaid`, so the counter never fires in either
-/// branch (verified: kicked target resolves to the battlefield uncountered).
-///
-/// Unblocking this requires an engine change (a target-scoped additional-cost
-/// condition that reads the target object's `kickers_paid`), gated through
-/// `add-engine-variant` — out of scope for the parser salvage. When that lands,
-/// remove `#[ignore]` and this becomes a discriminating runtime guard.
+/// The parser lowers "if it was kicked" to `AbilityCondition::AdditionalCostPaid`
+/// and `retarget_counter_additional_cost_to_target` rewrites its `subject` to
+/// `ObjectScope::Target` because the effect is `Effect::Counter`. At resolution,
+/// `evaluate_condition` then reads the *target spell's* `kickers_paid` (CR 115.1)
+/// rather than Ertai's own empty context, so the counter fires iff the target was
+/// kicked. Discriminating: if the `subject` axis is reverted to `Source`, both
+/// branches read Ertai's empty context, the condition is always false, and the
+/// `assert!(counter_with_ertai(true), ...)` below fails (kicked target resolves
+/// uncountered to the battlefield).
 #[test]
-#[ignore = "engine gap: AdditionalCostPaid reads the counter's own context, not the target spell's kicker"]
 fn ertai_trickery_counters_only_kicked_target() {
     assert!(
         counter_with_ertai(true),
