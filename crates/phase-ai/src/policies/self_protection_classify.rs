@@ -149,8 +149,8 @@ fn modification_is_defensive(m: &ContinuousModification) -> bool {
     match m {
         ContinuousModification::AddKeyword { keyword } => keyword_is_defensive(keyword),
         ContinuousModification::AddStaticMode { mode } => static_mode_is_defensive(mode),
-        // CR 613.1d: granted abilities inherit the grant's affected object — inner
-        // static defs often omit `affected` because the payload applies to ~.
+        // CR 613.1f: Layer 6 applies ability-adding effects — inner static defs often
+        // omit `affected` because the granted payload applies to ~.
         ContinuousModification::GrantAbility { definition } => {
             ability_has_defensive_payload(definition)
         }
@@ -275,7 +275,7 @@ enum DefensiveGrant {
     Protection(ProtectionTarget),
     /// CR 702.12a: indestructible.
     Indestructible,
-    /// CR 704.15: damage prevention.
+    /// CR 615.1a: Effects that use "prevent" are prevention effects.
     PreventDamage,
 }
 
