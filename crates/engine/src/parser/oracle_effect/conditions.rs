@@ -1787,6 +1787,10 @@ pub(super) fn strip_suffix_conditional(
         return (Some(cond), effect_text);
     }
 
+    if let Some(cond) = parse_was_kicked_condition_text(condition_core) {
+        return (Some(cond), effect_text);
+    }
+
     if let Some(condition) = parse_triggering_spell_targets_filter_ability_condition(condition_core)
         .or_else(|| try_nom_condition_as_ability_condition(condition_core, ctx))
         .or_else(|| parse_condition_text(condition_core))
@@ -1850,10 +1854,30 @@ fn parse_no_mana_spent_to_cast_target_condition(input: &str) -> OracleResult<'_,
     ))
 }
 
+/// CR 702.33d + CR 608.2c: "if it/that spell was kicked" suffix on a targeted
+/// spell effect (Ertai's Trickery).
+fn parse_was_kicked_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| all_consuming(parse_was_kicked_condition).parse(input))
+}
+
+fn parse_was_kicked_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = (
+        alt((tag("it"), tag("that spell"), tag("this spell"))),
+        tag(" was kicked"),
+    )
+        .parse(input)?;
+    Ok((rest, AbilityCondition::additional_cost_paid_any()))
+}
+
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
     if let Some(condition) = parse_no_mana_spent_to_cast_target_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_was_kicked_condition_text(text) {
         return Some(condition);
     }
 
@@ -4288,6 +4312,16 @@ mod tests {
         );
         assert_eq!(text, "Counter target spell");
         assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
+    }
+
+    #[test]
+    fn parse_was_kicked_suffix_condition_on_counter() {
+        let (cond, text) = strip_suffix_conditional(
+            "Counter target spell if it was kicked",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "Counter target spell");
+        assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
     }
 
     /// CR 508.1a: filtered attack-history condition — "you attacked with <X>"
