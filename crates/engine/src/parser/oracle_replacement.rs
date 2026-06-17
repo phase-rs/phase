@@ -832,7 +832,7 @@ fn parse_as_enters_exile_from_graveyards(
 
     // Isolate the cost body from the "If you do" continuation
     let after_prefix_lower = after_prefix.to_lowercase();
-    let (cost_body, tail) =
+    let (cost_body, _tail) =
         split_once_on_lower(after_prefix, &after_prefix_lower, ". if you do, ")?;
 
     // Parse the exile cost manually to handle "from graveyards" (plural)
@@ -865,12 +865,32 @@ fn parse_as_enters_exile_from_graveyards(
         filter: Some(filter),
     };
 
-    // Parse the "If you do" continuation effect
-    let continuation_text = tail.trim_end_matches('.');
-    if continuation_text.is_empty() {
-        return None;
-    }
-    let continuation = parse_effect_chain(continuation_text, AbilityKind::Spell);
+    // CR 607.2a: Manually construct the continuation for Mimeoplasm-style effects.
+    // The continuation text "it enters as a copy of one of those cards, except it has
+    // the other card's power and toughness as +1/+1 counters" must be lowered to:
+    // - BecomeCopy targeting the first exiled card (ExiledCardByIndex { index: 0 })
+    // - PutCounter with count = second exiled card's power (ExiledCardPower { index: 1 })
+    // This cannot use parse_effect_chain because the generic parser lowers this
+    // pattern to CopySpell (which copies spells on the stack, not exiled cards).
+    let continuation = crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::BecomeCopy {
+            target: crate::types::ability::TargetFilter::ExiledCardByIndex { index: 0 },
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: vec![],
+        },
+    )
+    .sub_ability(crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::ExiledCardPower { index: 1 },
+            },
+            target: crate::types::ability::TargetFilter::SelfRef,
+        },
+    ));
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)

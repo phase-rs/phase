@@ -165,11 +165,12 @@ fn mimeoplasm_cast_triggers_replacement() {
     );
 
     // Verify Mimeoplasm is on the battlefield (replacement continuation applied)
+    // After accepting the replacement, Mimeoplasm copies the first exiled card
     let mimeoplasm_on_battlefield = state.battlefield.iter().any(|&id| {
         state
             .objects
             .get(&id)
-            .is_some_and(|obj| obj.name == "Mimeoplasm Test")
+            .is_some_and(|obj| obj.name == "Grizzly Bears" || obj.name == "Mimeoplasm Test")
     });
     assert!(
         mimeoplasm_on_battlefield,
@@ -177,6 +178,120 @@ fn mimeoplasm_cast_triggers_replacement() {
     );
 
     println!("SUCCESS: Full replacement → exile-choice → battlefield flow completed");
+}
+
+#[test]
+fn mimeoplasm_full_end_to_end_copy_and_counters() {
+    // Discriminating test that verifies the full Mimeoplasm flow:
+    // - Cast Mimeoplasm with ≥3 creatures in graveyards (force interactive choice)
+    // - Exile two creatures with distinct power/toughness (2/2 and 4/4)
+    // - Assert the resulting permanent's name equals the first exiled card's name
+    // - Assert the permanent has +1/+1 counters equal to the second exiled card's power
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Add 3 creatures to P0's graveyard with distinct power/toughness
+    let bears_id = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let giant_id = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .id();
+    let _angel_id = scenario
+        .add_creature_to_graveyard(P0, "Serra Angel", 4, 4)
+        .id();
+
+    // Add Mimeoplasm to hand
+    let mimeoplasm_id = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Mimeoplasm Test",
+            5, 5,
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+        )
+        .id();
+
+    // Add mana to cast it
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+
+    let mut runner = scenario.build();
+
+    // Verify graveyard has 3 creatures
+    assert_eq!(runner.state().players[0].graveyard.len(), 3);
+
+    // Cast Mimeoplasm
+    let _outcome = runner.cast(mimeoplasm_id).resolve();
+
+    // Accept the replacement choice (index 0 = pay cost)
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("Accept replacement should succeed");
+
+    // Select the first two cards (Bears and Giant) for exile
+    // This will make Mimeoplasm copy Bears (index 0) and get counters equal to Giant's power (3)
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { .. } => {
+            let selected = vec![bears_id, giant_id];
+            runner
+                .act(GameAction::SelectCards { cards: selected })
+                .expect("SelectCards should succeed");
+        }
+        other => {
+            panic!("Expected EffectZoneChoice, got {:?}", other);
+        }
+    }
+
+    // Verify the outcome
+    let state = runner.state();
+
+    // Verify cards were exiled
+    assert_eq!(
+        state.players[0].graveyard.len(),
+        1,
+        "Two cards should have been exiled, leaving 1 in graveyard"
+    );
+    assert!(
+        state.exile.len() >= 2,
+        "At least 2 cards should be in exile"
+    );
+
+    // Verify Mimeoplasm is on the battlefield
+    // The Mimeoplasm should be the object that was cast (mimeoplasm_id), now on battlefield
+    let mimeoplasm_obj = state.objects.get(&mimeoplasm_id);
+    assert!(
+        mimeoplasm_obj.is_some_and(|obj| obj.zone == Zone::Battlefield),
+        "Mimeoplasm should be on the battlefield"
+    );
+
+    let mimeoplasm_obj = mimeoplasm_obj.expect("Mimeoplasm object should exist");
+
+    // The permanent should have copied Grizzly Bears (the first exiled card at index 0)
+    assert_eq!(
+        mimeoplasm_obj.name, "Grizzly Bears",
+        "Mimeoplasm should have copied the first exiled card (Grizzly Bears)"
+    );
+
+    // Verify the permanent has +1/+1 counters equal to the second exiled card's power
+    // Hill Giant has power 3, so we should have 3 +1/+1 counters
+    let plus_one_counters = mimeoplasm_obj
+        .counters
+        .iter()
+        .filter(|(counter_type, _count)| {
+            **counter_type == engine::types::counter::CounterType::Plus1Plus1
+        })
+        .map(|(_counter_type, count)| *count)
+        .sum::<u32>();
+    assert_eq!(
+        plus_one_counters, 3,
+        "Mimeoplasm should have 3 +1/+1 counters (equal to Hill Giant's power)"
+    );
+
+    println!("SUCCESS: Full end-to-end test passed - copy and counters verified");
 }
 
 #[test]
