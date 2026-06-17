@@ -2283,6 +2283,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_control_count_eq,
         // "you control a/an/another [type]" → IsPresent with filter
         parse_you_control_a,
+        // CR 508.1: "a creature is attacking you" → IsPresent(creature attacking you)
+        parse_creature_attacking_you,
         // "you don't control a/an [type]" → Not(IsPresent)
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
@@ -2474,6 +2476,25 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
 /// not just hardcoded creature/artifact/enchantment/planeswalker.
 /// "another" is handled by passing "another [type]" to `parse_type_phrase`,
 /// which recognizes "another" and adds `FilterProp::Another`.
+/// CR 508.1: "a creature is attacking you" — presence check for an attacker
+/// whose defending player is the controller. Gates Confront the Assault's
+/// casting restriction and the Swat Away / Heroic Return cost reductions.
+/// Lowers to `IsPresent` over a creature filter carrying `FilterProp::Attacking
+/// { defender: You }` — the same filter "for each creature attacking you" uses.
+fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a creature is attacking you").parse(input)?;
+    let mut filter = TypedFilter::creature();
+    filter.properties.push(FilterProp::Attacking {
+        defender: Some(ControllerRef::You),
+    });
+    Ok((
+        rest,
+        StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(filter)),
+        },
+    ))
+}
+
 fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // Strip "you control " prefix, then pass the rest (including a/an/another) to parse_type_phrase.
     // parse_type_phrase handles "a ", "an ", and "another " as article/modifier prefixes.
@@ -6659,6 +6680,28 @@ mod tests {
         let (rest, c) = parse_inner_condition("you control a creature").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// CR 508.1: "a creature is attacking you" presence condition (Confront the
+    /// Assault, Swat Away, Heroic Return).
+    #[test]
+    fn test_a_creature_is_attacking_you() {
+        let (rest, c) = parse_inner_condition("a creature is attacking you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                )),
+                "filter should carry Attacking {{ defender: You }}, got {tf:?}"
+            ),
+            other => panic!("expected IsPresent with attacking filter, got {other:?}"),
+        }
     }
 
     #[test]
