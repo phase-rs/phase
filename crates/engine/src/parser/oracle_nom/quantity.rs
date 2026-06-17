@@ -1369,6 +1369,24 @@ fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, Quantit
     Ok((rest, QuantityRef::PlayerCount { filter }))
 }
 
+/// CR 119.3 + CR 603.2c: "1 life you gained" / "1 life you lost" — the per-1
+/// multiplier in a "for each 1 life you gained/lost" clause on a
+/// `Whenever you gain/lose life` trigger. The triggering `GameEvent::LifeChanged`
+/// carries the gained/lost magnitude, which `EventContextAmount` resolves via
+/// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => `amount.abs()`).
+/// The leading "1 "/"one " disambiguates from the duration class "life you
+/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`, which has no
+/// "1 ") and from Blood Tyrant's "1 life lost or gained this way" (no "you";
+/// handled by the `TrackedSetSize` "this way" block).
+fn parse_for_each_one_life_changed(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("1 life you "), tag("one life you "))).parse(input)?;
+    value(
+        QuantityRef::EventContextAmount,
+        alt((tag("gained"), tag("lost"))),
+    )
+    .parse(rest)
+}
+
 /// Parse "your life total".
 fn parse_life_total_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
@@ -2262,6 +2280,7 @@ fn parse_for_each_clause_ref_with_they_controller(
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_for_each_one_life_changed,
         parse_for_each_opponents_life_change,
         parse_counter_added_this_turn_for_each,
         parse_object_colors_for_each,
@@ -3812,6 +3831,58 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 119.3 + CR 603.2c: "for each 1 life you gained/lost" — the per-1
+    /// multiplier on a `Whenever you gain/lose life` trigger resolves to the
+    /// triggering event's amount via `EventContextAmount` (Cradle of Vitality,
+    /// Transcendence, Lich's Tomb). Without the dedicated arm the for-each parse
+    /// fails and the count silently stays `Fixed{1}`.
+    #[test]
+    fn parse_for_each_one_life_changed_yields_event_amount() {
+        use crate::parser::oracle_quantity::{parse_for_each_clause, parse_for_each_clause_expr};
+
+        for clause in ["1 life you gained", "1 life you lost"] {
+            assert_eq!(
+                parse_for_each_clause(clause),
+                Some(QuantityRef::EventContextAmount),
+                "{clause:?} must resolve to the triggering life-change amount",
+            );
+        }
+        // "one life you ..." spelled-out variant.
+        assert_eq!(
+            parse_for_each_clause("one life you lost"),
+            Some(QuantityRef::EventContextAmount),
+        );
+        // Expr wrapper used by the for-each effect path.
+        assert_eq!(
+            parse_for_each_clause_expr("1 life you lost"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+        );
+    }
+
+    /// No-regression: "life you gained/lost this turn" (no leading "1 ") must
+    /// keep its duration-class lower, NOT the per-1 event-amount arm.
+    #[test]
+    fn parse_for_each_one_life_changed_requires_one_prefix() {
+        let (rest, q) = parse_quantity_ref("life you gained this turn").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+        let (rest, q) = parse_quantity_ref("life you lost this turn").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]

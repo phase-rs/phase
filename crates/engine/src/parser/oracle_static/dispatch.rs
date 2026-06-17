@@ -400,17 +400,54 @@ pub(crate) fn parse_static_line_inner(
     // string-equality checks.
     {
         let lower_trim = tp.lower.trim_end_matches('.').trim();
+        // The optional comma after "while voting" is a single `opt` axis rather
+        // than two flat full-sentence permutations (CLAUDE.md: compose
+        // combinators, don't enumerate permutations).
         let res: nom::IResult<&str, (), OracleError<'_>> = nom::combinator::value(
             (),
-            nom::branch::alt((
-                nom::bytes::complete::tag("while voting, you may vote an additional time"),
-                nom::bytes::complete::tag("while voting you may vote an additional time"),
-            )),
+            (
+                nom::bytes::complete::tag("while voting"),
+                nom::combinator::opt(nom::bytes::complete::tag(",")),
+                nom::bytes::complete::tag(" you may vote an additional time"),
+            ),
         )
         .parse(lower_trim);
         if res.is_ok() {
             return Some(
                 StaticDefinition::new(StaticMode::GrantsExtraVote)
+                    .affected(TargetFilter::Player)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
+    // CR 701.55c: "If an opponent would face a villainous choice, they face that
+    // choice an additional time." (The Valeyard) — an extra-instance replacement
+    // static, the structural twin of `GrantsExtraVote` (CR 701.38d). `affected`
+    // is `Player` (mirroring `GrantsExtraVote`); the opponent-of-the-facing-
+    // player scoping is owned by the resolver
+    // (`choose_one_of::villainous_extra_instances_for`), which counts only
+    // sources controlled by an opponent of the facing player — `affected` here is
+    // a coverage/semantic marker, not the scope authority. Reminder text "(They
+    // can make the same or different choices.)" is already stripped above by
+    // `strip_reminder_text`. Comma/no-comma variants are alt arms, not flat
+    // The optional comma after "choice" is a single `opt` axis rather than two
+    // flat full-sentence permutations (CLAUDE.md: compose combinators, don't
+    // enumerate permutations).
+    {
+        let lower_trim = tp.lower.trim_end_matches('.').trim();
+        let res: nom::IResult<&str, (), OracleError<'_>> = nom::combinator::value(
+            (),
+            (
+                nom::bytes::complete::tag("if an opponent would face a villainous choice"),
+                nom::combinator::opt(nom::bytes::complete::tag(",")),
+                nom::bytes::complete::tag(" they face that choice an additional time"),
+            ),
+        )
+        .parse(lower_trim);
+        if res.is_ok() {
+            return Some(
+                StaticDefinition::new(StaticMode::GrantsExtraVillainousChoice)
                     .affected(TargetFilter::Player)
                     .description(text.to_string()),
             );
@@ -430,6 +467,13 @@ pub(crate) fn parse_static_line_inner(
 
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 122.2 + CR 113.6b: "Counters remain on ~ as it moves to any zone other
+    // than [zone list]." Counter-persistence override (Me, the Immortal;
+    // Skullbriar, the Walking Grave).
+    if let Some(result) = try_parse_counters_persist_across_zones(&text, &lower) {
         return Some(result);
     }
 
@@ -2428,19 +2472,4 @@ fn parse_enters_with_additional_counters(
         .affected(affected)
         .description(text.to_string()),
     )
-}
-
-/// CR 109.5: True when `filter` is anchored to the source's controller via a
-/// `ControllerRef::You` constraint (directly or within an Or/And composition).
-/// Stricter than `filter_has_source_or_controller_anchor`, which also accepts
-/// `Opponent` — "enters with an additional counter" statics are always
-/// "you control" scoped, so an opponent anchor must NOT match.
-fn filter_is_controller_you(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.controller == Some(ControllerRef::You),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().all(filter_is_controller_you)
-        }
-        _ => false,
-    }
 }

@@ -2625,17 +2625,20 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
-    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
+    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent",
+    // "non-Saga token" (Good King Mog XII chapter II — issue #3294).
     if let Ok((after_non, _)) = alt((tag::<_, _, OracleError<'_>>("non-"), tag("non"))).parse(text)
     {
-        // Consume the negated word up to whitespace, then check for a core type after.
+        // Consume the negated word up to whitespace, then check for a core type or
+        // standalone "token"/"tokens" after the negation.
         if let Ok((after_space, _)) = (
             take_till::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
             tag::<_, _, OracleError<'_>>(" "),
         )
             .parse(after_non)
         {
-            if parse_core_type(after_space).0.is_some() {
+            if parse_core_type(after_space).0.is_some() || parse_token_suffix(after_space).is_some()
+            {
                 return true;
             }
         }
@@ -3875,8 +3878,8 @@ fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::Oracl
 /// `FilterContext::from_ability`.
 pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     use nom::branch::alt;
-    use nom::bytes::complete::{tag as tag_e, take_until};
-    use nom::combinator::{opt, value};
+    use nom::bytes::complete::tag as tag_e;
+    use nom::combinator::value;
 
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
@@ -3893,6 +3896,31 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     .ok()?;
     let lead_len = trimmed.len() - rest.len();
 
+    // The shared counter-spec body, with offsets relative to `rest`. The public
+    // entry adds back the leading whitespace and the consumed lead length to
+    // preserve the absolute (FilterProp, bytes-from-`text`) contract.
+    let (prop, consumed) = parse_counter_spec_after_lead(rest, comparator)?;
+    Some((prop, leading_ws + lead_len + consumed))
+}
+
+/// CR 122.1 / CR 122.1a: parse the counter spec AFTER the lead is consumed and
+/// the comparator decided. `rest` begins at "[a/an/<count>] <type> counter(s) on
+/// it/them" / "counter(s) on it/them" / "no counters …". Returns `(FilterProp,
+/// bytes consumed from `rest`)`.
+///
+/// The EQ-vs-GE selection is gated purely on the `comparator` parameter — no
+/// lead-specific state leaks in — so both the `with`/`without` entry
+/// (`parse_counter_suffix`) and the relative-clause entry
+/// (`parse_that_clause_suffix`'s "that has a … counter on it" arm) share this
+/// body and produce identical `FilterProp::Counters` shapes.
+fn parse_counter_spec_after_lead(
+    rest: &str,
+    comparator: Comparator,
+) -> Option<(FilterProp, usize)> {
+    use nom::branch::alt;
+    use nom::bytes::complete::{tag as tag_e, take_until};
+    use nom::combinator::{opt, value};
+
     // CR 122.1: Negated branch — untyped FIRST, before any `take_until`. The
     // untyped negated case ("with no counters on them", "without counters")
     // never touches the typed suffix loop, so the empty-`counter_text` guard
@@ -3907,7 +3935,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         ))
         .parse(rest);
         if let Ok((after, _)) = untyped {
-            let consumed = leading_ws + lead_len + (rest.len() - after.len());
+            let consumed = rest.len() - after.len();
             return Some((
                 FilterProp::Counters {
                     counters: CounterMatch::Any,
@@ -3926,7 +3954,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         // it". Must precede the typed-counter branch so the empty-counter-type
         // guard there doesn't fire.
         if let Ok((after, _)) = parse_bare_any_counter_suffix(rest) {
-            let consumed = leading_ws + lead_len + (rest.len() - after.len());
+            let consumed = rest.len() - after.len();
             return Some((
                 FilterProp::Counters {
                     counters: CounterMatch::Any,
@@ -3953,7 +3981,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
             Ok((input, expr))
         },
     ));
-    let (rest, count_opt) = opt(count_parser).parse(rest).ok()?;
+    let (after_count, count_opt) = opt(count_parser).parse(rest).ok()?;
     let count = count_opt.unwrap_or(QuantityExpr::Fixed { value: 1 });
 
     // Try each counter suffix; pick the first that matches via `take_until`.
@@ -3965,7 +3993,8 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         " counter on them",
         " counter on it",
     ] {
-        let Ok((after, counter_text)) = take_until::<_, _, OracleError<'_>>(suffix).parse(rest)
+        let Ok((after, counter_text)) =
+            take_until::<_, _, OracleError<'_>>(suffix).parse(after_count)
         else {
             continue;
         };
@@ -3973,7 +4002,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         if counter_type.is_empty() {
             continue;
         }
-        let consumed = text.len() - after.len() + suffix.len();
+        let consumed = rest.len() - after.len() + suffix.len();
         // CR 122.1: negated typed filter means exactly 0 counters of the type;
         // positive filter is the parsed (or implicit-1) threshold.
         let count = if comparator == Comparator::EQ {
@@ -4777,6 +4806,26 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             if at_clause_boundary {
                 return Some((props, consumed_at(after_disjunction)));
             }
+        }
+    }
+
+    // CR 122.1 / CR 122.1a: "that has a/an <type> counter on it" / "that have …
+    // on them" — relative-clause counter predicate; positive (GE). Reuses the
+    // shared counter-spec combinator the with-form (parse_counter_suffix) uses,
+    // so the FilterProp::Counters is identical to "creature with a … counter on
+    // it" (Crumbling Ashes). The article a/an is consumed inside
+    // parse_counter_spec_after_lead, so the lead here is just "has "/"have ".
+    // Banewhip Punisher: "Destroy target creature that has a -1/-1 counter on
+    // it"; Triad of Fates: "Exile target creature that has a fate counter on it".
+    if let Ok((after_verb, _)) = alt((
+        tag::<_, _, OracleError<'_>>("has "),
+        tag::<_, _, OracleError<'_>>("have "),
+    ))
+    .parse(after_that)
+    {
+        if let Some((prop, consumed)) = parse_counter_spec_after_lead(after_verb, Comparator::GE) {
+            let verb_len = after_that.len() - after_verb.len();
+            return Some((vec![prop], that_len + verb_len + consumed));
         }
     }
 
@@ -8901,6 +8950,60 @@ mod tests {
         }
     }
 
+    /// "that has a <type> counter on it" relative clause — must lower to the
+    /// same `FilterProp::Counters` shape as the `with`-form (Banewhip Punisher,
+    /// Triad of Fates). Previously this clause was dropped entirely.
+    #[test]
+    fn parse_that_clause_has_minus_counter() {
+        let phrase = " that has a -1/-1 counter on it";
+        let (props, consumed) =
+            parse_that_clause_suffix(phrase, None).expect("relative counter clause must parse");
+        assert_eq!(consumed, phrase.len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Minus1Minus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }]
+        );
+    }
+
+    /// Plural relative-clause form "that have a +1/+1 counter on them" → the
+    /// same positive (GE) typed counter filter (Plus1Plus1).
+    #[test]
+    fn parse_that_clause_have_plus_counter_plural() {
+        let phrase = " that have a +1/+1 counter on them";
+        let (props, consumed) =
+            parse_that_clause_suffix(phrase, None).expect("plural relative counter clause");
+        assert_eq!(consumed, phrase.len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }]
+        );
+    }
+
+    /// "that has a fate counter on it" → Generic("fate") (Triad of Fates).
+    #[test]
+    fn parse_that_clause_has_fate_counter() {
+        let phrase = " that has a fate counter on it";
+        let (props, consumed) =
+            parse_that_clause_suffix(phrase, None).expect("generic relative counter clause");
+        assert_eq!(consumed, phrase.len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("fate".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }]
+        );
+    }
+
     #[test]
     fn parse_type_phrase_creature_with_stun_counter() {
         let (filter, _rest) = parse_type_phrase("creature with a stun counter on it");
@@ -12239,5 +12342,33 @@ mod tests {
             "expected Named prop with 'Falkenrath Gorger', got {tf:?}"
         );
         assert_eq!(rest.trim_start_matches([',', ' ']), "it gains");
+    }
+
+    #[test]
+    fn parse_non_saga_token_you_control_issue_3294() {
+        use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+
+        let (filter, rest) = parse_type_phrase("non-saga token you control");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                    "Saga".to_string()
+                )))),
+            "expected Non(Saga), got {:?}",
+            tf.type_filters
+        );
+        assert!(tf.properties.contains(&FilterProp::Token));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(rest.is_empty(), "expected empty remainder, got {rest:?}");
+
+        let (filter2, rest2) = parse_target("a non-Saga token you control");
+        let TargetFilter::Typed(tf2) = filter2 else {
+            panic!("parse_target must not collapse to Any, got {filter2:?}");
+        };
+        assert!(tf2.properties.contains(&FilterProp::Token));
+        assert!(rest2.is_empty(), "expected empty remainder, got {rest2:?}");
     }
 }

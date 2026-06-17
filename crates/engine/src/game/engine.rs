@@ -17939,6 +17939,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -18008,6 +18009,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let result = apply_as_current(
@@ -18053,6 +18055,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });

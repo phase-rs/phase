@@ -234,7 +234,14 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p1_label: "Orzhov Greasefang (P1)",
         p0: snap("pioneer", "orzhov-greasefang.json"),
         p1: snap("pioneer", "orzhov-greasefang.json"),
-        exercises: &[FeatureKind::Aristocrats],
+        // Orzhov Greasefang is the canonical reanimator list: discard outlets
+        // (Fleeting Spirit, Iron-Shield Elf, Guardian of New Benalia) pitch
+        // Parhelion II, then Greasefang / Lively Dirge return it from the
+        // graveyard to the battlefield. It clears `reanimator::COMMITMENT_FLOOR`,
+        // so this matchup is the gate's exercise of `ReanimatorPayoffPolicy`
+        // (verified by `greasefang_mirror_deck_activates_reanimator_payoff`
+        // below). It also exercises the aristocrats axis via its sacrifice value.
+        exercises: &[FeatureKind::Aristocrats, FeatureKind::Reanimator],
         expected: Expected::Mirror {
             tolerance: MIRROR_TOLERANCE,
         },
@@ -339,6 +346,23 @@ pub static MATCHUPS: &[MatchupSpec] = &[
         p0: snap("modern", "boros-energy.json"),
         p1: snap("modern", "boros-energy.json"),
         exercises: &[FeatureKind::AggroPressure],
+        expected: Expected::Mirror {
+            tolerance: MIRROR_TOLERANCE,
+        },
+    },
+    MatchupSpec {
+        id: "equipment-mirror",
+        p0_label: "Mono-White Equipment (P0)",
+        p1_label: "Mono-White Equipment (P1)",
+        p0: snap("modern", "mono-white-equipment.json"),
+        p1: snap("modern", "mono-white-equipment.json"),
+        // Mono-White Equipment is the canonical voltron list: a dense Equipment
+        // package (Bonesplitter, Vulshok Morningstar, Armory of Iroas, …) plus
+        // equipment-matters support (Stoneforge Mystic, Puresteel Paladin, Kor
+        // Outfitter, Steelshaper's Gift). It clears `equipment::COMMITMENT_FLOOR`,
+        // so this matchup is the gate's exercise of `EquipmentPayoffPolicy`
+        // (verified by `equipment_mirror_deck_activates_equipment_payoff` below).
+        exercises: &[FeatureKind::Equipment],
         expected: Expected::Mirror {
             tolerance: MIRROR_TOLERANCE,
         },

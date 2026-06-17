@@ -54,7 +54,8 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             target_filter_has_pitch_bound_x(filter)
         }
-        TargetFilter::None
+        TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
@@ -104,6 +105,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
                 .collect(),
             ..tf.clone()
         }),
+        TargetFilter::ExiledCardByIndex { .. } => filter.clone(),
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters.iter().map(relax_pitch_bound_x_filter).collect(),
         },

@@ -2291,3 +2291,37 @@ mod tests {
         }
     }
 }
+
+#[test]
+fn copy_token_non_saga_token_you_control_issue_3294() {
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+
+    let effect = try_parse_token(
+        "create a token that's a copy of a non-saga token you control",
+        "Create a token that's a copy of a non-Saga token you control.",
+        &mut ParseContext::default(),
+    )
+    .expect("expected CopyTokenOf");
+    let Effect::CopyTokenOf {
+        target,
+        source_filter,
+        ..
+    } = effect
+    else {
+        panic!("expected CopyTokenOf, got {effect:?}");
+    };
+    assert!(source_filter.is_none());
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected Typed copy source, got {target:?}");
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Saga".to_string()
+            )))),
+        "expected Non(Saga), got {:?}",
+        tf.type_filters
+    );
+    assert!(tf.properties.contains(&FilterProp::Token));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+}

@@ -30,6 +30,14 @@ fn static_granted_keyword() {
     insta::assert_json_snapshot!(def);
 }
 
+#[test]
+fn static_tiered_enters_with_additional_counters() {
+    let defs = parse_static_line_multi(
+        "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.",
+    );
+    insta::assert_json_snapshot!("static_tiered_enters_with_additional_counters", &defs);
+}
+
 /// Issue #327: "of that color" anaphor (post-Choose) is the equivalent of
 /// "of the chosen color" and must lower to a filter with IsChosenColor.
 #[test]

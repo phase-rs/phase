@@ -2182,7 +2182,12 @@ impl FromStr for Keyword {
             "riot" => Ok(Keyword::Riot),
             "livingweapon" => Ok(Keyword::LivingWeapon),
             "jobselect" => Ok(Keyword::JobSelect),
-            "formirrodin!" => Ok(Keyword::ForMirrodin),
+            // Accept both the Oracle spelling ("For Mirrodin!") and the
+            // serialized variant name ("ForMirrodin"). `Serialize` emits the
+            // bare variant name (no "!"), so card-data.json round-trips through
+            // this path as "formirrodin"; without the second spelling it would
+            // fall to `Keyword::Unknown` and drop the keyword on reload.
+            "formirrodin!" | "formirrodin" => Ok(Keyword::ForMirrodin),
             // CR 702.89a/b: "umbra armor" is the current name; "totem armor" is the
             // obsolete printing both Oracle text and MTGJSON may still carry.
             "totemarmor" | "totem armor" | "umbra armor" | "umbraarmor" => Ok(Keyword::TotemArmor),
@@ -2880,6 +2885,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Afterlife" => Ok(Keyword::Afterlife(uint(data))),
         "Fading" => Ok(Keyword::Fading(uint(data))),
         "Vanishing" => Ok(Keyword::Vanishing(uint(data))),
+        // CR 702.48: Offering — `Offering(String)` serializes as
+        // {"Offering": "<quality>"}; round-trip it back rather than dropping
+        // the keyword to Unknown on reload of card-data.json.
+        "Offering" => Ok(Keyword::Offering(
+            data.as_str().unwrap_or_default().to_string(),
+        )),
+        // Specialize (Alchemy Horizons: Baldur's Gate) — `Specialize(ManaCost)`
+        // serializes as {"Specialize": <ManaCost>}; round-trip it back to the
+        // typed variant so the synthesized specialize ability is not lost.
+        "Specialize" => mana(data).map(Keyword::Specialize),
         "Crew" => {
             // Struct variant: {"Crew": {"power": N, "once_per_turn": {...}}}.
             // A bare number is also accepted for forward/back compatibility.
@@ -3093,6 +3108,26 @@ mod tests {
         );
         assert_eq!(Keyword::from_str("Battle Cry").unwrap(), Keyword::Battlecry);
         assert_eq!(Keyword::from_str("Aftermath").unwrap(), Keyword::Aftermath);
+    }
+
+    #[test]
+    fn unit_keywords_survive_serde_round_trip() {
+        // `Serialize` emits the bare variant name; the custom `Deserialize`
+        // routes plain strings through `FromStr`. Every unit keyword must
+        // round-trip back to itself rather than degrading to `Unknown`.
+        // ForMirrodin regressed here: its variant name "ForMirrodin" lacks the
+        // "!" that the Oracle-spelling `FromStr` arm required.
+        for kw in [
+            Keyword::Flying,
+            Keyword::LivingWeapon,
+            Keyword::JobSelect,
+            Keyword::TotemArmor,
+            Keyword::ForMirrodin,
+        ] {
+            let value = serde_json::to_value(&kw).unwrap();
+            let back: Keyword = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(back, kw, "round-trip failed for {value:?}");
+        }
     }
 
     #[test]
@@ -4064,6 +4099,22 @@ mod tests {
         match kw {
             Keyword::Freerunning(_) => {} // cost shape validated by ManaCost deser
             other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameterized_keywords_survive_serde_round_trip() {
+        // Serialize emits these as externally-tagged objects
+        // ({"Specialize": <ManaCost>}, {"Offering": "<quality>"}); the custom
+        // Deserialize must route them back through keyword_from_tagged rather
+        // than dropping them to Unknown on reload of card-data.json.
+        for kw in [
+            Keyword::Specialize(parse_keyword_mana_cost("{2}")),
+            Keyword::Offering("Fox".to_string()),
+        ] {
+            let json = serde_json::to_value(&kw).unwrap();
+            let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(kw, deserialized, "round-trip failed for {json}");
         }
     }
 

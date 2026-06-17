@@ -287,6 +287,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -463,6 +464,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -1662,6 +1664,18 @@ fn resolve_ref(
         QuantityRef::CardsExiledBySource => usize_to_i32_saturating(
             crate::game::players::linked_exile_cards_for_source(state, source_id).len(),
         ),
+        // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
+        // ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
+        QuantityRef::ExiledCardPower { index } => {
+            let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);
+            match exiled_cards.and_then(|cards| cards.get(*index as usize)) {
+                Some(&card_id) => {
+                    let card = state.objects.get(&card_id);
+                    card.and_then(|obj| obj.power).unwrap_or(0)
+                }
+                None => 0,
+            }
+        }
         // CR 604.3: Count cards in a zone matching optional type filters.
         QuantityRef::ZoneCardCount {
             zone,

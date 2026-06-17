@@ -3124,44 +3124,61 @@ fn try_parse_choose_one_of_inline(
     // failed trial pollutes the committed warnings buffer with spurious
     // gaps from a malformed branch (e.g., "return a red" left half from
     // splitting "return a red or green creature" at the wrong " or ").
+    // CR 701.55a: each chosen option performs ALL of its instructions, so a
+    // branch body may itself be a multi-step chain ("They exile cards ... until
+    // they exile a nonland card, then you may cast that card", "discards all the
+    // cards in their hand, then draws that many cards minus one"). Parse each
+    // half with `parse_effect_chain_with_context` — the same chain builder used
+    // for top-level effect sequences — so "then"/","-chained second steps are
+    // lowered into `sub_ability` links instead of being silently dropped by the
+    // single-clause `parse_effect_clause`. `build_resolved_from_def` consumes the
+    // chained `AbilityDefinition` via `resolve_ability_chain` at resolution.
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let left_clause;
-    let right_clause;
+    let mut left_def;
+    let mut right_def;
     if scoped_choice_player {
         let mut branch_ctx = ctx.clone();
         branch_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
-        left_clause = parse_effect_clause(left_orig, &mut branch_ctx);
-        right_clause = parse_effect_clause(right_orig, &mut branch_ctx);
+        left_def = parse_effect_chain_with_context(left_orig, AbilityKind::Spell, &mut branch_ctx);
+        right_def =
+            parse_effect_chain_with_context(right_orig, AbilityKind::Spell, &mut branch_ctx);
         ctx.diagnostics = branch_ctx.diagnostics;
     } else {
-        left_clause = parse_effect_clause(left_orig, ctx);
-        right_clause = parse_effect_clause(right_orig, ctx);
+        left_def = parse_effect_chain_with_context(left_orig, AbilityKind::Spell, ctx);
+        right_def = parse_effect_chain_with_context(right_orig, AbilityKind::Spell, ctx);
     }
 
-    // Reject unless BOTH branches produce non-Unimplemented effects. This
+    // Reject unless BOTH branches produce a non-Unimplemented HEAD effect. This
     // prevents false positives on noun-phrase disjunctions and "and/or"
-    // coordinations inside larger imperatives.
-    if matches!(left_clause.effect, Effect::Unimplemented { .. })
-        || matches!(right_clause.effect, Effect::Unimplemented { .. })
+    // coordinations inside larger imperatives. Inspect the chain head — a
+    // multi-step branch's first effect — not a single flattened clause.
+    if matches!(*left_def.effect, Effect::Unimplemented { .. })
+        || matches!(*right_def.effect, Effect::Unimplemented { .. })
     {
         ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
     }
 
-    // Also reject if either branch is `TargetOnly` — that's a structural
+    // Also reject if either branch HEAD is `TargetOnly` — that's a structural
     // wrapper, not a terminal effect. A real binary choice needs two
     // executable branches.
-    if matches!(left_clause.effect, Effect::TargetOnly { .. })
-        || matches!(right_clause.effect, Effect::TargetOnly { .. })
+    if matches!(*left_def.effect, Effect::TargetOnly { .. })
+        || matches!(*right_def.effect, Effect::TargetOnly { .. })
     {
         ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
     }
 
-    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
     left_def.description = Some(left_orig.to_string());
-    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
     right_def.description = Some(right_orig.to_string());
+
+    // CR 608.2c + CR 701.55a: a branch that opens with an anaphoric subject
+    // ("That creature becomes a 1/1 …", Hunted by The Family) refers to the
+    // per-target object chosen by the parent spell, not a fresh broadcast set.
+    // Rebind the becomes/animate `GenericEffect` subject to `ParentTarget` so
+    // the type-change binds only to the chosen creature at resolution.
+    rebind_anaphoric_generic_effect_subject_to_parent(&left_orig.to_lowercase(), &mut left_def);
+    rebind_anaphoric_generic_effect_subject_to_parent(&right_orig.to_lowercase(), &mut right_def);
 
     Some(parsed_clause(Effect::ChooseOneOf {
         chooser,
@@ -3171,6 +3188,17 @@ fn try_parse_choose_one_of_inline(
 
 fn parse_villainous_choice_chooser_prefix(input: &str) -> OracleResult<'_, PlayerFilter> {
     alt((
+        // CR 109.4 + CR 701.55a: "that creature's controller faces a villainous
+        // choice — …" (Hunted by The Family) — the chooser is the CONTROLLER of
+        // the per-target creature (CR 109.4), which can differ from its owner for
+        // a stolen creature, so this is `ParentObjectTargetController`, not
+        // `ParentObjectTargetOwner`. Placed first: it is a strict superstring of
+        // the bare "faces a villainous choice — " arm below, so longest-literal
+        // ordering is load-bearing.
+        value(
+            PlayerFilter::ParentObjectTargetController,
+            tag("that creature's controller faces a villainous choice — "),
+        ),
         value(
             PlayerFilter::DefendingPlayer,
             tag("defending player faces a villainous choice — "),
@@ -11001,6 +11029,67 @@ fn replace_fight_subject_with_parent_if_anaphoric_subject(
         true
     } else {
         false
+    }
+}
+
+/// CR 608.2c + CR 701.55a: Rebind an anaphoric "That creature"/"That
+/// permanent"/"It" subject in a villainous-choice (or other inline-choice)
+/// branch back to the spell's parent target.
+///
+/// A branch such as "That creature becomes a 1/1 white Human creature and loses
+/// all abilities" (Hunted by The Family) lowers its type-change to an
+/// `Effect::GenericEffect` whose inner `StaticDefinition.affected` is the
+/// broadcast `Typed(Creature)` filter the static-ability parser emits for an
+/// implicit "a creature" subject. But the anaphoric "That creature" names the
+/// per-target creature chosen by the parent spell (CR 608.2c — read the whole
+/// text), so the type-change must bind to that one object, not fan out to every
+/// creature on the battlefield. Rebind the outer `target` and each inner
+/// `affected` to `ParentTarget` so the runtime `generic_effect_application_filter`
+/// inherits the parent's chosen target (CR 611.2c) instead of the broadcast
+/// filter.
+///
+/// Sibling of `replace_fight_subject_with_parent_if_anaphoric_subject`: same
+/// anaphoric-subject detection, but for the becomes/animate `GenericEffect`
+/// family. Only fires when the branch text begins with the anaphoric subject,
+/// so non-anaphoric branches ("you create a token …") are untouched.
+fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut AbilityDefinition) {
+    let is_anaphoric_subject = alt((
+        tag::<_, _, OracleError<'_>>("that creature "),
+        tag("that permanent "),
+        tag("it "),
+    ))
+    .parse(lower)
+    .is_ok();
+    if !is_anaphoric_subject {
+        return;
+    }
+
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &mut *def.effect
+    {
+        if target.is_none() {
+            *target = Some(TargetFilter::ParentTarget);
+        }
+        for static_def in static_abilities {
+            // Only rebind the broadcast/self subject the parser emits for an
+            // implicit subject. A `ParentTarget`/`ControllerRef`-bearing
+            // `affected` is already correctly anchored; leave deliberate
+            // controller-scoped filters intact.
+            let is_broadcast_subject = matches!(
+                static_def.affected,
+                None | Some(TargetFilter::SelfRef)
+                    | Some(TargetFilter::Typed(TypedFilter {
+                        controller: None,
+                        ..
+                    }))
+            );
+            if is_broadcast_subject {
+                static_def.affected = Some(TargetFilter::ParentTarget);
+            }
+        }
     }
 }
 
@@ -20338,6 +20427,61 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    /// CR 701.15a: A self-referential possessive (`~'s power`) inside a target
+    /// filter must not put the clause splitter into quote mode and thereby
+    /// swallow a later sentence boundary (a text-structure concern with no
+    /// governing CR). The grant-keyword clause must terminate at
+    /// the period so the trailing imperative ("Goad it.") re-dispatches as a chained
+    /// sibling targeting the same creature (`ParentTarget`). This is the
+    /// building-block fix for the whole "[filter referencing ~'s P/T] gains
+    /// [keyword] until end of turn. [imperative on it]" class (The Master,
+    /// Mesmerist is the type specimen).
+    #[test]
+    fn grant_keyword_then_imperative_with_self_possessive_filter_chains() {
+        let def = parse_effect_chain(
+            "Target creature an opponent controls with power less than or equal to ~'s power gains skulk until end of turn. Goad it.",
+            AbilityKind::Activated,
+        );
+        // Head clause: grant skulk until end of turn to the filtered target.
+        assert!(
+            matches!(*def.effect, Effect::GenericEffect { .. }),
+            "expected grant-keyword GenericEffect head, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        // Chained sibling: goad that same creature via ParentTarget anaphora.
+        let sub = def.sub_ability.expect("expected chained Goad sub-ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Goad {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "expected Goad{{ParentTarget}}, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Building-block guard: a possessive/contraction apostrophe (`~'s`) opens a
+    /// phantom single-quote in the clause splitter, but a sentence-ending period
+    /// must still split — Oracle quoted-ability text always uses double quotes,
+    /// so a dangling single-quote can never legitimately span a sentence.
+    #[test]
+    fn self_ref_possessive_does_not_swallow_sentence_boundary_in_clause_splitter() {
+        let chunks =
+            sequence::split_clause_sequence("~'s power gains skulk until end of turn. Goad it");
+        let texts: Vec<_> = chunks.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "~'s power gains skulk until end of turn".to_string(),
+                "Goad it".to_string(),
+            ],
+            "self-ref possessive must not suppress the sentence boundary"
+        );
+    }
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
@@ -50579,6 +50723,221 @@ mod tests {
             "\"they own\" must add ownership filter to the mass target, got {:#?}",
             typed
         );
+    }
+
+    /// CR 701.55a (cluster 32, Class A+B — Ensnared by the Mara): a
+    /// villainous-choice branch body that is itself a multi-step chain ("They
+    /// exile cards ... until they exile a nonland card, then you may cast that
+    /// card ...") must survive as a chained `AbilityDefinition` (head +
+    /// `sub_ability`), not be bisected by the clause chunker into a failing
+    /// `Unimplemented{name:"face"}`. Tests the building blocks (sticky choice
+    /// block + chain-parsed branches), not the card name.
+    #[test]
+    fn villainous_choice_keeps_multistep_first_branch() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — They exile cards from the top of their library until they exile a nonland card, then you may cast that card without paying its mana cost, or that player exiles the top four cards of their library and ~ deals damage equal to the total mana value of those exiled cards to that player.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Opponent);
+        assert_eq!(branches.len(), 2);
+        // Branch 0 head + chained "then you may cast" second step preserved.
+        assert!(
+            matches!(&*branches[0].effect, Effect::ExileFromTopUntil { .. }),
+            "branch 0 head must be ExileFromTopUntil, got {:?}",
+            branches[0].effect
+        );
+        assert!(
+            branches[0].sub_ability.is_some(),
+            "branch 0 must retain its 'then you may cast' chained second step"
+        );
+        // No Unimplemented anywhere in either branch chain.
+        for b in branches {
+            assert!(
+                !matches!(&*b.effect, Effect::Unimplemented { .. }),
+                "no branch head may be Unimplemented, got {:?}",
+                b.effect
+            );
+        }
+    }
+
+    /// CR 701.55a (cluster 32, Class A+B — Sycorax Commander): the first branch
+    /// "discards all the cards in their hand, then draws that many cards minus
+    /// one" must stay a chained `Discard -> Draw` body. Before the fix the
+    /// chunker severed it at ", then" and the lead-in became `Unimplemented`.
+    #[test]
+    fn villainous_choice_keeps_discard_then_draw_branch() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — That opponent discards all the cards in their hand, then draws that many cards minus one, or this creature deals damage to that player equal to the number of cards in their hand.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Opponent);
+        assert_eq!(branches.len(), 2);
+        assert!(
+            matches!(&*branches[0].effect, Effect::Discard { .. }),
+            "branch 0 head must be Discard, got {:?}",
+            branches[0].effect
+        );
+        assert!(
+            branches[0].sub_ability.is_some(),
+            "branch 0 must retain its 'then draws that many cards minus one' chained step"
+        );
+        assert!(
+            matches!(&*branches[1].effect, Effect::DealDamage { .. }),
+            "branch 1 head must be DealDamage, got {:?}",
+            branches[1].effect
+        );
+    }
+
+    /// CR 109.4 + CR 701.55a (cluster 32, Class C — Hunted by The Family): "that
+    /// creature's controller faces a villainous choice — …" anchors the chooser
+    /// to the controller of the per-target creature
+    /// (`PlayerFilter::ParentObjectTargetController`), distinct from its owner
+    /// for a stolen creature. Parser-only: the runtime resolution already exists
+    /// in `choosing_players`.
+    #[test]
+    fn that_creatures_controller_faces_villainous_choice_uses_parent_controller_chooser() {
+        let ability = parse_effect_chain(
+            "That creature's controller faces a villainous choice — That creature becomes a 1/1 white Human creature and loses all abilities, or you create a token that's a copy of it.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(
+            *chooser,
+            PlayerFilter::ParentObjectTargetController,
+            "chooser for \"that creature's controller\" must be ParentObjectTargetController"
+        );
+        assert_eq!(branches.len(), 2);
+        for b in branches {
+            assert!(
+                !matches!(&*b.effect, Effect::Unimplemented { .. }),
+                "no branch head may be Unimplemented, got {:?}",
+                b.effect
+            );
+        }
+
+        // CR 608.2c + CR 611.2c: branch 0 ("That creature becomes a 1/1 white
+        // Human creature and loses all abilities") is anaphoric — the
+        // type-change must bind to the parent spell's chosen target, NOT fan out
+        // to every creature on the battlefield. Both the outer `target` and each
+        // inner static `affected` must be `ParentTarget`.
+        let Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } = &*branches[0].effect
+        else {
+            panic!(
+                "branch 0 must be GenericEffect, got {:?}",
+                branches[0].effect
+            );
+        };
+        assert_eq!(
+            *target,
+            Some(TargetFilter::ParentTarget),
+            "branch 0 GenericEffect.target must be ParentTarget (the chosen creature), got {target:?}"
+        );
+        for static_def in static_abilities {
+            assert_eq!(
+                static_def.affected,
+                Some(TargetFilter::ParentTarget),
+                "branch 0 static_def.affected must be ParentTarget, not a broadcast creature filter, got {:?}",
+                static_def.affected
+            );
+        }
+    }
+
+    /// CR 120.1 + CR 202.3 (cluster 32, Class C — Ensnared by the Mara): the
+    /// branch-1 damage amount "the total mana value of those exiled cards" is an
+    /// exiled-this-resolution aggregate the typed quantity parsers don't yet
+    /// model. It must NOT degrade to a verbatim `QuantityRef::Variable` carrying
+    /// raw Oracle text — that would silently resolve to 0 damage at runtime
+    /// (only `Variable{name:"X"}` / named choices resolve). Instead the
+    /// `DealDamage` step must strict-fail to `Effect::Unimplemented` so coverage
+    /// honestly flags the gap. The `ExileTop` branch head still parses, keeping
+    /// the two-branch `ChooseOneOf` intact.
+    #[test]
+    fn ensnared_by_the_mara_unresolvable_damage_amount_strict_fails_not_verbatim_variable() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — They exile cards from the top of their library until they exile a nonland card, then you may cast that card without paying its mana cost, or that player exiles the top four cards of their library and ~ deals damage equal to the total mana value of those exiled cards to that player.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Opponent);
+        assert_eq!(branches.len(), 2);
+
+        // Branch 1 head exiles four cards (still parses); the chained damage
+        // step strict-fails rather than emitting a verbatim Variable.
+        let branch1 = &branches[1];
+        assert!(
+            matches!(&*branch1.effect, Effect::ExileTop { .. }),
+            "branch 1 head must be ExileTop, got {:?}",
+            branch1.effect
+        );
+        let damage = branch1
+            .sub_ability
+            .as_ref()
+            .expect("branch 1 must retain its chained damage step");
+        assert!(
+            matches!(&*damage.effect, Effect::Unimplemented { .. }),
+            "branch 1 damage step must strict-fail to Unimplemented (unresolvable exiled-cards aggregate), got {:?}",
+            damage.effect
+        );
+
+        // Belt-and-braces: no node anywhere in the parsed ability stores the raw
+        // Oracle aggregate phrase as a `QuantityRef::Variable` name (the
+        // prohibited verbatim-text-in-parser smell). The phrase legitimately
+        // survives in human-readable `description`/Unimplemented-trace fields —
+        // only its appearance as a resolvable `Variable` payload is the defect.
+        let json = serde_json::to_string(&ability).expect("serialize ability");
+        assert!(
+            !json.contains(r#""Variable","name":"the total mana value"#),
+            "the verbatim aggregate phrase must not be stored as a QuantityRef::Variable name"
+        );
+    }
+
+    /// Regression pin (cluster 32 — Missy): a single-effect-branch villainous
+    /// choice ("Each artifact creature you control deals 1 damage to that
+    /// opponent, or you draw a card") must remain a clean two-branch
+    /// `ChooseOneOf{chooser: Opponent}`. Guards the Class A sticky latch against
+    /// over-capturing or bisecting non-multistep choices.
+    #[test]
+    fn missy_endstep_villainous_choice_unchanged() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — Each artifact creature you control deals 1 damage to that opponent, or you draw a card.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Opponent);
+        assert_eq!(branches.len(), 2);
+        assert!(
+            matches!(&*branches[1].effect, Effect::Draw { .. }),
+            "branch 1 must be Draw, got {:?}",
+            branches[1].effect
+        );
+        for b in branches {
+            assert!(
+                !matches!(&*b.effect, Effect::Unimplemented { .. }),
+                "no branch head may be Unimplemented, got {:?}",
+                b.effect
+            );
+        }
     }
 
     /// CR 614.1a + CR 614.1d + CR 601: Don't Blink — the floating turn-bound

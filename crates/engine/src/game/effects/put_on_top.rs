@@ -114,6 +114,7 @@ pub fn resolve(
                     // CR 708.2a: library-position selection is not a face-down entry.
                     face_down_profile: None,
                     count_param: 0,
+                    is_cost_payment: false,
                 };
                 return Ok(());
             }

@@ -12,10 +12,12 @@ pub mod artifacts;
 pub mod commitment;
 pub mod control;
 pub mod enchantments;
+pub mod equipment;
 pub mod landfall;
 pub mod lifegain;
 pub mod mana_ramp;
 pub mod plus_one_counters;
+pub mod reanimator;
 pub mod spellslinger_prowess;
 pub mod tokens_wide;
 pub mod tribal;
@@ -28,10 +30,12 @@ pub use aristocrats::AristocratsFeature;
 pub use artifacts::ArtifactsFeature;
 pub use control::ControlFeature;
 pub use enchantments::EnchantmentsFeature;
+pub use equipment::EquipmentFeature;
 pub use landfall::LandfallFeature;
 pub use lifegain::LifegainFeature;
 pub use mana_ramp::ManaRampFeature;
 pub use plus_one_counters::PlusOneCountersFeature;
+pub use reanimator::ReanimatorFeature;
 pub use spellslinger_prowess::SpellslingerProwessFeature;
 pub use tokens_wide::TokensWideFeature;
 pub use tribal::TribalFeature;
@@ -57,12 +61,14 @@ pub struct DeckFeatures {
     pub tribal: TribalFeature,
     pub control: ControlFeature,
     pub enchantments: EnchantmentsFeature,
+    pub equipment: EquipmentFeature,
     pub aristocrats: AristocratsFeature,
     pub artifacts: ArtifactsFeature,
     pub aggro_pressure: AggroPressureFeature,
     pub tokens_wide: TokensWideFeature,
     pub plus_one_counters: PlusOneCountersFeature,
     pub spellslinger_prowess: SpellslingerProwessFeature,
+    pub reanimator: ReanimatorFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -96,12 +102,14 @@ impl DeckFeatures {
             tribal: tribal::detect(deck),
             control: control::detect(deck),
             enchantments: enchantments::detect(deck),
+            equipment: equipment::detect(deck),
             aristocrats: aristocrats::detect(deck),
             artifacts: artifacts::detect(deck),
             aggro_pressure: aggro_pressure::detect(deck),
             tokens_wide: tokens_wide::detect(deck),
             plus_one_counters: plus_one_counters::detect(deck),
             spellslinger_prowess: spellslinger_prowess::detect(deck),
+            reanimator: reanimator::detect(deck),
             bracket_tier: tier,
         }
     }

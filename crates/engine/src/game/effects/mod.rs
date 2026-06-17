@@ -3154,6 +3154,20 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                 }
             )
         }),
+        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
+        // gates the rider on whether control actually changed (Kain, Traitorous
+        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
+        // recipient differs from the object's current controller,
+        // `ControllerChanged`.
+        Effect::GiveControl { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::GiveControl,
+                    ..
+                } | GameEvent::ControllerChanged { .. }
+            )
+        }),
         _ => true,
     }
 }
@@ -3836,10 +3850,41 @@ fn hydrate_event_context_targets<'a>(
     Cow::Owned(resolved)
 }
 
+/// CR 603.2: Filters that auto-resolve from `state.current_trigger_event` during
+/// hydration / unless-pay payer resolution (issue #2361, Kain #1335).
+fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::StackSpell
+    )
+}
+
 /// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
 fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 110.2 + CR 603.7c: `GiveControl` carries both an object `target` and a
+    // `recipient`. Kain ("that player gains control of Kain") binds the recipient
+    // to `TriggeringPlayer` while the object is `SelfRef` — only the recipient
+    // is an event-context player ref and must be hydrated into `ability.targets`
+    // when empty (issue #1335).
+    if let Effect::GiveControl { target, recipient } = effect {
+        if hydratable_event_context_filter(recipient) {
+            return Some(recipient);
+        }
+        if hydratable_event_context_filter(target) {
+            return Some(target);
+        }
+        return None;
+    }
+
     let filter = match effect {
         Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
@@ -3898,7 +3943,6 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::SkipNextStep { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::AdditionalPhase { target, .. }
-        | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
         // CR 701.26a/b + CR 603.7c: only the single-permanent tap/untap exposes
@@ -3932,17 +3976,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         _ => return None,
     };
 
-    if matches!(
-        filter,
-        TargetFilter::TriggeringSpellController
-            | TargetFilter::TriggeringSpellOwner
-            | TargetFilter::TriggeringPlayer
-            | TargetFilter::TriggeringSource
-            | TargetFilter::DefendingPlayer
-            | TargetFilter::ParentTargetController
-            | TargetFilter::ParentTarget
-            | TargetFilter::StackSpell
-    ) {
+    if hydratable_event_context_filter(filter) {
         Some(filter)
     } else {
         None
@@ -7639,6 +7673,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         crate::game::engine::apply(
@@ -11784,6 +11819,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -11820,6 +11856,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_profile: None,
                 count_param: 0,
+                is_cost_payment: false,
             },
             GameAction::SelectCards {
                 cards: vec![second],
@@ -17673,6 +17710,34 @@ mod tests {
         assert!(
             !mandatory_parent_effect_performed(&copy, &not_made),
             "a CopySpell that made no copy is NOT 'performed' — the draw rider must run"
+        );
+    }
+
+    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
+    /// Kain. If they do, …" gates the rider on whether control actually
+    /// transferred. `GiveControl` counts as performed only when
+    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    #[test]
+    fn give_control_performed_tracks_controller_changed_event() {
+        let give = Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::TriggeringPlayer,
+        };
+
+        let transferred = [GameEvent::ControllerChanged {
+            object_id: ObjectId(1),
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+        }];
+        assert!(
+            mandatory_parent_effect_performed(&give, &transferred),
+            "GiveControl that changed controllers is 'performed'"
+        );
+
+        let not_transferred: [GameEvent; 0] = [];
+        assert!(
+            !mandatory_parent_effect_performed(&give, &not_transferred),
+            "GiveControl that failed must not seed the if-they-do rider"
         );
     }
 

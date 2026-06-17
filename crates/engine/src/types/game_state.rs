@@ -3113,6 +3113,11 @@ pub enum WaitingFor {
         /// Zero for all non-blight EffectZoneChoice uses.
         #[serde(default)]
         count_param: u32,
+        /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
+        /// rather than effect resolution. Cost-payment choices require special
+        /// handling for exile-link tracking (push_exiled_with_source_this_turn).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_cost_payment: bool,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -8169,6 +8174,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -8416,6 +8422,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -8517,6 +8524,7 @@ mod tests {
                 ward: None,
             }),
             count_param: 0,
+            is_cost_payment: false,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

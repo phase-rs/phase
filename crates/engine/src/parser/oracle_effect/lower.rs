@@ -4291,15 +4291,33 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         // CDA quantity parser (`the number of … you control`, `your life total`,
         // …). Without this fallback the phrase degrades to a raw `Variable`, which
         // resolves to 0 at runtime — the damage silently no-ops.
-        let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
-            .or_else(|| {
+        let qty =
+            crate::parser::oracle_quantity::parse_event_context_quantity(qty_text).or_else(|| {
                 crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
-            })
-            .unwrap_or_else(|| QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: qty_text.to_string(),
-                },
             });
+        let qty = match qty {
+            Some(qty) => qty,
+            // CR 120.1 + CR 202.3: The typed quantity parsers declined this
+            // amount. Only the spell variable "X" resolves through the
+            // `Variable` runtime path (`quantity.rs` — `name == "X"`, or a named
+            // choice); any OTHER unrecognized phrase ("the total mana value of
+            // those exiled cards", Ensnared by the Mara) would be stored
+            // verbatim and silently resolve to 0 damage. Storing raw Oracle text
+            // as a `Variable` name is the prohibited verbatim-text-in-parser
+            // smell, so strict-fail instead: return `None` here, letting the
+            // effect lower to `Effect::Unimplemented` so coverage honestly flags
+            // the branch as unsupported rather than dealing the wrong (zero)
+            // amount. Reaching a resolvable model ("those exiled cards" as a
+            // typed exiled-this-resolution mana-value aggregate) is a future
+            // building block; until then coverage waits on the strict-failure
+            // tag rather than masking the gap.
+            None if qty_text.eq_ignore_ascii_case("x") => QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            None => return None,
+        };
         (qty, &amount_text[before_to.len() + 4..])
     } else {
         return None;

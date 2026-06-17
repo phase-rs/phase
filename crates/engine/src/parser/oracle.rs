@@ -3849,7 +3849,7 @@ pub fn parse_oracle_text(
 /// "Equipment you control have equip {0}" (Puresteel Paladin granted-equip
 /// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
 /// remainder ("ment you control...") as a malformed activated ability cost.
-fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     let (activation_line, cost_reduction) = split_trailing_self_cost_reduction(line);
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
@@ -5001,6 +5001,94 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::CountScope;
 
+    /// Issue #69 (Banewhip Punisher): "Destroy target creature that has a -1/-1
+    /// counter on it" — the relative-clause counter restriction was dropped, so
+    /// the activated ability destroyed ANY creature. The target filter must now
+    /// carry `FilterProp::Counters{OfType(Minus1Minus1), GE, 1}`. CR 122.1 /
+    /// CR 122.1a.
+    #[test]
+    fn banewhip_punisher_destroy_creature_with_minus_counter() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        let r = parse(
+            "{B}, Sacrifice this creature: Destroy target creature that has a -1/-1 counter on it.",
+            "Banewhip Punisher",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "{r:#?}");
+        let Effect::Destroy { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected Destroy effect, got {:?}", r.abilities[0].effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties.contains(&FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Minus1Minus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            "counter restriction must survive, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Issue #69 (Triad of Fates): "Exile target creature that has a fate counter
+    /// on it, then return it to the battlefield…" — the exile target ChangeZone
+    /// filter must carry the fate-counter restriction, and the "then return it"
+    /// tail must still fully parse (the ability stays supported, not
+    /// Unimplemented). CR 122.1.
+    #[test]
+    fn triad_of_fates_exile_creature_with_fate_counter() {
+        use crate::types::counter::{CounterMatch, CounterType};
+        let r = parse(
+            "{W}, {T}: Exile target creature that has a fate counter on it, then return it to the battlefield under its owner's control.",
+            "Triad of Fates",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "{r:#?}");
+        let ability = &r.abilities[0];
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*ability.effect
+        else {
+            panic!(
+                "expected ChangeZone (exile) effect, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(*destination, Zone::Exile);
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed exile target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties.contains(&FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic("fate".to_string())),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            "fate-counter restriction must survive, got {:?}",
+            tf.properties
+        );
+        // The "then return it…" tail must parse as the return sub-ability, so the
+        // card stays supported (no Unimplemented effect anywhere).
+        assert!(
+            ability.sub_ability.is_some(),
+            "the return-to-battlefield tail must parse as a sub-ability"
+        );
+        assert!(
+            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "ability must not be Unimplemented"
+        );
+    }
+
     /// Test helper: pull the graveyard-exile sub-cost count out of a compound
     /// `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{count,...}]))`.
     /// Asserts exactly one `Exile` sub-cost is present and returns its count.
@@ -5537,6 +5625,38 @@ mod tests {
         assert_eq!(r.abilities.len(), 1, "expected one spell ability");
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
         assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
+    /// CR 701.55c (cluster 32, Class D — The Valeyard): "If an opponent would
+    /// face a villainous choice, they face that choice an additional time." leads
+    /// with "if …" and contains "would ", so without the classifier redirect it
+    /// is classified as a replacement and falls through to an
+    /// `Unimplemented{name:"replacement_structure"}`. The
+    /// `is_static_compound_pattern` gate must route it to Priority 7 static
+    /// dispatch, which lowers it to `StaticMode::GrantsExtraVillainousChoice`.
+    /// Tests the classifier+dispatch building blocks, asserting NO Unimplemented.
+    #[test]
+    fn valeyard_grants_extra_villainous_choice_static() {
+        let r = parse(
+            "If an opponent would face a villainous choice, they face that choice an additional time. (They can make the same or different choices.)",
+            "The Valeyard",
+            &[],
+            &["Legendary", "Creature"],
+            &[],
+        );
+
+        assert_eq!(
+            r.statics.len(),
+            1,
+            "expected one extra-villainous-choice static, got {r:#?}"
+        );
+        assert_eq!(r.statics[0].mode, StaticMode::GrantsExtraVillainousChoice);
+        assert!(
+            r.abilities
+                .iter()
+                .all(|a| !matches!(*a.effect, Effect::Unimplemented { .. })),
+            "the Valeyard line must not produce an Unimplemented effect, got {r:#?}"
+        );
     }
 
     #[test]
@@ -13028,6 +13148,106 @@ mod tests {
                  resolve to 0)"
             );
         }
+    }
+
+    /// CR 119.3 + CR 603.2c: "for each 1 life you gained/lost" on a
+    /// `Whenever you gain/lose life` trigger binds the per-1 multiplier to the
+    /// triggering `LifeChanged` amount via `EventContextAmount`. Regression gate
+    /// for Cradle of Vitality / Transcendence / Lich's Tomb: previously the
+    /// for-each parse failed and the count stayed `Fixed{1}` (or `Fixed{2}`).
+    #[test]
+    fn parse_for_each_one_life_changed_full_cards() {
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+
+        // Walk an ability-definition chain (effect + sub_ability) collecting the
+        // first matching effect predicate hit.
+        fn find_effect<'a>(
+            def: &'a AbilityDefinition,
+            pred: &dyn Fn(&Effect) -> bool,
+        ) -> Option<&'a Effect> {
+            if pred(def.effect.as_ref()) {
+                return Some(def.effect.as_ref());
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                if let Some(found) = find_effect(sub, pred) {
+                    return Some(found);
+                }
+            }
+            def.else_ability
+                .as_deref()
+                .and_then(|else_def| find_effect(else_def, pred))
+        }
+
+        fn execute_effect<'a>(
+            r: &'a ParsedAbilities,
+            pred: &dyn Fn(&Effect) -> bool,
+        ) -> &'a Effect {
+            r.triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .find_map(|exec| find_effect(exec, pred))
+                .expect("expected matching effect in a trigger execute chain")
+        }
+
+        let event_amount = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+
+        // Cradle of Vitality — reflexive PutCounter for each 1 life gained.
+        let cradle = parse(
+            "Whenever you gain life, you may pay {1}{W}. If you do, put a +1/+1 \
+             counter on target creature for each 1 life you gained.",
+            "Cradle of Vitality",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let put = execute_effect(&cradle, &|e| matches!(e, Effect::PutCounter { .. }));
+        let Effect::PutCounter { count, .. } = put else {
+            unreachable!()
+        };
+        assert_eq!(
+            count, &event_amount,
+            "Cradle of Vitality PutCounter.count must be the life-gained amount, not Fixed{{1}}"
+        );
+
+        // Transcendence — gain 2 life for each 1 life lost ⇒ Multiply{2, amount}.
+        let transcendence = parse(
+            "Whenever you lose life, you gain 2 life for each 1 life you lost.",
+            "Transcendence",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let gain = execute_effect(&transcendence, &|e| matches!(e, Effect::GainLife { .. }));
+        let Effect::GainLife { amount, .. } = gain else {
+            unreachable!()
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(event_amount.clone()),
+            },
+            "Transcendence GainLife.amount must be 2 × life-lost, not Fixed{{2}}"
+        );
+
+        // Lich's Tomb — sacrifice a permanent for each 1 life lost.
+        let lichs_tomb = parse(
+            "Whenever you lose life, sacrifice a permanent for each 1 life you lost.",
+            "Lich's Tomb",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let sac = execute_effect(&lichs_tomb, &|e| matches!(e, Effect::Sacrifice { .. }));
+        let Effect::Sacrifice { count, .. } = sac else {
+            unreachable!()
+        };
+        assert_eq!(
+            count, &event_amount,
+            "Lich's Tomb Sacrifice.count must be the life-lost amount, not Fixed{{1}}"
+        );
     }
 
     #[test]

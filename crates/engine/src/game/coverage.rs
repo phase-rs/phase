@@ -73,6 +73,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // gates the per-card `CastingPermission::PlayFromExile` on a live
             // source. Not registry-keyed (mirrors the cast-permission cluster).
             | StaticMode::LinkedCollectionCounterPlayPermission
+            // CR 122.2 + CR 113.6b: CountersPersistAcrossZones carries the
+            // excluded-zone list. Runtime enforcement is the from-zone counter
+            // guard zones.rs::counters_persist_on_move (called from
+            // apply_zone_exit_cleanup) (Me, the Immortal; Skullbriar).
+            | StaticMode::CountersPersistAcrossZones { .. }
             | StaticMode::CastWithKeyword { .. }
             // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
@@ -394,6 +399,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
+        TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
         TargetFilter::StackAbility {
             controller: None,
@@ -1163,6 +1169,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             },
         },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
@@ -5692,6 +5699,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
         QuantityRef::DistinctColorsAmongPermanents { .. } => {

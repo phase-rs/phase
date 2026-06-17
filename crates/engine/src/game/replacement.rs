@@ -410,6 +410,45 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
             }
         },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+            ..
+        } => {
+            let zone_str = match zone {
+                Some(Zone::Graveyard) => {
+                    // CR 406.6: Check if the filter is controller-scoped. When the filter
+                    // has controller: None (unrestricted "graveyards"), use "from graveyards".
+                    // When controller: Some(ControllerRef::You) ("your graveyard"), use
+                    // "from your graveyard".
+                    let is_unrestricted = filter.as_ref().is_none_or(|f| {
+                        matches!(
+                            f,
+                            crate::types::ability::TargetFilter::Typed(
+                                crate::types::ability::TypedFilter {
+                                    controller: None,
+                                    ..
+                                }
+                            )
+                        )
+                    });
+                    if is_unrestricted {
+                        "from graveyards"
+                    } else {
+                        "from your graveyard"
+                    }
+                }
+                Some(Zone::Hand) => "from your hand",
+                Some(Zone::Battlefield) => "from the battlefield",
+                _ => "",
+            };
+            if *count == 1 {
+                format!("Exile a card {zone_str}")
+            } else {
+                format!("Exile {count} cards {zone_str}")
+            }
+        }
         // CR 702.24a: Delegate the label to the base cost so a "for each
         // counter" wrapper inherits its base's prompt phrasing (e.g.,
         // "Pay 1 life" → "Pay 1 life" for the per-counter scaling). The
@@ -420,7 +459,6 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
@@ -662,6 +700,47 @@ fn pay_replacement_may_cost(
                 Ok(crate::game::costs::PaymentOutcome::Paid) => {
                     if state.waiting_for != prior_waiting_for
                         && matches!(state.waiting_for, WaitingFor::DiscardChoice { .. })
+                    {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: None,
+                        };
+                    }
+                    true
+                }
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
+            }
+        }
+        // CR 406.6: Non-self exile cost paid as the replacement is applied
+        // (The Mimeoplasm's "exile two creature cards from graveyards"). This
+        // follows the same pattern as Discard: the resolution authority handles
+        // the interactive choice via `WaitingFor::EffectZoneChoice` with is_cost_payment: true.
+        AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+            let ability = ResolvedAbility::new(
+                crate::types::ability::Effect::PayCost {
+                    cost: cost.clone(),
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                player,
+            );
+            let prior_waiting_for = state.waiting_for.clone();
+            match crate::game::costs::pay_ability_cost_for_resolution(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => {
+                    if state.waiting_for != prior_waiting_for
+                        && matches!(
+                            state.waiting_for,
+                            WaitingFor::EffectZoneChoice {
+                                is_cost_payment: true,
+                                ..
+                            }
+                        )
                     {
                         return MayCostOutcome::PausedForChoice {
                             remaining_cost: None,

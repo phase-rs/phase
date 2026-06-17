@@ -18,6 +18,60 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
     obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
 }
 
+/// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
+/// into the `to` zone. The default (CR 122.2) is that counters cease to exist on
+/// any zone change. A `StaticMode::CountersPersistAcrossZones` ability overrides
+/// this for destination zones NOT in its `excluded_zones` list (Me, the
+/// Immortal; Skullbriar, the Walking Grave).
+///
+/// CR 113.6b: the ability is read from the object's state in the zone it is
+/// moving FROM. This function must be called while the object's `zone` field
+/// still holds the from-zone (before `move_to_zone` updates it), so the
+/// ability's `condition` gate is evaluated from the correct zone — matching
+/// Me's official ruling.
+///
+/// Two documented limitations, both arising because this helper reads
+/// `obj.static_definitions` directly (via `active_static_definitions`) rather
+/// than the layer-resolved view of the object:
+///
+/// 1. `active_zones`: `active_static_definitions` only enforces the
+///    `active_zones` membership gate for the Command zone
+///    (functioning_abilities.rs); for other zones the full `active_zones` gate
+///    lives in the layers pipeline (layers.rs), which this helper bypasses.
+///    Persistence here is therefore gated by `excluded_zones`, not by
+///    `active_zones`. This is sound for the shipping cards because their
+///    `excluded_zones` (Hand, Library) coincide with the inactive zones where
+///    objects never carry counters. A future `CountersPersistAcrossZones` card
+///    with a different active/excluded split would need an explicit
+///    `active_zones` check added here.
+///
+/// 2. Layer-6 ability removal (Humility / Yixlid Jailer's "Cards in graveyards
+///    lose all abilities"): `evaluate_layers` (layers.rs) only applies layers to
+///    battlefield + hand objects, so a graveyard/exile object's
+///    `static_definitions` never has its abilities stripped. With Yixlid Jailer
+///    in play and Me/Skullbriar in a graveyard bearing counters, this helper
+///    still observes the persistence static and would INCORRECTLY persist the
+///    counters on a graveyard→exile move — CR 113.6b reads the ability from the
+///    from-zone state, where it is rules-meant to be removed. This is not a
+///    regression (graveyard ability-removal is unmodeled engine-wide), but it is
+///    a known-wrong interaction on this new path, called out here explicitly
+///    rather than left implicit.
+///    TODO: once `evaluate_layers` applies Layer-6 ability removal to non-
+///    battlefield zones, re-check persistence against the layer-resolved view
+///    here so Humility/Yixlid correctly suppress it.
+fn counters_persist_on_move(state: &GameState, object_id: ObjectId, to: Zone) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+        matches!(
+            &def.mode,
+            StaticMode::CountersPersistAcrossZones { excluded_zones }
+                if !excluded_zones.contains(&to)
+        )
+    })
+}
+
 /// CR 603.10a + CR 603.6e: Capture a snapshot of every attachment on `obj` at the
 /// moment of the zone change. The snapshot records each attachment's current
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
@@ -119,6 +173,13 @@ pub(crate) fn apply_zone_exit_cleanup(
             state.lki_cache.insert(object_id, lki);
         }
     }
+
+    // CR 122.2 + CR 113.6b: Decide counter persistence using the still-current
+    // from-zone object state, BEFORE taking the mutable borrow below (the helper
+    // needs `&state` to read the object's functioning statics). Me, the
+    // Immortal / Skullbriar keep their counters on a move to any zone outside
+    // their `excluded_zones`; every other object follows the CR 122.2 default.
+    let preserve_counters = counters_persist_on_move(state, object_id, to);
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
         // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
@@ -321,8 +382,14 @@ pub(crate) fn apply_zone_exit_cleanup(
             obj_mut.phyrexian_life_paid = 0;
         }
 
-        // CR 122.2: Counters cease to exist when an object changes zones.
-        obj_mut.counters.clear();
+        // CR 122.2: Counters cease to exist when an object changes zones —
+        // UNLESS a `CountersPersistAcrossZones` ability (read from the from-zone
+        // state above) keeps them for this destination (CR 113.6b). Me, the
+        // Immortal / Skullbriar retain their counters on a move to any zone
+        // other than a player's hand or library.
+        if !preserve_counters {
+            obj_mut.counters.clear();
+        }
     }
 
     if from == Zone::Battlefield {
@@ -1721,6 +1788,96 @@ mod tests {
         move_to_zone(&mut state, id, Zone::Hand, &mut events);
 
         assert!(state.objects[&id].counters.is_empty());
+    }
+
+    /// CR 122.2 + CR 113.6b building-block test for
+    /// `StaticMode::CountersPersistAcrossZones`: Me, the Immortal / Skullbriar
+    /// retain counters on a move to any zone OTHER than a player's hand or
+    /// library, and follow the normal CR 122.2 clear for hand/library moves.
+    /// Exercises the full destination matrix so the parameter (the
+    /// `excluded_zones` set), not a single card, is verified.
+    fn make_persistent_counter_object(state: &mut GameState, card: u64, zone: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            "Counter Keeper".to_string(),
+            zone,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 4);
+        // "Counters remain on ~ as it moves to any zone other than a player's
+        // hand or library." Functions in every zone the object can leave with
+        // counters on it (CR 113.6b).
+        obj.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CountersPersistAcrossZones {
+                    excluded_zones: vec![Zone::Hand, Zone::Library],
+                },
+            )
+            .affected(crate::types::ability::TargetFilter::SelfRef)
+            .active_zones(vec![
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Command,
+                Zone::Stack,
+            ]),
+        );
+        id
+    }
+
+    #[test]
+    fn persistent_counters_survive_move_to_non_excluded_zones() {
+        for to in [Zone::Graveyard, Zone::Exile, Zone::Command] {
+            let mut state = setup();
+            let id = make_persistent_counter_object(&mut state, 1, Zone::Battlefield);
+            let mut events = Vec::new();
+            move_to_zone(&mut state, id, to, &mut events);
+            assert_eq!(
+                state.objects[&id]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Plus1Plus1)
+                    .copied(),
+                Some(4),
+                "counters should persist on move to {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_counters_cleared_on_move_to_excluded_hand_or_library() {
+        // CR 122.2: hand and library are in `excluded_zones`, so the default
+        // clear still applies (matches Me, the Immortal's ruling).
+        for to in [Zone::Hand, Zone::Library] {
+            let mut state = setup();
+            let id = make_persistent_counter_object(&mut state, 1, Zone::Battlefield);
+            let mut events = Vec::new();
+            move_to_zone(&mut state, id, to, &mut events);
+            assert!(
+                state.objects[&id].counters.is_empty(),
+                "counters should clear on move to excluded zone {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_counters_survive_graveyard_to_battlefield_reanimation() {
+        // CR 113.6b: the ability is read from the graveyard (from-zone) state;
+        // a reanimated Me/Skullbriar keeps its graveyard counters.
+        let mut state = setup();
+        let id = make_persistent_counter_object(&mut state, 1, Zone::Graveyard);
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1)
+                .copied(),
+            Some(4),
+            "graveyard→battlefield should preserve counters per the from-zone ability"
+        );
     }
 
     #[test]

@@ -555,6 +555,7 @@ pub fn resolve(
             // resolves the choice.
             face_down_profile: face_down_profile.clone(),
             count_param: 0,
+            is_cost_payment: false,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -6521,6 +6522,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            is_cost_payment: false,
         };
 
         let _ = apply_as_current(
