@@ -38,7 +38,16 @@ pub fn resolve(
     // from `target`. `controller` is the optional CR 110.2a override for which
     // player the cards enter the battlefield under ("under your control").
     let player = super::resolve_player_for_context_ref(state, ability, &target);
-    let controller = resolve_enters_under(state, ability, enters_under);
+    // CR 110.2a: Resolve the optional controller override through the single
+    // canonical authority shared with `ChangeZone`/`ChangeZoneAll` — never a
+    // hand-rolled second resolver (per the single-authority rule). `None` keeps
+    // each manifested card under its library owner's control (CR 701.40a).
+    let controller = super::change_zone::resolve_enters_under_player(
+        state,
+        ability,
+        "Manifest",
+        enters_under.as_ref(),
+    )?;
 
     // CR 708.2a: Use the effect-specified face-down profile when present
     // ("They're 2/2 Cyberman artifact creatures."), otherwise the vanilla 2/2
@@ -73,47 +82,6 @@ pub fn resolve(
     });
 
     Ok(())
-}
-
-/// CR 110.2a: Resolve the optional controller override for a face-down entry.
-///
-/// `None` leaves each manifested card under its library owner's control (the
-/// CR 701.40a default). A `Some(ControllerRef)` maps the reference to a concrete
-/// player using the same context-ref resolution the rest of the effect layer
-/// uses — `You` is the ability's controller (Cybership's "under your control"),
-/// and the remaining player references reuse `resolve_player_for_context_ref`
-/// via their `TargetFilter` analogues.
-fn resolve_enters_under(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    enters_under: Option<crate::types::ability::ControllerRef>,
-) -> Option<crate::types::player::PlayerId> {
-    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
-    let controller_ref = enters_under?;
-    let filter = match controller_ref {
-        ControllerRef::You => TargetFilter::Controller,
-        ControllerRef::Opponent => {
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-        }
-        ControllerRef::ScopedPlayer => TargetFilter::ScopedPlayer,
-        ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer => {
-            TargetFilter::TriggeringPlayer
-        }
-        ControllerRef::ParentTargetController => TargetFilter::ParentTargetController,
-        // CR 108.3 + CR 110.2a: entry under the parent target object's owner's
-        // control resolves through the matching owner filter, mirroring the
-        // `ParentTargetController` arm above.
-        ControllerRef::ParentTargetOwner => TargetFilter::ParentTargetOwner,
-        // Remaining references have no direct `TargetFilter` analogue at the
-        // effect layer; they are not produced for manifest entry, so fall back
-        // to the ability's controller (CR 110.2a default acting player).
-        ControllerRef::DefendingPlayer
-        | ControllerRef::ChosenPlayer { .. }
-        | ControllerRef::SourceChosenPlayer => return Some(ability.controller),
-    };
-    Some(super::resolve_player_for_context_ref(
-        state, ability, &filter,
-    ))
 }
 
 #[cfg(test)]
