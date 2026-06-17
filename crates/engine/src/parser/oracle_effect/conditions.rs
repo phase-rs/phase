@@ -2216,6 +2216,16 @@ fn build_instead_def(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
+    // CR 608.2e: An additional-cost-paid "instead" fold ("if it/this spell was
+    // kicked, ... instead") is owned by `strip_additional_cost_conditional`,
+    // which folds it to the dedicated `AdditionalCostPaidInstead`. Defer here so
+    // the generic `parse_condition_text` recognizer (which now classifies "was
+    // kicked" as the bare `AdditionalCostPaid`) does not pre-empt that fold by
+    // producing a `ConditionInstead { inner: AdditionalCostPaid }` wrapper.
+    if parse_additional_cost_instead_condition_fragment(&cond_text).is_some() {
+        return None;
+    }
+
     let condition = try_nom_condition_as_ability_condition(&cond_text, ctx)
         .or_else(|| parse_condition_text(&cond_text))
         .or_else(|| parse_control_count_as_ability_condition(&cond_text))?;
