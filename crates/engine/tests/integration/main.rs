@@ -367,6 +367,7 @@ mod treasured_find_regression;
 mod turn_control_priority_softlock;
 mod twice_instead_repeat_for;
 mod tyvar_activate_as_though_haste;
+mod unravel_counter_mana_value;
 mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
 mod urge_to_feed_regression;
