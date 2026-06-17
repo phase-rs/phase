@@ -150,10 +150,10 @@ export function BattlefieldZoneOverflow({
 // Fixed, readable card size for the scrollable creature grid. Big enough to
 // read P/T, keywords, and counters; the parent scrolls the overflow.
 const CREATURE_GRID_VARS: CSSProperties = {
-  "--art-crop-w": "6.4rem",
-  "--art-crop-h": "4.8rem",
-  "--card-w": "4.4rem",
-  "--card-h": "6.16rem",
+  "--art-crop-w": "5.6rem",
+  "--art-crop-h": "4.2rem",
+  "--card-w": "3.85rem",
+  "--card-h": "5.4rem",
 } as CSSProperties;
 
 interface CreatureOverviewProps {
@@ -249,7 +249,10 @@ function CreatureOverview({ groups, objectIds, onOpen }: CreatureOverviewProps) 
           {t("battlefieldOverflow.creatures.viewAll")}
         </button>
       </div>
-      <div className="relative min-h-0 flex-1">
+      {/* Floor the scroll region at one full card row (+ the pb-1 padding) so a
+          cramped half-row never clips the first row of creatures; flex-1 still
+          lets it grow to fill the available space. */}
+      <div className="relative min-h-[calc(var(--card-h)_+_0.25rem)] flex-1" style={CREATURE_GRID_VARS}>
         <div
           aria-hidden
           className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-5 bg-gradient-to-b from-slate-950 to-transparent transition-opacity ${edges.top ? "opacity-100" : "opacity-0"}`}
@@ -258,7 +261,6 @@ function CreatureOverview({ groups, objectIds, onOpen }: CreatureOverviewProps) 
           ref={scrollRef}
           onScroll={updateEdges}
           className="thin-scrollbar h-full overflow-y-auto overscroll-contain px-1 pb-1"
-          style={CREATURE_GRID_VARS}
         >
           <BattlefieldRow groups={sortedGroups} rowType="creatures" fixedSize />
         </div>
@@ -292,7 +294,7 @@ function ZoneSummaryTile({ groups, objectIds, zone, onOpen }: ZoneSummaryTilePro
   // The collapsed overflow pill is more compact on mobile so it claims less of
   // the cramped half-row; desktop keeps the roomier footprint.
   const sizeClass = isMobile
-    ? "min-h-[2.5rem] min-w-[5.5rem] px-1.5 py-1"
+    ? "min-h-[2.25rem] min-w-[4.75rem] px-1.5 py-0.5"
     : "min-h-[3.25rem] min-w-[7.5rem] px-2 py-1.5";
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
