@@ -15,6 +15,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 use super::engine::EngineError;
 use super::players;
@@ -2746,7 +2747,51 @@ fn collect_target_slot_specs(
     }
 }
 
+/// CR 601.2c / CR 602.2b: Targets are chosen before costs are paid. This
+/// engine pays a non-self Sacrifice/Discard/Exile activation cost BEFORE
+/// target selection as a documented architectural shortcut (see the ordering
+/// note in `push_activated_ability_to_stack`), so the object that cost just
+/// moved off the battlefield must not become newly eligible for an unrelated
+/// target slot just because it now sits in the destination zone. Cauldron of
+/// Essence's official ruling states this explicitly: "the target ... can't be
+/// the creature sacrificed to pay its cost." Costs that leave the object on
+/// the battlefield (Tap, Blight, RemoveCounter) never made it newly eligible
+/// for a different zone, so they are correctly left untouched by this gate.
+fn exclude_cost_paid_object_that_left_battlefield(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    targets: Vec<TargetRef>,
+) -> Vec<TargetRef> {
+    let Some(snapshot) = ability.cost_paid_object.as_ref() else {
+        return targets;
+    };
+    let left_battlefield = match state.objects.get(&snapshot.object_id) {
+        Some(obj) => obj.zone != Zone::Battlefield,
+        None => true,
+    };
+    if !left_battlefield {
+        return targets;
+    }
+    targets
+        .into_iter()
+        .filter(|target| !matches!(target, TargetRef::Object(id) if *id == snapshot.object_id))
+        .collect()
+}
+
 fn legal_targets_for_ability_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    existing_slots: &[TargetSelectionSlot],
+) -> Vec<TargetRef> {
+    exclude_cost_paid_object_that_left_battlefield(
+        state,
+        ability,
+        legal_targets_for_ability_filter_uncapped(state, ability, filter, existing_slots),
+    )
+}
+
+fn legal_targets_for_ability_filter_uncapped(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
@@ -3305,7 +3350,7 @@ fn legal_targets_for_selected_slot(
             legal.retain(|t| t != prior);
         }
     }
-    legal
+    exclude_cost_paid_object_that_left_battlefield(state, ability, legal)
 }
 
 fn damage_any_target_legal_targets(
